@@ -64,13 +64,31 @@ async function main() {
     const a = accounts[0];
     console.log("    첫 계좌: accountNo", mask(String(a.accountNo)), "| accountSeq", a.accountSeq, "| type", a.accountType);
 
-    // 4) 매수가능금액 (계좌 헤더 필요) — accountSeq를 X-Tossinvest-Account로
-    console.log("\n[4] 매수가능금액 GET /api/v1/buying-power?currency=USD (계좌 헤더 사용) …");
-    const bp = await fetch(`${BASE}/api/v1/buying-power?currency=USD`, {
-      headers: { ...authHeaders, "X-Tossinvest-Account": String(a.accountSeq) },
-    });
-    console.log("    HTTP", bp.status);
-    console.log("    응답:", JSON.stringify(await bp.json()).slice(0, 300));
+    // 3-1) 오너가 준 실제 계좌번호와 API가 돌려준 계좌번호 교차검증(대시 제거 후 비교).
+    const ownerNo = (process.env.TOSS_ACCOUNT_NO ?? "").replace(/-/g, "");
+    if (ownerNo) {
+      const apiNo = String(a.accountNo).replace(/-/g, "");
+      console.log(
+        "    계좌번호 교차검증:",
+        apiNo === ownerNo ? "✅ 일치 (오너 계좌 = API 계좌)" : `❌ 불일치 (API ${mask(apiNo)} vs 오너 ${mask(ownerNo)})`,
+      );
+    }
+
+    const acctHeaders = { ...authHeaders, "X-Tossinvest-Account": String(a.accountSeq) };
+
+    // 4) 매수가능금액 — USD와 KRW 둘 다 조회해 오너 스샷 값과 교차검증.
+    console.log("\n[4] 매수가능금액 GET /api/v1/buying-power (계좌 헤더 사용) …");
+    for (const cur of ["USD", "KRW"]) {
+      const bp = await fetch(`${BASE}/api/v1/buying-power?currency=${cur}`, { headers: acctHeaders });
+      const body: any = await bp.json();
+      console.log(`    ${cur}: HTTP ${bp.status} →`, JSON.stringify(body.result ?? body).slice(0, 200));
+    }
+
+    // 4-1) 보유 종목(잔고) 조회 — 읽기전용.
+    console.log("\n[4-1] 보유 종목 GET /api/v1/holdings …");
+    const hd = await fetch(`${BASE}/api/v1/holdings`, { headers: acctHeaders });
+    const hdBody: any = await hd.json();
+    console.log("    HTTP", hd.status, "→", JSON.stringify(hdBody.result ?? hdBody).slice(0, 400));
   } else {
     console.log("    (계좌가 없거나 조회 불가 → buying-power 테스트 건너뜀)");
   }
