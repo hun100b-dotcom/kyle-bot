@@ -1,0 +1,33 @@
+# =============================================================================
+# electron-builder.yml — 설치 파일(dmg) 만들기 설정
+# -----------------------------------------------------------------------------
+# [이게 뭔가?]
+#   electron-builder 라는 도구가 이 설정을 읽고, 빌드된 화면(dist/)과
+#   봇 엔진(dist-electron/)을 묶어 "카일봇.app + 설치용 dmg"를 만들어 줍니다.
+#   실행: npm run app:dist  →  release/ 폴더에 결과물 생성
+# =============================================================================
+
+appId: com.hun100b.kylebot
+productName: 카일봇
+directories:
+  output: release        # 결과물이 담기는 폴더
+
+# 앱 안에 포함할 파일들(소스 전체가 아니라 "빌드 결과물"만 담아 가볍게)
+files:
+  - dist/**              # React 화면 빌드 결과
+  - dist-electron/**     # 봇 엔진(메인 프로세스) 빌드 결과
+  - package.json
+
+asar: true               # 앱 내부 파일을 하나의 아카이브로 묶음(표준)
+
+mac:
+  category: public.app-category.finance
+  target:
+    - target: dmg
+      arch: [arm64]      # 애플 실리콘(M1~M4) 맥북용
+  # 애플 개발자 인증서가 없으므로 서명 생략(개인 사용 목적).
+  # 처음 열 때 macOS가 확인창을 띄우면 "우클릭 → 열기"로 실행하면 됩니다.
+  identity: null
+
+dmg:
+  title: 카일봇 설치

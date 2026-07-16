@@ -1,10 +1,12 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
   <head>
     <meta charset="UTF-8" />
+    <!-- 보안 정책(CSP): 이 화면은 앱 안의 파일만 불러올 수 있게 제한(외부 스크립트 차단) -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>kyle-bot</title>
+    <title>카일봇 — 토스 미국주식 자동매매</title>
   </head>
   <body>
     <div id="root"></div>
