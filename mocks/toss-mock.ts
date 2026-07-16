@@ -46,18 +46,19 @@ export interface MockState {
   tokenIssueCount: number; // 토큰을 몇 번 새로 발급했는지(캐싱/재발급 검증용)
   orders: Map<string, MockOrder>; // clientOrderId → 주문 (멱등키 저장소)
   seq: number; // tossOrderId 일련번호
+  prices: Record<string, number>; // 심볼별 현재가(테스트에서 setPrice로 바꿀 수 있음)
 }
 
-/** 심볼별 현재가(시나리오 기준값) */
-const MOCK_PRICES: Record<string, number> = {
+/** 심볼별 현재가 초기값(시나리오 기준값) */
+const INITIAL_PRICES: Record<string, number> = {
   AAPL: 2.05,
   PARTIAL: 2.05,
   REJECT: 2.05,
   SLOW: 2.05,
 };
 
-function priceOf(symbol: string): number {
-  return MOCK_PRICES[symbol] ?? 100; // 등록 안 된 심볼은 기본 100
+function priceOf(prices: Record<string, number>, symbol: string): number {
+  return prices[symbol] ?? 100; // 등록 안 된 심볼은 기본 100
 }
 
 /** JSON 응답 보내기 */
@@ -95,6 +96,7 @@ export function createMockTossServer() {
     tokenIssueCount: 0,
     orders: new Map(),
     seq: 0,
+    prices: { ...INITIAL_PRICES }, // 복사본(테스트마다 원본을 오염시키지 않도록)
   };
 
   const server = http.createServer(async (req, res) => {
@@ -131,14 +133,14 @@ export function createMockTossServer() {
       if (symbol === "SLOW") await delay(500);
       return sendJson(res, 200, {
         symbol,
-        price: priceOf(symbol),
+        price: priceOf(state.prices, symbol),
         timestamp: new Date().toISOString(),
       });
     }
 
     if (path === "/api/v1/orderbook" && method === "GET") {
       const symbol = url.searchParams.get("symbol") ?? "AAPL";
-      const cur = priceOf(symbol);
+      const cur = priceOf(state.prices, symbol);
       // 가짜 호가: 현재가 근처에 매수벽(bids)/매도벽(asks)을 몇 개 만들어 둠.
       return sendJson(res, 200, {
         symbol,
@@ -157,7 +159,7 @@ export function createMockTossServer() {
     if (path === "/api/v1/candles" && method === "GET") {
       const symbol = url.searchParams.get("symbol") ?? "AAPL";
       const interval = (url.searchParams.get("interval") ?? "1m") as "1m" | "1d";
-      const cur = priceOf(symbol);
+      const cur = priceOf(state.prices, symbol);
       // 가짜 캔들 3개(양봉 하나 포함 — 캔들 기법 판정 재료).
       return sendJson(res, 200, {
         symbol,
@@ -262,7 +264,7 @@ export function createMockTossServer() {
         //   매도(SELL): 시장 현재가 >= 내가 부른 지정가 → 체결
         // [삼분할 시연] AAPL 현재가 2.05일 때, 1분할 2.11은 체결(2.05<=2.11),
         //   2분할 2.02·3분할 1.93은 미체결(시장이 거기까지 안 내려옴) → "하나만 체결"이 재현됨.
-        const cur = priceOf(symbol);
+        const cur = priceOf(state.prices, symbol);
         const fill = side === "BUY" ? cur <= (price as number) : cur >= (price as number);
         if (fill) {
           order.status = "filled";
@@ -301,6 +303,19 @@ export function createMockTossServer() {
           order.remaining = 0;
           order.status = "filled";
         }
+        // [대기 주문 재판정] 아직 안 채워진 지정가 주문(submitted)은, 조회 시점의
+        //   현재가를 다시 보고 체결 조건이 맞으면 체결로 바꾼다.
+        //   [왜?] 실제 시장에서도 "그때는 안 됐지만 가격이 움직여 나중에 체결"이 일어납니다.
+        //   덕분에 테스트에서 setPrice로 가격을 바꾼 뒤 조회하면 익절/진입 체결을 재현할 수 있습니다.
+        if (order.status === "submitted" && order.orderType === "LIMIT" && order.price !== undefined) {
+          const cur = priceOf(state.prices, order.symbol);
+          const fill = order.side === "BUY" ? cur <= order.price : cur >= order.price;
+          if (fill) {
+            order.status = "filled";
+            order.filled_qty = order.quantity;
+            order.remaining = 0;
+          }
+        }
         return sendJson(res, 200, toOrderResponse(order, false));
       }
 
@@ -338,6 +353,10 @@ export function createMockTossServer() {
     /** 서버를 닫는다. */
     close(): Promise<void> {
       return new Promise((resolve) => server.close(() => resolve()));
+    },
+    /** (테스트용) 심볼의 현재가를 바꾼다. 익절/손절 체결 시나리오를 만들 때 사용. */
+    setPrice(symbol: string, price: number): void {
+      state.prices[symbol] = price;
     },
   };
 }
