@@ -146,6 +146,8 @@ export interface OrderResponse {
   side: OrderSide;
   price?: number;
   quantity?: number;
+  filled_qty?: number; // 체결된 수량(부분체결 추적용)
+  idempotentHit?: boolean; // 멱등키 재요청으로 기존 주문이 반환된 경우 true(목 서버 표시)
 }
 
 /** 주문 목록 응답 */
@@ -256,6 +258,22 @@ interface TossConfig {
  */
 function getConfig(): TossConfig {
   const baseUrl = process.env.TOSS_BASE_URL;
+
+  // [목(mock) 모드] TOSS_MOCK=true 면 가짜 토스 서버를 상대하므로 실제 키가 필요 없습니다.
+  //   baseUrl(목 서버 주소)만 있으면 되고, 나머지는 더미 값으로 채웁니다.
+  //   [왜?] 키 없이도 어댑터의 "전체 경로"(토큰→시세→주문)를 실제 네트워크로 리허설하려고요.
+  if (process.env.TOSS_MOCK === "true") {
+    if (!baseUrl) {
+      throw new Error("TOSS_MOCK=true 인데 TOSS_BASE_URL(목 서버 주소)이 없습니다.");
+    }
+    return {
+      baseUrl,
+      clientId: "mock-client",
+      clientSecret: "mock-secret",
+      account: process.env.TOSS_ACCOUNT ?? "mock-account",
+    };
+  }
+
   const clientId = process.env.TOSS_CLIENT_ID;
   const clientSecret = process.env.TOSS_CLIENT_SECRET;
   const account = process.env.TOSS_ACCOUNT;
@@ -280,6 +298,43 @@ function getConfig(): TossConfig {
     clientSecret: clientSecret as string,
     account: account as string,
   };
+}
+
+/**
+ * getTimeoutMs — 요청 타임아웃(밀리초)을 돌려준다.
+ *   기본 10초. TOSS_TIMEOUT_MS 환경변수로 조정 가능(테스트에선 짧게 줘서 타임아웃 시험).
+ */
+function getTimeoutMs(): number {
+  const v = process.env.TOSS_TIMEOUT_MS;
+  const n = v ? Number(v) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 10_000;
+}
+
+/**
+ * fetchWithTimeout — 정해진 시간 안에 응답이 안 오면 요청을 중단(abort)하는 fetch.
+ *
+ * [왜 필요한가?]
+ *   기본 fetch는 서버가 응답을 안 주면 "무한정" 기다립니다. 자동매매 봇이 한 요청에
+ *   매달려 멈추면 다음 감시·청산을 놓칩니다. 그래서 제한 시간을 두고, 넘으면 끊고
+ *   에러로 처리해 봇이 계속 돌게 합니다(안전장치).
+ *
+ * [AbortController란?] 진행 중인 요청을 밖에서 취소할 수 있게 해주는 표준 도구입니다.
+ *   타이머가 끝나면 abort()를 불러 요청을 끊습니다.
+ */
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number, label: string): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (err) {
+    // abort로 끊긴 경우를 사람이 알아보기 쉬운 메시지로 바꿔 던진다.
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`요청 타임아웃(${timeoutMs}ms 초과): ${label}`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer); // 타이머 정리(메모리 누수·오작동 방지)
+  }
 }
 
 // 토큰 캐시(모듈 메모리에 보관). 서버 프로세스가 살아있는 동안 재사용됩니다.
@@ -310,11 +365,16 @@ export async function getAccessToken(): Promise<string> {
     client_secret: cfg.clientSecret,
   });
 
-  const res = await fetch(`${cfg.baseUrl}${ENDPOINTS.token}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
+  const res = await fetchWithTimeout(
+    `${cfg.baseUrl}${ENDPOINTS.token}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+    },
+    getTimeoutMs(),
+    "POST /oauth2/token",
+  );
 
   if (!res.ok) {
     throw new Error(`토큰 발급 실패: HTTP ${res.status} ${await safeText(res)}`);
@@ -411,11 +471,16 @@ async function tossFetch<T>(path: string, opts: RequestOptions = {}): Promise<T>
     headers["X-Tossinvest-Account"] = cfg.account;
   }
 
-  const res = await fetch(url.toString(), {
-    method: opts.method ?? "GET",
-    headers,
-    body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-  });
+  const res = await fetchWithTimeout(
+    url.toString(),
+    {
+      method: opts.method ?? "GET",
+      headers,
+      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+    },
+    getTimeoutMs(),
+    `${opts.method ?? "GET"} ${path}`,
+  );
 
   if (!res.ok) {
     throw new Error(`토스 API 실패 [${opts.method ?? "GET"} ${path}]: HTTP ${res.status} ${await safeText(res)}`);
@@ -540,6 +605,14 @@ export async function cancelOrder(tossOrderId: string): Promise<OrderResponse> {
     method: "DELETE",
     withAccount: true,
   });
+}
+
+/**
+ * getOrder — 단건 주문 상태 조회(체결 진행 확인용).
+ *   부분 체결이 얼마나 채워졌는지, 대기 주문이 체결됐는지 등을 폴링할 때 씁니다.
+ */
+export async function getOrder(tossOrderId: string): Promise<OrderResponse> {
+  return tossFetch<OrderResponse>(`${ENDPOINTS.orders}/${encodeURIComponent(tossOrderId)}`, { withAccount: true });
 }
 
 /** listOrders — 주문 목록 조회(미체결 확인·이월 취소 대상 파악용). */
