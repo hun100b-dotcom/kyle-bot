@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# 환경변수(실제 비밀값). .env.example 견본만 커밋하고 실제 .env 는 절대 커밋 금지.
+.env
+.env.*
+!.env.example
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
