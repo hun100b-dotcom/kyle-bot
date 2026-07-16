@@ -17,6 +17,9 @@ dist-ssr
 .env.*
 !.env.example
 
+# 현황판 HTML(실계좌 잔고가 담기므로 커밋 금지. 로컬에서만 열람)
+report.html
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

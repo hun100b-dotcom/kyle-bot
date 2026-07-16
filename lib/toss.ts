@@ -280,33 +280,53 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
 }
 
 let tokenCache: { accessToken: string; expiresAtMs: number } | null = null;
+// 발급 "진행 중"인 요청을 공유하기 위한 자리(single-flight 패턴).
+let tokenInFlight: Promise<string> | null = null;
 
-/** 유효한 액세스 토큰을 돌려준다(캐시 + 만료 10분 전 자동 재발급). */
+/**
+ * getAccessToken — 유효한 액세스 토큰을 돌려준다(캐시 + 만료 10분 전 자동 재발급).
+ *
+ * [single-flight 패턴 — 실서버에서 발견한 실전 버그의 해결책]
+ *   여러 API를 "동시에" 부르면(Promise.all), 캐시가 빈 순간 토큰 발급 요청이
+ *   여러 개 동시에 나갑니다. 토스는 새 토큰을 발급하면 직전 토큰을 무효화하므로,
+ *   나중에 발급된 토큰이 먼저 발급된 토큰을 죽여 일부 호출이 401로 실패합니다
+ *   (2026-07-16 실서버에서 실제 재현). 그래서 "누군가 이미 발급 중이면 새로 요청하지
+ *   않고 그 결과를 같이 기다리는" 구조로 만들어, 토큰 발급이 항상 1개만 나가게 합니다.
+ */
 export async function getAccessToken(): Promise<string> {
   const now = Date.now();
   if (tokenCache && !isTokenExpired(tokenCache.expiresAtMs, now, TOKEN_SAFETY_MARGIN_MS)) {
     return tokenCache.accessToken;
   }
+  // 이미 다른 호출이 발급 중이면 그 결과를 같이 기다린다(중복 발급 방지).
+  if (tokenInFlight) return tokenInFlight;
 
-  const cfg = getConfig();
-  // 실제 스펙: application/x-www-form-urlencoded, body에 grant_type/client_id/client_secret.
-  const body = new URLSearchParams({
-    grant_type: "client_credentials",
-    client_id: cfg.clientId,
-    client_secret: cfg.clientSecret,
-  });
+  tokenInFlight = (async () => {
+    try {
+      const cfg = getConfig();
+      // 실제 스펙: application/x-www-form-urlencoded, body에 grant_type/client_id/client_secret.
+      const body = new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: cfg.clientId,
+        client_secret: cfg.clientSecret,
+      });
 
-  const res = await fetchWithTimeout(
-    `${cfg.baseUrl}${ENDPOINTS.token}`,
-    { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body },
-    getTimeoutMs(),
-    "POST /oauth2/token",
-  );
-  if (!res.ok) throw new Error(`토큰 발급 실패: HTTP ${res.status} ${await safeText(res)}`);
+      const res = await fetchWithTimeout(
+        `${cfg.baseUrl}${ENDPOINTS.token}`,
+        { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body },
+        getTimeoutMs(),
+        "POST /oauth2/token",
+      );
+      if (!res.ok) throw new Error(`토큰 발급 실패: HTTP ${res.status} ${await safeText(res)}`);
 
-  const data = (await res.json()) as TokenResponse;
-  tokenCache = { accessToken: data.access_token, expiresAtMs: now + data.expires_in * 1000 };
-  return tokenCache.accessToken;
+      const data = (await res.json()) as TokenResponse;
+      tokenCache = { accessToken: data.access_token, expiresAtMs: Date.now() + data.expires_in * 1000 };
+      return tokenCache.accessToken;
+    } finally {
+      tokenInFlight = null; // 성공/실패와 무관하게 자리 비움(다음 발급 가능하게)
+    }
+  })();
+  return tokenInFlight;
 }
 
 /** (테스트/재로그인용) 토큰 캐시 비우기. */
@@ -347,7 +367,7 @@ interface RequestOptions {
  *   [실제 스펙] 토스는 성공 응답을 { result: 실제데이터 } 로 감쌉니다. 그 껍질을 여기서
  *   한 번에 벗겨, 각 함수는 알맹이(result)만 받게 합니다.
  */
-async function tossFetch<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+async function tossFetch<T>(path: string, opts: RequestOptions = {}, isRetry = false): Promise<T> {
   const cfg = getConfig();
   const token = await getAccessToken();
 
@@ -366,6 +386,15 @@ async function tossFetch<T>(path: string, opts: RequestOptions = {}): Promise<T>
     getTimeoutMs(),
     `${opts.method ?? "GET"} ${path}`,
   );
+
+  // [401 자동 복구] 토큰이 서버 쪽에서 무효화됐을 수 있음(예: 다른 프로세스가 새 토큰
+  //   발급 → 기존 토큰 죽음). 캐시를 비우고 새 토큰으로 "딱 한 번만" 재시도한다.
+  //   (읽기 요청은 재시도해도 안전. 무한 재시도는 금지 — isRetry 플래그로 1회 제한)
+  if (res.status === 401 && !isRetry) {
+    clearTokenCache();
+    return tossFetch<T>(path, opts, true);
+  }
+
   if (!res.ok) throw new Error(`토스 API 실패 [${opts.method ?? "GET"} ${path}]: HTTP ${res.status} ${await safeText(res)}`);
 
   const json = (await res.json()) as { result?: T };

@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "demo": "tsx scripts/demo.ts"
+    "demo": "tsx scripts/demo.ts",
+    "report": "tsx scripts/report.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.6",
