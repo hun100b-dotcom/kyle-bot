@@ -30,3 +30,7 @@ report.html
 *.njsproj
 *.sln
 *.sw?
+
+# 빌드 산출물(용량 큼) — 코드가 아니라 결과물이므로 커밋 금지
+release
+dist-electron

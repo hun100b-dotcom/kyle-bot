@@ -27,9 +27,13 @@
 ## 실행/검증
 ```bash
 npm install        # 기기 바꾸면 최초 1회
-npx vitest run     # 전체 테스트(현재 63개 통과)
+npx vitest run     # 전체 테스트(현재 66개 통과)
 npm run demo       # 키 없이 워커가 목 서버에 붙어 한 판 도는 데모
+npm run app        # 데스크톱 앱을 개발 모드로 빌드해 실행(Electron)
+npm run app:dist   # macOS 설치 파일(dmg) 생성 → release/
 ```
+- 데스크톱 앱(S5) 완료: `electron/` + `src/App.tsx`. **v0.1은 실주문 코드 잠금(드라이런 강제)**.
+- macOS 패키징 주의: productName 한글 금지(SIGTRAP) — 영문 이름 + CFBundleDisplayName 한글.
 
 ## 환경 팁
 - 커밋 메시지에 큰따옴표가 있으면 PowerShell here-string이 깨진다 → `git commit -F <메시지파일>` 사용.
