@@ -250,8 +250,9 @@ interface TossConfig {
  *   나거나, 최악의 경우 잘못된 요청이 나갈 수 있습니다. 그래서 호출 초입에서
  *   "무엇이 비어 있는지" 콕 집어 알려주고 멈춥니다(안전장치).
  *
- * [보안] process.env 는 서버(Vercel 함수/Node)에서만 존재합니다. 브라우저에는
- *   이 값들이 전달되지 않습니다(VITE_ 접두사가 없기 때문). 토스 키는 서버 전용입니다.
+ * [보안] process.env 는 로컬 Node 워커(백그라운드 프로세스)에서만 존재합니다.
+ *   브라우저(Electron 렌더러)에는 이 값들이 전달되지 않습니다(VITE_ 접두사가 없기 때문).
+ *   토스 키는 이 워커 전용입니다. (아키텍처: 웹 배포가 아니라 로컬 상시 실행 프로그램)
  */
 function getConfig(): TossConfig {
   const baseUrl = process.env.TOSS_BASE_URL;
@@ -268,7 +269,7 @@ function getConfig(): TossConfig {
   if (missing.length > 0) {
     throw new Error(
       `토스 환경변수가 없습니다: ${missing.join(", ")}. ` +
-        `서버 환경변수(Vercel 등)에 설정하세요. (S3 단계에서는 키가 없어 정상적으로 실패합니다)`,
+        `로컬 .env 파일 또는 OS 환경변수에 설정하세요. (S3 단계에서는 키가 없어 정상적으로 실패합니다)`,
     );
   }
 
