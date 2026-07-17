@@ -6,10 +6,11 @@
 ## 프로젝트
 미국 주식(토스 데이마켓·달러) 자동매매 봇. 유일 사양서: `docs/카일봇_개발설계서.md`.
 
-## 아키텍처 (최우선 전제)
-- **웹 배포 아님.** 오너 PC에서 **상시 실행하는 로컬 프로그램**이다.
-- 런타임: **로컬 Node 워커 + 스케줄러 루프**(setInterval tick). Vercel Functions/Cron 안 씀.
-- UI: React를 **Electron으로 감싼 데스크톱 앱**(추후).
+## 아키텍처 (v2 전환 확정 2026-07-17 — 최우선 전제)
+- **자율 봇 아님(오너 결정).** "수동 계산기 + 온디맨드 주문 도구"다. 자동 루프·자율판단 금지.
+- 익절/손절 감시는 **토스 서버의 조건주문(OCO/OTO)** 이 한다 → 앱 상시 실행 불필요.
+- UI: React를 **Electron으로 감싼 데스크톱 앱**(완성). 엔진: electron/tool-engine.ts(버튼 눌러야만 동작).
+- lib/worker.ts·lifecycle.ts는 v1 유산 — 레포에 보존하되 앱에서 미사용.
 - 시크릿: **로컬 `.env`(gitignore) + OS 환경변수.** `TOSS_CLIENT_SECRET` 커밋·프론트 노출 금지.
 
 ## 작업 방식 (오너 = 비전공자)
@@ -27,12 +28,12 @@
 ## 실행/검증
 ```bash
 npm install        # 기기 바꾸면 최초 1회
-npx vitest run     # 전체 테스트(현재 66개 통과)
+npx vitest run     # 전체 테스트(현재 71개 통과)
 npm run demo       # 키 없이 워커가 목 서버에 붙어 한 판 도는 데모
 npm run app        # 데스크톱 앱을 개발 모드로 빌드해 실행(Electron)
 npm run app:dist   # macOS 설치 파일(dmg) 생성 → release/
 ```
-- 데스크톱 앱(S5) 완료: `electron/` + `src/App.tsx`. **v0.1은 실주문 코드 잠금(드라이런 강제)**.
+- 데스크톱 앱 v0.2(도구) 완료: 계산기 3종 + $·₩ 병기 + 조건주문. **실주문은 소액 테스트 전까지 코드 잠금(드라이런)**.
 - macOS 패키징 주의: productName 한글 금지(SIGTRAP) — 영문 이름 + CFBundleDisplayName 한글.
 
 ## 환경 팁

@@ -39,6 +39,8 @@ const ENDPOINTS = {
   sellable: "/api/v1/sellable-quantity",
   commissions: "/api/v1/commissions",
   orders: "/api/v1/orders",
+  conditionalOrders: "/api/v1/conditional-orders", // 조건주문(감시는 토스 서버가 함)
+  exchangeRate: "/api/v1/exchange-rate", //           환율(USD↔KRW, 1분 갱신 참고용)
 } as const;
 
 const PRICE_MIN_INTERVAL_MS = 100; // 시세 Rate limit: 초당 10회 → 최소 100ms 간격
@@ -101,7 +103,14 @@ export interface SellableResponse {
 export type OrderSide = "BUY" | "SELL";
 export type OrderType = "LIMIT" | "MARKET";
 
-/** 주문 생성 요청(우리 표준). TODO(실주문 전): timeInForce 등 실제 필수 필드 확정. */
+/**
+ * 주문 생성 요청(우리 표준).
+ * [2026-07-17 스펙 확정 — 공식 openapi.json 재확인 결과]
+ *   - 필수: symbol / side / orderType / quantity. LIMIT면 price도 필수.
+ *   - timeInForce: 선택, 기본 DAY(당일 유효 — 정규장 종료까지 미체결분 자동 취소).
+ *   - 수량·가격은 전송 시 "문자열(decimal)"이어야 한다(직렬화는 createOrder가 처리).
+ *   - confirmHighValueOrder: 1억원 이상 주문 시 true 필수(착오주문 방지).
+ */
 export interface CreateOrderRequest {
   symbol: string;
   side: OrderSide;
@@ -110,6 +119,61 @@ export interface CreateOrderRequest {
   quantity?: number;
   amountUsd?: number;
   clientOrderId: string;
+  timeInForce?: "DAY" | "CLS"; // 기본 DAY
+  confirmHighValueOrder?: boolean;
+}
+
+// -----------------------------------------------------------------------------
+// 조건주문 타입 (공식 스펙: POST /api/v1/conditional-orders)
+//   "이 가격(triggerPrice)에 닿으면 이 지정가(orderPrice)로 매수/매도" 를
+//   토스 서버가 대신 감시·집행한다. → 앱을 꺼도 익절/손절이 작동하는 핵심.
+// -----------------------------------------------------------------------------
+
+/** 감시 조건 한 다리(leg): 감시가에 닿으면 orderSide 방향의 지정가 주문이 나간다 */
+export interface ConditionLeg {
+  orderSide: OrderSide; //  BUY(진입) 또는 SELL(익절/손절)
+  triggerPrice: number; //  감시 가격(현재가가 닿으면 발동)
+  orderPrice?: number; //   발동 시 낼 지정가(LIMIT일 때 필수)
+}
+
+/**
+ * 조건주문 생성 요청.
+ *   - SINGLE: first 하나만 감시
+ *   - OCO: first(위·익절)·second(아래·손절) 동시 감시, 한쪽 발동 시 다른 쪽 자동 취소.
+ *          둘 다 SELL + 지정가만 허용, "익절 감시가 > 현재가 > 손절 감시가" 필수.
+ *   - OTO: first(BUY 진입) 체결 후 second(SELL) 감시 시작. 지정가만.
+ */
+export interface ConditionalOrderRequest {
+  symbol: string;
+  type: "SINGLE" | "OCO" | "OTO";
+  quantity: number; //      그룹 공통 수량
+  orderType: OrderType; //  OCO/OTO는 LIMIT만 지원(스펙)
+  expireDate: string; //    만료일 YYYY-MM-DD (필수)
+  first: ConditionLeg;
+  second?: ConditionLeg;
+  clientOrderId?: string;
+  confirmHighValueOrder?: boolean;
+}
+
+/** 조건주문 응답(우리 표준) */
+export interface ConditionalOrderResponse {
+  conditionalOrderId: string;
+  symbol?: string;
+  type?: string;
+  status?: string;
+  quantity?: number;
+  first?: { orderSide?: string; triggerPrice?: number; orderPrice?: number };
+  second?: { orderSide?: string; triggerPrice?: number; orderPrice?: number } | null;
+  expireDate?: string;
+}
+
+/** 환율 응답: 1 baseCurrency = rate quoteCurrency (예: 1 USD = 1,390 KRW) */
+export interface ExchangeRateResponse {
+  baseCurrency: string;
+  quoteCurrency: string;
+  rate: number;
+  validFrom?: string;
+  validUntil?: string;
 }
 
 /** 주문 상세: 실제 응답(일부) */
@@ -491,14 +555,24 @@ function toOrderResponse(raw: OrderDetailRaw): OrderResponse {
 
 /**
  * createOrder — 주문 생성. 지정가면 price를 roundPrice로 유효 틱에 맞춘다.
- *   [실제 스펙] 응답은 { orderId, clientOrderId }. TODO(실주문 전): 요청 바디의 실제
- *   필수 필드(timeInForce=DAY 등)와 금액/수량 표기(문자열 여부)를 최종 확정.
+ *   [2026-07-17 스펙 확정] 요청 바디의 수량·가격은 "문자열(decimal)"로 전송해야 한다.
+ *   timeInForce 는 선택(기본 DAY = 당일 유효). 응답은 { orderId, clientOrderId }.
  */
 export async function createOrder(req: CreateOrderRequest): Promise<OrderResponse> {
-  const body = {
-    ...req,
-    price: req.orderType === "LIMIT" && req.price !== undefined ? roundPrice(req.price) : req.price,
+  const price = req.orderType === "LIMIT" && req.price !== undefined ? roundPrice(req.price) : undefined;
+  // 실제 스펙 형태로 직렬화: 숫자 → 문자열, LIMIT 아닐 땐 price 자체를 보내지 않음.
+  const body: Record<string, unknown> = {
+    symbol: req.symbol,
+    side: req.side,
+    orderType: req.orderType,
+    timeInForce: req.timeInForce ?? "DAY",
+    clientOrderId: req.clientOrderId,
   };
+  if (req.quantity !== undefined) body.quantity = String(req.quantity);
+  if (price !== undefined) body.price = String(price);
+  if (req.amountUsd !== undefined) body.orderAmount = String(req.amountUsd); // US MARKET 전용(정규장만)
+  if (req.confirmHighValueOrder) body.confirmHighValueOrder = true;
+
   const raw = await tossFetch<OrderDetailRaw>(ENDPOINTS.orders, { method: "POST", body, withAccount: true });
   return toOrderResponse(raw);
 }
@@ -547,5 +621,112 @@ export async function listOrders(query: { status: string; symbol?: string }): Pr
     orders: (raw.orders ?? []).map(toOrderResponse),
     nextCursor: raw.nextCursor,
     hasNext: raw.hasNext,
+  };
+}
+
+// =============================================================================
+// 7) 조건주문 API (2026-07-17 신규 — 공식 스펙 확인 완료)
+//    "감시가에 닿으면 지정가 주문"을 토스 서버가 대신 감시한다.
+//    → 앱을 꺼도 익절/손절이 작동한다(수동 도구 전환의 핵심 근거).
+//    ⚠️ 이 함수들도 실주문 계열이므로, 호출부는 반드시 드라이런 게이트를 먼저 거친다.
+// =============================================================================
+
+/** 조건 다리(leg)를 실제 스펙 형태(문자열 숫자)로 직렬화 */
+function legToBody(leg: ConditionLeg): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    orderSide: leg.orderSide,
+    triggerPrice: String(roundPrice(leg.triggerPrice)),
+  };
+  if (leg.orderPrice !== undefined) out.orderPrice = String(roundPrice(leg.orderPrice));
+  return out;
+}
+
+/** 실제 응답의 조건주문을 우리 표준형으로 변환(문자열 숫자 → number) */
+function toConditionalResponse(raw: Record<string, unknown>): ConditionalOrderResponse {
+  const leg = (v: unknown) => {
+    if (!v || typeof v !== "object") return undefined;
+    const o = v as Record<string, unknown>;
+    return {
+      orderSide: o.orderSide as string | undefined,
+      triggerPrice: o.triggerPrice != null ? Number(o.triggerPrice) : undefined,
+      orderPrice: o.orderPrice != null ? Number(o.orderPrice) : undefined,
+    };
+  };
+  return {
+    conditionalOrderId: String(raw.conditionalOrderId ?? raw.id ?? ""),
+    symbol: raw.symbol as string | undefined,
+    type: raw.type as string | undefined,
+    status: raw.status as string | undefined,
+    quantity: raw.quantity != null ? Number(raw.quantity) : undefined,
+    first: leg(raw.first),
+    second: raw.second === null ? null : leg(raw.second),
+    expireDate: raw.expireDate as string | undefined,
+  };
+}
+
+/**
+ * createConditionalOrder — 조건주문 생성.
+ *   OCO(익절+손절 동시)·OTO(진입 체결 후 감시)·SINGLE 을 지원한다.
+ *   [스펙 제약] OCO/OTO 는 지정가(LIMIT)만. OCO 는 둘 다 SELL 이고
+ *   "first 감시가 > 현재가 > second 감시가" 여야 한다(아니면 서버가 거부).
+ */
+export async function createConditionalOrder(req: ConditionalOrderRequest): Promise<ConditionalOrderResponse> {
+  const body: Record<string, unknown> = {
+    symbol: req.symbol,
+    type: req.type,
+    quantity: String(req.quantity),
+    orderType: req.orderType,
+    expireDate: req.expireDate,
+    first: legToBody(req.first),
+  };
+  if (req.second) body.second = legToBody(req.second);
+  if (req.clientOrderId) body.clientOrderId = req.clientOrderId;
+  if (req.confirmHighValueOrder) body.confirmHighValueOrder = true;
+
+  const raw = await tossFetch<Record<string, unknown>>(ENDPOINTS.conditionalOrders, {
+    method: "POST",
+    body,
+    withAccount: true,
+  });
+  return toConditionalResponse(raw);
+}
+
+/** listConditionalOrders — 조건주문 목록 조회 */
+export async function listConditionalOrders(): Promise<ConditionalOrderResponse[]> {
+  const raw = await tossFetch<unknown>(ENDPOINTS.conditionalOrders, { withAccount: true });
+  // 응답이 배열이거나 { conditionalOrders: [...] } 형태 둘 다 수용(방어적).
+  const arr = Array.isArray(raw)
+    ? raw
+    : ((raw as Record<string, unknown>)?.conditionalOrders as unknown[]) ?? [];
+  return arr.map((r) => toConditionalResponse(r as Record<string, unknown>));
+}
+
+/** cancelConditionalOrder — 조건주문 취소(DELETE) */
+export async function cancelConditionalOrder(conditionalOrderId: string): Promise<void> {
+  await tossFetch<unknown>(`${ENDPOINTS.conditionalOrders}/${encodeURIComponent(conditionalOrderId)}`, {
+    method: "DELETE",
+    withAccount: true,
+  });
+}
+
+// =============================================================================
+// 8) 환율 API (2026-07-17 신규)
+// =============================================================================
+
+/**
+ * getExchangeRate — USD↔KRW 환율 조회(원화 병기 표시용).
+ *   [스펙 주의] 1분 갱신 "참고용 표시 환율"이며, 실제 주문에 적용되는 거래 환율과
+ *   다를 수 있다(공식 문구). 화면에도 이 사실을 함께 표기할 것.
+ */
+export async function getExchangeRate(base = "USD", quote = "KRW"): Promise<ExchangeRateResponse> {
+  const raw = await tossFetch<Record<string, unknown>>(ENDPOINTS.exchangeRate, {
+    query: { baseCurrency: base, quoteCurrency: quote },
+  });
+  return {
+    baseCurrency: String(raw.baseCurrency ?? base),
+    quoteCurrency: String(raw.quoteCurrency ?? quote),
+    rate: Number(raw.rate ?? raw.exchangeRate ?? 0),
+    validFrom: raw.validFrom as string | undefined,
+    validUntil: raw.validUntil as string | undefined,
   };
 }

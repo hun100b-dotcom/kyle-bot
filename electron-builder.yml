@@ -24,9 +24,9 @@ files:
 asar: true               # 앱 내부 파일을 하나의 아카이브로 묶음(표준)
 
 mac:
-  # Dock·정보 창에 보이는 표시 이름은 한글 "카일봇"
+  # Dock·정보 창에 보이는 표시 이름 (v2: 도구로 전환)
   extendInfo:
-    CFBundleDisplayName: 카일봇
+    CFBundleDisplayName: 카일 매매도구
   category: public.app-category.finance
   target:
     - target: dmg

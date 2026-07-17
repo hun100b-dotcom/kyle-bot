@@ -40,12 +40,27 @@ interface MockOrder {
   pollCount: number; // 단건 조회 횟수(부분체결 "누적" 시연용)
 }
 
+/** 목 서버의 조건주문 한 건(실스펙 흉내: 감시 조건 1~2개) */
+interface MockConditional {
+  conditionalOrderId: string;
+  symbol: string;
+  type: "SINGLE" | "OCO" | "OTO";
+  quantity: number;
+  orderType: "LIMIT" | "MARKET";
+  expireDate: string;
+  status: "WAITING" | "TRIGGERED" | "CANCELED";
+  first: { orderSide: "BUY" | "SELL"; triggerPrice: number; orderPrice?: number };
+  second?: { orderSide: "BUY" | "SELL"; triggerPrice: number; orderPrice?: number } | null;
+}
+
 /** 목 서버 내부 상태(테스트에서 조작/검증 가능하게 노출) */
 export interface MockState {
   tokenIssueCount: number;
   orders: Map<string, MockOrder>; // clientOrderId → 주문(멱등키 저장소)
   seq: number;
   prices: Record<string, number>;
+  conditionals: Map<string, MockConditional>; // 조건주문 저장소
+  fxRate: number; // USD→KRW 환율(연습용 고정값, setFxRate로 조작 가능)
 }
 
 const INITIAL_PRICES: Record<string, number> = { AAPL: 2.05, PARTIAL: 2.05, REJECT: 2.05, SLOW: 2.05 };
@@ -111,6 +126,8 @@ export function createMockTossServer() {
     orders: new Map(),
     seq: 0,
     prices: { ...INITIAL_PRICES },
+    conditionals: new Map(),
+    fxRate: 1390.5, // 연습용 기본 환율: 1 USD = 1,390.5 KRW
   };
 
   const server = http.createServer(async (req, res) => {
@@ -207,6 +224,76 @@ export function createMockTossServer() {
       return sendResult(res, 200, []); // 구간별 수수료 배열(비워둠)
     }
 
+    // ---------- 3.5) 환율 (실스펙: baseCurrency/quoteCurrency 필수) ----------
+    if (path === "/api/v1/exchange-rate" && method === "GET") {
+      const base = url.searchParams.get("baseCurrency");
+      const quote = url.searchParams.get("quoteCurrency");
+      if (!base || !quote) return sendJson(res, 400, { error: "missing_currency_params" });
+      const now = new Date();
+      return sendResult(res, 200, {
+        baseCurrency: base,
+        quoteCurrency: quote,
+        rate: String(state.fxRate), // 실스펙 관례에 맞춰 문자열
+        validFrom: now.toISOString(),
+        validUntil: new Date(now.getTime() + 60_000).toISOString(), // 1분 유효
+      });
+    }
+
+    // ---------- 3.6) 조건주문 (실스펙: SINGLE/OCO/OTO) ----------
+    if (path === "/api/v1/conditional-orders" && method === "POST") {
+      if (!req.headers["x-tossinvest-account"]) return sendJson(res, 400, { error: "missing_account" });
+      const body = await readJsonBody(req);
+      const type = String(body.type ?? "SINGLE") as MockConditional["type"];
+      const first = body.first as MockConditional["first"] | undefined;
+      const second = body.second as MockConditional["second"] | undefined;
+
+      // 실스펙 검증 흉내: 필수 필드
+      if (!body.symbol || !first || !body.expireDate || !body.quantity) {
+        return sendJson(res, 400, { error: "invalid_request", message: "필수 필드 누락" });
+      }
+      // OCO 규칙: 둘 다 SELL + 익절 감시가 > 현재가 > 손절 감시가
+      if (type === "OCO") {
+        const cur = priceOf(state.prices, String(body.symbol));
+        if (!second) return sendJson(res, 400, { error: "invalid_request", message: "OCO는 second 필수" });
+        if (first.orderSide !== "SELL" || second.orderSide !== "SELL")
+          return sendJson(res, 400, { error: "invalid_request", message: "OCO는 두 다리 모두 SELL" });
+        if (!(Number(first.triggerPrice) > cur && cur > Number(second.triggerPrice)))
+          return sendJson(res, 400, { error: "invalid_request", message: "OCO는 first감시가>현재가>second감시가" });
+      }
+
+      state.seq += 1;
+      const cond: MockConditional = {
+        conditionalOrderId: `C${state.seq}`,
+        symbol: String(body.symbol),
+        type,
+        quantity: Number(body.quantity),
+        orderType: (body.orderType ?? "LIMIT") as "LIMIT" | "MARKET",
+        expireDate: String(body.expireDate),
+        status: "WAITING",
+        first: { ...first, triggerPrice: Number(first.triggerPrice), orderPrice: first.orderPrice != null ? Number(first.orderPrice) : undefined },
+        second: second ? { ...second, triggerPrice: Number(second.triggerPrice), orderPrice: second.orderPrice != null ? Number(second.orderPrice) : undefined } : null,
+      };
+      state.conditionals.set(cond.conditionalOrderId, cond);
+      return sendResult(res, 201, { ...cond, quantity: String(cond.quantity) });
+    }
+
+    if (path === "/api/v1/conditional-orders" && method === "GET") {
+      if (!req.headers["x-tossinvest-account"]) return sendJson(res, 400, { error: "missing_account" });
+      return sendResult(res, 200, [...state.conditionals.values()].map((c) => ({ ...c, quantity: String(c.quantity) })));
+    }
+
+    const cm = path.match(/^\/api\/v1\/conditional-orders\/([^/]+)$/);
+    if (cm) {
+      if (!req.headers["x-tossinvest-account"]) return sendJson(res, 400, { error: "missing_account" });
+      const cond = state.conditionals.get(decodeURIComponent(cm[1]));
+      if (!cond) return sendJson(res, 404, { error: "not_found" });
+      if (method === "GET") return sendResult(res, 200, { ...cond, quantity: String(cond.quantity) });
+      if (method === "DELETE") {
+        cond.status = "CANCELED";
+        return sendResult(res, 200, { conditionalOrderId: cond.conditionalOrderId, status: cond.status });
+      }
+    }
+
     // ---------- 4) 주문 ----------
 
     // 주문 생성
@@ -216,7 +303,8 @@ export function createMockTossServer() {
       const symbol = String(body.symbol ?? "");
       const side = (body.side ?? "BUY") as "BUY" | "SELL";
       const orderType = (body.orderType ?? "LIMIT") as "LIMIT" | "MARKET";
-      const price = body.price as number | undefined;
+      // 실스펙: 가격·수량은 문자열로 온다 → 숫자로 변환(문자열/숫자 둘 다 수용).
+      const price = body.price != null ? Number(body.price) : undefined;
       const clientOrderId = String(body.clientOrderId ?? "");
       const quantity = Number(body.quantity ?? 10);
 
@@ -316,7 +404,7 @@ export function createMockTossServer() {
       // 정정: POST /orders/{id}/modify (실제 스펙)
       if (action === "modify" && method === "POST") {
         const body = await readJsonBody(req);
-        if (body.price !== undefined) order.price = body.price as number;
+        if (body.price !== undefined) order.price = Number(body.price);
         if (body.quantity !== undefined) order.quantity = Number(body.quantity);
         return sendResult(res, 200, toDetail(order));
       }
@@ -345,6 +433,10 @@ export function createMockTossServer() {
     /** (테스트용) 심볼 현재가 변경 — 익절/손절/체결 시나리오 재현 */
     setPrice(symbol: string, price: number): void {
       state.prices[symbol] = price;
+    },
+    /** (테스트용) 환율 변경 */
+    setFxRate(rate: number): void {
+      state.fxRate = rate;
     },
   };
 }

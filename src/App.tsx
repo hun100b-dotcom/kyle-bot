@@ -1,152 +1,285 @@
 // =============================================================================
-// src/App.tsx  —  카일봇 대시보드 화면 (React)
+// src/App.tsx — 카일 매매도구 화면 (v2: 계산기 + 온디맨드 주문)
 // -----------------------------------------------------------------------------
-// [이게 뭔가?]
-//   데스크톱 앱의 눈에 보이는 부분 전부입니다. 봇의 실제 판단·주문은 전부
-//   메인 프로세스의 엔진(electron/bot-engine.ts)이 하고, 이 화면은
-//   window.kylebot 창구(preload.cjs)를 통해 ① 상태를 받아 그리고 ② 버튼 입력을
-//   엔진에 전달만 합니다. (화면이 죽어도 봇 로직과 분리돼 있어 안전)
+// [v2 화면 철학]
+//   자동으로 갱신되는 것이 거의 없다. 시세·환율·목록은 전부 "버튼을 눌러야" 1회
+//   조회된다(자율판단 제거 컨셉과 일치). 주문은 반드시 확인 팝업을 거친다.
 //
-// [화면 구성]
-//   상단바: 모드 배지(연습/실서버) · 드라이런 배지 · 봇 시작/정지 · 킬 스위치
-//   탭 1 대시보드: 장 상태 카드 / 새 매매 계획 폼 / 진행 세션 / 매매일지 / 실시간 로그
-//   탭 2 설정: 연습·실서버 모드, 토스 API 키(값은 화면에 다시 안 보임), 확인 간격
+// [탭 구성]
+//   ① 계산기: 기법 선택(삼분할/호가창/캔들/수동) → 재료 입력 → 진입/익절/손절
+//              산출($와 ₩ 병기) → 주문 버튼(확인 팝업 → 전송)
+//   ② 주문 현황: 미체결 일반주문 + 조건주문(OCO/OTO) 목록·취소
+//   ③ 기록: 도구가 한 일(주문·드라이런·취소) 시간순 기록
+//   ④ 설정: 연습/실서버 모드, 토스 API 키(값은 화면에 재표시 안 됨)
 // =============================================================================
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import "./App.css";
 
-/** 장 세션 코드 → 한국어 라벨 */
 const SESSION_LABEL: Record<string, string> = {
-  day: "데이마켓 (거래 시간)",
+  day: "데이마켓",
   pre: "프리마켓",
-  regular: "정규장",
+  regular: "본장(정규장)",
   after: "애프터마켓",
   closed: "장 마감",
 };
 
-/** 포지션 상태 → 한국어 라벨 */
-const POS_LABEL: Record<string, string> = {
-  pending_entry: "진입 대기",
-  entered: "보유 중",
-  closed: "청산 완료",
-  skipped: "건너뜀(차단/드라이런)",
+const TECH_LABEL: Record<string, string> = {
+  split3: "삼분할 (EMA200)",
+  orderbook: "호가창 (매수벽+1틱)",
+  candle: "캔들 (시가−3틱)",
+  manual: "수동 입력",
 };
 
-/** 청산 사유 → 한국어 라벨 */
-const EXIT_LABEL: Record<string, string> = {
-  take_profit: "익절",
-  stop_loss: "손절",
-  eod_close: "장마감 청산",
-  cancelled: "취소",
-};
+/** 달러 → "$x (₩y)" 병기 문자열. 환율 없으면 $만. */
+function usdKrw(usd: number, fx: number | null): string {
+  const dollar = `$${usd.toLocaleString(undefined, { maximumFractionDigits: 4 })}`;
+  if (!fx) return dollar;
+  return `${dollar} (₩${Math.round(usd * fx).toLocaleString()})`;
+}
+
+/** 조건주문 만료일 기본값: 오늘 + 30일 (팝업에 표시해 사람이 인지) */
+function defaultExpire(): string {
+  const d = new Date(Date.now() + 30 * 86400_000);
+  return d.toISOString().slice(0, 10);
+}
+
+// 주문 확인 팝업에 담기는 내용(무엇을 전송할지 사람이 최종 확인)
+interface PendingOrder {
+  kind: "entry" | "oco" | "oto";
+  title: string;
+  lines: string[];
+  send: () => Promise<JournalEntry>;
+}
 
 function App() {
-  // --- 엔진에서 받아 오는 상태들 ---
-  const [status, setStatus] = useState<UiStatus | null>(null);
-  const [logs, setLogs] = useState<UiLogEntry[]>([]);
-  const [settings, setSettings] = useState<UiSettings | null>(null);
-  const [tab, setTab] = useState<"dash" | "settings">("dash");
+  const [status, setStatus] = useState<ToolStatus | null>(null);
+  const [tab, setTab] = useState<"calc" | "orders" | "journal" | "settings">("calc");
+  const [journal, setJournal] = useState<JournalEntry[]>([]);
 
-  // --- 새 매매 계획 폼 입력값 ---
+  // --- 계산기 입력 상태 ---
   const [symbol, setSymbol] = useState("AAPL");
-  const [plan, setPlan] = useState<{ price: number; entry: number; tp: number; sl: number } | null>(null);
+  const [curPrice, setCurPrice] = useState<number | null>(null);
+  const [tech, setTech] = useState<Technique>("split3");
+  const [tpPct, setTpPct] = useState(2);
+  const [slPct, setSlPct] = useState(10);
   const [qty, setQty] = useState(1);
-  const [busy, setBusy] = useState(false); // 버튼 연타 방지
+  // 기법별 재료
+  const [baseClose, setBaseClose] = useState("");
+  const [ema200, setEma200] = useState("");
+  const [wallPrice, setWallPrice] = useState("");
+  const [barOpen, setBarOpen] = useState("");
+  const [manualEntry, setManualEntry] = useState("");
+  const [candleYang, setCandleYang] = useState(false); // 캔들: 전봉 양봉 확인 체크
 
-  // --- 연습 모드 가격 조작 입력값 ---
-  const [mockPrice, setMockPrice] = useState("");
+  const [result, setResult] = useState<CalcResult | null>(null);
+  const [calcErr, setCalcErr] = useState("");
 
-  // --- 설정 폼 입력값(키는 입력했을 때만 전송) ---
+  // --- 환율 ---
+  const [fx, setFx] = useState<number | null>(null);
+  const [fxSource, setFxSource] = useState<string | null>(null);
+  const [manualFx, setManualFxInput] = useState("");
+  const [fxFailed, setFxFailed] = useState(false);
+
+  // --- 주문 확인 팝업 ---
+  const [pending, setPending] = useState<PendingOrder | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // --- 주문 현황 ---
+  const [openOrders, setOpenOrders] = useState<OpenOrder[]>([]);
+  const [conds, setConds] = useState<CondOrder[]>([]);
+
+  // --- 설정 ---
+  const [settings, setSettings] = useState<ToolSettings | null>(null);
   const [formMode, setFormMode] = useState<"mock" | "live">("mock");
-  const [formClientId, setFormClientId] = useState("");
-  const [formClientSecret, setFormClientSecret] = useState("");
+  const [formId, setFormId] = useState("");
+  const [formSecret, setFormSecret] = useState("");
   const [formAccount, setFormAccount] = useState("");
-  const [formTick, setFormTick] = useState(5);
   const [savedMsg, setSavedMsg] = useState("");
 
-  const logEndRef = useRef<HTMLDivElement>(null);
+  // --- 연습 가격 조작 ---
+  const [mockPrice, setMockPrice] = useState("");
 
-  // 첫 로드: 상태·로그·설정을 가져오고, 실시간 이벤트를 구독한다.
   useEffect(() => {
-    window.kylebot.getStatus().then(setStatus);
-    window.kylebot.getLogs().then(setLogs);
-    window.kylebot.getSettings().then((s) => {
+    refreshStatus();
+    window.kyletool.journal().then(setJournal);
+    window.kyletool.getSettings().then((s) => {
       setSettings(s);
       setFormMode(s.mode);
       setFormAccount(s.account);
-      setFormTick(s.tickSeconds);
     });
-    // 엔진이 밀어 주는 실시간 갱신(틱마다 상태, 이벤트마다 로그 한 줄).
-    const offStatus = window.kylebot.onStatus(setStatus);
-    const offLog = window.kylebot.onLog((entry) => setLogs((prev) => [...prev.slice(-499), entry]));
-    // 보조 폴링(2초): 이벤트를 놓쳐도 화면이 오래 낡지 않게.
-    const poll = setInterval(() => window.kylebot.getStatus().then(setStatus), 2000);
-    return () => {
-      offStatus();
-      offLog();
-      clearInterval(poll);
-    };
+    const off = window.kyletool.onJournal((e) => setJournal((prev) => [...prev.slice(-99), e]));
+    return off;
   }, []);
 
-  // 로그가 추가되면 로그 창을 맨 아래로 스크롤.
-  useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [logs]);
+  async function refreshStatus() {
+    setStatus(await window.kyletool.status());
+  }
 
-  // --- 버튼 동작들 ---
-
-  /** 시세를 불러와 기본 매매 계획(진입 -0.5%/익절 +2%/손절 -10%)을 채운다 */
-  async function loadPlan() {
+  async function loadQuote() {
     setBusy(true);
     try {
-      const p = await window.kylebot.planFromQuote(symbol.trim().toUpperCase());
-      setPlan({ price: p.price, entry: p.entry, tp: p.tp, sl: p.sl });
+      setCurPrice(await window.kyletool.quote(symbol.trim().toUpperCase()));
+      await loadFx(); // 시세 볼 때 환율도 함께(둘 다 표시용)
+      await refreshStatus();
     } catch (e) {
-      alert(`시세 조회 실패: ${String(e)}\n(봇이 켜져 있어야 연습 서버에 연결됩니다)`);
+      alert(`시세 조회 실패: ${String(e)}`);
     } finally {
       setBusy(false);
     }
   }
 
-  /** 계획 확정 → 세션 생성·장전(진입 지정가 등록) */
-  async function submitSession() {
-    if (!plan) return;
-    setBusy(true);
+  async function loadFx() {
+    const r = await window.kyletool.fx();
+    if (r) {
+      setFx(r.rate);
+      setFxSource(r.source);
+      setFxFailed(false);
+    } else {
+      setFxFailed(true); // 화면에 수동 입력 폴백 표시
+    }
+  }
+
+  async function applyManualFx() {
+    const rate = Number(manualFx);
+    if (rate > 0) {
+      await window.kyletool.setManualFx(rate);
+      setFx(rate);
+      setFxSource("manual");
+      setFxFailed(false);
+    }
+  }
+
+  /** 계산 실행 — lib/calc.ts(사양서 M1 검증 함수)를 엔진 경유로 호출 */
+  async function runCalc() {
+    setCalcErr("");
+    setResult(null);
+    if (tech === "candle" && !candleYang) {
+      setCalcErr("캔들 기법은 '전봉이 양봉'일 때만 씁니다. 확인 체크를 해 주세요.");
+      return;
+    }
     try {
-      await window.kylebot.createSession({
-        symbol: symbol.trim().toUpperCase(),
-        entry: plan.entry,
-        tp: plan.tp,
-        sl: plan.sl,
-        quantity: qty,
+      const r = await window.kyletool.calc({
+        technique: tech,
+        tpPct,
+        slPct,
+        baseClose: baseClose ? Number(baseClose) : undefined,
+        ema200: ema200 ? Number(ema200) : undefined,
+        wallPrice: wallPrice ? Number(wallPrice) : undefined,
+        barOpen: barOpen ? Number(barOpen) : undefined,
+        entry: manualEntry ? Number(manualEntry) : undefined,
       });
-      setPlan(null); // 폼 초기화
+      setResult(r);
     } catch (e) {
-      alert(`세션 생성 실패: ${String(e)}`);
+      setCalcErr(String(e).replace(/^Error:\s*(Error invoking remote method '[^']+':\s*Error:\s*)?/, ""));
+    }
+  }
+
+  // --- 주문 팝업 만들기(전송은 팝업의 확인 버튼에서만) ---
+
+  function confirmEntry(lv: CalcLevel) {
+    const total = lv.entry * qty;
+    setPending({
+      kind: "entry",
+      title: `진입 지정가 매수 — ${symbol.toUpperCase()}`,
+      lines: [
+        `진입가 ${usdKrw(lv.entry, fx)} × ${qty}주`,
+        `예상 투입액 ${usdKrw(total, fx)}`,
+        `주문 유효기간: 당일(DAY) — 미체결분은 자동 취소`,
+      ],
+      send: () => window.kyletool.placeEntry({ symbol, price: lv.entry, quantity: qty }),
+    });
+  }
+
+  function confirmOco(lv: CalcLevel) {
+    const expire = defaultExpire();
+    setPending({
+      kind: "oco",
+      title: `OCO 익절+손절 동시 등록 — ${symbol.toUpperCase()} (보유 중일 때)`,
+      lines: [
+        `수량 ${qty}주 / 익절 감시가 ${usdKrw(lv.tp, fx)} / 손절 감시가 ${usdKrw(lv.sl, fx)}`,
+        `한쪽이 발동되면 다른 쪽은 자동 취소됩니다 (토스 서버가 감시 — 앱 꺼도 작동)`,
+        `만료일 ${expire} / 규칙: 익절 감시가 > 현재가 > 손절 감시가`,
+      ],
+      send: () =>
+        window.kyletool.placeOco({
+          symbol,
+          quantity: qty,
+          tpTrigger: lv.tp,
+          tpPrice: lv.tp,
+          slTrigger: lv.sl,
+          slPrice: lv.sl,
+          expireDate: expire,
+        }),
+    });
+  }
+
+  function confirmOto(lv: CalcLevel) {
+    const expire = defaultExpire();
+    setPending({
+      kind: "oto",
+      title: `OTO 진입→익절 원스톱 — ${symbol.toUpperCase()}`,
+      lines: [
+        `진입 감시가 ${usdKrw(lv.entry, fx)} × ${qty}주 (체결되면 익절 감시 시작)`,
+        `익절 감시가 ${usdKrw(lv.tp, fx)} / 만료일 ${expire}`,
+        `⚠ 손절은 포함되지 않습니다(토스 OTO 스펙). 진입 체결 후 OCO로 바꿔 거는 것을 권장.`,
+      ],
+      send: () =>
+        window.kyletool.placeOto({
+          symbol,
+          quantity: qty,
+          entryTrigger: lv.entry,
+          entryPrice: lv.entry,
+          exitTrigger: lv.tp,
+          exitPrice: lv.tp,
+          expireDate: expire,
+        }),
+    });
+  }
+
+  async function sendPending() {
+    if (!pending) return;
+    setBusy(true);
+    try {
+      await pending.send();
+      setPending(null);
+      if (tab === "orders") await loadOrders();
+    } catch (e) {
+      alert(`전송 실패: ${String(e).replace(/^Error:\s*(Error invoking remote method '[^']+':\s*Error:\s*)?/, "")}`);
     } finally {
       setBusy(false);
     }
   }
 
-  /** 설정 저장(키는 입력한 경우에만 전송 — 빈 칸이면 기존 키 유지) */
-  async function saveSettings() {
-    const saved = await window.kylebot.saveSettings({
-      mode: formMode,
-      clientId: formClientId || undefined,
-      clientSecret: formClientSecret || undefined,
-      account: formAccount,
-      tickSeconds: formTick,
-    });
-    setSettings(saved);
-    setFormClientId(""); // 입력칸 비움(키를 화면에 남기지 않음)
-    setFormClientSecret("");
-    setSavedMsg("저장되었습니다. (키는 이 컴퓨터의 앱 데이터 폴더에만 저장됩니다)");
-    setTimeout(() => setSavedMsg(""), 4000);
+  async function loadOrders() {
+    setBusy(true);
+    try {
+      const [o, c] = await Promise.all([window.kyletool.openOrders(), window.kyletool.conditionals()]);
+      setOpenOrders(o);
+      setConds(c);
+    } catch (e) {
+      alert(`목록 조회 실패: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
   }
 
-  if (!status) return <div className="loading">카일봇을 불러오는 중…</div>;
+  async function saveSettings() {
+    const s = await window.kyletool.saveSettings({
+      mode: formMode,
+      clientId: formId || undefined,
+      clientSecret: formSecret || undefined,
+      account: formAccount,
+    });
+    setSettings(s);
+    setFormId("");
+    setFormSecret("");
+    setSavedMsg("저장되었습니다.");
+    setTimeout(() => setSavedMsg(""), 4000);
+    await refreshStatus();
+  }
 
+  if (!status) return <div className="loading">카일 매매도구를 불러오는 중…</div>;
   const isMock = status.mode === "mock";
 
   return (
@@ -154,243 +287,280 @@ function App() {
       {/* ===== 상단바 ===== */}
       <header className="topbar">
         <div className="brand">
-          <span className="logo">🤖</span>
-          <h1>카일봇</h1>
+          <span className="logo">🧮</span>
+          <h1>카일 매매도구</h1>
           <span className={`badge ${isMock ? "badge-mock" : "badge-live"}`}>
-            {isMock ? "연습 모드 (가짜 서버)" : "실서버 (읽기 전용)"}
+            {isMock ? "연습 모드 (가짜 서버)" : "실서버"}
           </span>
-          <span className="badge badge-dry" title="이 버전은 실주문이 코드에서 차단되어 있습니다">
-            드라이런 · 실주문 잠금
-          </span>
+          {status.dryRun && (
+            <span className="badge badge-dry" title="소액(1주) 테스트를 사람이 통과시키기 전까지 실주문은 전송되지 않습니다">
+              주문 잠금 (드라이런)
+            </span>
+          )}
+          <span className="badge">{SESSION_LABEL[status.session]} · 3개 장 모두 주문 가능</span>
+          {status.orderFrozen && <span className="badge badge-dry">⚠ 마감 1분 전: 정정·취소 불가 구간</span>}
         </div>
         <div className="controls">
           <button
-            className={`btn ${status.running ? "btn-stop" : "btn-start"}`}
-            onClick={() => (status.running ? window.kylebot.stop() : window.kylebot.start())}
-          >
-            {status.running ? "■ 봇 정지" : "▶ 봇 시작"}
-          </button>
-          <button
             className={`btn btn-kill ${status.killSwitch ? "kill-on" : ""}`}
-            title="비상정지: 켜면 신규 진입 주문이 전부 차단됩니다(청산은 허용)"
-            onClick={() => window.kylebot.setKillSwitch(!status.killSwitch)}
+            title="켜면 모든 주문 버튼이 잠깁니다(계산·조회는 가능)"
+            onClick={async () => {
+              await window.kyletool.setKillSwitch(!status.killSwitch);
+              refreshStatus();
+            }}
           >
-            {status.killSwitch ? "🔴 킬 스위치 ON" : "⭘ 킬 스위치"}
+            {status.killSwitch ? "🔴 주문 잠금 중" : "⭘ 킬 스위치"}
           </button>
         </div>
       </header>
 
       {/* ===== 탭 ===== */}
       <nav className="tabs">
-        <button className={tab === "dash" ? "tab active" : "tab"} onClick={() => setTab("dash")}>
-          대시보드
-        </button>
-        <button className={tab === "settings" ? "tab active" : "tab"} onClick={() => setTab("settings")}>
-          설정
-        </button>
+        {(["calc", "orders", "journal", "settings"] as const).map((t) => (
+          <button
+            key={t}
+            className={tab === t ? "tab active" : "tab"}
+            onClick={() => {
+              setTab(t);
+              if (t === "orders") loadOrders();
+            }}
+          >
+            {{ calc: "계산기", orders: "주문 현황", journal: "기록", settings: "설정" }[t]}
+          </button>
+        ))}
       </nav>
 
-      {tab === "dash" && (
+      {/* ===== ① 계산기 ===== */}
+      {tab === "calc" && (
         <main className="grid">
-          {/* --- 장 상태 카드 --- */}
           <section className="card">
-            <h2>장 상태</h2>
-            <div className="stat-row">
-              <div className="stat">
-                <span className="stat-label">현재 세션</span>
-                <span className={`stat-value ${status.session === "day" ? "ok" : ""}`}>
-                  {SESSION_LABEL[status.session]}
-                </span>
-              </div>
-              <div className="stat">
-                <span className="stat-label">시각</span>
-                <span className="stat-value small">{status.clockNote}</span>
-              </div>
-              <div className="stat">
-                <span className="stat-label">데이마켓 개장</span>
-                <span className="stat-value">{status.nextDayOpen} KST</span>
-              </div>
-              <div className="stat">
-                <span className="stat-label">청산 데드라인</span>
-                <span className="stat-value">{status.closeDeadline} KST</span>
-              </div>
-              <div className="stat">
-                <span className="stat-label">마지막 확인</span>
-                <span className="stat-value">{status.lastTickAt ?? "—"}</span>
-              </div>
-              <div className="stat">
-                <span className="stat-label">매수 가능</span>
-                <span className="stat-value">
-                  {status.buyingPowerUsd != null ? `$${status.buyingPowerUsd.toLocaleString()}` : "—"}{" "}
-                  <button className="mini" onClick={() => window.kylebot.refreshBuyingPower()}>
-                    새로고침
-                  </button>
-                </span>
-              </div>
-            </div>
-            {/* 오늘의 안전장치 현황 */}
-            {status.riskState && (
-              <div className="risk-row">
-                <span>오늘 실현 손익 {status.riskState.realized_pnl_pct.toFixed(2)}%</span>
-                <span>주문 {status.riskState.order_count}건</span>
-                <span>연속 손절 {status.riskState.consecutive_losses}회</span>
-                {status.riskState.halted && <span className="danger">⛔ 거래 정지: {status.riskState.halt_reason}</span>}
-              </div>
-            )}
-          </section>
-
-          {/* --- 새 매매 계획 --- */}
-          <section className="card">
-            <h2>새 매매 계획</h2>
-            <p className="hint">
-              봇을 켠 뒤 종목을 정하고 시세를 불러오면 기본 계획(진입 −0.5% / 익절 +2% / 손절 −10%)을
-              계산해 줍니다. 수치는 직접 고칠 수 있습니다.
-            </p>
+            <h2>1) 종목 · 시세 · 환율</h2>
             <div className="form-row">
               <label>
                 종목 코드
                 <input value={symbol} onChange={(e) => setSymbol(e.target.value)} placeholder="예: AAPL" />
               </label>
-              <button className="btn" disabled={busy || !status.running} onClick={loadPlan}>
-                시세 불러오기
+              <button className="btn" disabled={busy} onClick={loadQuote}>
+                시세·환율 조회
               </button>
-              {!status.running && <span className="hint">← 먼저 봇을 시작하세요</span>}
+              {curPrice != null && <span className="quote">현재가 {usdKrw(curPrice, fx)}</span>}
             </div>
-            {plan && (
-              <>
-                <div className="form-row">
-                  <span className="quote">현재가 ${plan.price}</span>
-                  <label>
-                    진입가 $
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={plan.entry}
-                      onChange={(e) => setPlan({ ...plan, entry: Number(e.target.value) })}
-                    />
-                  </label>
-                  <label>
-                    익절가 $
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={plan.tp}
-                      onChange={(e) => setPlan({ ...plan, tp: Number(e.target.value) })}
-                    />
-                  </label>
-                  <label>
-                    손절가 $
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={plan.sl}
-                      onChange={(e) => setPlan({ ...plan, sl: Number(e.target.value) })}
-                    />
-                  </label>
-                  <label>
-                    수량(주)
-                    <input type="number" min="1" value={qty} onChange={(e) => setQty(Math.max(1, Number(e.target.value)))} />
-                  </label>
-                </div>
-                <div className="form-row">
-                  <button className="btn btn-start" disabled={busy} onClick={submitSession}>
-                    이 계획으로 세션 시작
+            <div className="form-row">
+              <span className="hint">
+                환율:{" "}
+                {fx
+                  ? `1 USD = ₩${fx.toLocaleString()} (${fxSource === "toss" ? "토스 자동 · 1분 갱신 참고용" : "수동 입력"})`
+                  : "미조회 — [시세·환율 조회]를 누르세요"}
+              </span>
+              {fxFailed && (
+                <>
+                  <input
+                    type="number"
+                    placeholder="환율 수동 입력 (예: 1390)"
+                    value={manualFx}
+                    onChange={(e) => setManualFxInput(e.target.value)}
+                  />
+                  <button className="mini" onClick={applyManualFx}>
+                    적용
                   </button>
-                  <span className="hint">진입 주문은 안전장치 게이트를 통과해야만 등록됩니다.</span>
-                </div>
-              </>
-            )}
-            {/* 연습 모드 전용: 시장 가격 조작(교육용) */}
-            {isMock && status.running && (
+                  <span className="hint danger">자동 조회 실패 — 수동으로 입력해 주세요</span>
+                </>
+              )}
+            </div>
+            {isMock && (
               <div className="form-row mock-box">
-                <span className="hint">🎮 연습: 시장 가격을 직접 움직여 익절/손절을 재현해 보세요.</span>
-                <input
-                  type="number"
-                  step="0.01"
-                  placeholder="새 가격"
-                  value={mockPrice}
-                  onChange={(e) => setMockPrice(e.target.value)}
-                />
+                <span className="hint">🎮 연습: 가짜 서버 현재가 바꾸기</span>
+                <input type="number" step="0.01" placeholder="새 가격" value={mockPrice} onChange={(e) => setMockPrice(e.target.value)} />
                 <button
                   className="mini"
-                  onClick={() => mockPrice && window.kylebot.mockSetPrice(symbol.trim().toUpperCase(), Number(mockPrice))}
+                  onClick={async () => {
+                    if (mockPrice) {
+                      await window.kyletool.mockSetPrice(symbol.trim().toUpperCase(), Number(mockPrice));
+                      loadQuote();
+                    }
+                  }}
                 >
-                  가격 변경
+                  변경
                 </button>
               </div>
             )}
           </section>
 
-          {/* --- 진행 중 세션 --- */}
-          <section className="card wide">
-            <h2>매매 세션 ({status.sessions.length})</h2>
-            {status.sessions.length === 0 ? (
-              <p className="hint">아직 세션이 없습니다. 위에서 새 매매 계획을 만들어 보세요.</p>
-            ) : (
-              <table>
-                <thead>
-                  <tr>
-                    <th>세션</th>
-                    <th>종목</th>
-                    <th>상태</th>
-                    <th>진입가</th>
-                    <th>익절가</th>
-                    <th>손절가</th>
-                    <th>수량</th>
-                    <th>포지션</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {status.sessions.flatMap((s) =>
-                    s.positions.map((p) => (
-                      <tr key={`${s.id}-${p.level}`}>
-                        <td className="mono">{s.id}</td>
-                        <td>{s.symbol}</td>
-                        <td>{s.status}</td>
-                        <td>${p.entryPrice}</td>
-                        <td className="ok">${p.tpPrice}</td>
-                        <td className="danger">${p.slPrice}</td>
-                        <td>{p.quantity}</td>
-                        <td>
-                          {POS_LABEL[p.state]}
-                          {p.exitReason ? ` · ${EXIT_LABEL[p.exitReason] ?? p.exitReason}` : ""}
-                        </td>
-                      </tr>
-                    )),
-                  )}
-                </tbody>
-              </table>
+          <section className="card">
+            <h2>2) 매매기법 선택 · 재료 입력</h2>
+            <div className="form-row">
+              {(["split3", "orderbook", "candle", "manual"] as Technique[]).map((t) => (
+                <label className="radio" key={t}>
+                  <input
+                    type="radio"
+                    checked={tech === t}
+                    onChange={() => {
+                      setTech(t);
+                      setResult(null);
+                      setCalcErr("");
+                    }}
+                  />
+                  {TECH_LABEL[t]}
+                </label>
+              ))}
+            </div>
+
+            {tech === "split3" && (
+              <div className="form-row">
+                <label>
+                  전봉 종가 $
+                  <input type="number" step="0.0001" value={baseClose} onChange={(e) => setBaseClose(e.target.value)} />
+                </label>
+                <label>
+                  EMA200 $
+                  <input type="number" step="0.0001" value={ema200} onChange={(e) => setEma200(e.target.value)} />
+                </label>
+                <span className="hint">전봉종가~EMA200을 3등분해 1·2·3분할 산출 (전봉종가 &gt; EMA200 필수)</span>
+              </div>
             )}
+            {tech === "orderbook" && (
+              <div className="form-row">
+                <label>
+                  매수벽 가격 $
+                  <input type="number" step="0.0001" value={wallPrice} onChange={(e) => setWallPrice(e.target.value)} />
+                </label>
+                <span className="hint">진입 = 벽 + 1틱. 벽인지 판단은 사람 몫(정량 기준 미확정)</span>
+              </div>
+            )}
+            {tech === "candle" && (
+              <div className="form-row">
+                <label>
+                  현재봉 시가 $
+                  <input type="number" step="0.0001" value={barOpen} onChange={(e) => setBarOpen(e.target.value)} />
+                </label>
+                <label className="radio">
+                  <input type="checkbox" checked={candleYang} onChange={(e) => setCandleYang(e.target.checked)} />
+                  전봉이 양봉(종가&gt;시가)임을 확인했습니다
+                </label>
+              </div>
+            )}
+            {tech === "manual" && (
+              <div className="form-row">
+                <label>
+                  진입가 $
+                  <input type="number" step="0.0001" value={manualEntry} onChange={(e) => setManualEntry(e.target.value)} />
+                </label>
+              </div>
+            )}
+
+            <div className="form-row">
+              <label>
+                익절 %
+                <input type="number" step="0.1" value={tpPct} onChange={(e) => setTpPct(Number(e.target.value))} />
+              </label>
+              <label>
+                손절 %
+                <input type="number" step="0.1" value={slPct} onChange={(e) => setSlPct(Number(e.target.value))} />
+              </label>
+              <label>
+                수량(주)
+                <input type="number" min="1" value={qty} onChange={(e) => setQty(Math.max(1, Number(e.target.value)))} />
+              </label>
+              <button className="btn btn-start" onClick={runCalc}>
+                계산하기
+              </button>
+            </div>
+            {calcErr && <p className="danger">⚠ {calcErr}</p>}
           </section>
 
-          {/* --- 매매일지 --- */}
+          {result && (
+            <section className="card wide">
+              <h2>
+                3) 계산 결과 — {TECH_LABEL[result.technique]} <span className="hint">{result.note}</span>
+              </h2>
+              <table>
+                <thead>
+                  <tr>
+                    <th>분할</th>
+                    <th>진입가</th>
+                    <th>익절가 (+{tpPct}%)</th>
+                    <th>손절가 (−{slPct}%)</th>
+                    <th>투입액 ({qty}주)</th>
+                    <th>주문 (확인 팝업 후 전송)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.levels.map((lv) => (
+                    <tr key={lv.level}>
+                      <td>{lv.level}분할</td>
+                      <td>{usdKrw(lv.entry, fx)}</td>
+                      <td className="ok">{usdKrw(lv.tp, fx)}</td>
+                      <td className="danger">{usdKrw(lv.sl, fx)}</td>
+                      <td>{usdKrw(lv.entry * qty, fx)}</td>
+                      <td>
+                        <button className="mini" disabled={status.killSwitch} onClick={() => confirmEntry(lv)}>
+                          진입 지정가
+                        </button>{" "}
+                        <button className="mini" disabled={status.killSwitch} onClick={() => confirmOco(lv)}>
+                          OCO 익절/손절
+                        </button>{" "}
+                        <button className="mini" disabled={status.killSwitch} onClick={() => confirmOto(lv)}>
+                          OTO 진입→익절
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="hint">
+                💡 권장 순서: <b>진입 지정가</b>로 사고 → 체결 확인 후 <b>OCO 익절/손절</b> 등록. OCO/OTO 감시는 토스
+                서버가 하므로 이 앱을 꺼도 작동합니다.
+                {status.dryRun && " (현재 주문 잠금 — 전송 대신 모의 기록만 남습니다)"}
+              </p>
+            </section>
+          )}
+        </main>
+      )}
+
+      {/* ===== ② 주문 현황 ===== */}
+      {tab === "orders" && (
+        <main className="grid">
           <section className="card wide">
-            <h2>매매일지 (최근 {status.tradeLogs.length}건)</h2>
-            {status.tradeLogs.length === 0 ? (
-              <p className="hint">청산이 완료되면 여기 기록됩니다. (승률·손익의 재료)</p>
+            <h2>
+              미체결 일반 주문{" "}
+              <button className="mini" disabled={busy} onClick={loadOrders}>
+                새로고침
+              </button>
+            </h2>
+            {openOrders.length === 0 ? (
+              <p className="hint">미체결 주문이 없습니다.</p>
             ) : (
               <table>
                 <thead>
                   <tr>
+                    <th>주문번호</th>
                     <th>종목</th>
-                    <th>진입</th>
-                    <th>청산</th>
-                    <th>손익 %</th>
-                    <th>손익 $</th>
-                    <th>사유</th>
-                    <th>시각</th>
+                    <th>방향</th>
+                    <th>가격</th>
+                    <th>상태</th>
+                    <th></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {[...status.tradeLogs].reverse().map((t, i) => (
-                    <tr key={i}>
-                      <td>{t.symbol}</td>
-                      <td>${t.entryPrice}</td>
-                      <td>${t.exitPrice}</td>
-                      <td className={t.pnlPct >= 0 ? "ok" : "danger"}>{t.pnlPct.toFixed(2)}%</td>
-                      <td className={t.pnlUsd >= 0 ? "ok" : "danger"}>${t.pnlUsd.toFixed(2)}</td>
-                      <td>{EXIT_LABEL[t.exitReason] ?? t.exitReason}</td>
-                      <td className="mono small">{t.exitedAt?.slice(0, 16).replace("T", " ")}</td>
+                  {openOrders.map((o) => (
+                    <tr key={o.tossOrderId}>
+                      <td className="mono">{o.tossOrderId}</td>
+                      <td>{o.symbol}</td>
+                      <td>{o.side === "BUY" ? "매수" : "매도"}</td>
+                      <td>{o.price != null ? usdKrw(o.price, fx) : "-"}</td>
+                      <td>{o.status}</td>
+                      <td>
+                        <button
+                          className="mini"
+                          disabled={status.killSwitch}
+                          onClick={async () => {
+                            await window.kyletool.cancelOrder(o.tossOrderId).catch((e) => alert(String(e)));
+                            loadOrders();
+                          }}
+                        >
+                          취소
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -398,96 +568,156 @@ function App() {
             )}
           </section>
 
-          {/* --- 실시간 로그 --- */}
           <section className="card wide">
-            <h2>실시간 로그</h2>
-            <div className="logbox">
-              {logs.map((l, i) => (
+            <h2>조건주문 (OCO/OTO — 토스 서버가 감시 중)</h2>
+            {conds.length === 0 ? (
+              <p className="hint">등록된 조건주문이 없습니다.</p>
+            ) : (
+              <table>
+                <thead>
+                  <tr>
+                    <th>번호</th>
+                    <th>종목</th>
+                    <th>타입</th>
+                    <th>1번 조건</th>
+                    <th>2번 조건</th>
+                    <th>수량</th>
+                    <th>만료</th>
+                    <th>상태</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {conds.map((c) => (
+                    <tr key={c.conditionalOrderId}>
+                      <td className="mono">{c.conditionalOrderId}</td>
+                      <td>{c.symbol}</td>
+                      <td>{c.type}</td>
+                      <td>{c.first ? `${c.first.orderSide === "BUY" ? "매수" : "매도"} @$${c.first.triggerPrice}` : "-"}</td>
+                      <td>{c.second ? `${c.second.orderSide === "BUY" ? "매수" : "매도"} @$${c.second.triggerPrice}` : "-"}</td>
+                      <td>{c.quantity}</td>
+                      <td className="small">{c.expireDate}</td>
+                      <td>{c.status}</td>
+                      <td>
+                        <button
+                          className="mini"
+                          disabled={status.killSwitch}
+                          onClick={async () => {
+                            await window.kyletool.cancelConditional(c.conditionalOrderId).catch((e) => alert(String(e)));
+                            loadOrders();
+                          }}
+                        >
+                          취소
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </section>
+        </main>
+      )}
+
+      {/* ===== ③ 기록 ===== */}
+      {tab === "journal" && (
+        <main className="grid">
+          <section className="card wide">
+            <h2>도구 기록 (주문·드라이런·취소)</h2>
+            <div className="logbox tall">
+              {journal.length === 0 && <div className="logline hint">아직 기록이 없습니다.</div>}
+              {[...journal].reverse().map((j, i) => (
                 <div key={i} className="logline">
-                  <span className="log-ts">{l.ts}</span> {l.msg}
+                  <span className="log-ts">{j.ts}</span> {j.summary}
                 </div>
               ))}
-              <div ref={logEndRef} />
             </div>
           </section>
         </main>
       )}
 
+      {/* ===== ④ 설정 ===== */}
       {tab === "settings" && settings && (
         <main className="grid">
           <section className="card wide">
             <h2>설정</h2>
             <div className="settings-block">
-              <h3>실행 모드</h3>
+              <h3>모드</h3>
               <label className="radio">
                 <input type="radio" checked={formMode === "mock"} onChange={() => setFormMode("mock")} />
-                <b>연습 모드</b> — 앱 안의 가짜 토스 서버 사용. 실제 돈·계좌와 완전히 무관. 키 불필요.
+                <b>연습 모드</b> — 앱 안의 가짜 토스 서버. 실제 돈과 무관, 주문 흐름까지 연습 가능.
               </label>
               <label className="radio">
                 <input type="radio" checked={formMode === "live"} onChange={() => setFormMode("live")} />
-                <b>실서버 모드</b> — 실제 토스 서버에서 시세·잔고를 읽음.{" "}
-                <b>이 버전은 실주문이 잠겨 있어(드라이런 강제) 주문은 절대 나가지 않습니다.</b>
+                <b>실서버 모드</b> — 실제 시세·잔고·환율 조회. <b>주문은 잠금(드라이런)</b>: 소액(1주) 테스트를 사람이
+                직접 통과시킨 뒤 별도 버전에서 해금됩니다.
               </label>
             </div>
-
             <div className="settings-block">
               <h3>토스 API 키 {settings.hasClientId && settings.hasClientSecret ? "✅ 저장됨" : "❌ 미등록"}</h3>
-              <p className="hint">
-                키는 이 컴퓨터의 앱 데이터 폴더(.env, 본인만 읽기 가능)에만 저장되며, 화면·로그 어디에도
-                다시 표시되지 않습니다. 변경할 때만 새로 입력하세요.
-              </p>
+              <p className="hint">키는 이 컴퓨터의 앱 데이터 폴더(.env, 본인만 읽기)에만 저장되고 화면에 다시 표시되지 않습니다.</p>
               <div className="form-col">
                 <label>
                   Client ID
                   <input
                     type="password"
-                    value={formClientId}
-                    onChange={(e) => setFormClientId(e.target.value)}
-                    placeholder={settings.hasClientId ? "(저장됨 — 변경 시에만 입력)" : "토스 개발자센터에서 발급"}
+                    value={formId}
+                    onChange={(e) => setFormId(e.target.value)}
+                    placeholder={settings.hasClientId ? "(저장됨 — 변경 시에만)" : ""}
                   />
                 </label>
                 <label>
                   Client Secret
                   <input
                     type="password"
-                    value={formClientSecret}
-                    onChange={(e) => setFormClientSecret(e.target.value)}
-                    placeholder={settings.hasClientSecret ? "(저장됨 — 변경 시에만 입력)" : "토스 개발자센터에서 발급"}
+                    value={formSecret}
+                    onChange={(e) => setFormSecret(e.target.value)}
+                    placeholder={settings.hasClientSecret ? "(저장됨 — 변경 시에만)" : ""}
                   />
                 </label>
                 <label>
                   계좌 번호(accountSeq)
                   <input value={formAccount} onChange={(e) => setFormAccount(e.target.value)} placeholder="예: 1" />
                 </label>
-                <label>
-                  시장 확인 간격(초)
-                  <input
-                    type="number"
-                    min="2"
-                    value={formTick}
-                    onChange={(e) => setFormTick(Math.max(2, Number(e.target.value)))}
-                  />
-                </label>
               </div>
             </div>
-
             <div className="form-row">
               <button className="btn btn-start" onClick={saveSettings}>
                 설정 저장
               </button>
               {savedMsg && <span className="ok">{savedMsg}</span>}
             </div>
-
-            <div className="settings-block">
-              <h3>안전 안내</h3>
-              <ul className="hint">
-                <li>이 버전(v0.1)은 <b>실주문 기능이 코드 차원에서 잠겨</b> 있습니다. 설정으로도 풀 수 없습니다.</li>
-                <li>이유: 토스 주문 API의 필수 항목(주문 유효기간 등) 확정이 아직 안 끝났습니다(진행 문서 참고).</li>
-                <li>실주문 해금은 "스펙 확정 → 소액 검증" 후 별도 버전으로 배포됩니다.</li>
-              </ul>
-            </div>
           </section>
         </main>
+      )}
+
+      {/* ===== 주문 확인 팝업 (사람이 눌러야만 전송) ===== */}
+      {pending && (
+        <div className="modal-back">
+          <div className="modal">
+            <h2>{pending.title}</h2>
+            {pending.lines.map((l, i) => (
+              <p key={i}>{l}</p>
+            ))}
+            {status.dryRun ? (
+              <p className="hint">
+                🔒 현재 <b>주문 잠금(드라이런)</b> — 아래 버튼을 눌러도 실제 주문은 나가지 않고 모의 기록만 남습니다.
+              </p>
+            ) : (
+              <p className="danger">
+                <b>⚠ 실제 주문이 전송됩니다.</b> 가격·수량을 다시 확인하세요.
+              </p>
+            )}
+            <div className="form-row">
+              <button className="btn btn-start" disabled={busy} onClick={sendPending}>
+                {status.dryRun ? "모의 전송(기록만)" : "주문 전송"}
+              </button>
+              <button className="btn" disabled={busy} onClick={() => setPending(null)}>
+                취소
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -1,49 +1,49 @@
 // =============================================================================
-// electron/preload.cjs  —  화면(React) ↔ 엔진(메인 프로세스) 사이의 "다리"
+// electron/preload.cjs  —  화면(React) ↔ 도구 엔진 사이의 "다리" (v2)
 // -----------------------------------------------------------------------------
-// [이게 뭔가?]
-//   보안을 위해 화면은 Node 기능(파일, 네트워크 등)을 직접 못 씁니다(contextIsolation).
-//   대신 이 파일이 "허용된 창구"만 골라 window.kylebot 이라는 이름으로 화면에
-//   노출합니다. 화면은 window.kylebot.start() 처럼 부르기만 하면 되고,
-//   실제 일은 메인 프로세스의 봇 엔진이 합니다.
-//
-// [왜 .cjs 인가?]
-//   프로젝트가 ESM(type: module)이지만, Electron 의 preload 는 CommonJS 가
-//   가장 호환이 좋아 확장자를 .cjs 로 명시했습니다(빌드 없이 그대로 복사해서 씀).
+// 보안(contextIsolation) 때문에 화면은 Node 기능을 직접 못 씁니다.
+// 여기서 허용한 창구만 window.kyletool 이름으로 노출합니다.
 // =============================================================================
 
 const { contextBridge, ipcRenderer } = require("electron");
 
-contextBridge.exposeInMainWorld("kylebot", {
-  // --- 상태 조회 ---
-  getStatus: () => ipcRenderer.invoke("bot:getStatus"),
-  getLogs: () => ipcRenderer.invoke("bot:getLogs"),
+contextBridge.exposeInMainWorld("kyletool", {
+  // 상태·기록
+  status: () => ipcRenderer.invoke("tool:status"),
+  journal: () => ipcRenderer.invoke("tool:journal"),
 
-  // --- 봇 조작 ---
-  start: () => ipcRenderer.invoke("bot:start"),
-  stop: () => ipcRenderer.invoke("bot:stop"),
-  setKillSwitch: (on) => ipcRenderer.invoke("bot:killSwitch", on),
+  // 설정
+  getSettings: () => ipcRenderer.invoke("tool:settings:get"),
+  saveSettings: (input) => ipcRenderer.invoke("tool:settings:save", input),
+  setKillSwitch: (on) => ipcRenderer.invoke("tool:killSwitch", on),
 
-  // --- 설정 ---
-  getSettings: () => ipcRenderer.invoke("bot:getSettings"),
-  saveSettings: (input) => ipcRenderer.invoke("bot:saveSettings", input),
+  // 조회(버튼 눌렀을 때 1회)
+  quote: (symbol) => ipcRenderer.invoke("tool:quote", symbol),
+  fx: () => ipcRenderer.invoke("tool:fx"),
+  setManualFx: (rate) => ipcRenderer.invoke("tool:fx:manual", rate),
+  buyingPower: () => ipcRenderer.invoke("tool:buyingPower"),
 
-  // --- 매매 계획/세션 ---
-  planFromQuote: (symbol) => ipcRenderer.invoke("bot:planFromQuote", symbol),
-  createSession: (spec) => ipcRenderer.invoke("bot:createSession", spec),
-  mockSetPrice: (symbol, price) => ipcRenderer.invoke("bot:mockSetPrice", symbol, price),
-  refreshBuyingPower: () => ipcRenderer.invoke("bot:refreshBuyingPower"),
-  quote: (symbol) => ipcRenderer.invoke("bot:quote", symbol),
+  // 계산기(카일매매기법 3종 + 수동)
+  calc: (req) => ipcRenderer.invoke("tool:calc", req),
 
-  // --- 실시간 이벤트 구독(엔진 → 화면) ---
-  onLog: (cb) => {
+  // 주문(화면의 확인 팝업 통과 후에만 호출됨)
+  placeEntry: (spec) => ipcRenderer.invoke("tool:order:entry", spec),
+  placeOco: (spec) => ipcRenderer.invoke("tool:order:oco", spec),
+  placeOto: (spec) => ipcRenderer.invoke("tool:order:oto", spec),
+
+  // 주문 현황
+  openOrders: () => ipcRenderer.invoke("tool:orders:open"),
+  conditionals: () => ipcRenderer.invoke("tool:orders:conditionals"),
+  cancelOrder: (id) => ipcRenderer.invoke("tool:orders:cancel", id),
+  cancelConditional: (id) => ipcRenderer.invoke("tool:orders:cancelConditional", id),
+
+  // 연습 모드 전용
+  mockSetPrice: (symbol, price) => ipcRenderer.invoke("tool:mockSetPrice", symbol, price),
+
+  // 실시간 저널 구독
+  onJournal: (cb) => {
     const h = (_ev, entry) => cb(entry);
-    ipcRenderer.on("bot:log", h);
-    return () => ipcRenderer.removeListener("bot:log", h); // 구독 해제 함수 반환
-  },
-  onStatus: (cb) => {
-    const h = (_ev, status) => cb(status);
-    ipcRenderer.on("bot:status", h);
-    return () => ipcRenderer.removeListener("bot:status", h);
+    ipcRenderer.on("tool:journalEvent", h);
+    return () => ipcRenderer.removeListener("tool:journalEvent", h);
   },
 });

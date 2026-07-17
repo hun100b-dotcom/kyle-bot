@@ -1,8 +1,8 @@
 {
   "name": "kyle-bot",
   "private": true,
-  "version": "0.1.0",
-  "description": "카일봇 — 토스 미국주식(데이마켓) 자동매매 데스크톱 앱 (v0.1: 드라이런 전용)",
+  "version": "0.2.0",
+  "description": "카일 매매도구 — 카일매매기법 계산기 + 토스 조건주문 (v0.2: 주문 잠금/드라이런)",
   "author": "hun100b",
   "type": "module",
   "main": "dist-electron/main.cjs",
