@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>카일매매기법 — 최신 확정본 (2026-07-17)</title>
+<style>
+  /* 외부 의존성 없는 자체 완결 스타일 */
+  :root {
+    --ink: #1a2333; --sub: #5b6577; --line: #dfe4ec; --bg: #f6f8fb;
+    --card: #ffffff; --accent: #2563eb; --green: #0d9464; --red: #dc4545; --amber: #b45309;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "Apple SD Gothic Neo", "Malgun Gothic", Pretendard, -apple-system, sans-serif;
+    line-height: 1.7; font-size: 15px;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 32px 20px 64px; }
+  header.hero {
+    background: linear-gradient(135deg, #1e3a8a, #2563eb); color: #fff;
+    border-radius: 16px; padding: 28px 28px 22px; margin-bottom: 28px;
+  }
+  .hero h1 { margin: 0 0 6px; font-size: 26px; }
+  .hero .meta { font-size: 13px; opacity: .92; }
+  .hero .badges { margin-top: 12px; }
+  .chip {
+    display: inline-block; font-size: 12px; padding: 3px 10px; border-radius: 999px;
+    background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.35); margin-right: 6px;
+  }
+  h2 {
+    font-size: 19px; margin: 36px 0 12px; padding-bottom: 6px;
+    border-bottom: 2px solid var(--accent);
+  }
+  h3 { font-size: 15.5px; margin: 20px 0 8px; color: var(--accent); }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 18px 20px; margin: 14px 0;
+  }
+  table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 14px; background: var(--card); }
+  th, td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: #eef2f9; font-weight: 700; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  code, .mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 13px;
+    background: #eef2f9; border-radius: 4px; padding: 1px 5px; }
+  .formula {
+    background: #0f172a; color: #dbeafe; border-radius: 10px; padding: 14px 16px;
+    font-family: ui-monospace, Consolas, monospace; font-size: 14px; overflow-x: auto; margin: 10px 0;
+  }
+  .ok { color: var(--green); font-weight: 700; }
+  .warn { color: var(--amber); font-weight: 700; }
+  .danger { color: var(--red); font-weight: 700; }
+  .note {
+    border-left: 4px solid var(--accent); background: #eef4ff;
+    padding: 10px 14px; border-radius: 0 8px 8px 0; margin: 12px 0; font-size: 14px;
+  }
+  .note.red { border-color: var(--red); background: #fdf0f0; }
+  .note.amber { border-color: var(--amber); background: #fdf6ea; }
+  .step { display: flex; gap: 12px; margin: 10px 0; }
+  .step .n {
+    flex: 0 0 26px; height: 26px; border-radius: 50%; background: var(--accent); color: #fff;
+    display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; margin-top: 2px;
+  }
+  footer { margin-top: 40px; font-size: 12.5px; color: var(--sub); border-top: 1px solid var(--line); padding-top: 14px; }
+  .toc { font-size: 14px; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink: #e6e9f0; --sub: #9aa3b5; --line: #2a3140; --bg: #0f1115; --card: #161a22; }
+    th { background: #1d2330; }
+    code, .mono { background: #1d2330; }
+    .note { background: #14213c; }
+    .note.red { background: #331b1b; }
+    .note.amber { background: #33270f; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <h1>카일매매기법 — 최신 확정본</h1>
+  <div class="meta">
+    버전: <b>2026-07-17 검증판</b> (사양서 2026-07-16 확정 + 봇 코드 대조 완료)<br>
+    출처: kyle-bot 레포 유일 사양서 <span class="mono">docs/카일봇_개발설계서.md</span> · 진행 기록 <span class="mono">docs/progress.md</span>
+  </div>
+  <div class="badges">
+    <span class="chip">토스 데이마켓 · 미국주식 · 달러 고정</span>
+    <span class="chip">코드-문서 일치 검증 ✔ (테스트 66개 통과)</span>
+    <span class="chip">3가지 기법: 삼분할 · 호가창 · 캔들</span>
+  </div>
+</header>
+
+<div class="card toc">
+  <b>목차</b> —
+  <a href="#principle">① 5대 원칙</a> ·
+  <a href="#common">② 공통 규칙(시간·가격)</a> ·
+  <a href="#split3">③ 기법1 삼분할</a> ·
+  <a href="#orderbook">④ 기법2 호가창</a> ·
+  <a href="#candle">⑤ 기법3 캔들</a> ·
+  <a href="#risk">⑥ 안전장치</a> ·
+  <a href="#verify">⑦ 코드 일치 검증</a> ·
+  <a href="#todo">⑧ 미확정 항목</a>
+</div>
+
+<h2 id="principle">① 기법의 5대 원칙</h2>
+<div class="card">
+  <div class="step"><div class="n">1</div><div><b>판단은 사람, 실행은 기계.</b> 어떤 종목에 들어갈지는 사람이 정하고, 주문·감시·청산의 실행만 봇이 한다.</div></div>
+  <div class="step"><div class="n">2</div><div><b>달러 주문 고정.</b> 모든 주문은 미국 달러(USD) 기준.</div></div>
+  <div class="step"><div class="n">3</div><div><b>당일 청산.</b> 데이마켓 마감 15분 전부터 강제 정리 — 포지션을 다음 날로 넘기지 않는다.</div></div>
+  <div class="step"><div class="n">4</div><div><b>안전장치 우선.</b> 신규 진입은 반드시 안전장치 게이트를 통과해야만 나간다(우회 불가). 청산은 게이트 없이 항상 허용(위험을 줄이는 행위이므로).</div></div>
+  <div class="step"><div class="n">5</div><div><b>드라이런(모의 실행) 우선.</b> 검증 전에는 실주문 금지. 현재 앱 v0.1은 실주문이 코드에서 잠겨 있음.</div></div>
+</div>
+
+<h2 id="common">② 공통 규칙 — 시간과 가격</h2>
+
+<h3>장 시간표 (KST, 한국 시각)</h3>
+<table>
+  <tr><th>세션</th><th>서머타임(3월~11월초)</th><th>겨울</th></tr>
+  <tr><td><b>데이마켓</b> ← 매매 대상</td><td>09:00 ~ 17:00</td><td>10:00 ~ 18:00</td></tr>
+  <tr><td>프리마켓</td><td>17:00 ~ 22:30</td><td>18:00 ~ 23:30</td></tr>
+  <tr><td>정규장</td><td>22:30 ~ 05:00</td><td>23:30 ~ 06:00</td></tr>
+  <tr><td>애프터마켓</td><td>05:00 ~ 08:50</td><td>06:00 ~ 09:50</td></tr>
+</table>
+
+<h3>하루 운용 시각 (개장 기준 상대시각)</h3>
+<table>
+  <tr><th>시각</th><th>서머 기준</th><th>하는 일</th></tr>
+  <tr><td>개장 +30분</td><td>09:30</td><td><b>종목 탐색(스캔)</b></td></tr>
+  <tr><td>개장 +90분</td><td>10:30</td><td><b>1차 주문</b></td></tr>
+  <tr><td>개장 +120분</td><td>11:00</td><td><b>2차 주문</b></td></tr>
+  <tr><td>마감 −15분</td><td>16:45</td><td><b>청산 데드라인</b> — 미체결 취소 + 보유분 전량 정리 시작</td></tr>
+</table>
+
+<div class="note red">
+  <b>토스 거래 제약 (반드시 기억)</b><br>
+  · 마감 <b>10분 전</b> 신규 주문 → 예약으로 바뀌어 <u>다음 세션에 체결됨</u> (그래서 15분 전에 정리 시작)<br>
+  · 마감 <b>1분 전</b>은 정정·취소 불가 — <u>킬스위치도 안 먹는 구간</u><br>
+  · 미체결 주문은 다음 세션으로 <b>자동 이월</b>됨 → 봇이 명시적으로 취소한다(자동 취소에 의존 금지)
+</div>
+
+<h3>가격 규칙 (토스가 거부하지 않는 유효 가격 만들기)</h3>
+<table>
+  <tr><th>구분</th><th>$1 이상 종목</th><th>$1 미만 종목</th></tr>
+  <tr><td>최소 호가 단위(틱)</td><td class="num">$0.01</td><td class="num">$0.0001</td></tr>
+  <tr><td>가격 다듬기</td><td>소수 2자리에서 <b>절삭(내림)</b></td><td>소수 4자리에서 <b>절삭(내림)</b></td></tr>
+  <tr><td>예시</td><td>2.1522 → <b>2.15</b> / 1.8990 → <b>1.89</b></td><td>0.73105 → <b>0.7310</b></td></tr>
+</table>
+<div class="formula">익절가 = 진입가 × (1 + 익절% ÷ 100)&nbsp;&nbsp;&nbsp;기본 익절 = +2%
+손절가 = 진입가 × (1 − 손절% ÷ 100)&nbsp;&nbsp;&nbsp;기본 손절 = −10%
+※ 익절·손절가도 반드시 위 절삭 규칙을 통과시킨다 (아니면 토스 400 에러)</div>
+
+<h2 id="split3">③ 기법 1 — 삼분할 (EMA200 눌림목)</h2>
+<div class="card">
+  <p><b>아이디어:</b> 상승 추세 종목이 눌릴 때, 전봉 종가와 EMA200(200봉 이동평균선) 사이를 3등분해서 나눠 산다. 얕게 눌리면 1분할만, 깊게 눌리면 3분할까지 잡힌다.</p>
+
+  <h3>진입 조건 (필터)</h3>
+  <p><b>전봉 종가가 EMA200보다 위에 있을 것</b> (gap = 전봉종가 − EMA200 이 0보다 커야 함). 아니면 <span class="danger">진입 거부</span> — 상승 추세가 아니므로 매수 전략이 성립하지 않는다.</p>
+
+  <h3>진입가 계산</h3>
+  <div class="formula">gap = 전봉종가 − EMA200
+1분할 = 전봉종가 − gap × 1/3&nbsp;&nbsp;(가장 위)
+2분할 = 전봉종가 − gap × 2/3&nbsp;&nbsp;(중간)
+3분할 = EMA200&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(가장 아래)</div>
+
+  <h3>계산 예시 (사양서 검증 케이스 그대로)</h3>
+  <table>
+    <tr><th></th><th>값</th><th>익절 +2%</th><th>손절 −10%</th></tr>
+    <tr><td>전봉종가 / EMA200</td><td class="num">$2.20 / $1.93</td><td colspan="2">gap = 0.27</td></tr>
+    <tr><td><b>1분할 진입</b></td><td class="num"><b>$2.11</b></td><td class="num ok">$2.15</td><td class="num danger">$1.89</td></tr>
+    <tr><td><b>2분할 진입</b></td><td class="num"><b>$2.02</b></td><td class="num ok">$2.06</td><td class="num danger">$1.81</td></tr>
+    <tr><td><b>3분할 진입</b></td><td class="num"><b>$1.93</b></td><td class="num ok">$1.96</td><td class="num danger">$1.73</td></tr>
+  </table>
+
+  <ul>
+    <li><b>시드(투입금) 배분:</b> 주문당 시드의 <b>50%</b> (사양서 확정값)</li>
+    <li><b>각 분할은 독립된 한 판:</b> 1분할이 익절돼도 2·3분할 진입 주문은 유지. 한 분할의 손절이 다른 분할을 막지 않음. 단, 손익은 하루 한도에 <b>합산</b>.</li>
+    <li><b>분할 체결 정책:</b> 기본 first_only(1분할 체결 확인 후 진행) — 세부 동작은 미확정(⑧ 참고)</li>
+  </ul>
+
+  <div class="note amber"><b>운용 교훈(실검증에서 나옴):</b> 3분할(EMA200)은 현재가에서 멀어서, 안전장치의 "가격 이상 감지(현재가 ±5%)"에 걸릴 수 있다. 삼분할을 쓸 때는 이 허용 폭을 전략 폭보다 넉넉하게 설정할 것.</div>
+</div>
+
+<h2 id="orderbook">④ 기법 2 — 호가창 (매수벽 + 1틱)</h2>
+<div class="card">
+  <p><b>아이디어:</b> 호가창에 두꺼운 매수벽(큰 매수 대기 물량)이 있으면, 그 벽이 가격을 받쳐 주는 동안 벽 바로 한 칸 위에서 먼저 체결되기를 노린다.</p>
+  <div class="formula">진입가 = 매수벽 가격 + 1틱&nbsp;&nbsp;&nbsp;예) 벽 $1.85 → 진입 $1.86</div>
+  <ul>
+    <li><b>시드 배분:</b> 시드의 <b>90%</b> (사양서 확정값 — 세 기법 중 가장 공격적)</li>
+    <li><b>미확정:</b> "몇 주 이상을 벽으로 볼 것인가"의 정량 기준 (⑧ 참고) — 현재는 사람이 벽을 판단</li>
+  </ul>
+</div>
+
+<h2 id="candle">⑤ 기법 3 — 캔들 (양봉 후 눌림)</h2>
+<div class="card">
+  <p><b>아이디어:</b> 전봉이 양봉(상승 마감)이면, 다음 봉의 눌림을 시가보다 3틱 아래에서 싸게 받는다.</p>
+  <h3>진입 조건</h3>
+  <p><b>전봉이 양봉일 것</b> (종가 &gt; 시가). 이 확인 후에만 아래 계산을 쓴다.</p>
+  <div class="formula">진입가 = 현재봉 시가 − 3틱&nbsp;&nbsp;&nbsp;예) 시가 $1.50 → 진입 $1.47</div>
+  <ul>
+    <li><b>시드 배분:</b> 주문당 시드의 <b>50%</b> (사양서 확정값)</li>
+    <li>기본 익절 +2% / 손절 −10% 적용 (봇 기본값과 동일)</li>
+  </ul>
+</div>
+
+<h2 id="risk">⑥ 안전장치 — 신규 진입 앞의 7중 검문소</h2>
+<div class="card">
+  <p>신규 진입 주문은 아래 검문을 <b>전부</b> 통과해야만 나간다(코드상 우회 경로 없음). 하나라도 걸리면 차단되고 사유가 기록된다.</p>
+  <table>
+    <tr><th>#</th><th>검문</th><th>기준값</th><th>상태</th></tr>
+    <tr><td>1</td><td>킬 스위치(사람의 비상정지 버튼)</td><td>켜져 있으면 전면 차단</td><td class="ok">확정</td></tr>
+    <tr><td>2</td><td>거래 정지 상태(halted)</td><td>정지 중이면 차단</td><td class="ok">확정</td></tr>
+    <tr><td>3</td><td>일일 손실 한도</td><td class="num">하루 −3% 도달 시 그날 중단</td><td class="warn">제안값</td></tr>
+    <tr><td>4</td><td>연속 손절 컷</td><td class="num">3연속 손절 시 중단</td><td class="warn">제안값</td></tr>
+    <tr><td>5</td><td>일일 최대 주문 횟수</td><td class="num">20건 초과 시 차단(과매매 방지)</td><td class="warn">제안값</td></tr>
+    <tr><td>6</td><td>세션당 금액 상한</td><td class="num">$1,000 초과분 차단</td><td class="warn">제안값</td></tr>
+    <tr><td>7</td><td>가격 이상 감지</td><td class="num">주문가가 현재가 ±5% 벗어나면 오타 의심 차단</td><td class="warn">제안값</td></tr>
+  </table>
+  <div class="note">
+    <b>청산(익절·손절·마감 정리)은 검문 없이 항상 허용</b> — 포지션을 못 닫으면 오히려 위험이 커지기 때문에, 위 검문은 "새로 사는 것"만 막는다. 드라이런 모드에서는 검문 통과 후에도 실주문 대신 "냈을 주문"의 기록만 남긴다.
+  </div>
+</div>
+
+<h2 id="verify">⑦ 문서 ↔ 봇 코드 일치 검증 결과 (2026-07-17)</h2>
+<div class="card">
+  <table>
+    <tr><th>기법 요소</th><th>코드 위치</th><th>일치</th></tr>
+    <tr><td>삼분할 계산·진입 필터(gap&gt;0)</td><td class="mono">lib/calc.ts calcSplit3</td><td class="ok">✔ 일치</td></tr>
+    <tr><td>호가창 진입(벽+1틱)</td><td class="mono">lib/calc.ts calcOrderbook</td><td class="ok">✔ 일치</td></tr>
+    <tr><td>캔들 진입(시가−3틱)</td><td class="mono">lib/calc.ts calcCandle</td><td class="ok">✔ 일치</td></tr>
+    <tr><td>가격 절삭·틱 규칙</td><td class="mono">lib/calc.ts roundPrice/getTick</td><td class="ok">✔ 일치</td></tr>
+    <tr><td>익절 +2% / 손절 −10% 기본값</td><td class="mono">lib/lifecycle.ts createSession</td><td class="ok">✔ 일치</td></tr>
+    <tr><td>장 시간표·스캔/주문 시각·마감 15분 전 청산</td><td class="mono">lib/session.ts</td><td class="ok">✔ 일치 (서머타임 자동 계산)</td></tr>
+    <tr><td>안전장치 7중 검문</td><td class="mono">lib/risk.ts canPlaceOrder</td><td class="ok">✔ 일치</td></tr>
+    <tr><td>분할 독립·손익 합산·마감 강제청산</td><td class="mono">lib/lifecycle.ts</td><td class="ok">✔ 일치</td></tr>
+    <tr><td>시드 배분(50% / 90%)</td><td>—</td><td class="warn">문서 확정, 코드 미반영 (현재 수량은 사람이 직접 입력)</td></tr>
+  </table>
+  <p style="font-size:13px; color:var(--sub);">검증 방법: 사양서의 검증 케이스와 코드·테스트(vitest 66개 전부 통과)를 직접 대조. 이 레포에 기법 문서는 사양서 하나뿐이며(유일 사양서 원칙), 다른 버전은 존재하지 않음 — 따라서 이 문서가 곧 최신 확정본이다.</p>
+</div>
+
+<h2 id="todo">⑧ 아직 미확정 — 오너(사용자)가 정해야 하는 것</h2>
+<div class="card">
+  <table>
+    <tr><th>항목</th><th>현재 상태</th></tr>
+    <tr><td>안전장치 수치 4개 (일일한도/연속손절/주문횟수/금액상한/±5%)</td><td>보수적 제안값으로 동작 중 — 실운용 전 확정 필요</td></tr>
+    <tr><td>분할 체결 정책(split_fill_policy)</td><td>기본 first_only, 세부 동작 미정</td></tr>
+    <tr><td>매수벽 정량 기준(호가창 기법)</td><td>미정 — 현재는 사람이 벽을 판단</td></tr>
+    <tr><td>애프터마켓 매매 여부</td><td>미정 — 현재 봇은 데이마켓에서만 동작</td></tr>
+    <tr><td>시드 배분 자동화(50%/90%)</td><td>문서만 확정, 코드 미구현</td></tr>
+  </table>
+</div>
+
+<footer>
+  카일매매기법 최신 확정본 · 2026-07-17 · kyle-bot 레포 기준<br>
+  원천: docs/카일봇_개발설계서.md (유일 사양서, 아키텍처 2026-07-16 확정) + docs/progress.md + lib/ 코드 대조<br>
+  ⚠ 이 문서는 기법 기록용이며 투자 권유가 아닙니다. 실주문은 앱 v0.1에서 코드로 잠겨 있습니다.
+</footer>
+
+</div>
+</body>
+</html>
