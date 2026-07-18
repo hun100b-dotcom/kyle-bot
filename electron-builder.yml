@@ -1,38 +1,71 @@
 # =============================================================================
-# electron-builder.yml — 설치 파일(dmg) 만들기 설정
+# electron-builder.yml — 설치 파일(.exe / .dmg) 만들기 + 자동 배포 설정
 # -----------------------------------------------------------------------------
 # [이게 뭔가?]
-#   electron-builder 라는 도구가 이 설정을 읽고, 빌드된 화면(dist/)과
-#   봇 엔진(dist-electron/)을 묶어 "카일봇.app + 설치용 dmg"를 만들어 줍니다.
-#   실행: npm run app:dist  →  release/ 폴더에 결과물 생성
+#   electron-builder 가 이 설정을 읽고, 빌드된 화면(dist/)과 엔진(dist-electron/)을
+#   묶어 "설치 파일"을 만듭니다.
+#     - Windows: NSIS 설치파일(.exe)   → npm run dist:win
+#     - macOS:   .dmg (Intel + Apple Silicon) → npm run dist:mac  (맥에서만 빌드 가능)
+#   결과물은 release/ 폴더에 생성됩니다.
+#
+# [자동 업데이트 배포]
+#   빌드 시 --publish always 를 주면 아래 공개 레포(kyle-bot-releases)에 설치파일 +
+#   latest.yml(버전 정보)이 올라가고, 사용자 앱의 electron-updater 가 그걸 보고
+#   새 버전을 감지합니다. 소스 레포(kyle-bot)는 private 유지, 배포는 공개 레포로 분리.
 # =============================================================================
 
 appId: com.hun100b.kylebot
-# 실행파일/폴더 이름은 영문으로 한다.
-# [왜?] 실행파일 이름이 한글이면 macOS 에서 Electron 부팅이 죽는 문제(SIGTRAP)가
-#   확인됐다. 대신 화면에 보이는 이름(Dock·메뉴)은 아래 extendInfo 로 "카일봇" 지정.
+# 실행파일/폴더 이름은 영문. (한글이면 macOS 부팅이 SIGTRAP 크래시 — 확인된 교훈)
+# 화면에 보이는 이름은 mac.extendInfo / nsis.shortcutName 으로 한글 지정.
 productName: KyleBot
 directories:
-  output: release        # 결과물이 담기는 폴더
+  output: release
 
-# 앱 안에 포함할 파일들(소스 전체가 아니라 "빌드 결과물"만 담아 가볍게)
+# ★★ 보안 핵심: 앱 안에 포함할 파일 화이트리스트(필요한 빌드 결과물만).
+#   .env(실제 API 키)·소스는 절대 포함하지 않는다. 아래 제외 규칙으로 이중 차단.
 files:
-  - dist/**              # React 화면 빌드 결과
-  - dist-electron/**     # 봇 엔진(메인 프로세스) 빌드 결과
+  - dist/**            # React 화면 빌드 결과
+  - dist-electron/**   # 엔진(메인 프로세스) 빌드 결과
   - package.json
+  # --- 명시적 제외(혹시라도 섞이지 않게 이중 안전장치) ---
+  - "!**/.env"
+  - "!**/.env.*"
+  - "!**/*.map"
 
-asar: true               # 앱 내부 파일을 하나의 아카이브로 묶음(표준)
+asar: true             # 앱 내부 파일을 하나의 아카이브로 묶음(표준)
 
+# 자동 업데이트 배포 피드(바이너리 전용 공개 레포)
+publish:
+  provider: github
+  owner: hun100b-dotcom
+  repo: kyle-bot-releases
+  releaseType: release
+
+# ---------------- Windows ----------------
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  # 코드서명 인증서 없음(유료) → 미서명 빌드. 첫 실행 시 SmartScreen 경고는
+  # "추가 정보 → 실행"으로 통과(README 안내). 개인 사용엔 충분.
+
+nsis:
+  oneClick: false                # 설치 위치 선택 등 일반 설치 마법사 방식
+  perMachine: false              # 관리자 권한 없이 현재 사용자에만 설치
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 카일 매매도구      # 바탕화면/시작메뉴 아이콘 이름(한글 OK)
+
+# ---------------- macOS ----------------
 mac:
-  # Dock·정보 창에 보이는 표시 이름 (v2: 도구로 전환)
   extendInfo:
     CFBundleDisplayName: 카일 매매도구
   category: public.app-category.finance
   target:
     - target: dmg
-      arch: [arm64]      # 애플 실리콘(M1~M4) 맥북용
-  # 애플 개발자 인증서가 없어 서명은 Electron 기본(애드혹 링커 서명)에 맡긴다.
-  # 개인 사용 목적으로는 이걸로 충분히 실행된다(처음 열 때만 우클릭→열기 필요할 수 있음).
+      arch: [arm64, x64]         # 애플 실리콘 + 인텔 맥 모두
+  # 애플 개발자 인증서 없음 → 기본(ad-hoc) 서명. 첫 실행은 우클릭→열기(README 안내).
 
 dmg:
-  title: 카일봇 설치
+  title: 카일 매매도구 설치

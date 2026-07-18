@@ -100,6 +100,12 @@ function App() {
   // --- 연습 가격 조작 ---
   const [mockPrice, setMockPrice] = useState("");
 
+  // --- 자동 업데이트 ---
+  const [appVer, setAppVer] = useState("");
+  const [update, setUpdate] = useState<{ version: string; notes: string } | null>(null);
+  const [updateProgress, setUpdateProgress] = useState<number | null>(null); // 다운로드 진행률 %
+  const [updateReady, setUpdateReady] = useState(false); // 다운로드 완료 → 재시작 대기
+
   useEffect(() => {
     refreshStatus();
     window.kyletool.journal().then(setJournal);
@@ -108,9 +114,31 @@ function App() {
       setFormMode(s.mode);
       setFormAccount(s.account);
     });
+    window.kyletool.appVersion?.().then(setAppVer).catch(() => {});
     const off = window.kyletool.onJournal((e) => setJournal((prev) => [...prev.slice(-99), e]));
-    return off;
+    // 업데이트 이벤트 구독(있음/진행률/완료). 오류는 조용히 무시(앱 정상 동작 우선).
+    const offUpd = window.kyletool.onUpdate?.({
+      available: (info) => setUpdate(info),
+      progress: (pct) => setUpdateProgress(pct),
+      downloaded: () => {
+        setUpdateReady(true);
+        setUpdateProgress(100);
+      },
+    });
+    return () => {
+      off();
+      offUpd?.();
+    };
   }, []);
+
+  async function startDownloadUpdate() {
+    setUpdateProgress(0);
+    const r = await window.kyletool.downloadUpdate();
+    if (!r.ok) {
+      setUpdateProgress(null);
+      alert("업데이트 다운로드에 실패했습니다. 인터넷 연결을 확인하고 나중에 다시 시도하세요. (앱은 계속 사용 가능합니다)");
+    }
+  }
 
   async function refreshStatus() {
     setStatus(await window.kyletool.status());
@@ -689,6 +717,55 @@ function App() {
             </div>
           </section>
         </main>
+      )}
+
+      {/* ===== 자동 업데이트 팝업 ===== */}
+      {update && (
+        <div className="modal-back">
+          <div className="modal">
+            <h2>🎉 새 버전이 있습니다 — v{update.version}</h2>
+            {appVer && <p className="hint">현재 설치된 버전: v{appVer}</p>}
+            {update.notes ? (
+              <div className="update-notes">
+                <b>변경 사항</b>
+                <pre>{update.notes}</pre>
+              </div>
+            ) : (
+              <p className="hint">이번 버전의 개선 사항이 적용됩니다.</p>
+            )}
+
+            {updateProgress != null && !updateReady && (
+              <div className="progress-wrap">
+                <div className="progress-bar" style={{ width: `${updateProgress}%` }} />
+                <span className="progress-txt">다운로드 중… {updateProgress}%</span>
+              </div>
+            )}
+
+            <div className="form-row">
+              {updateReady ? (
+                <button className="btn btn-start" onClick={() => window.kyletool.installUpdate()}>
+                  ↻ 재시작하고 적용
+                </button>
+              ) : updateProgress != null ? (
+                <button className="btn" disabled>
+                  다운로드 중…
+                </button>
+              ) : (
+                <button className="btn btn-start" onClick={startDownloadUpdate}>
+                  지금 업데이트
+                </button>
+              )}
+              {!updateReady && (
+                <button className="btn" onClick={() => setUpdate(null)}>
+                  나중에
+                </button>
+              )}
+            </div>
+            <p className="hint">
+              💡 업데이트는 언제 해도 됩니다. "나중에"를 눌러도 앱은 그대로 사용할 수 있고, 다음에 켤 때 다시 안내합니다.
+            </p>
+          </div>
+        </div>
       )}
 
       {/* ===== 주문 확인 팝업 (사람이 눌러야만 전송) ===== */}

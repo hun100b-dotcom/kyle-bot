@@ -46,4 +46,26 @@ contextBridge.exposeInMainWorld("kyletool", {
     ipcRenderer.on("tool:journalEvent", h);
     return () => ipcRenderer.removeListener("tool:journalEvent", h);
   },
+
+  // --- 자동 업데이트 ---
+  appVersion: () => ipcRenderer.invoke("app:version"),
+  downloadUpdate: () => ipcRenderer.invoke("update:download"),
+  installUpdate: () => ipcRenderer.invoke("update:install"),
+  // 업데이트 이벤트 구독(있음/진행률/완료/오류). 반환값은 구독 해제 함수.
+  onUpdate: (handlers) => {
+    const onAvail = (_ev, info) => handlers.available?.(info);
+    const onProg = (_ev, pct) => handlers.progress?.(pct);
+    const onDone = () => handlers.downloaded?.();
+    const onErr = (_ev, msg) => handlers.error?.(msg);
+    ipcRenderer.on("update:available", onAvail);
+    ipcRenderer.on("update:progress", onProg);
+    ipcRenderer.on("update:downloaded", onDone);
+    ipcRenderer.on("update:error", onErr);
+    return () => {
+      ipcRenderer.removeListener("update:available", onAvail);
+      ipcRenderer.removeListener("update:progress", onProg);
+      ipcRenderer.removeListener("update:downloaded", onDone);
+      ipcRenderer.removeListener("update:error", onErr);
+    };
+  },
 });

@@ -1,32 +1,86 @@
-# React + TypeScript + Vite
+# 카일 매매도구 (KyleBot)
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+카일매매기법 **계산기 + 토스 조건주문(OCO/OTO) 제출 도구**. 데스크톱 앱(Windows/macOS).
+자율 매매 봇이 아니라, 사람이 판단해 버튼을 누르면 계산·주문을 도와주는 도구입니다.
 
-Currently, two official plugins are available:
+> 현재 v0.2 — **실주문은 잠금(드라이런)** 상태입니다. 소액(1주) 테스트를 사람이 통과시킨 뒤
+> 별도 버전에서 해금됩니다. 지금은 계산·조회·모의주문까지 안전하게 사용할 수 있습니다.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+---
 
-## React Compiler
+## 📥 설치 방법 (오너용)
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+### Windows
+1. [배포 페이지](https://github.com/hun100b-dotcom/kyle-bot-releases/releases/latest)에서
+   **`KyleBot-Setup-x.y.z.exe`** 를 다운로드합니다.
+2. 파일을 실행합니다.
+3. ⚠️ **파란색 "Windows의 PC 보호" 경고(SmartScreen)가 뜹니다.** 이건 이 앱이 유료 코드서명
+   인증서로 서명되지 않아서 뜨는 정상 경고입니다(바이러스가 아님).
+   → **"추가 정보"** 클릭 → **"실행"** 버튼을 누르면 설치가 진행됩니다.
+4. 설치 후 바탕화면/시작메뉴의 **"카일 매매도구"** 아이콘으로 실행합니다.
 
-## Expanding the Oxlint configuration
+### macOS
+1. 배포 페이지에서 **`KyleBot-x.y.z-arm64.dmg`**(애플 실리콘) 또는
+   **`KyleBot-x.y.z.dmg`**(인텔 맥)을 다운로드합니다.
+2. dmg를 열고 앱을 **응용 프로그램** 폴더로 드래그합니다.
+3. ⚠️ **첫 실행 시 "확인되지 않은 개발자" 경고(Gatekeeper)가 뜹니다.**
+   → 앱 아이콘을 **우클릭(또는 Control+클릭) → "열기"** → 다시 나오는 창에서 **"열기"** 를 누릅니다.
+   (한 번만 이렇게 하면 다음부터는 그냥 더블클릭으로 열립니다.)
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
+### 처음 켠 뒤 — API 키 입력
+앱에는 **키가 들어있지 않습니다**(보안). 처음 실행 후 **설정 탭**에서 본인의
+토스 Open API **Client ID / Client Secret / 계좌번호(accountSeq)** 를 입력하고 저장하세요.
+키는 이 컴퓨터의 앱 데이터 폴더에만 저장되고 화면에 다시 표시되지 않습니다.
 
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+---
+
+## 🔄 업데이트 방법 (오너용)
+
+- 앱을 켜면 **자동으로 새 버전을 확인**합니다.
+- 새 버전이 있으면 **"새 버전이 있습니다" 팝업**이 뜹니다.
+  → **"지금 업데이트"** → 다운로드(진행률 표시) → **"재시작하고 적용"** 을 누르면 끝.
+- 인터넷이 안 되거나 확인에 실패해도 **앱은 그대로 정상 동작**합니다.
+- "나중에"를 눌러도 됩니다. 다음에 앱을 켤 때 다시 안내합니다.
+
+---
+
+## 🛠 새 버전 배포 방법 (개발자용)
+
+배포는 **바이너리 전용 공개 레포**([kyle-bot-releases](https://github.com/hun100b-dotcom/kyle-bot-releases))로 나갑니다.
+소스 레포(kyle-bot)는 private로 유지합니다.
+
+1. `package.json` 의 `version` 을 올린다 (예: `0.2.0` → `0.2.1`).
+2. GitHub 토큰을 환경변수로 설정한다 (이 PC는 자격증명 관리자에 저장돼 있음).
+   ```bash
+   export GH_TOKEN=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill | grep '^password=' | cut -d= -f2-)
+   ```
+3. 빌드 + 배포:
+   ```bash
+   npm run release:win     # 윈도우 .exe 빌드 후 릴리스 업로드 (이 PC=윈도우)
+   npm run release:mac     # 맥 .dmg 빌드 후 릴리스 업로드 (맥에서 실행)
+   ```
+   → `kyle-bot-releases` 에 `vX.Y.Z` 릴리스 + `latest.yml`(자동 업데이트 피드)이 올라간다.
+4. 사용자 앱이 다음 실행 때 새 버전을 감지해 업데이트 팝업을 띄운다.
+
+- **로컬 빌드만**(배포 없이 설치파일만 확인): `npm run dist:win` / `npm run dist:mac` → `release/` 폴더.
+- ⚠️ 릴리스에 `latest.yml` 이 반드시 포함돼야 자동 업데이트가 작동한다(빠지면 수동 업로드).
+
+---
+
+## 🔒 보안
+
+- **실제 API 키(.env)는 앱/설치파일/릴리스에 절대 포함되지 않습니다.**
+  `electron-builder.yml` 의 `files` 화이트리스트 + `!**/.env` 제외로 이중 차단, 빌드 후 산출물에서
+  키 문자열이 없음을 실제로 검증합니다.
+- 키는 사용자가 설정 탭에서 입력해 본인 컴퓨터에만 저장합니다.
+
+---
+
+## 💻 개발
+
+```bash
+npm install
+npm test        # vitest 71개
+npm run app     # 개발 모드로 앱 실행
 ```
-
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+자세한 진행 상황·아키텍처는 `docs/progress.md` 참고.

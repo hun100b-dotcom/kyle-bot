@@ -13,9 +13,60 @@
 import { app, BrowserWindow, ipcMain } from "electron";
 import { join } from "node:path";
 import { ToolEngine } from "./tool-engine";
+import electronUpdater from "electron-updater";
+
+const { autoUpdater } = electronUpdater;
 
 let engine: ToolEngine | null = null;
 let win: BrowserWindow | null = null;
+
+// =============================================================================
+// 자동 업데이트 (electron-updater)
+// -----------------------------------------------------------------------------
+// [흐름] 앱 시작 → 조용히 새 버전 확인 → 있으면 화면에 팝업 신호(update:available)
+//   → 사용자가 "지금 업데이트" 누르면 다운로드(진행률 update:progress)
+//   → 완료(update:downloaded) → "재시작하고 적용" 누르면 quitAndInstall.
+//
+// [★ 안전 원칙] 업데이트 확인/다운로드가 실패해도(오프라인·서버오류 등) 앱은
+//   절대 죽지 않는다. 모든 호출을 try/catch로 감싸고, 자동 다운로드는 끈다
+//   (사용자가 팝업에서 승낙할 때만 받는다).
+// =============================================================================
+function setupAutoUpdater(): void {
+  // 사용자 승낙 전에는 자동으로 받지도, 자동으로 설치하지도 않는다.
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+
+  // 새 버전이 있을 때: 화면에 버전·변경사항을 보내 팝업을 띄운다.
+  autoUpdater.on("update-available", (info) => {
+    win?.webContents.send("update:available", {
+      version: info.version,
+      // 릴리스 노트(변경사항). 문자열 또는 배열일 수 있어 문자열로 정리.
+      notes: typeof info.releaseNotes === "string" ? info.releaseNotes : "",
+    });
+  });
+
+  // 다운로드 진행률(0~100)을 화면에 실시간 전달.
+  autoUpdater.on("download-progress", (p) => {
+    win?.webContents.send("update:progress", Math.round(p.percent));
+  });
+
+  // 다운로드 완료: 이제 "재시작하고 적용"을 누를 수 있다.
+  autoUpdater.on("update-downloaded", () => {
+    win?.webContents.send("update:downloaded");
+  });
+
+  // 오류가 나도 조용히 넘어간다(앱은 계속 동작). 화면엔 참고용으로만 알림.
+  autoUpdater.on("error", (err) => {
+    win?.webContents.send("update:error", String(err?.message ?? err));
+  });
+
+  // 시작 시 1회 확인. 실패해도 무시(오프라인 등).
+  try {
+    void autoUpdater.checkForUpdates().catch(() => {});
+  } catch {
+    /* 개발 실행 등에서 실패해도 앱은 정상 */
+  }
+}
 
 function createWindow(): void {
   win = new BrowserWindow({
@@ -117,6 +168,22 @@ function registerIpc(e: ToolEngine): void {
 
   ipcMain.handle("tool:mockSetPrice", (_ev, symbol: string, price: number) => e.mockSetPrice(symbol, price));
 
+  // --- 자동 업데이트: 화면 버튼 → updater 동작 (전부 실패해도 안전) ---
+  ipcMain.handle("update:download", async () => {
+    try {
+      await autoUpdater.downloadUpdate();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    }
+  });
+  // "재시작하고 적용": 앱을 끄고 새 버전 설치 후 다시 켠다.
+  ipcMain.handle("update:install", () => {
+    setImmediate(() => autoUpdater.quitAndInstall());
+  });
+  // 현재 앱 버전(화면 표시용)
+  ipcMain.handle("app:version", () => app.getVersion());
+
   e.on("journal", (entry) => win?.webContents.send("tool:journalEvent", entry));
 }
 
@@ -125,6 +192,11 @@ app.whenReady().then(() => {
   engine = new ToolEngine(app.getPath("userData"), { forceMock: process.env.KYLEBOT_E2E === "1" });
   registerIpc(engine);
   createWindow();
+
+  // 자동 업데이트는 실제 설치본에서만(개발/검증 실행 제외). 실패해도 앱은 정상.
+  if (app.isPackaged && !process.env.KYLEBOT_SHOT) {
+    setupAutoUpdater();
+  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

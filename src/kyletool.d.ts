@@ -114,6 +114,17 @@ interface KyletoolBridge {
 
   mockSetPrice(symbol: string, price: number): Promise<boolean>;
   onJournal(cb: (entry: JournalEntry) => void): () => void;
+
+  // 자동 업데이트
+  appVersion(): Promise<string>;
+  downloadUpdate(): Promise<{ ok: boolean; error?: string }>;
+  installUpdate(): Promise<void>;
+  onUpdate(handlers: {
+    available?: (info: { version: string; notes: string }) => void;
+    progress?: (pct: number) => void;
+    downloaded?: () => void;
+    error?: (msg: string) => void;
+  }): () => void;
 }
 
 interface Window {

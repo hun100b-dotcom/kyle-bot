@@ -148,3 +148,46 @@ ul.hint { padding-left: 18px; }
 
 /* 기록 탭 로그창을 더 크게 */
 .logbox.tall { height: 420px; }
+
+/* ===== 자동 업데이트 팝업 ===== */
+.update-notes {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--line, #2a2e37);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 10px 0;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.update-notes b { font-size: 12.5px; color: var(--sub, #9ca3af); }
+.update-notes pre {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  line-height: 1.6;
+  font-family: inherit;
+}
+.progress-wrap {
+  position: relative;
+  height: 22px;
+  background: rgba(255,255,255,0.08);
+  border-radius: 11px;
+  overflow: hidden;
+  margin: 12px 0;
+}
+.progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #2563eb, #3b82f6);
+  transition: width 0.2s ease;
+}
+.progress-txt {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+}

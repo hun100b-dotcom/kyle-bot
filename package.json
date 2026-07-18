@@ -15,12 +15,17 @@
     "test:watch": "vitest",
     "demo": "tsx scripts/demo.ts",
     "report": "tsx scripts/report.ts",
-    "app:compile": "esbuild electron/main.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist-electron/main.cjs && cp electron/preload.cjs dist-electron/preload.cjs",
+    "app:compile": "esbuild electron/main.ts --bundle --platform=node --format=cjs --external:electron --external:electron-updater --outfile=dist-electron/main.cjs && node -e \"require('fs').copyFileSync('electron/preload.cjs','dist-electron/preload.cjs')\"",
     "app": "npm run build && npm run app:compile && electron .",
-    "app:dist": "npm run build && npm run app:compile && electron-builder --mac dmg"
+    "app:dist": "npm run build && npm run app:compile && electron-builder --mac dmg",
+    "dist:win": "npm run build && npm run app:compile && electron-builder --win nsis",
+    "dist:mac": "npm run build && npm run app:compile && electron-builder --mac dmg",
+    "release:win": "npm run build && npm run app:compile && electron-builder --win nsis --publish always",
+    "release:mac": "npm run build && npm run app:compile && electron-builder --mac dmg --publish always"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.6",
+    "electron-updater": "^6.8.9",
     "luxon": "^3.7.2",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
