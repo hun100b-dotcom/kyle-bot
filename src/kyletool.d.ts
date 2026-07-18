@@ -97,16 +97,6 @@ interface KyletoolBridge {
     slPrice: number;
     expireDate: string;
   }): Promise<JournalEntry>;
-  placeOto(spec: {
-    symbol: string;
-    quantity: number;
-    entryTrigger: number;
-    entryPrice: number;
-    exitTrigger: number;
-    exitPrice: number;
-    expireDate: string;
-  }): Promise<JournalEntry>;
-
   openOrders(): Promise<OpenOrder[]>;
   conditionals(): Promise<CondOrder[]>;
   cancelOrder(id: string): Promise<JournalEntry>;

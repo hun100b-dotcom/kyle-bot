@@ -1,5 +1,5 @@
 // =============================================================================
-// electron/main.ts  —  데스크톱 앱 진입점 (v2: 카일 매매도구)
+// electron/main.ts  —  데스크톱 앱 진입점 (v2: 카프리 매매도구)
 // -----------------------------------------------------------------------------
 // [v2 컨셉] "자율 봇" → "수동 계산기 + 온디맨드 주문 도구".
 //   앱은 창을 하나 띄우고, 화면의 버튼 입력을 도구 엔진(tool-engine.ts)에
@@ -10,7 +10,7 @@
 //   화면은 preload.cjs가 허용한 창구(window.kyletool.*)로만 엔진과 대화한다.
 // =============================================================================
 
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, ipcMain, Menu } from "electron";
 import { join } from "node:path";
 import { ToolEngine } from "./tool-engine";
 import electronUpdater from "electron-updater";
@@ -74,7 +74,7 @@ function createWindow(): void {
     height: 820,
     minWidth: 940,
     minHeight: 640,
-    title: "카일 매매도구",
+    title: "카프리 — 토스 미국주식 매매도구",
     backgroundColor: "#0f1115",
     webPreferences: {
       preload: join(__dirname, "preload.cjs"),
@@ -160,7 +160,6 @@ function registerIpc(e: ToolEngine): void {
 
   ipcMain.handle("tool:order:entry", (_ev, spec) => e.placeEntry(spec));
   ipcMain.handle("tool:order:oco", (_ev, spec) => e.placeOco(spec));
-  ipcMain.handle("tool:order:oto", (_ev, spec) => e.placeOto(spec));
   ipcMain.handle("tool:orders:open", () => e.openOrders());
   ipcMain.handle("tool:orders:conditionals", () => e.conditionals());
   ipcMain.handle("tool:orders:cancel", (_ev, id: string) => e.cancelNormalOrder(id));
@@ -188,6 +187,10 @@ function registerIpc(e: ToolEngine): void {
 }
 
 app.whenReady().then(() => {
+  // 상단 기본 메뉴바(File/Edit/View/Window) 제거 — 이 도구엔 불필요.
+  //   (개발용 F12 devtools 단축키는 창 webContents 에서 그대로 동작한다.)
+  Menu.setApplicationMenu(null);
+
   // KYLEBOT_E2E(자동 검증)일 때는 실서버 접근을 원천 차단(연습 모드 강제).
   engine = new ToolEngine(app.getPath("userData"), { forceMock: process.env.KYLEBOT_E2E === "1" });
   registerIpc(engine);

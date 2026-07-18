@@ -23,13 +23,12 @@ contextBridge.exposeInMainWorld("kyletool", {
   setManualFx: (rate) => ipcRenderer.invoke("tool:fx:manual", rate),
   buyingPower: () => ipcRenderer.invoke("tool:buyingPower"),
 
-  // 계산기(카일매매기법 3종 + 수동)
+  // 계산기(카프리매매기법 3종 + 수동)
   calc: (req) => ipcRenderer.invoke("tool:calc", req),
 
   // 주문(화면의 확인 팝업 통과 후에만 호출됨)
   placeEntry: (spec) => ipcRenderer.invoke("tool:order:entry", spec),
   placeOco: (spec) => ipcRenderer.invoke("tool:order:oco", spec),
-  placeOto: (spec) => ipcRenderer.invoke("tool:order:oto", spec),
 
   // 주문 현황
   openOrders: () => ipcRenderer.invoke("tool:orders:open"),

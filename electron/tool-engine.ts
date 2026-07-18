@@ -1,5 +1,5 @@
 // =============================================================================
-// electron/tool-engine.ts  —  카일 매매도구 엔진 (v2: 자율판단 제거, 온디맨드 전용)
+// electron/tool-engine.ts  —  카프리 매매도구 엔진 (v2: 자율판단 제거, 온디맨드 전용)
 // -----------------------------------------------------------------------------
 // [v1(bot-engine)과 무엇이 다른가? — 컨셉 전환의 핵심]
 //   v1: 봇이 5초마다 스스로 깨어나(틱 루프) 세션을 자동 전진(체결확인·익절·손절).
@@ -118,6 +118,7 @@ export class ToolEngine extends EventEmitter {
   private mode: "mock" | "live" = "mock";
   private killSwitch = false;
   private mock: ReturnType<typeof createMockTossServer> | null = null;
+  private mockPort = 0;
 
   // 환율 캐시(토스 스펙: 1분 갱신이므로 60초 캐시)
   private fxCache: { rate: number; atMs: number; source: "toss" | "manual" } | null = null;
@@ -171,12 +172,13 @@ export class ToolEngine extends EventEmitter {
       this.buyingPowerUsd = null;
     }
     process.env.TOSS_MOCK = this.mode === "mock" ? "true" : "false";
-    if (this.mode === "live") process.env.TOSS_BASE_URL = "https://apigw.tossinvest.com";
+    // 실서버 주소는 검증된 openapi 도메인으로 고정(틀린 apigw 주소 버그 수정).
+    if (this.mode === "live") process.env.TOSS_BASE_URL = ToolEngine.LIVE_BASE_URL;
 
     const lines = [
-      "# 카일 매매도구 설정(자동 생성). 이 파일은 본인 컴퓨터에만 있습니다.",
+      "# 카프리 매매도구 설정(자동 생성). 이 파일은 본인 컴퓨터에만 있습니다.",
       `TOSS_MOCK=${this.mode === "mock" ? "true" : "false"}`,
-      `TOSS_BASE_URL=${process.env.TOSS_BASE_URL ?? ""}`,
+      `TOSS_BASE_URL=${this.mode === "live" ? ToolEngine.LIVE_BASE_URL : ""}`,
       `TOSS_CLIENT_ID=${process.env.TOSS_CLIENT_ID ?? ""}`,
       `TOSS_CLIENT_SECRET=${process.env.TOSS_CLIENT_SECRET ?? ""}`,
       `TOSS_ACCOUNT=${process.env.TOSS_ACCOUNT ?? ""}`,
@@ -190,15 +192,50 @@ export class ToolEngine extends EventEmitter {
     return this.getSettings();
   }
 
-  /** 연습 모드일 때 가짜 토스 서버를 (필요 시점에) 켠다 — 버튼 없이 자동 준비 */
-  private async ensureBackend(): Promise<void> {
-    if (this.mode !== "mock" || this.mock) return;
-    this.mock = createMockTossServer();
-    const port = await this.mock.listen();
-    process.env.TOSS_MOCK = "true";
-    process.env.TOSS_BASE_URL = `http://127.0.0.1:${port}`;
-    if (!process.env.TOSS_ACCOUNT) process.env.TOSS_ACCOUNT = "practice";
-    this.addJournal({ kind: "info", symbol: "-", summary: `연습용 가짜 토스 서버 준비 (127.0.0.1:${port})` });
+  // 실서버(실제 토스) 기본 주소 — 읽기전용 검증에서 실제로 200이 확인된 도메인.
+  //  [교훈] 이전엔 apigw.tossinvest.com 을 썼는데 그건 틀린 주소라 모든 실서버 요청이
+  //  실패했다. 반드시 아래 openapi 도메인을 쓴다(2026-07-18 실검증).
+  private static readonly LIVE_BASE_URL = "https://openapi.tossinvest.com";
+
+  /**
+   * prepareBackend — 매 조회·주문 직전에 "현재 모드에 맞는 접속 상태"를 확실히 맞춘다.
+   *
+   * [왜 매번 맞추나? = 버그 재발 방지]
+   *   예전엔 모드/주소를 여러 곳(설정 저장·백엔드 준비)에서 따로 정해서, 배지는 "연습"인데
+   *   요청은 실서버로 나가는 모순이 생겼다. 이제 이 함수 하나가 "모드와 실제 접속 주소"를
+   *   항상 일치시킨다(단일 진실 소스).
+   *     - 연습 모드: 가짜 서버(127.0.0.1)로만. 계좌 없으면 practice 로 자동 채움.
+   *     - 실서버 모드: 실제 토스(openapi)로만. 가짜 서버는 끈다.
+   */
+  private async prepareBackend(): Promise<void> {
+    if (this.mode === "mock") {
+      if (!this.mock) {
+        this.mock = createMockTossServer();
+        this.mockPort = await this.mock.listen();
+        this.addJournal({ kind: "info", symbol: "-", summary: `연습용 가짜 토스 서버 준비 (127.0.0.1:${this.mockPort})` });
+      }
+      process.env.TOSS_MOCK = "true";
+      process.env.TOSS_BASE_URL = `http://127.0.0.1:${this.mockPort}`;
+      if (!process.env.TOSS_ACCOUNT) process.env.TOSS_ACCOUNT = "practice";
+    } else {
+      await this.stopMock();
+      process.env.TOSS_MOCK = "false";
+      process.env.TOSS_BASE_URL = ToolEngine.LIVE_BASE_URL;
+    }
+  }
+
+  /**
+   * assertAccountReady — 실서버 모드에서 계좌가 비어 있으면, 서버에 요청을 보내기 전에
+   *   "설정 탭에서 계좌를 입력하라"고 사람이 이해할 수 있는 한국어로 막는다.
+   *   [왜?] 계좌가 비면 토스가 400 missing_account 를 주는데, 그 원시 에러가 화면에
+   *   그대로 노출돼 오너가 원인을 알 수 없었다(실제 발생한 버그).
+   */
+  private assertAccountReady(): void {
+    if (this.mode === "live" && !process.env.TOSS_ACCOUNT?.trim()) {
+      throw new Error(
+        "계좌가 설정되지 않았습니다. [설정] 탭에서 '계좌번호(accountSeq)' 칸에 보통 1 을 입력하고 저장한 뒤 다시 시도하세요.",
+      );
+    }
   }
 
   async stopMock(): Promise<void> {
@@ -210,7 +247,7 @@ export class ToolEngine extends EventEmitter {
 
   /** 연습 모드 전용: 가짜 서버 현재가 조작(익절/손절 발동 연습) */
   async mockSetPrice(symbol: string, price: number): Promise<boolean> {
-    await this.ensureBackend();
+    await this.prepareBackend();
     if (!this.mock) return false;
     this.mock.setPrice(symbol.toUpperCase(), Math.round(price * 100) / 100);
     return true;
@@ -228,7 +265,7 @@ export class ToolEngine extends EventEmitter {
   // 조회(사람이 버튼 눌렀을 때만 1회)
   // --------------------------------------------------------------------------
   async quote(symbol: string): Promise<number> {
-    await this.ensureBackend();
+    await this.prepareBackend();
     const { price } = await getPrice(symbol.toUpperCase());
     return price;
   }
@@ -242,7 +279,7 @@ export class ToolEngine extends EventEmitter {
       return { rate: this.fxCache.rate, source: this.fxCache.source };
     }
     try {
-      await this.ensureBackend();
+      await this.prepareBackend();
       const r = await getExchangeRate("USD", "KRW");
       if (r.rate > 0) {
         this.fxCache = { rate: r.rate, atMs: Date.now(), source: "toss" };
@@ -261,7 +298,8 @@ export class ToolEngine extends EventEmitter {
 
   async refreshBuyingPower(): Promise<number | null> {
     try {
-      await this.ensureBackend();
+      await this.prepareBackend();
+      this.assertAccountReady();
       const bp = await getBuyingPower("USD");
       this.buyingPowerUsd = bp.buyingPowerUsd;
       return this.buyingPowerUsd;
@@ -271,7 +309,7 @@ export class ToolEngine extends EventEmitter {
   }
 
   // --------------------------------------------------------------------------
-  // ★ 계산기: 카일매매기법 3종 + 수동 (설계서 M1의 검증된 함수를 그대로 호출)
+  // ★ 계산기: 카프리매매기법 3종 + 수동 (설계서 M1의 검증된 함수를 그대로 호출)
   // --------------------------------------------------------------------------
   calc(req: CalcRequest): CalcResult {
     const tp = req.tpPct;
@@ -334,7 +372,8 @@ export class ToolEngine extends EventEmitter {
    */
   private async orderGate(symbol: string, entryPrices: number[] = []): Promise<number> {
     if (this.killSwitch) throw new Error("킬 스위치가 켜져 있어 주문이 잠겨 있습니다.");
-    await this.ensureBackend();
+    await this.prepareBackend();
+    this.assertAccountReady(); // 실서버인데 계좌 미설정이면 친절한 안내로 막음
     const { price: cur } = await getPrice(symbol.toUpperCase());
     for (const p of entryPrices) {
       const dev = Math.abs((p - cur) / cur) * 100;
@@ -423,55 +462,22 @@ export class ToolEngine extends EventEmitter {
     });
   }
 
-  /** ③ 진입+익절 원스톱(OTO): 진입(BUY) 체결되면 익절(SELL) 감시 시작. */
-  async placeOto(spec: {
-    symbol: string;
-    quantity: number;
-    entryTrigger: number;
-    entryPrice: number;
-    exitTrigger: number;
-    exitPrice: number;
-    expireDate: string;
-  }): Promise<JournalEntry> {
-    const symbol = spec.symbol.toUpperCase();
-    await this.orderGate(symbol, [spec.entryTrigger]); // 진입 감시가만 오타 검사(익절은 기법상 먼 값)
-
-    if (this.isDryRun()) {
-      return this.addJournal({
-        kind: "dryrun",
-        symbol,
-        summary: `[드라이런] OTO 등록 ${symbol} ${spec.quantity}주: 진입 $${spec.entryTrigger} → 체결 후 익절 $${spec.exitTrigger} 감시 (실주문 잠금)`,
-        detail: spec,
-      });
-    }
-    const c = await createConditionalOrder({
-      symbol,
-      type: "OTO",
-      quantity: spec.quantity,
-      orderType: "LIMIT",
-      expireDate: spec.expireDate,
-      first: { orderSide: "BUY", triggerPrice: spec.entryTrigger, orderPrice: spec.entryPrice },
-      second: { orderSide: "SELL", triggerPrice: spec.exitTrigger, orderPrice: spec.exitPrice },
-    });
-    return this.addJournal({
-      kind: "oto",
-      symbol,
-      summary: `OTO 등록 완료 ${symbol} ${spec.quantity}주: 진입 $${spec.entryTrigger} → 익절 $${spec.exitTrigger} (번호 ${c.conditionalOrderId})`,
-      detail: c,
-    });
-  }
+  // [OTO 제거됨] 진입→익절만 걸리고 손절이 안 걸려 반쪽짜리라 위험(오너 판단).
+  //   남은 주문 수단: ① 진입 지정가  ② 조건주문(OCO: 익절+손절 동시) 두 가지.
 
   // --------------------------------------------------------------------------
   // 주문 현황(조회·취소) — 조회는 드라이런과 무관하게 실서버에서도 안전(읽기)
   // --------------------------------------------------------------------------
   async openOrders(): Promise<OrderResponse[]> {
-    await this.ensureBackend();
+    await this.prepareBackend();
+    this.assertAccountReady(); // 계좌 API라 계좌 헤더 필요 → 미설정이면 친절한 안내
     const r = await listOrders({ status: "OPEN" });
     return r.orders;
   }
 
   async conditionals(): Promise<ConditionalOrderResponse[]> {
-    await this.ensureBackend();
+    await this.prepareBackend();
+    this.assertAccountReady();
     return listConditionalOrders();
   }
 

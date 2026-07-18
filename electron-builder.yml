@@ -14,10 +14,13 @@
 #   새 버전을 감지합니다. 소스 레포(kyle-bot)는 private 유지, 배포는 공개 레포로 분리.
 # =============================================================================
 
+# [주의] appId 는 예전 값(kylebot)을 그대로 유지한다.
+#   자동 업데이트는 이 appId(설치 식별자)로 기존 설치본을 인식하므로, 여기서 바꾸면
+#   기존 사용자에게 "다른 앱"으로 취급돼 자동 업데이트가 끊긴다. 이름만 카프리로 바꾼다.
 appId: com.hun100b.kylebot
 # 실행파일/폴더 이름은 영문. (한글이면 macOS 부팅이 SIGTRAP 크래시 — 확인된 교훈)
 # 화면에 보이는 이름은 mac.extendInfo / nsis.shortcutName 으로 한글 지정.
-productName: KyleBot
+productName: Capri
 directories:
   output: release
 
@@ -55,12 +58,12 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: 카일 매매도구      # 바탕화면/시작메뉴 아이콘 이름(한글 OK)
+  shortcutName: 카프리 매매도구      # 바탕화면/시작메뉴 아이콘 이름(한글 OK)
 
 # ---------------- macOS ----------------
 mac:
   extendInfo:
-    CFBundleDisplayName: 카일 매매도구
+    CFBundleDisplayName: 카프리 매매도구
   category: public.app-category.finance
   target:
     - target: dmg
@@ -68,4 +71,4 @@ mac:
   # 애플 개발자 인증서 없음 → 기본(ad-hoc) 서명. 첫 실행은 우클릭→열기(README 안내).
 
 dmg:
-  title: 카일 매매도구 설치
+  title: 카프리 매매도구 설치

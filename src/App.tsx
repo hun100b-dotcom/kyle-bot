@@ -1,5 +1,5 @@
 // =============================================================================
-// src/App.tsx — 카일 매매도구 화면 (v2: 계산기 + 온디맨드 주문)
+// src/App.tsx — 카프리 매매도구 화면 (v2: 계산기 + 온디맨드 주문)
 // -----------------------------------------------------------------------------
 // [v2 화면 철학]
 //   자동으로 갱신되는 것이 거의 없다. 시세·환율·목록은 전부 "버튼을 눌러야" 1회
@@ -46,7 +46,7 @@ function defaultExpire(): string {
 
 // 주문 확인 팝업에 담기는 내용(무엇을 전송할지 사람이 최종 확인)
 interface PendingOrder {
-  kind: "entry" | "oco" | "oto";
+  kind: "entry" | "oco";
   title: string;
   lines: string[];
   send: () => Promise<JournalEntry>;
@@ -223,7 +223,7 @@ function App() {
     const expire = defaultExpire();
     setPending({
       kind: "oco",
-      title: `OCO 익절+손절 동시 등록 — ${symbol.toUpperCase()} (보유 중일 때)`,
+      title: `조건주문(익절+손절 동시) 등록 — ${symbol.toUpperCase()} (보유 중일 때)`,
       lines: [
         `수량 ${qty}주 / 익절 감시가 ${usdKrw(lv.tp, fx)} / 손절 감시가 ${usdKrw(lv.sl, fx)}`,
         `한쪽이 발동되면 다른 쪽은 자동 취소됩니다 (토스 서버가 감시 — 앱 꺼도 작동)`,
@@ -237,29 +237,6 @@ function App() {
           tpPrice: lv.tp,
           slTrigger: lv.sl,
           slPrice: lv.sl,
-          expireDate: expire,
-        }),
-    });
-  }
-
-  function confirmOto(lv: CalcLevel) {
-    const expire = defaultExpire();
-    setPending({
-      kind: "oto",
-      title: `OTO 진입→익절 원스톱 — ${symbol.toUpperCase()}`,
-      lines: [
-        `진입 감시가 ${usdKrw(lv.entry, fx)} × ${qty}주 (체결되면 익절 감시 시작)`,
-        `익절 감시가 ${usdKrw(lv.tp, fx)} / 만료일 ${expire}`,
-        `⚠ 손절은 포함되지 않습니다(토스 OTO 스펙). 진입 체결 후 OCO로 바꿔 거는 것을 권장.`,
-      ],
-      send: () =>
-        window.kyletool.placeOto({
-          symbol,
-          quantity: qty,
-          entryTrigger: lv.entry,
-          entryPrice: lv.entry,
-          exitTrigger: lv.tp,
-          exitPrice: lv.tp,
           expireDate: expire,
         }),
     });
@@ -307,7 +284,7 @@ function App() {
     await refreshStatus();
   }
 
-  if (!status) return <div className="loading">카일 매매도구를 불러오는 중…</div>;
+  if (!status) return <div className="loading">카프리 매매도구를 불러오는 중…</div>;
   const isMock = status.mode === "mock";
 
   return (
@@ -316,7 +293,7 @@ function App() {
       <header className="topbar">
         <div className="brand">
           <span className="logo">🧮</span>
-          <h1>카일 매매도구</h1>
+          <h1>카프리 매매도구</h1>
           <span className={`badge ${isMock ? "badge-mock" : "badge-live"}`}>
             {isMock ? "연습 모드 (가짜 서버)" : "실서버"}
           </span>
@@ -525,10 +502,7 @@ function App() {
                           진입 지정가
                         </button>{" "}
                         <button className="mini" disabled={status.killSwitch} onClick={() => confirmOco(lv)}>
-                          OCO 익절/손절
-                        </button>{" "}
-                        <button className="mini" disabled={status.killSwitch} onClick={() => confirmOto(lv)}>
-                          OTO 진입→익절
+                          조건주문(익절+손절)
                         </button>
                       </td>
                     </tr>
@@ -536,8 +510,8 @@ function App() {
                 </tbody>
               </table>
               <p className="hint">
-                💡 권장 순서: <b>진입 지정가</b>로 사고 → 체결 확인 후 <b>OCO 익절/손절</b> 등록. OCO/OTO 감시는 토스
-                서버가 하므로 이 앱을 꺼도 작동합니다.
+                💡 권장 순서: <b>진입 지정가</b>로 사고 → 체결 확인 후 <b>조건주문(익절+손절)</b> 등록.
+                조건주문 감시는 토스 서버가 하므로 이 앱을 꺼도 작동합니다.
                 {status.dryRun && " (현재 주문 잠금 — 전송 대신 모의 기록만 남습니다)"}
               </p>
             </section>
