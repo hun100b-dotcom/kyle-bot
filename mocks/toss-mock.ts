@@ -203,7 +203,15 @@ export function createMockTossServer() {
 
     if (path === "/api/v1/holdings" && method === "GET") {
       if (!req.headers["x-tossinvest-account"]) return sendJson(res, 400, { error: "missing_account" });
-      return sendResult(res, 200, [{ symbol: "AAPL", quantity: "100", averagePrice: "2.00" }]);
+      // [실스펙 정합] 실서버 holdings는 배열이 아니라 "객체"(요약 + items)다.
+      //   목이 배열을 주면 나중에 getHoldings를 붙일 때 목만 초록·실서버는 파싱 깨짐.
+      return sendResult(res, 200, {
+        totalPurchaseAmount: { krw: "200", usd: "100" },
+        marketValue: { amount: { krw: "205", usd: "102.5" } },
+        profitLoss: { amount: { krw: "5", usd: "2.5" }, rate: "0.025" },
+        dailyProfitLoss: { amount: { krw: "1", usd: "0.5" } },
+        items: [{ symbol: "AAPL", quantity: "100", averagePrice: "2.00" }],
+      });
     }
 
     if (path === "/api/v1/buying-power" && method === "GET") {
@@ -281,7 +289,17 @@ export function createMockTossServer() {
 
     if (path === "/api/v1/conditional-orders" && method === "GET") {
       if (!req.headers["x-tossinvest-account"]) return sendJson(res, 400, { error: "missing_account" });
-      return sendResult(res, 200, [...state.conditionals.values()].map((c) => ({ ...c, quantity: String(c.quantity) })));
+      // [실스펙 정합] status 쿼리 필수(없으면 실서버가 400). 목서버도 동일하게 강제해야
+      //   "status 누락" 같은 실서버 전용 버그를 테스트가 잡아낸다(과거엔 관대해서 놓쳤음).
+      if (!url.searchParams.get("status")) {
+        return sendJson(res, 400, { error: { code: "invalid-request", message: "status 필수", data: { field: "status" } } });
+      }
+      // 실서버 형태({ conditionalOrders, nextCursor, hasNext })로 응답.
+      return sendResult(res, 200, {
+        conditionalOrders: [...state.conditionals.values()].map((c) => ({ ...c, quantity: String(c.quantity) })),
+        nextCursor: null,
+        hasNext: false,
+      });
     }
 
     const cm = path.match(/^\/api\/v1\/conditional-orders\/([^/]+)$/);

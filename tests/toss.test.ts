@@ -71,8 +71,12 @@ describe("mapOrderStatus (실제 토스 상태 → 내부 표준 번역)", () =>
     expect(mapOrderStatus("CANCELED")).toBe("cancelled");
     expect(mapOrderStatus("REJECTED")).toBe("failed");
   });
-  it("모르는 상태는 안전하게 submitted 취급", () => {
-    expect(mapOrderStatus("SOMETHING_NEW")).toBe("submitted");
+  it("만료·부분취소는 종료(cancelled) 계열로", () => {
+    expect(mapOrderStatus("EXPIRED")).toBe("cancelled");
+    expect(mapOrderStatus("PARTIAL_CANCELED")).toBe("cancelled");
+  });
+  it("모르는 상태는 'unknown'으로 드러낸다(진행 중으로 위장하지 않음)", () => {
+    expect(mapOrderStatus("SOMETHING_NEW")).toBe("unknown");
   });
 });
 

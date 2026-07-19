@@ -263,8 +263,14 @@ export function mapOrderStatus(tossStatus: string): string {
     case "CANCEL_REJECTED":
     case "REPLACE_REJECTED":
       return "failed";
+    case "EXPIRED":
+    case "PARTIAL_CANCELED":
+      return "cancelled"; // 만료·부분취소는 "종료" 계열로
     default:
-      return "submitted";
+      // [안전 방향] 모르는 새 상태를 '진행 중(submitted)'으로 위장하면 이미 끝난 주문이
+      //   살아있는 것처럼 보인다. 미지값은 'unknown'으로 드러내고 로그를 남긴다.
+      console.warn(`[toss] 알 수 없는 주문 상태: ${tossStatus}`);
+      return "unknown";
   }
 }
 
@@ -474,8 +480,13 @@ async function tossFetch<T>(path: string, opts: RequestOptions = {}, isRetry = f
 export async function getPrice(symbol: string): Promise<PriceResponse> {
   await priceLimiter.wait();
   const arr = await tossFetch<PriceRaw[]>(ENDPOINTS.prices, { query: { symbols: symbol } });
-  const p = arr[0];
-  return { symbol: p.symbol, price: Number(p.lastPrice), currency: p.currency, timestamp: p.timestamp };
+  // [빈 결과 방어] 상장폐지·오타 심볼이면 토스가 빈 배열을 준다. arr[0] 접근 전에 막아
+  //   흉한 원시 예외 대신 사람이 이해할 안내를 던진다(orderGate도 이 경로를 탄다).
+  const p = arr?.[0];
+  if (!p) throw new Error(`시세를 찾을 수 없습니다: 종목코드 '${symbol}' 를 확인하세요.`);
+  const price = Number(p.lastPrice);
+  if (!Number.isFinite(price)) throw new Error(`시세 값이 올바르지 않습니다: ${symbol}`);
+  return { symbol: p.symbol, price, currency: p.currency, timestamp: p.timestamp };
 }
 
 /** getOrderbook — 호가 조회. (세부 응답 필드는 TODO(실시세 붙일 때 확정)) */
@@ -691,10 +702,13 @@ export async function createConditionalOrder(req: ConditionalOrderRequest): Prom
   return toConditionalResponse(raw);
 }
 
-/** listConditionalOrders — 조건주문 목록 조회 */
-export async function listConditionalOrders(): Promise<ConditionalOrderResponse[]> {
-  const raw = await tossFetch<unknown>(ENDPOINTS.conditionalOrders, { withAccount: true });
-  // 응답이 배열이거나 { conditionalOrders: [...] } 형태 둘 다 수용(방어적).
+/**
+ * listConditionalOrders — 조건주문 목록 조회.
+ *   [실스펙] status 쿼리 필수(없으면 400 invalid-request field:status). 기본 'OPEN'(진행 중).
+ *   응답은 { conditionalOrders, nextCursor, hasNext }(배열도 방어적 수용).
+ */
+export async function listConditionalOrders(status = "OPEN"): Promise<ConditionalOrderResponse[]> {
+  const raw = await tossFetch<unknown>(ENDPOINTS.conditionalOrders, { query: { status }, withAccount: true });
   const arr = Array.isArray(raw)
     ? raw
     : ((raw as Record<string, unknown>)?.conditionalOrders as unknown[]) ?? [];

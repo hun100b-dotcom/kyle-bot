@@ -8,7 +8,7 @@
 // [탭 구성]
 //   ① 계산기: 기법 선택(삼분할/호가창/캔들/수동) → 재료 입력 → 진입/익절/손절
 //              산출($와 ₩ 병기) → 주문 버튼(확인 팝업 → 전송)
-//   ② 주문 현황: 미체결 일반주문 + 조건주문(OCO/OTO) 목록·취소
+//   ② 주문 현황: 미체결 일반주문 + 조건주문(OCO) 목록·취소
 //   ③ 기록: 도구가 한 일(주문·드라이런·취소) 시간순 기록
 //   ④ 설정: 연습/실서버 모드, 토스 API 키(값은 화면에 재표시 안 됨)
 // =============================================================================
@@ -31,6 +31,12 @@ const TECH_LABEL: Record<string, string> = {
   manual: "수동 입력",
 };
 
+/** 가격을 유효 틱으로 절삭($1↑ 2자리 / $1↓ 4자리). lib/calc.ts와 동일 규칙. */
+function roundPrice(p: number): number {
+  const s = p >= 1 ? 100 : 10000;
+  return Math.floor(p * s + 1e-6) / s;
+}
+
 /** 달러 → "$x (₩y)" 병기 문자열. 환율 없으면 $만. */
 function usdKrw(usd: number, fx: number | null): string {
   const dollar = `$${usd.toLocaleString(undefined, { maximumFractionDigits: 4 })}`;
@@ -38,10 +44,12 @@ function usdKrw(usd: number, fx: number | null): string {
   return `${dollar} (₩${Math.round(usd * fx).toLocaleString()})`;
 }
 
-/** 조건주문 만료일 기본값: 오늘 + 30일 (팝업에 표시해 사람이 인지) */
+/** 조건주문 만료일 기본값: (KST 기준) 오늘 + 30일.
+ *   [주의] toISOString()은 UTC라, KST 새벽(00~09시)엔 하루 이르게 찍힌다.
+ *   그래서 KST 오프셋(+9h)을 더한 뒤 날짜를 뽑아 KST 날짜와 일치시킨다. */
 function defaultExpire(): string {
-  const d = new Date(Date.now() + 30 * 86400_000);
-  return d.toISOString().slice(0, 10);
+  const kstMs = Date.now() + 9 * 3600_000 + 30 * 86400_000;
+  return new Date(kstMs).toISOString().slice(0, 10);
 }
 
 // 주문 확인 팝업에 담기는 내용(무엇을 전송할지 사람이 최종 확인)
@@ -227,11 +235,15 @@ function App() {
 
   function confirmOco(lv: CalcLevel) {
     const expire = defaultExpire();
+    // 손절 지정가(orderPrice)는 감시가(trigger)보다 1% 아래로 둔다. 감시가=지정가면
+    //   급락 시 지정가를 관통해 미체결될 수 있어, 아래로 벌려 즉시 체결 확률을 높인다.
+    const slLimit = roundPrice(lv.sl * 0.99);
     setPending({
       kind: "oco",
       title: `조건주문(익절+손절 동시) 등록 — ${symbol.toUpperCase()} (보유 중일 때)`,
       lines: [
         `수량 ${qty}주 / 익절 감시가 ${usdKrw(lv.tp, fx)} / 손절 감시가 ${usdKrw(lv.sl, fx)}`,
+        `손절 지정가 ${usdKrw(slLimit, fx)} (감시가 1% 아래 — 급락 시 체결 확보)`,
         `한쪽이 발동되면 다른 쪽은 자동 취소됩니다 (토스 서버가 감시 — 앱 꺼도 작동)`,
         `만료일 ${expire} / 규칙: 익절 감시가 > 현재가 > 손절 감시가`,
       ],
@@ -242,7 +254,7 @@ function App() {
           tpTrigger: lv.tp,
           tpPrice: lv.tp,
           slTrigger: lv.sl,
-          slPrice: lv.sl,
+          slPrice: slLimit,
           expireDate: expire,
         }),
     });
@@ -265,9 +277,17 @@ function App() {
   async function loadOrders() {
     setBusy(true);
     try {
-      const [o, c] = await Promise.all([window.kyletool.openOrders(), window.kyletool.conditionals()]);
-      setOpenOrders(o);
-      setConds(c);
+      // [allSettled] 한쪽(일반/조건)이 실패해도 다른 쪽은 보여준다. 예전엔 Promise.all이라
+      //   조건주문 조회가 한 번 실패하면 정상인 일반주문까지 화면에서 통째로 사라졌다.
+      const [oRes, cRes] = await Promise.allSettled([window.kyletool.openOrders(), window.kyletool.conditionals()]);
+      if (oRes.status === "fulfilled") setOpenOrders(oRes.value);
+      if (cRes.status === "fulfilled") setConds(cRes.value);
+      const fails: string[] = [];
+      if (oRes.status === "rejected") fails.push("일반 주문");
+      if (cRes.status === "rejected") fails.push("조건 주문");
+      if (fails.length) {
+        alert(`${fails.join("·")} 목록을 불러오지 못했어요. [설정] 탭에서 실서버 모드·키·계좌(보통 1)를 저장했는지 확인해 주세요.`);
+      }
     } catch (e) {
       alert(`목록 조회 실패: ${String(e)}`);
     } finally {
@@ -581,7 +601,7 @@ function App() {
           </section>
 
           <section className="card wide">
-            <h2>조건주문 (OCO/OTO — 토스 서버가 감시 중)</h2>
+            <h2>조건주문 (OCO 익절+손절 — 토스 서버가 감시 중)</h2>
             {conds.length === 0 ? (
               <p className="hint">등록된 조건주문이 없습니다.</p>
             ) : (

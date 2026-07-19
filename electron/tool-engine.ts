@@ -24,6 +24,7 @@ import { getSession, isOrderFrozen, type Session } from "../lib/session";
 import { calcSplit3, calcOrderbook, calcCandle, roundPrice, getTick, type SplitOrder } from "../lib/calc";
 import {
   getPrice,
+  getAccounts,
   getBuyingPower,
   getExchangeRate,
   createOrder,
@@ -165,21 +166,42 @@ export class ToolEngine extends EventEmitter {
   }
 
   async saveSettings(input: { mode: "mock" | "live"; clientId?: string; clientSecret?: string; account?: string }) {
+    const prevAccount = process.env.TOSS_ACCOUNT ?? "";
     if (input.clientId) process.env.TOSS_CLIENT_ID = input.clientId.trim();
     if (input.clientSecret) process.env.TOSS_CLIENT_SECRET = input.clientSecret.trim();
     if (input.account !== undefined) process.env.TOSS_ACCOUNT = input.account.trim();
 
     const hasKeys = !!process.env.TOSS_CLIENT_ID && !!process.env.TOSS_CLIENT_SECRET;
     const newMode = input.mode === "live" && hasKeys ? "live" : "mock";
+    // 모드가 바뀌거나 "계좌만" 바뀌어도 이전 계좌의 매수가능금액/환율 캐시는 무효화한다.
+    const accountChanged = (process.env.TOSS_ACCOUNT ?? "") !== prevAccount;
+    if (newMode !== this.mode || accountChanged) {
+      this.fxCache = null;
+      this.buyingPowerUsd = null;
+    }
     if (newMode !== this.mode) {
       this.mode = newMode;
       await this.stopMock(); // 모드가 바뀌면 연습 서버 상태 초기화
-      this.fxCache = null;
-      this.buyingPowerUsd = null;
     }
     process.env.TOSS_MOCK = this.mode === "mock" ? "true" : "false";
     // 실서버 주소는 검증된 openapi 도메인으로 고정(틀린 apigw 주소 버그 수정).
     if (this.mode === "live") process.env.TOSS_BASE_URL = ToolEngine.LIVE_BASE_URL;
+    clearTokenCache(); // 키/계좌가 바뀌었을 수 있으니 토큰 재발급
+
+    // [계좌 자동 조회] 실서버인데 계좌가 비어 있으면 /api/v1/accounts 로 accountSeq를 자동 확보한다.
+    //   (예전엔 사용자가 "1"을 손으로 입력해야 했고, 실제 accountSeq가 1이 아니면 조용히 틀렸다.)
+    //   실패해도 저장 자체는 진행(사용자가 나중에 직접 입력 가능).
+    if (this.mode === "live" && !process.env.TOSS_ACCOUNT?.trim()) {
+      try {
+        const accts = await getAccounts();
+        if (accts.length > 0) {
+          process.env.TOSS_ACCOUNT = String(accts[0].accountSeq);
+          this.addJournal({ kind: "info", symbol: "-", summary: `계좌 자동 확인: accountSeq ${accts[0].accountSeq}` });
+        }
+      } catch {
+        /* 조회 실패해도 저장은 계속(사용자가 설정 탭에서 직접 입력 가능) */
+      }
+    }
 
     const lines = [
       "# Capri 매매도구 설정(자동 생성). 이 파일은 본인 컴퓨터에만 있습니다.",
@@ -193,7 +215,6 @@ export class ToolEngine extends EventEmitter {
     ].join("\n");
     writeFileSync(this.envPath, lines, "utf8");
     chmodSync(this.envPath, 0o600);
-    clearTokenCache();
     this.addJournal({ kind: "info", symbol: "-", summary: `설정 저장 (모드: ${this.mode === "mock" ? "연습" : "실서버(주문 잠금)"})` });
     return this.getSettings();
   }
@@ -381,6 +402,11 @@ export class ToolEngine extends EventEmitter {
     await this.prepareBackend();
     this.assertAccountReady(); // 실서버인데 계좌 미설정이면 친절한 안내로 막음
     const { price: cur } = await getPrice(symbol.toUpperCase());
+    // [현재가 방어] cur가 0/음수/NaN이면 아래 편차 계산이 0으로 나누기(Infinity)나
+    //   NaN이 되어 오차단·오통과가 생긴다(프리마켓 무거래 등). 먼저 막는다.
+    if (!Number.isFinite(cur) || cur <= 0) {
+      throw new Error("현재가를 확인할 수 없습니다(무거래 시간대이거나 종목코드 확인). 잠시 후 다시 시도하세요.");
+    }
     for (const p of entryPrices) {
       const dev = Math.abs((p - cur) / cur) * 100;
       if (dev > 15) {
@@ -484,11 +510,12 @@ export class ToolEngine extends EventEmitter {
   async conditionals(): Promise<ConditionalOrderResponse[]> {
     await this.prepareBackend();
     this.assertAccountReady();
-    return listConditionalOrders();
+    return listConditionalOrders("OPEN"); // status 필수(실스펙). 진행 중 조건주문만.
   }
 
   async cancelNormalOrder(orderId: string): Promise<JournalEntry> {
     if (this.killSwitch) throw new Error("킬 스위치가 켜져 있습니다.");
+    await this.prepareBackend(); // 접속 상태(주소/모드) 단일 진실 소스 유지
     if (isOrderFrozen(DateTime.now())) throw new Error("마감 1분 전 취소 불가 구간입니다(토스 제약).");
     if (this.isDryRun()) {
       return this.addJournal({ kind: "dryrun", symbol: "-", summary: `[드라이런] 주문 취소 ${orderId} (실제 전송 안 함)` });
@@ -499,6 +526,7 @@ export class ToolEngine extends EventEmitter {
 
   async cancelConditional(id: string): Promise<JournalEntry> {
     if (this.killSwitch) throw new Error("킬 스위치가 켜져 있습니다.");
+    await this.prepareBackend(); // 접속 상태 단일 진실 소스 유지
     if (this.isDryRun()) {
       return this.addJournal({ kind: "dryrun", symbol: "-", summary: `[드라이런] 조건주문 취소 ${id} (실제 전송 안 함)` });
     }
