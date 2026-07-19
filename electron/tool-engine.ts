@@ -1,5 +1,5 @@
 // =============================================================================
-// electron/tool-engine.ts  —  카프리 매매도구 엔진 (v2: 자율판단 제거, 온디맨드 전용)
+// electron/tool-engine.ts  —  Capri 매매도구 엔진 (v2: 자율판단 제거, 온디맨드 전용)
 // -----------------------------------------------------------------------------
 // [v1(bot-engine)과 무엇이 다른가? — 컨셉 전환의 핵심]
 //   v1: 봇이 5초마다 스스로 깨어나(틱 루프) 세션을 자동 전진(체결확인·익절·손절).
@@ -145,6 +145,12 @@ export class ToolEngine extends EventEmitter {
     if (existsSync(this.envPath)) {
       for (const [k, v] of Object.entries(parseEnv(readFileSync(this.envPath, "utf8")))) process.env[k] = v;
     }
+    // [이중 안전] 구버전(0.2.0)이 저장해둔 틀린 주소(apigw)가 .env에 남아 있을 수 있다.
+    //   prepareBackend가 실서버 요청 직전에 openapi로 덮어쓰지만, 여기서도 선제 교정해
+    //   혹시 모를 경로로 낡은 주소가 새어나가지 않게 한다.
+    if (process.env.TOSS_BASE_URL && /apigw\.tossinvest\.com/i.test(process.env.TOSS_BASE_URL)) {
+      process.env.TOSS_BASE_URL = ToolEngine.LIVE_BASE_URL;
+    }
     const hasKeys = !!process.env.TOSS_CLIENT_ID && !!process.env.TOSS_CLIENT_SECRET;
     this.mode = process.env.TOSS_MOCK !== "true" && hasKeys ? "live" : "mock";
   }
@@ -176,7 +182,7 @@ export class ToolEngine extends EventEmitter {
     if (this.mode === "live") process.env.TOSS_BASE_URL = ToolEngine.LIVE_BASE_URL;
 
     const lines = [
-      "# 카프리 매매도구 설정(자동 생성). 이 파일은 본인 컴퓨터에만 있습니다.",
+      "# Capri 매매도구 설정(자동 생성). 이 파일은 본인 컴퓨터에만 있습니다.",
       `TOSS_MOCK=${this.mode === "mock" ? "true" : "false"}`,
       `TOSS_BASE_URL=${this.mode === "live" ? ToolEngine.LIVE_BASE_URL : ""}`,
       `TOSS_CLIENT_ID=${process.env.TOSS_CLIENT_ID ?? ""}`,
@@ -309,7 +315,7 @@ export class ToolEngine extends EventEmitter {
   }
 
   // --------------------------------------------------------------------------
-  // ★ 계산기: 카프리매매기법 3종 + 수동 (설계서 M1의 검증된 함수를 그대로 호출)
+  // ★ 계산기: Capri매매기법 3종 + 수동 (설계서 M1의 검증된 함수를 그대로 호출)
   // --------------------------------------------------------------------------
   calc(req: CalcRequest): CalcResult {
     const tp = req.tpPct;

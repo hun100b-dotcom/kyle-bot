@@ -1,5 +1,5 @@
 // =============================================================================
-// electron/main.ts  —  데스크톱 앱 진입점 (v2: 카프리 매매도구)
+// electron/main.ts  —  데스크톱 앱 진입점 (v2: Capri 매매도구)
 // -----------------------------------------------------------------------------
 // [v2 컨셉] "자율 봇" → "수동 계산기 + 온디맨드 주문 도구".
 //   앱은 창을 하나 띄우고, 화면의 버튼 입력을 도구 엔진(tool-engine.ts)에
@@ -74,7 +74,7 @@ function createWindow(): void {
     height: 820,
     minWidth: 940,
     minHeight: 640,
-    title: "카프리 — 토스 미국주식 매매도구",
+    title: "Capri — 토스 미국주식 매매도구",
     backgroundColor: "#0f1115",
     webPreferences: {
       preload: join(__dirname, "preload.cjs"),
@@ -186,7 +186,32 @@ function registerIpc(e: ToolEngine): void {
   e.on("journal", (entry) => win?.webContents.send("tool:journalEvent", entry));
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  // [자가진단] CAPRI_SELFTEST=1: 실제 Electron 메인 프로세스에서 실서버 시세·환율을
+  //   호출해보고 콘솔에 결과를 찍은 뒤 종료한다(창 안 띄움). 오너 환경에서 "시세 실패"
+  //   같은 문제가 나면, 진짜로 Electron 런타임의 네트워크가 문제인지 이걸로 가른다.
+  if (process.env.CAPRI_SELFTEST === "1") {
+    try {
+      const { readFileSync } = await import("node:fs");
+      for (const raw of readFileSync(join(process.cwd(), ".env"), "utf8").split("\n")) {
+        const m = raw.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)\s*$/);
+        if (m) process.env[m[1]] = m[2].trim();
+      }
+      process.env.TOSS_MOCK = "false";
+      process.env.TOSS_BASE_URL = "https://openapi.tossinvest.com";
+      const t = await import("../lib/toss");
+      const p = await t.getPrice("AAPL");
+      console.log("[SELFTEST] getPrice OK:", p.price, p.currency);
+      const fx = await t.getExchangeRate("USD", "KRW");
+      console.log("[SELFTEST] getExchangeRate OK:", fx.rate, fx.quoteCurrency);
+      console.log("[SELFTEST] ✅ Electron 메인 프로세스 네트워크 정상");
+    } catch (e) {
+      console.log("[SELFTEST] ❌ 실패:", String(e));
+    }
+    app.quit();
+    return;
+  }
+
   // 상단 기본 메뉴바(File/Edit/View/Window) 제거 — 이 도구엔 불필요.
   //   (개발용 F12 devtools 단축키는 창 webContents 에서 그대로 동작한다.)
   Menu.setApplicationMenu(null);

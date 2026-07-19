@@ -1,10 +1,10 @@
 // =============================================================================
-// scripts/report.ts  —  카프리 현황판 HTML 생성 (읽기전용, 주문 0건)
+// scripts/report.ts  —  Capri 현황판 HTML 생성 (읽기전용, 주문 0건)
 // -----------------------------------------------------------------------------
 // [이게 뭔가?]
 //   터미널을 몰라도 봇 상태를 볼 수 있게, "브라우저로 여는 HTML 현황판"을 만듭니다.
 //   실행하면: 실제 토스에서 시세·잔고를 읽어와(읽기전용) → report.html 파일 생성.
-//   오너는 카프리현황.bat 더블클릭 한 번이면 최신 현황이 브라우저에 뜹니다.
+//   오너는 Capri현황.bat 더블클릭 한 번이면 최신 현황이 브라우저에 뜹니다.
 //
 // [보안 설계 — 왜 이런 방식인가?]
 //   브라우저(HTML/JS)에서 직접 토스 API를 부르면 비밀키가 브라우저에 노출됩니다(금지).
@@ -12,7 +12,7 @@
 //   정적 HTML을 만들어 줍니다. HTML엔 키가 전혀 없습니다.
 //   단, 잔고 등 계좌 정보가 담기므로 report.html은 git에 올리지 않습니다(.gitignore).
 //
-// [실행] npm run report   또는   카프리현황.bat 더블클릭
+// [실행] npm run report   또는   Capri현황.bat 더블클릭
 // =============================================================================
 
 import { readFileSync, writeFileSync } from "node:fs";
@@ -67,7 +67,7 @@ async function main() {
   const html = `<!doctype html>
 <html lang="ko"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>카프리 현황판</title>
+<title>Capri 현황판</title>
 <style>
   :root{--bg:#f6f7fb;--card:#fff;--tx:#111827;--sub:#6b7280;--line:#e5e7eb}
   @media(prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#171a21;--tx:#e5e7eb;--sub:#9ca3af;--line:#2a2e37}}
@@ -89,7 +89,7 @@ async function main() {
   .done{background:#16a34a22;color:#16a34a;font-weight:600}
   .now{background:#d9770622;color:#d97706;font-weight:600}
 </style></head><body><div class="wrap">
-  <h1>🤖 카프리 현황판</h1>
+  <h1>🤖 Capri 현황판</h1>
   <div class="sub">생성: ${now.toFormat("yyyy-MM-dd HH:mm:ss")} KST · 실제 토스 계좌에서 읽어온 값(읽기전용) · 이 파일에는 계좌 정보가 있으니 공유 금지</div>
 
   <div class="grid">
@@ -134,7 +134,7 @@ async function main() {
 
   <div class="foot">
     ✅ 이 현황판을 만드는 동안 서버에는 <b>조회(읽기)만</b> 나갔고 주문은 0건입니다.<br>
-    🔄 새로고침하려면: <b>카프리현황.bat</b>을 다시 더블클릭 (또는 터미널에서 <code>npm run report</code>)<br>
+    🔄 새로고침하려면: <b>Capri현황.bat</b>을 다시 더블클릭 (또는 터미널에서 <code>npm run report</code>)<br>
     📁 코드·진행상황: github.com/hun100b-dotcom/kyle-bot → docs/progress.md
   </div>
 </div></body></html>`;

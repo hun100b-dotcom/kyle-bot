@@ -1,5 +1,5 @@
 // =============================================================================
-// src/App.tsx — 카프리 매매도구 화면 (v2: 계산기 + 온디맨드 주문)
+// src/App.tsx — Capri 매매도구 화면 (v2: 계산기 + 온디맨드 주문)
 // -----------------------------------------------------------------------------
 // [v2 화면 철학]
 //   자동으로 갱신되는 것이 거의 없다. 시세·환율·목록은 전부 "버튼을 눌러야" 1회
@@ -151,7 +151,13 @@ function App() {
       await loadFx(); // 시세 볼 때 환율도 함께(둘 다 표시용)
       await refreshStatus();
     } catch (e) {
-      alert(`시세 조회 실패: ${String(e)}`);
+      // 원시 에러를 그대로 보여주지 않고, 사람이 조치할 수 있는 한국어 안내로.
+      const raw = String(e).replace(/^Error:\s*(Error invoking remote method '[^']+':\s*Error:\s*)?/, "");
+      alert(
+        `시세 조회에 실패했어요.\n\n확인해 주세요:\n` +
+          `· [설정] 탭에서 실서버 모드 + Client ID/Secret/계좌번호(보통 1)를 저장했는지\n` +
+          `· 인터넷 연결 상태\n\n(자세한 메시지: ${raw})`,
+      );
     } finally {
       setBusy(false);
     }
@@ -284,7 +290,7 @@ function App() {
     await refreshStatus();
   }
 
-  if (!status) return <div className="loading">카프리 매매도구를 불러오는 중…</div>;
+  if (!status) return <div className="loading">Capri 매매도구를 불러오는 중…</div>;
   const isMock = status.mode === "mock";
 
   return (
@@ -293,7 +299,7 @@ function App() {
       <header className="topbar">
         <div className="brand">
           <span className="logo">🧮</span>
-          <h1>카프리 매매도구</h1>
+          <h1>Capri 매매도구</h1>
           <span className={`badge ${isMock ? "badge-mock" : "badge-live"}`}>
             {isMock ? "연습 모드 (가짜 서버)" : "실서버"}
           </span>

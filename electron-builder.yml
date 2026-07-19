@@ -16,7 +16,7 @@
 
 # [주의] appId 는 예전 값(kylebot)을 그대로 유지한다.
 #   자동 업데이트는 이 appId(설치 식별자)로 기존 설치본을 인식하므로, 여기서 바꾸면
-#   기존 사용자에게 "다른 앱"으로 취급돼 자동 업데이트가 끊긴다. 이름만 카프리로 바꾼다.
+#   기존 사용자에게 "다른 앱"으로 취급돼 자동 업데이트가 끊긴다. 이름만 Capri로 바꾼다.
 appId: com.hun100b.kylebot
 # 실행파일/폴더 이름은 영문. (한글이면 macOS 부팅이 SIGTRAP 크래시 — 확인된 교훈)
 # 화면에 보이는 이름은 mac.extendInfo / nsis.shortcutName 으로 한글 지정.
@@ -53,17 +53,22 @@ win:
   # "추가 정보 → 실행"으로 통과(README 안내). 개인 사용엔 충분.
 
 nsis:
-  oneClick: false                # 설치 위치 선택 등 일반 설치 마법사 방식
+  # [oneClick=true] 업데이트가 "매끄럽게" 적용되게 하는 핵심 설정.
+  #   assisted(마법사) 모드면 자동 업데이트의 quitAndInstall 때 설치 마법사 창이 다시
+  #   떠서 "또 설치하는" 느낌을 준다. oneClick 모드는 마법사 없이 조용히 재설치·재실행한다.
+  #   (첫 설치도 원클릭으로 간편해진다.)
+  oneClick: true
   perMachine: false              # 관리자 권한 없이 현재 사용자에만 설치
-  allowToChangeInstallationDirectory: true
+  allowToChangeInstallationDirectory: false  # oneClick 모드에선 경로 선택 없음(조용한 설치)
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: 카프리 매매도구      # 바탕화면/시작메뉴 아이콘 이름(한글 OK)
+  runAfterFinish: true           # 설치/업데이트 후 자동 실행
+  shortcutName: Capri            # 바탕화면/시작메뉴 아이콘 이름
 
 # ---------------- macOS ----------------
 mac:
   extendInfo:
-    CFBundleDisplayName: 카프리 매매도구
+    CFBundleDisplayName: Capri
   category: public.app-category.finance
   target:
     - target: dmg
@@ -71,4 +76,4 @@ mac:
   # 애플 개발자 인증서 없음 → 기본(ad-hoc) 서명. 첫 실행은 우클릭→열기(README 안내).
 
 dmg:
-  title: 카프리 매매도구 설치
+  title: Capri 설치
