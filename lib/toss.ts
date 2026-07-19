@@ -722,10 +722,13 @@ export async function getExchangeRate(base = "USD", quote = "KRW"): Promise<Exch
   const raw = await tossFetch<Record<string, unknown>>(ENDPOINTS.exchangeRate, {
     query: { baseCurrency: base, quoteCurrency: quote },
   });
+  // [어느 환율을 쓰나?] 토스는 rate(매수환율, 스프레드 포함)·midRate(매매기준율)·basisPoint 를 준다.
+  //   화면 표시용 참고 환산에는 스프레드가 없는 "매매기준율(midRate)"이 더 중립적이라 우선 사용.
+  //   (rate는 매수 시 실제 붙는 값이라 원화가 조금 더 크게 나온다.) midRate 없으면 rate로 폴백.
   return {
     baseCurrency: String(raw.baseCurrency ?? base),
     quoteCurrency: String(raw.quoteCurrency ?? quote),
-    rate: Number(raw.rate ?? raw.exchangeRate ?? 0),
+    rate: Number(raw.midRate ?? raw.rate ?? raw.exchangeRate ?? 0),
     validFrom: raw.validFrom as string | undefined,
     validUntil: raw.validUntil as string | undefined,
   };

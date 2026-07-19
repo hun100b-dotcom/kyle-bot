@@ -360,8 +360,12 @@ function App() {
               <span className="hint">
                 환율:{" "}
                 {fx
-                  ? `1 USD = ₩${fx.toLocaleString()} (${fxSource === "toss" ? "토스 자동 · 1분 갱신 참고용" : "수동 입력"})`
+                  ? `1 USD = ₩${fx.toLocaleString()} (${fxSource === "toss" ? "토스 매매기준율 · 1분 갱신" : "수동 입력"})`
                   : "미조회 — [시세·환율 조회]를 누르세요"}
+              </span>
+              <span className="hint">
+                💡 <b>원화(₩)는 참고용 환산</b>입니다. 환율은 1분마다 바뀌고 토스 화면과 조회 시점이 달라
+                몇백 원 차이가 날 수 있어요. <b>실제 주문·체결은 달러 기준</b>입니다.
               </span>
               {fxFailed && (
                 <>

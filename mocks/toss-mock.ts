@@ -233,7 +233,9 @@ export function createMockTossServer() {
       return sendResult(res, 200, {
         baseCurrency: base,
         quoteCurrency: quote,
-        rate: String(state.fxRate), // 실스펙 관례에 맞춰 문자열
+        rate: String(state.fxRate), // 매수환율(스프레드 포함) — 실스펙 관례에 맞춰 문자열
+        midRate: String(state.fxRate), // 매매기준율(어댑터가 우선 사용). 목에선 동일값
+        basisPoint: "0",
         validFrom: now.toISOString(),
         validUntil: new Date(now.getTime() + 60_000).toISOString(), // 1분 유효
       });
