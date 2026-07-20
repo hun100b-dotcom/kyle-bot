@@ -78,6 +78,7 @@ export interface ToolStatus {
   mode: "mock" | "live";
   dryRun: boolean;
   liveOrdersEnabled: boolean; // 실주문 활성화 토글 상태(빨간 배지 표시용)
+  skipOrderConfirm: boolean; // 주문 확인 팝업 건너뛰기
   killSwitch: boolean;
   session: Session; //       지금 장 세션(정보 표시용 — 주문을 막지는 않음)
   orderFrozen: boolean; //   마감 1분 전 정정·취소 불가 구간 경고
@@ -121,6 +122,15 @@ export class ToolEngine extends EventEmitter {
   private killSwitch = false;
   /** [v0.2.5] 실주문 활성화 스위치. 기본 false(잠금) — 설정 탭에서 사용자가 명시적으로 켠다. */
   private liveOrdersEnabled = false;
+  /**
+   * [v0.2.7] 오입력 방지(현재가에서 크게 벗어난 가격 경고). **기본 꺼짐**.
+   *   예전엔 ±15%가 코드에 박혀 있어 오너가 원하는 가격도 앱이 임의로 막았다.
+   *   이제 기본은 "앱이 막지 않음"이고, 원할 때만 켜고 임계값도 직접 정한다.
+   */
+  private priceGuardEnabled = false;
+  private priceGuardPct = 15; // 켰을 때 쓸 기본 제안값(사용자가 바꿀 수 있음)
+  /** [v0.2.7] 주문 확인 팝업 건너뛰기(기본 false = 팝업 표시) */
+  private skipOrderConfirm = false;
   private mock: ReturnType<typeof createMockTossServer> | null = null;
   private mockPort = 0;
 
@@ -166,6 +176,9 @@ export class ToolEngine extends EventEmitter {
       hasClientSecret: !!process.env.TOSS_CLIENT_SECRET,
       account: process.env.TOSS_ACCOUNT ?? "",
       liveOrdersEnabled: this.liveOrdersEnabled, // 실주문 활성화 여부(설정 탭 토글 상태)
+      priceGuardEnabled: this.priceGuardEnabled,
+      priceGuardPct: this.priceGuardPct,
+      skipOrderConfirm: this.skipOrderConfirm,
     };
   }
 
@@ -335,6 +348,23 @@ export class ToolEngine extends EventEmitter {
    *   [안전 설계] 켜는 행위는 반드시 사람이 화면에서 경고를 확인한 뒤에만 일어난다(UI가 보장).
    *   여기서는 상태만 바꾸고, 무엇이 바뀌었는지 기록에 크게 남긴다.
    */
+  /** [v0.2.7] 오입력 방지 설정(켜기/끄기 + 임계값). 기본은 꺼짐. */
+  setPriceGuard(on: boolean, pct?: number): void {
+    this.priceGuardEnabled = on;
+    if (typeof pct === "number" && Number.isFinite(pct) && pct > 0) this.priceGuardPct = pct;
+    this.addJournal({
+      kind: "info",
+      symbol: "-",
+      summary: on ? `오입력 방지 ON (±${this.priceGuardPct}%)` : "오입력 방지 OFF — 앱이 가격으로 막지 않습니다",
+    });
+  }
+
+  /** [v0.2.7] 주문 확인 팝업 건너뛰기(기본 끔 = 팝업 표시). 화면에서만 쓰지만 상태는 여기 보관. */
+  setSkipConfirm(on: boolean): void {
+    this.skipOrderConfirm = on;
+    this.addJournal({ kind: "info", symbol: "-", summary: on ? "주문 확인 팝업 건너뛰기 ON" : "주문 확인 팝업 표시 ON" });
+  }
+
   setLiveOrders(on: boolean): void {
     this.liveOrdersEnabled = on;
     this.addJournal({
@@ -465,21 +495,25 @@ export class ToolEngine extends EventEmitter {
     if (!Number.isFinite(cur) || cur <= 0) {
       throw new Error("현재가를 확인할 수 없습니다(무거래 시간대이거나 종목코드 확인). 잠시 후 다시 시도하세요.");
     }
-    for (const p of entryPrices) {
-      const dev = Math.abs((p - cur) / cur) * 100;
-      if (dev > 15) {
-        throw new Error(
-          `[안전장치: 가격 이상 감지] 주문을 보내지 않았습니다.
+    // [오입력 방지] 기본은 꺼져 있어 어떤 가격이든 통과한다(오너 결정).
+    //   설정 탭에서 켠 경우에만, 사용자가 정한 임계값으로 경고 차단한다.
+    if (this.priceGuardEnabled) {
+      for (const p of entryPrices) {
+        const dev = Math.abs((p - cur) / cur) * 100;
+        if (dev > this.priceGuardPct) {
+          throw new Error(
+            `[오입력 방지 — 설정에서 켜둔 기능] 주문을 보내지 않았습니다.
 ` +
-            `· 입력한 진입가: $${p}
+              `· 입력한 진입가: $${p}
 ` +
-            `· 현재가: $${cur}
+              `· 현재가: $${cur}
 ` +
-            `· 차이: ${dev.toFixed(1)}% (허용 한도 ±15%)
+              `· 차이: ${dev.toFixed(1)}% (내가 정한 한도 ±${this.priceGuardPct}%)
 
 ` +
-            `진입가가 현재가에서 너무 멀어 오타로 판단했습니다. 진입가를 현재가 근처로 다시 입력하세요.`,
-        );
+              `의도한 가격이 맞다면 설정 탭에서 이 기능을 끄거나 한도를 넓히세요.`,
+          );
+        }
       }
     }
     return cur;
@@ -659,6 +693,7 @@ export class ToolEngine extends EventEmitter {
       mode: this.mode,
       dryRun: this.isDryRun(),
       liveOrdersEnabled: this.liveOrdersEnabled,
+      skipOrderConfirm: this.skipOrderConfirm,
       killSwitch: this.killSwitch,
       session: getSession(now),
       orderFrozen: isOrderFrozen(now),

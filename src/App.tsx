@@ -129,6 +129,7 @@ function App() {
   const [formSecret, setFormSecret] = useState("");
   const [formAccount, setFormAccount] = useState("");
   const [savedMsg, setSavedMsg] = useState("");
+  const [guardPct, setGuardPct] = useState("15"); // 오입력 방지 한도(사용자 지정)
 
   // --- 연습 가격 조작 ---
   const [mockPrice, setMockPrice] = useState("");
@@ -146,6 +147,7 @@ function App() {
       setSettings(s);
       setFormMode(s.mode);
       setFormAccount(s.account);
+      if (s.priceGuardPct) setGuardPct(String(s.priceGuardPct));
     });
     window.kyletool.appVersion?.().then(setAppVer).catch(() => {});
     const off = window.kyletool.onJournal((e) => setJournal((prev) => [...prev.slice(-99), e]));
@@ -262,7 +264,7 @@ function App() {
       return;
     }
     const total = lv.entry * q;
-    setPending({
+    requestOrder({
       kind: "entry",
       title: `진입 지정가 매수 — ${symbol.toUpperCase()}`,
       lines: [
@@ -284,7 +286,7 @@ function App() {
     // 손절 지정가(orderPrice)는 감시가(trigger)보다 1% 아래로 둔다. 감시가=지정가면
     //   급락 시 지정가를 관통해 미체결될 수 있어, 아래로 벌려 즉시 체결 확률을 높인다.
     const slLimit = roundPrice(lv.sl * 0.99);
-    setPending({
+    requestOrder({
       kind: "oco",
       title: `조건주문(익절+손절 동시) 등록 — ${symbol.toUpperCase()} (보유 중일 때)`,
       lines: [
@@ -304,6 +306,28 @@ function App() {
           expireDate: expire,
         }),
     });
+  }
+
+  /** 확인 팝업을 띄우거나(기본), 설정에서 건너뛰기를 켰으면 곧바로 전송한다. */
+  async function requestOrder(po: PendingOrder) {
+    if (status?.skipOrderConfirm) {
+      setBusy(true);
+      try {
+        await po.send();
+        if (tab === "orders") await loadOrders();
+      } catch (e) {
+        const msg = String(e).replace(/^Error:\s*(Error invoking remote method '[^']+':\s*Error:\s*)?/, "");
+        alert(`주문이 전송되지 않았습니다.
+
+${msg}
+
+(위 사유가 해결되면 다시 시도하세요. 돈은 나가지 않았습니다.)`);
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    setPending(po);
   }
 
   async function sendPending() {
@@ -833,6 +857,60 @@ ${msg}
                   }}
                 />
                 <b>실제 주문 전송 허용</b> — 켜기 전에 경고 확인을 거칩니다
+              </label>
+            </div>
+
+            <div className="settings-block">
+              <h3>주문 편의·안전 옵션 (전부 선택)</h3>
+              <p className="hint">
+                기본 상태에서 <b>앱은 주문을 막지 않습니다.</b> 아래는 원할 때만 켜는 보조 기능입니다.
+              </p>
+              <label className="radio">
+                <input
+                  type="checkbox"
+                  checked={settings.priceGuardEnabled}
+                  onChange={async (e) => {
+                    await window.kyletool.setPriceGuard(e.target.checked, toNum(guardPct) ?? undefined);
+                    setSettings(await window.kyletool.getSettings());
+                  }}
+                />
+                <b>오입력 방지</b> — 현재가에서 크게 벗어난 가격이면 경고하고 막기
+              </label>
+              <div className="form-row">
+                <label>
+                  허용 차이 (%)
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={guardPct}
+                    onChange={(e) => isNumericDraft(e.target.value) && setGuardPct(e.target.value)}
+                    placeholder="예: 15"
+                  />
+                </label>
+                <button
+                  className="mini"
+                  onClick={async () => {
+                    await window.kyletool.setPriceGuard(settings.priceGuardEnabled, toNum(guardPct) ?? undefined);
+                    setSettings(await window.kyletool.getSettings());
+                    setSavedMsg("오입력 방지 한도를 저장했습니다.");
+                    setTimeout(() => setSavedMsg(""), 3000);
+                  }}
+                >
+                  한도 저장
+                </button>
+                <span className="hint">현재: {settings.priceGuardEnabled ? `켜짐 (±${settings.priceGuardPct}%)` : "꺼짐 (막지 않음)"}</span>
+              </div>
+              <label className="radio">
+                <input
+                  type="checkbox"
+                  checked={settings.skipOrderConfirm}
+                  onChange={async (e) => {
+                    await window.kyletool.setSkipConfirm(e.target.checked);
+                    setSettings(await window.kyletool.getSettings());
+                    await refreshStatus();
+                  }}
+                />
+                <b>주문 확인 팝업 건너뛰기</b> — 버튼을 누르면 바로 전송(오발주 위험 ↑)
               </label>
             </div>
 

@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld("kyletool", {
   saveSettings: (input) => ipcRenderer.invoke("tool:settings:save", input),
   setKillSwitch: (on) => ipcRenderer.invoke("tool:killSwitch", on),
   setLiveOrders: (on) => ipcRenderer.invoke("tool:liveOrders", on),
+  setPriceGuard: (on, pct) => ipcRenderer.invoke("tool:priceGuard", on, pct),
+  setSkipConfirm: (on) => ipcRenderer.invoke("tool:skipConfirm", on),
 
   // 조회(버튼 눌렀을 때 1회)
   quote: (symbol) => ipcRenderer.invoke("tool:quote", symbol),

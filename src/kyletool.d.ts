@@ -22,6 +22,7 @@ interface ToolStatus {
   mode: "mock" | "live";
   dryRun: boolean;
   liveOrdersEnabled: boolean;
+  skipOrderConfirm: boolean;
   killSwitch: boolean;
   session: "day" | "pre" | "regular" | "after" | "closed";
   orderFrozen: boolean;
@@ -41,6 +42,9 @@ interface JournalEntry {
 interface ToolSettings {
   mode: "mock" | "live";
   liveOrdersEnabled: boolean;
+  priceGuardEnabled: boolean;
+  priceGuardPct: number;
+  skipOrderConfirm: boolean;
   hasClientId: boolean;
   hasClientSecret: boolean;
   account: string;
@@ -73,6 +77,8 @@ interface KyletoolBridge {
   saveSettings(input: { mode: "mock" | "live"; clientId?: string; clientSecret?: string; account?: string }): Promise<ToolSettings>;
   setKillSwitch(on: boolean): Promise<void>;
   setLiveOrders(on: boolean): Promise<void>;
+  setPriceGuard(on: boolean, pct?: number): Promise<void>;
+  setSkipConfirm(on: boolean): Promise<void>;
 
   quote(symbol: string): Promise<number>;
   fx(): Promise<{ rate: number; source: "toss" | "manual" } | null>;
