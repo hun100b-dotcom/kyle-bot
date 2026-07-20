@@ -70,6 +70,50 @@ interface CondOrder {
   expireDate?: string;
 }
 
+/** [v0.2.10] 주문 시점에 함께 보내는 "매매기법 근거" (왜 이 가격에 샀는가) */
+interface RationaleInput {
+  technique: Technique;
+  level?: number; //     삼분할 몇 분할 타점인지
+  baseClose?: number; // [삼분할] 전봉 종가
+  ema200?: number; //    [삼분할] EMA200
+  wallPrice?: number; // [호가창] 매수벽
+  barOpen?: number; //   [캔들] 현재봉 시가
+  entry?: number;
+  tp?: number;
+  sl?: number;
+  tpPct?: number;
+  slPct?: number;
+  priceAtOrder?: number | null;
+}
+
+/** 저장된 근거 한 건(위 입력 + 주문 시점에 앱이 자동으로 채운 값) */
+interface TradeRationale extends RationaleInput {
+  clientOrderId: string;
+  ts: string;
+  kind: "entry" | "oco";
+  symbol: string;
+  quantity: number;
+  priceAtOrder: number | null;
+  tossOrderId?: string;
+  dryRun: boolean;
+}
+
+/** 보유 포지션 한 줄(근거 + 실시간 손익) */
+interface PositionView {
+  symbol: string;
+  quantity: number;
+  currency: string;
+  avgPrice: number | null;
+  entryPrice: number | null;
+  entrySource: "rationale" | "toss" | "none";
+  currentPrice: number | null;
+  pnlPct: number | null;
+  pnlUsd: number | null;
+  toTpPct: number | null;
+  toSlPct: number | null;
+  rationale: TradeRationale | null;
+}
+
 interface KyletoolBridge {
   status(): Promise<ToolStatus>;
   journal(): Promise<JournalEntry[]>;
@@ -107,7 +151,12 @@ interface KyletoolBridge {
     entry?: number;
   }): Promise<CalcResult>;
 
-  placeEntry(spec: { symbol: string; price: number; quantity: number }): Promise<JournalEntry>;
+  placeEntry(spec: {
+    symbol: string;
+    price: number;
+    quantity: number;
+    rationale?: RationaleInput;
+  }): Promise<JournalEntry>;
   placeOco(spec: {
     symbol: string;
     quantity: number;
@@ -116,7 +165,10 @@ interface KyletoolBridge {
     slTrigger: number;
     slPrice: number;
     expireDate: string;
+    rationale?: RationaleInput;
   }): Promise<JournalEntry>;
+  rationales(): Promise<TradeRationale[]>;
+  positions(): Promise<PositionView[]>;
   openOrders(): Promise<OpenOrder[]>;
   conditionals(): Promise<CondOrder[]>;
   cancelOrder(id: string): Promise<JournalEntry>;

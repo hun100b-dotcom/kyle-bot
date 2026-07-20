@@ -165,6 +165,9 @@ function registerIpc(e: ToolEngine): void {
 
   ipcMain.handle("tool:order:entry", (_ev, spec) => e.placeEntry(spec));
   ipcMain.handle("tool:order:oco", (_ev, spec) => e.placeOco(spec));
+  // [v0.2.10] 매매 근거 목록 / 보유 포지션(손익 포함) — 둘 다 읽기 전용이라 안전하다.
+  ipcMain.handle("tool:rationales", () => e.getRationales());
+  ipcMain.handle("tool:positions", () => e.positions());
   ipcMain.handle("tool:orders:open", () => e.openOrders());
   ipcMain.handle("tool:orders:conditionals", () => e.conditionals());
   ipcMain.handle("tool:orders:cancel", (_ev, id: string) => e.cancelNormalOrder(id));

@@ -56,6 +56,44 @@ function toNum(v: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/**
+ * [v0.2.10] 매매 근거 한 줄 문장 만들기.
+ *   예) "삼분할 2분할 · 전봉종가 $12.30 / EMA200 $11.10 · 진입 $11.90 · 익절 $12.14(+2%) · 손절 $10.71(-10%) · 3주"
+ *   기법마다 보여줄 재료가 다르므로 있는 값만 골라 이어 붙인다.
+ */
+function rationaleLine(r: TradeRationale): string {
+  const p: string[] = [];
+  const t = TECH_LABEL[r.technique] ?? r.technique;
+  p.push(r.technique === "split3" && r.level ? `${t.replace(/\s*\(.*\)/, "")} ${r.level}분할` : t.replace(/\s*\(.*\)/, ""));
+  if (r.baseClose != null) p.push(`전봉종가 $${r.baseClose}`);
+  if (r.ema200 != null) p.push(`EMA200 $${r.ema200}`);
+  if (r.wallPrice != null) p.push(`매수벽 $${r.wallPrice}`);
+  if (r.barOpen != null) p.push(`현재봉 시가 $${r.barOpen}`);
+  if (r.entry) p.push(`진입 $${r.entry}`);
+  if (r.tp) p.push(`익절 $${r.tp}${r.tpPct != null ? `(+${r.tpPct}%)` : ""}`);
+  if (r.sl) p.push(`손절 $${r.sl}${r.slPct != null ? `(-${r.slPct}%)` : ""}`);
+  p.push(`${r.quantity}주`);
+  if (r.priceAtOrder != null) p.push(`당시가 $${r.priceAtOrder}`);
+  return p.join(" · ");
+}
+
+/**
+ * [v0.2.10] 통화에 맞는 금액 표기.
+ *   실계좌에는 국내 종목(원화)도 섞여 있다. 원화 종목을 "$45,550"처럼 찍으면 금액을 완전히
+ *   오해하게 되므로, 통화가 USD가 아니면 ₩로 표기하고 환산도 하지 않는다.
+ */
+function money(v: number | null, currency: string, fxRate: number | null): string {
+  if (v == null) return "-";
+  if (currency !== "USD") return `₩${Math.round(v).toLocaleString()}`;
+  return usdKrw(v, fxRate);
+}
+
+/** 손익 % 를 색과 함께 보여주기 위한 클래스 이름(수익=초록, 손실=빨강) */
+function pnlClass(v: number | null): string {
+  if (v == null) return "";
+  return v > 0 ? "pnl-up" : v < 0 ? "pnl-down" : "";
+}
+
 /** 가격을 유효 틱으로 절삭($1↑ 2자리 / $1↓ 4자리). lib/calc.ts와 동일 규칙. */
 function roundPrice(p: number): number {
   const s = p >= 1 ? 100 : 10000;
@@ -121,6 +159,12 @@ function App() {
   // --- 주문 현황 ---
   const [openOrders, setOpenOrders] = useState<OpenOrder[]>([]);
   const [conds, setConds] = useState<CondOrder[]>([]);
+  // [v0.2.10] 보유 포지션(손익 포함) + 매매 근거 기록
+  const [positions, setPositions] = useState<PositionView[]>([]);
+  const [rationales, setRationales] = useState<TradeRationale[]>([]);
+  const [posBusy, setPosBusy] = useState(false);
+  const [posAt, setPosAt] = useState<string>(""); // 마지막 갱신 시각(표시용)
+  const [autoRefresh, setAutoRefresh] = useState(false); // 30초 자동 갱신 켜기/끄기
 
   // --- 설정 ---
   const [settings, setSettings] = useState<ToolSettings | null>(null);
@@ -175,6 +219,14 @@ function App() {
       offUpd?.();
     };
   }, []);
+
+  // [v0.2.10] 30초 자동 갱신. 기본은 꺼짐(자율 동작 최소화 원칙) — 오너가 켤 때만 돈다.
+  //   주문 현황 탭에 있을 때만 돌려서 불필요한 조회를 줄인다.
+  useEffect(() => {
+    if (!autoRefresh || tab !== "orders") return;
+    const id = setInterval(() => void loadPositions(), 30_000);
+    return () => clearInterval(id);
+  }, [autoRefresh, tab]);
 
   async function startDownloadUpdate() {
     setUpdateProgress(0);
@@ -279,6 +331,28 @@ function App() {
     }
   }
 
+  /**
+   * [v0.2.10] 지금 화면에 입력된 값으로 "매매 근거"를 만든다.
+   *   주문을 낼 때 이 스냅샷(그 순간의 사진)을 함께 보내 앱이 파일에 남긴다.
+   *   토스는 기법 정보를 돌려주지 않으므로, 우리가 보내지 않으면 근거는 영원히 사라진다.
+   */
+  function buildRationale(lv: CalcLevel, override?: { tp?: number; sl?: number }): RationaleInput {
+    return {
+      technique: tech,
+      level: lv.level, //          삼분할이면 1/2/3분할
+      baseClose: toNum(baseClose) ?? undefined,
+      ema200: toNum(ema200) ?? undefined,
+      wallPrice: toNum(wallPrice) ?? undefined,
+      barOpen: toNum(barOpen) ?? undefined,
+      entry: lv.entry > 0 ? lv.entry : (toNum(manualEntry) ?? undefined),
+      tp: override?.tp ?? lv.tp,
+      sl: override?.sl ?? lv.sl,
+      tpPct: toNum(tpPct) ?? undefined,
+      slPct: toNum(slPct) ?? undefined,
+      priceAtOrder: curPrice,
+    };
+  }
+
   // --- 주문 팝업 만들기(전송은 팝업의 확인 버튼에서만) ---
 
   function confirmEntry(lv: CalcLevel) {
@@ -297,7 +371,13 @@ function App() {
         `예상 투입액 ${usdKrw(total, fx)}`,
         `주문 유효기간: 당일(DAY) — 미체결분은 자동 취소`,
       ],
-      send: () => window.kyletool.placeEntry({ symbol, price: lv.entry, quantity: q }),
+      send: () =>
+        window.kyletool.placeEntry({
+          symbol,
+          price: lv.entry,
+          quantity: q,
+          rationale: buildRationale(lv), // 기법 근거 동봉(주문 성공 시 기록됨)
+        }),
     });
   }
 
@@ -327,7 +407,8 @@ function App() {
       alert("익절가·손절가·수량을 숫자로 입력하세요.");
       return;
     }
-    const lv = { level: 1, entry: 0, tp: tpv, sl: slv } as CalcLevel;
+    // 편집창에서 온 값이라 진입가가 없다 → 계산기 결과의 1분할 진입가를 근거로 함께 남긴다.
+    const lv = { level: result?.levels[0]?.level ?? 1, entry: result?.levels[0]?.entry ?? 0, tp: tpv, sl: slv } as CalcLevel;
     setOcoEdit(null);
     confirmOco(lv, q);
   }
@@ -360,6 +441,7 @@ function App() {
           slTrigger: lv.sl,
           slPrice: slLimit,
           expireDate: expire,
+          rationale: buildRationale(lv, { tp: lv.tp, sl: lv.sl }), // 기법 근거 동봉
         }),
     });
   }
@@ -405,7 +487,21 @@ ${msg}
     }
   }
 
+  /** [v0.2.10] 보유 포지션(손익)과 매매 근거를 다시 불러온다. 읽기 전용이라 언제 눌러도 안전. */
+  async function loadPositions() {
+    setPosBusy(true);
+    try {
+      const [pRes, rRes] = await Promise.allSettled([window.kyletool.positions(), window.kyletool.rationales()]);
+      if (pRes.status === "fulfilled") setPositions(pRes.value);
+      if (rRes.status === "fulfilled") setRationales(rRes.value);
+      setPosAt(new Date().toLocaleTimeString());
+    } finally {
+      setPosBusy(false);
+    }
+  }
+
   async function loadOrders() {
+    void loadPositions(); // 주문 목록을 볼 땐 포지션 손익도 같이 갱신
     setBusy(true);
     try {
       // [allSettled] 한쪽(일반/조건)이 실패해도 다른 쪽은 보여준다. 예전엔 Promise.all이라
@@ -775,6 +871,93 @@ ${msg}
       {/* ===== ② 주문 현황 ===== */}
       {tab === "orders" && (
         <main className="grid">
+          {/* [v0.2.10] 보유 포지션 — 매수가 대비 손익 %와 매매 근거를 한 장의 카드로 */}
+          <section className="card wide">
+            <h2>
+              보유 포지션 · 손익{" "}
+              <button className="mini" disabled={posBusy} onClick={loadPositions}>
+                새로고침
+              </button>{" "}
+              <label className="inline-check">
+                <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} /> 30초마다 자동
+              </label>
+              {posAt && <span className="hint small"> (마지막 갱신 {posAt})</span>}
+            </h2>
+            {positions.length === 0 ? (
+              <p className="hint">보유 중인 종목이 없거나 아직 조회하지 않았습니다. [새로고침]을 눌러 주세요.</p>
+            ) : (
+              <div className="poslist">
+                {positions.map((p) => (
+                  <div key={p.symbol} className="poscard">
+                    <div className="posline1">
+                      <b className="possym">{p.symbol}</b>
+                      <span className="posqty">{p.quantity}주</span>
+                      <span className={`posPnl ${pnlClass(p.pnlPct)}`}>
+                        {p.pnlPct == null ? "손익 조회 불가" : `${p.pnlPct >= 0 ? "+" : ""}${p.pnlPct.toFixed(2)}%`}
+                      </span>
+                      {p.pnlUsd != null && (
+                        <span className={`small ${pnlClass(p.pnlUsd)}`}>
+                          ({p.pnlUsd >= 0 ? "+" : ""}
+                          {money(p.pnlUsd, p.currency, fx)})
+                        </span>
+                      )}
+                    </div>
+                    <div className="posline2 small">
+                      기준가 {p.entryPrice != null ? money(p.entryPrice, p.currency, null) : "-"}
+                      <span className="hint">
+                        {p.entrySource === "rationale" ? " (내 기록 진입가)" : p.entrySource === "toss" ? " (토스 평균매입가)" : ""}
+                      </span>
+                      {" · "}현재가 {p.currentPrice != null ? money(p.currentPrice, p.currency, null) : "조회 불가"}
+                      {p.avgPrice != null && p.entrySource === "rationale" && ` · 토스 평단 ${money(p.avgPrice, p.currency, null)}`}
+                    </div>
+                    {(p.toTpPct != null || p.toSlPct != null) && (
+                      <div className="posline3 small">
+                        {p.toTpPct != null && <span className="pnl-up">익절까지 {p.toTpPct >= 0 ? "+" : ""}{p.toTpPct.toFixed(2)}%p</span>}
+                        {p.toTpPct != null && p.toSlPct != null && " / "}
+                        {p.toSlPct != null && <span className="pnl-down">손절까지 {p.toSlPct.toFixed(2)}%p</span>}
+                      </div>
+                    )}
+                    <div className="posrationale small">
+                      {p.rationale ? (
+                        <>
+                          <span className="tag">근거</span> {rationaleLine(p.rationale)}{" "}
+                          <span className="hint">({p.rationale.ts})</span>
+                        </>
+                      ) : (
+                        <span className="hint">이 종목은 매매 근거 기록이 없습니다(v0.2.10 이전에 낸 주문).</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* [v0.2.10] 최근 주문의 매매 근거 목록 */}
+          <section className="card wide">
+            <h2>최근 주문 근거 (내가 왜 이 가격에 냈는가)</h2>
+            {rationales.length === 0 ? (
+              <p className="hint">
+                아직 기록된 근거가 없습니다. v0.2.10부터 <b>새로 내는 주문</b>에 근거가 자동으로 남습니다.
+              </p>
+            ) : (
+              <div className="ratlist">
+                {rationales.slice(0, 30).map((r) => (
+                  <div key={r.clientOrderId} className="ratcard">
+                    <div>
+                      <span className="tag">{r.kind === "entry" ? "진입" : "조건주문"}</span>
+                      {r.dryRun && <span className="tag warn">모의</span>} <b>{r.symbol}</b> · {rationaleLine(r)}
+                    </div>
+                    <div className="hint small">
+                      {r.ts} · 주문키 {r.clientOrderId}
+                      {r.tossOrderId ? ` · 토스번호 ${r.tossOrderId}` : ""}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
           <section className="card wide">
             <h2>
               미체결 일반 주문{" "}

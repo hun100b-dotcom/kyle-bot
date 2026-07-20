@@ -91,6 +91,60 @@ export interface ToolStatus {
   buyingPowerUsd: number | null;
 }
 
+/**
+ * [v0.2.10] 매매 근거 스냅샷 — "이 주문을 왜 이 가격에 냈는가"를 주문 시점에 통째로 찍어 둔다.
+ *
+ * [왜 필요한가?]
+ *   토스 API는 주문 결과(가격·수량·상태)만 돌려주고, "삼분할 2분할 타점이었다"거나
+ *   "EMA200이 얼마였다" 같은 **우리 기법의 근거**는 어디에도 남지 않는다. 나중에 복기할 때
+ *   "이 주문 왜 냈지?"를 알 수 없다. 그래서 주문을 낼 때 우리가 직접 기록해 둔다.
+ *
+ * [어떻게 토스 주문과 연결하나?]
+ *   clientOrderId(우리가 만든 주문 고유번호)를 열쇠로 쓴다. 이 번호는 주문 요청에 담아 보내므로
+ *   나중에 토스 주문/체결과 짝을 맞출 수 있다.
+ */
+export interface TradeRationale {
+  clientOrderId: string; //  열쇠(토스 주문과 매칭용)
+  ts: string; //             주문 시각(KST)
+  kind: "entry" | "oco"; //  진입 지정가 / 조건주문
+  symbol: string;
+  technique: Technique; //   사용한 기법
+  level?: number; //         [삼분할] 몇 분할 타점인지(1/2/3)
+  baseClose?: number; //     [삼분할] 전봉 종가
+  ema200?: number; //        [삼분할] EMA200
+  wallPrice?: number; //     [호가창] 매수벽 가격
+  barOpen?: number; //       [캔들] 현재봉 시가
+  entry?: number; //         진입가
+  tp?: number; //            익절가
+  sl?: number; //            손절가
+  tpPct?: number; //         익절 %
+  slPct?: number; //         손절 %
+  quantity: number;
+  priceAtOrder: number | null; // 주문 낼 때의 현재가
+  tossOrderId?: string; //   토스가 준 주문번호(성공 시)
+  dryRun: boolean; //        모의 전송이었는지(실제로 안 나간 주문)
+}
+
+/** 화면이 주문할 때 함께 보내는 근거 입력(위 타입에서 자동 채워지는 항목 제외) */
+export type RationaleInput = Omit<TradeRationale, "clientOrderId" | "ts" | "kind" | "symbol" | "quantity" | "tossOrderId" | "dryRun">;
+
+/** [v0.2.10] 보유 포지션 한 줄 — 근거 + 실시간 손익까지 합쳐 화면에 그대로 뿌린다. */
+export interface PositionView {
+  symbol: string;
+  quantity: number;
+  /** 통화. 실계좌에는 국내 종목(원화)도 섞여 있어 $로만 표시하면 금액을 오해한다. */
+  currency: string;
+  avgPrice: number | null; //     토스가 알려준 평균매입가
+  entryPrice: number | null; //   손익 기준가(우리 기록 우선, 없으면 평균매입가)
+  entrySource: "rationale" | "toss" | "none"; // 기준가를 어디서 얻었는지(화면 표기용)
+  currentPrice: number | null; // 지금 시세
+  pnlPct: number | null; //       (현재가-기준가)/기준가 × 100
+  pnlUsd: number | null; //       평가손익(달러)
+  toTpPct: number | null; //      익절가까지 몇 %p 남았는지
+  toSlPct: number | null; //      손절가까지 몇 %p 남았는지
+  rationale: TradeRationale | null; // 이 종목의 가장 최근 매매 근거
+}
+
 /** 주문/기록 저널 한 줄(파일로 영속) */
 export interface JournalEntry {
   ts: string;
@@ -120,6 +174,11 @@ export class ToolEngine extends EventEmitter {
   private envPath: string;
   private journalPath: string;
   private journal: JournalEntry[] = [];
+  /** [v0.2.10] 매매 근거 파일 경로/메모리 캐시. 저널과 별도 파일로 두는 이유:
+   *  저널은 "사람이 읽는 일지"라 100건만 화면에 쓰지만, 근거는 나중에 주문과 매칭해야 하는
+   *  '데이터'라 오래 남겨야 한다. 섞으면 저널이 잘릴 때 근거까지 사라진다. */
+  private rationalePath: string;
+  private rationales: TradeRationale[] = [];
 
   private mode: "mock" | "live" = "mock";
   private killSwitch = false;
@@ -149,10 +208,12 @@ export class ToolEngine extends EventEmitter {
     mkdirSync(userDataDir, { recursive: true });
     this.envPath = join(userDataDir, ".env");
     this.journalPath = join(userDataDir, "kylebot-journal.json");
+    this.rationalePath = join(userDataDir, "kylebot-rationale.json");
     this.loadEnv();
     // [개발 검증용] E2E 등 자동 검증은 절대 실서버를 건드리면 안 되므로 연습 모드 강제.
     if (opts?.forceMock) this.mode = "mock";
     this.loadJournal();
+    this.loadRationales();
   }
 
   // --------------------------------------------------------------------------
@@ -679,18 +740,36 @@ export class ToolEngine extends EventEmitter {
   }
 
   /** ① 진입: 일반 지정가 매수 */
-  async placeEntry(spec: { symbol: string; price: number; quantity: number }): Promise<JournalEntry> {
+  async placeEntry(spec: {
+    symbol: string;
+    price: number;
+    quantity: number;
+    /** [v0.2.10] 이 주문의 매매기법 근거(화면이 함께 보냄). 없어도 주문은 정상 진행된다. */
+    rationale?: RationaleInput;
+  }): Promise<JournalEntry> {
     const symbol = spec.symbol.toUpperCase();
-    await this.orderGate(symbol, [spec.price]);
+    const cur = await this.orderGate(symbol, [spec.price]);
     // [B4] 매수 가능 금액 초과면 여기서 막는다(실서버에서만 검사).
     await this.assertAffordable(spec.price, spec.quantity);
 
+    // 주문번호(clientOrderId)를 **미리** 만든다. 근거 기록의 열쇠로 써야 하므로
+    //   createOrder 호출 안에서 즉석 생성하면 우리가 그 값을 알 수 없다.
+    const clientOrderId = makeClientOrderId(`tool${DateTime.now().toFormat("HHmmss")}`, 1, "entry");
+
     if (this.isDryRun()) {
+      this.saveRationale(spec.rationale, {
+        clientOrderId,
+        kind: "entry",
+        symbol,
+        quantity: spec.quantity,
+        priceAtOrder: cur,
+        dryRun: true,
+      });
       return this.addJournal({
         kind: "dryrun",
         symbol,
         summary: `[드라이런] 진입 지정가 매수 ${symbol} $${spec.price} × ${spec.quantity}주 (실주문 잠금 — 실제 전송 안 함)`,
-        detail: spec,
+        detail: { ...spec, clientOrderId },
       });
     }
     const o = await createOrder({
@@ -699,7 +778,17 @@ export class ToolEngine extends EventEmitter {
       orderType: "LIMIT",
       price: spec.price,
       quantity: spec.quantity,
-      clientOrderId: makeClientOrderId(`tool${DateTime.now().toFormat("HHmmss")}`, 1, "entry"),
+      clientOrderId,
+    });
+    // 주문이 실제로 접수된 뒤에 근거를 남긴다(실패한 주문의 근거는 남기지 않는다).
+    this.saveRationale(spec.rationale, {
+      clientOrderId,
+      kind: "entry",
+      symbol,
+      quantity: spec.quantity,
+      priceAtOrder: cur,
+      dryRun: false,
+      tossOrderId: o.tossOrderId,
     });
     return this.addJournal({
       kind: "entry",
@@ -718,6 +807,8 @@ export class ToolEngine extends EventEmitter {
     slTrigger: number; // 손절 감시가(현재가보다 아래)
     slPrice: number; //   손절 지정가(감시가보다 살짝 아래 = 즉시 체결 노림)
     expireDate: string; // YYYY-MM-DD
+    /** [v0.2.10] 이 조건주문의 매매기법 근거(화면이 함께 보냄). 없어도 주문은 정상 진행. */
+    rationale?: RationaleInput;
   }): Promise<JournalEntry> {
     const symbol = spec.symbol.toUpperCase();
     const cur = await this.orderGate(symbol); // 익절/손절 감시가는 ±검사 대신 아래 OCO 규칙으로 검증
@@ -732,12 +823,23 @@ export class ToolEngine extends EventEmitter {
       });
     }
 
+    // 근거 기록의 열쇠. 미리 만들어 두고 주문·기록에 같은 값을 쓴다(멱등키 겸용).
+    const clientOrderId = makeClientOrderId(`oco${DateTime.now().toFormat("HHmmss")}`, 1, "oco");
+
     if (this.isDryRun()) {
+      this.saveRationale(spec.rationale, {
+        clientOrderId,
+        kind: "oco",
+        symbol,
+        quantity: spec.quantity,
+        priceAtOrder: cur,
+        dryRun: true,
+      });
       return this.addJournal({
         kind: "dryrun",
         symbol,
         summary: `[드라이런] OCO 등록 ${symbol} ${spec.quantity}주: 익절 $${spec.tpTrigger}↑ / 손절 $${spec.slTrigger}↓ (실주문 잠금)`,
-        detail: spec,
+        detail: { ...spec, clientOrderId },
       });
     }
     const c = await createConditionalOrder({
@@ -749,7 +851,16 @@ export class ToolEngine extends EventEmitter {
       first: { orderSide: "SELL", triggerPrice: spec.tpTrigger, orderPrice: spec.tpPrice },
       second: { orderSide: "SELL", triggerPrice: spec.slTrigger, orderPrice: spec.slPrice },
       // [B5] 멱등키: 네트워크 재시도로 조건주문이 두 번 등록되는 걸 막는다(진입 주문과 동일 원칙).
-      clientOrderId: makeClientOrderId(`oco${DateTime.now().toFormat("HHmmss")}`, 1, "oco"),
+      clientOrderId,
+    });
+    this.saveRationale(spec.rationale, {
+      clientOrderId,
+      kind: "oco",
+      symbol,
+      quantity: spec.quantity,
+      priceAtOrder: cur,
+      dryRun: false,
+      tossOrderId: c.conditionalOrderId,
     });
     return this.addJournal({
       kind: "oco",
@@ -819,6 +930,130 @@ export class ToolEngine extends EventEmitter {
       fxSource: this.fxCache?.source ?? null,
       buyingPowerUsd: this.buyingPowerUsd,
     };
+  }
+
+  // --------------------------------------------------------------------------
+  // [v0.2.10] 매매 근거 저장/조회
+  // --------------------------------------------------------------------------
+
+  /** 근거 파일 읽기(없거나 깨졌으면 빈 목록으로 시작 — 앱은 계속 동작해야 한다). */
+  private loadRationales(): void {
+    try {
+      this.rationales = existsSync(this.rationalePath)
+        ? (JSON.parse(readFileSync(this.rationalePath, "utf8")) as TradeRationale[])
+        : [];
+    } catch {
+      this.rationales = [];
+    }
+  }
+
+  /**
+   * 근거 한 건 저장. 화면이 보낸 기법 입력(input)에 주문 시점 정보(fixed)를 합쳐 파일에 남긴다.
+   * 근거가 없어도(=화면이 안 보냈어도) 최소 정보는 남긴다 — "언제 무엇을 몇 주" 만이라도 있어야
+   * 나중에 토스 주문과 짝을 맞출 수 있기 때문이다.
+   * ⚠️ 이 기록이 실패해도 주문은 이미 나갔으므로, 예외를 밖으로 던지지 않는다(주문 흐름 보호).
+   */
+  private saveRationale(
+    input: RationaleInput | undefined,
+    fixed: {
+      clientOrderId: string;
+      kind: "entry" | "oco";
+      symbol: string;
+      quantity: number;
+      priceAtOrder: number | null;
+      dryRun: boolean;
+      tossOrderId?: string;
+    },
+  ): void {
+    try {
+      const rec: TradeRationale = {
+        ts: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
+        technique: input?.technique ?? "manual", // 화면이 안 보냈으면 '수동'으로 간주
+        ...input,
+        ...fixed,
+      };
+      this.rationales.push(rec);
+      if (this.rationales.length > 2000) this.rationales.shift(); // 오래된 것부터 정리
+      const tmp = this.rationalePath + ".tmp";
+      writeFileSync(tmp, JSON.stringify(this.rationales, null, 2), "utf8");
+      renameSync(tmp, this.rationalePath); // 원자적 교체(쓰다 만 파일 방지)
+    } catch {
+      /* 기록 실패는 주문을 되돌리지 않는다 */
+    }
+  }
+
+  /** 최근 근거 목록(화면 표시용). 최신이 위로 오게 뒤집어 준다. */
+  getRationales(): TradeRationale[] {
+    return this.rationales.slice(-200).reverse();
+  }
+
+  /**
+   * [v0.2.10] 보유 포지션 + 실시간 손익.
+   *   토스 holdings(보유 종목)에 ①우리가 기록한 매매 근거와 ②현재 시세를 붙여
+   *   "매수가 대비 몇 %"인지 계산해 돌려준다. 조회 실패는 null로 두고 화면이 '조회 불가'로 표시.
+   */
+  async positions(): Promise<PositionView[]> {
+    await this.prepareBackend();
+    const out: PositionView[] = [];
+    let items: Array<Record<string, unknown>> = [];
+    try {
+      const h = (await getHoldings()) as Record<string, unknown>;
+      items = (h?.items as Array<Record<string, unknown>>) ?? [];
+    } catch {
+      return out; // 보유 조회 실패 → 빈 목록(화면이 안내)
+    }
+
+    for (const it of items) {
+      const symbol = String(it.symbol ?? "").toUpperCase();
+      if (!symbol) continue;
+      const quantity = Number(it.quantity);
+      // 평균매입가: 토스 응답 필드명이 문서마다 조금씩 달라 후보를 순서대로 본다.
+      const avgRaw = it.averagePrice ?? it.avgPrice ?? it.averagePurchasePrice ?? it.purchasePrice;
+      const avgPrice = Number.isFinite(Number(avgRaw)) ? Number(avgRaw) : null;
+
+      // 현재가(실패해도 나머지는 보여준다).
+      //   ⚠️ getPrice는 숫자가 아니라 {symbol, price, ...} 객체를 돌려준다. 분해해서 숫자만 꺼내야
+      //   손익 계산이 된다(자체 검증에서 이 실수로 손익이 전부 '조회 불가'로 나왔다).
+      let currentPrice: number | null = null;
+      let currency = "USD";
+      try {
+        const q = await getPrice(symbol);
+        if (Number.isFinite(q.price)) currentPrice = q.price;
+        if (q.currency) currency = q.currency;
+      } catch {
+        /* 무시 */
+      }
+
+      // 이 종목의 가장 최근 '진입' 근거를 찾는다(없으면 조건주문 근거라도).
+      const mine = this.rationales.filter((r) => r.symbol === symbol);
+      const rationale = [...mine].reverse().find((r) => r.kind === "entry") ?? mine[mine.length - 1] ?? null;
+
+      // 손익 기준가: 우리가 기록한 진입가가 1순위(내가 의도한 가격), 없으면 토스 평균매입가.
+      const entryPrice = rationale?.entry ?? avgPrice ?? null;
+      const entrySource: PositionView["entrySource"] = rationale?.entry ? "rationale" : avgPrice != null ? "toss" : "none";
+
+      const pnlPct = entryPrice && currentPrice ? ((currentPrice - entryPrice) / entryPrice) * 100 : null;
+      const pnlUsd = entryPrice && currentPrice && Number.isFinite(quantity) ? (currentPrice - entryPrice) * quantity : null;
+      // "익절/손절까지 몇 %p" — 지금 가격에서 목표까지의 거리다(기준가가 아니라 현재가 대비).
+      const toTpPct = rationale?.tp && currentPrice ? ((rationale.tp - currentPrice) / currentPrice) * 100 : null;
+      const toSlPct = rationale?.sl && currentPrice ? ((rationale.sl - currentPrice) / currentPrice) * 100 : null;
+
+      out.push({
+        symbol,
+        currency,
+        quantity: Number.isFinite(quantity) ? quantity : 0,
+        avgPrice,
+        entryPrice,
+        entrySource,
+        currentPrice,
+        pnlPct,
+        pnlUsd,
+        toTpPct,
+        toSlPct,
+        rationale,
+      });
+    }
+    return out;
   }
 
   getJournal(): JournalEntry[] {

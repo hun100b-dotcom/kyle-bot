@@ -224,3 +224,24 @@ ul.hint { padding-left: 18px; }
 /* [v0.2.9] 주문가능 수량 안내 박스 */
 .cap-box { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .cap-box .hint b { color: var(--tx, #e5e7eb); }
+
+/* ===== [v0.2.10] 보유 포지션 손익 + 매매 근거 카드 ===== */
+.poslist, .ratlist { display: flex; flex-direction: column; gap: 8px; }
+.poscard, .ratcard {
+  border: 1px solid #2a2f3a; border-radius: 8px; padding: 10px 12px; background: #171b24;
+}
+.posline1 { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.possym { font-size: 16px; }
+.posqty { color: #9aa3b2; }
+/* 손익 숫자는 크게 — 실전 중 한눈에 들어와야 한다 */
+.posPnl { font-size: 18px; font-weight: 700; }
+.pnl-up { color: #2ecc71; }   /* 수익 = 초록 */
+.pnl-down { color: #ff6b6b; } /* 손실 = 빨강 */
+.posline2, .posline3 { color: #b9c0cc; margin-top: 4px; }
+.posrationale { margin-top: 6px; padding-top: 6px; border-top: 1px dashed #2a2f3a; color: #cfd6e2; }
+.tag {
+  display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px;
+  background: #2b3446; color: #9fb4d8; margin-right: 4px;
+}
+.tag.warn { background: #4a3a1e; color: #ffcf7a; }
+.inline-check { font-size: 12px; font-weight: 400; color: #9aa3b2; }
