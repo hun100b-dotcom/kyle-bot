@@ -132,6 +132,14 @@ function App() {
   const [guardPct, setGuardPct] = useState("15"); // 오입력 방지 한도(사용자 지정)
   // [v0.2.8] 조건주문 편집 창 — 계산값에 묶이지 않고 오너가 직접 고칠 수 있게 한다.
   const [ocoEdit, setOcoEdit] = useState<{ tp: string; sl: string; qty: string } | null>(null);
+  // [v0.2.9] 토스에서 받아온 수량 정보(주문가능 최대 / 보유 / 매도가능). 표시용 참고값.
+  const [cap, setCap] = useState<{
+    buyingPowerUsd: number | null;
+    commissionRate: number | null;
+    maxBuyQty: number | null;
+    heldQty: number | null;
+    sellableQty: number | null;
+  } | null>(null);
 
   // --- 연습 가격 조작 ---
   const [mockPrice, setMockPrice] = useState("");
@@ -184,8 +192,10 @@ function App() {
   async function loadQuote() {
     setBusy(true);
     try {
-      setCurPrice(await window.kyletool.quote(symbol.trim().toUpperCase()));
+      const cur = await window.kyletool.quote(symbol.trim().toUpperCase());
+      setCurPrice(cur);
       await loadFx(); // 시세 볼 때 환율도 함께(둘 다 표시용)
+      await refreshCapacity(cur); // 주문가능 수량·보유 수량도 같이 갱신
       await refreshStatus();
     } catch (e) {
       // 원시 에러를 그대로 보여주지 않고, 사람이 조치할 수 있는 한국어 안내로.
@@ -197,6 +207,16 @@ function App() {
       );
     } finally {
       setBusy(false);
+    }
+  }
+
+  /** [v0.2.9] 토스에서 주문가능 수량·보유 수량을 받아와 화면에 표시(강제 아님, 참고용). */
+  async function refreshCapacity(priceForCalc?: number) {
+    try {
+      const c = await window.kyletool.capacity(symbol.trim().toUpperCase(), priceForCalc);
+      setCap(c);
+    } catch {
+      setCap(null); // 조회 실패해도 앱은 정상 동작(값만 "조회 불가")
     }
   }
 
@@ -252,6 +272,8 @@ function App() {
         entry: manualEntry ? Number(manualEntry) : undefined,
       });
       setResult(r);
+      // 계산된 1분할 진입가 기준으로 "최대 몇 주" 다시 계산해 표시
+      if (r.levels[0]) void refreshCapacity(r.levels[0].entry);
     } catch (e) {
       setCalcErr(String(e).replace(/^Error:\s*(Error invoking remote method '[^']+':\s*Error:\s*)?/, ""));
     }
@@ -261,8 +283,9 @@ function App() {
 
   function confirmEntry(lv: CalcLevel) {
     const q = toNum(qty);
-    if (q === null || q <= 0 || !Number.isInteger(q)) {
-      alert("수량은 1 이상의 정수로 입력하세요. (예: 1)");
+    // [v0.2.9] 정수 강제 제거 — 토스는 소수주(예: 0.0655주)를 지원한다. 0보다 크기만 하면 보낸다.
+    if (q === null || q <= 0) {
+      alert("수량을 0보다 큰 숫자로 입력하세요. (예: 1 또는 0.5)");
       return;
     }
     const total = lv.entry * q;
@@ -281,12 +304,15 @@ function App() {
   /** [v0.2.8] 조건주문 버튼 → 바로 전송하지 않고 "편집 창"을 연다(값 자유 수정). */
   async function openOcoEditor(lv: CalcLevel) {
     // 보유수량을 조회해 기본값으로. 실패하면 계산기 수량을 쓴다(막지 않음).
+    // [v0.2.9] 창이 열릴 때 토스에서 보유·매도가능 수량을 자동 조회해 채운다.
     let defQty = qty;
     try {
-      const held = await window.kyletool.sellable?.(symbol.trim().toUpperCase());
-      if (held && held > 0) defQty = String(held);
+      const c = await window.kyletool.capacity(symbol.trim().toUpperCase(), curPrice ?? undefined);
+      setCap(c);
+      const auto = c.sellableQty ?? c.heldQty; // 매도가능 우선, 없으면 보유수량
+      if (auto != null && auto > 0) defQty = String(auto);
     } catch {
-      /* 조회 실패해도 진행 */
+      /* 조회 실패해도 진행(직접 입력 가능) */
     }
     setOcoEdit({ tp: String(lv.tp), sl: String(lv.sl), qty: defQty });
   }
@@ -492,7 +518,7 @@ ${msg}
             <div className="form-row">
               <label>
                 종목 코드
-                <input value={symbol} onChange={(e) => setSymbol(e.target.value)} placeholder="예: AAPL" />
+                <input value={symbol} onChange={(e) => { setSymbol(e.target.value); setCap(null); setCurPrice(null); setResult(null); }} placeholder="예: AAPL" />
               </label>
               <button className="btn" disabled={busy} onClick={loadQuote}>
                 시세·환율 조회
@@ -662,12 +688,37 @@ ${msg}
                 수량(주)
                 <input
                   type="text"
-                  inputMode="numeric"
-                  placeholder="예: 1"
+                  inputMode="decimal"
+                  placeholder="예: 1 (소수주 가능)"
                   value={qty}
                   onChange={(e) => isNumericDraft(e.target.value) && setQty(e.target.value)}
                 />
               </label>
+              {/* [v0.2.9] 토스에서 받아온 주문가능 수량 — 참고 표시이며 강제하지 않는다 */}
+              <div className="cap-box">
+                {cap ? (
+                  <>
+                    <span className="hint">
+                      주문가능 최대{" "}
+                      <b>{cap.maxBuyQty != null ? `${cap.maxBuyQty.toLocaleString()}주` : "—"}</b>
+                      {cap.buyingPowerUsd != null && ` (매수가능 $${cap.buyingPowerUsd.toLocaleString()} 기준`}
+                      {cap.commissionRate != null && `, 수수료 ${(cap.commissionRate * 100).toFixed(3)}%`}
+                      {cap.buyingPowerUsd != null && ")"}
+                    </span>
+                    {cap.maxBuyQty != null && cap.maxBuyQty > 0 && (
+                      <button className="mini" onClick={() => setQty(String(cap.maxBuyQty))}>
+                        최대
+                      </button>
+                    )}
+                    <span className="hint">
+                      · 보유 <b>{cap.heldQty != null ? `${cap.heldQty}주` : "—"}</b>
+                      {cap.sellableQty != null && ` (매도가능 ${cap.sellableQty}주)`}
+                    </span>
+                  </>
+                ) : (
+                  <span className="hint">주문가능 수량: [시세·환율 조회]를 누르면 표시됩니다</span>
+                )}
+              </div>
               <button className="btn btn-start" onClick={runCalc}>
                 계산하기
               </button>
@@ -687,7 +738,7 @@ ${msg}
                     <th>진입가</th>
                     <th>익절가 (+{tpPct}%)</th>
                     <th>손절가 (−{slPct}%)</th>
-                    <th>투입액 ({qty || "?"}주)</th>
+                    <th>투입액 ({qty || "?"}주){cap?.maxBuyQty != null && <span className="hint"> / 최대 {cap.maxBuyQty}주</span>}</th>
                     <th>주문 (확인 팝업 후 전송)</th>
                   </tr>
                 </thead>
@@ -991,6 +1042,12 @@ ${msg}
               계산값을 참고로 채워뒀습니다. <b>원하는 값으로 자유롭게 고치세요.</b> 앱은 막지 않고 그대로 토스에
               보냅니다(토스가 거부하면 그 응답을 보여드립니다).
               {curPrice != null && <> 현재가 <b>{usdKrw(curPrice, fx)}</b></>}
+              {cap && (
+                <>
+                  {" · "}보유 <b>{cap.heldQty != null ? `${cap.heldQty}주` : "—"}</b>
+                  {cap.sellableQty != null && <> (매도가능 <b>{cap.sellableQty}주</b>)</>}
+                </>
+              )}
             </p>
             <div className="form-row">
               <label>
@@ -1015,7 +1072,7 @@ ${msg}
                 수량(주)
                 <input
                   type="text"
-                  inputMode="numeric"
+                  inputMode="decimal"
                   value={ocoEdit.qty}
                   onChange={(e) => isNumericDraft(e.target.value) && setOcoEdit({ ...ocoEdit, qty: e.target.value })}
                 />
@@ -1046,12 +1103,14 @@ ${msg}
               <button
                 className="mini"
                 onClick={async () => {
-                  const held = await window.kyletool.sellable?.(symbol.trim().toUpperCase());
-                  if (held && held > 0) setOcoEdit({ ...ocoEdit, qty: String(held) });
-                  else alert("보유수량을 가져오지 못했습니다. 직접 입력하세요.");
+                  const c = await window.kyletool.capacity(symbol.trim().toUpperCase(), curPrice ?? undefined);
+                  setCap(c);
+                  const auto = c.sellableQty ?? c.heldQty;
+                  if (auto != null && auto > 0) setOcoEdit({ ...ocoEdit, qty: String(auto) });
+                  else alert("보유수량이 0이거나 조회하지 못했습니다. 직접 입력하세요.");
                 }}
               >
-                보유수량 불러오기
+                ↻ 보유수량 다시 불러오기
               </button>
             </div>
             <p className="hint">

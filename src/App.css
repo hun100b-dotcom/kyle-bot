@@ -220,3 +220,7 @@ ul.hint { padding-left: 18px; }
 }
 .live-confirm-box span { display: block; font-size: 11.5px; opacity: 0.75; margin-bottom: 3px; }
 .live-confirm-box b { font-size: 19px; }
+
+/* [v0.2.9] 주문가능 수량 안내 박스 */
+.cap-box { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cap-box .hint b { color: var(--tx, #e5e7eb); }

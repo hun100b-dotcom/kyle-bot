@@ -160,6 +160,7 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:fx:manual", (_ev, rate: number) => e.setManualFx(rate));
   ipcMain.handle("tool:buyingPower", () => e.refreshBuyingPower());
   ipcMain.handle("tool:sellable", (_ev, symbol: string) => e.sellableQty(symbol));
+  ipcMain.handle("tool:capacity", (_ev, symbol: string, price?: number) => e.orderCapacity(symbol, price));
   ipcMain.handle("tool:calc", (_ev, req) => e.calc(req));
 
   ipcMain.handle("tool:order:entry", (_ev, spec) => e.placeEntry(spec));

@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld("kyletool", {
   setManualFx: (rate) => ipcRenderer.invoke("tool:fx:manual", rate),
   buyingPower: () => ipcRenderer.invoke("tool:buyingPower"),
   sellable: (symbol) => ipcRenderer.invoke("tool:sellable", symbol),
+  capacity: (symbol, price) => ipcRenderer.invoke("tool:capacity", symbol, price),
 
   // 계산기(Capri매매기법 3종 + 수동)
   calc: (req) => ipcRenderer.invoke("tool:calc", req),

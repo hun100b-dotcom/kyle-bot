@@ -27,6 +27,8 @@ import {
   getAccounts,
   getBuyingPower,
   getSellable,
+  getHoldings,
+  getCommissions,
   getExchangeRate,
   createOrder,
   createConditionalOrder,
@@ -410,6 +412,98 @@ export class ToolEngine extends EventEmitter {
   /** 수동 환율 입력(자동 조회 실패 시 폴백) */
   setManualFx(rate: number): void {
     if (rate > 0) this.fxCache = { rate, atMs: Date.now(), source: "manual" };
+  }
+
+  /**
+   * [v0.2.9] 주문 수량 자동 계산 — 토스 API 값으로 "살 수 있는 최대 수량"과 "보유 수량"을 함께 준다.
+   *
+   * [무엇을 조회하나?]
+   *   - buying-power : 매수 가능 금액(USD)
+   *   - commissions  : 수수료율(미국). 수수료 때문에 1주가 모자라는 사고를 막으려고 반영한다.
+   *   - holdings     : 보유 종목 목록 → 이 종목을 몇 주 갖고 있는지
+   *   - sellable-quantity : 지금 팔 수 있는 수량(보유 중 묶인 물량 제외)
+   *
+   * [수수료 단위 주의] 토스 응답이 시장마다 표기가 다르다(KR 0.00015=비율, US 0.1=퍼센트).
+   *   그래서 "값이 0.01보다 크면 퍼센트 표기"로 보고 100으로 나눈다. 게다가 최대 수량은
+   *   여유(0.5%)를 빼고 내림 계산해, 계산 오차로 주문이 거부되는 일을 막는다.
+   *
+   * [강제하지 않는다] 이 값은 "참고 표시"일 뿐이다. 오너가 더 큰 수량을 넣어도 막지 않는다.
+   */
+  async orderCapacity(symbol: string, price?: number): Promise<{
+    buyingPowerUsd: number | null;
+    commissionRate: number | null;
+    maxBuyQty: number | null;
+    heldQty: number | null;
+    sellableQty: number | null;
+  }> {
+    const sym = symbol.toUpperCase();
+    const out = {
+      buyingPowerUsd: null as number | null,
+      commissionRate: null as number | null,
+      maxBuyQty: null as number | null,
+      heldQty: null as number | null,
+      sellableQty: null as number | null,
+    };
+    try {
+      await this.prepareBackend();
+    } catch {
+      return out; // 접속 준비 실패해도 화면은 "조회 불가"로만 표시
+    }
+
+    // 1) 매수 가능 금액
+    try {
+      const bp = await getBuyingPower("USD");
+      if (Number.isFinite(bp.buyingPowerUsd)) {
+        out.buyingPowerUsd = bp.buyingPowerUsd;
+        this.buyingPowerUsd = bp.buyingPowerUsd;
+      }
+    } catch {
+      /* 무시 */
+    }
+
+    // 2) 수수료율(미국 시장 기준)
+    try {
+      const raw = (await getCommissions()) as unknown;
+      const arr = Array.isArray(raw) ? raw : [];
+      const us = arr.find((x) => (x as Record<string, unknown>)?.marketCountry === "US") as Record<string, unknown> | undefined;
+      const v = us ? Number(us.commissionRate) : NaN;
+      if (Number.isFinite(v)) out.commissionRate = v > 0.01 ? v / 100 : v; // 퍼센트 표기 보정
+    } catch {
+      /* 무시 */
+    }
+
+    // 3) 최대 매수 수량 = 매수가능금액 ÷ (가격 × (1+수수료)) — 여유 0.5% 빼고 내림
+    if (out.buyingPowerUsd !== null && price && price > 0) {
+      const fee = out.commissionRate ?? 0;
+      const perShare = price * (1 + fee);
+      const usable = out.buyingPowerUsd * 0.995; // 안전 여유
+      out.maxBuyQty = Math.max(0, Math.floor(usable / perShare));
+    }
+
+    // 4) 보유 수량(holdings에서 이 종목만)
+    try {
+      const h = (await getHoldings()) as Record<string, unknown>;
+      const items = (h?.items as Array<Record<string, unknown>>) ?? [];
+      const mine = items.find((it) => String(it.symbol).toUpperCase() === sym);
+      if (mine) {
+        const q = Number(mine.quantity);
+        if (Number.isFinite(q)) out.heldQty = q;
+      } else {
+        out.heldQty = 0; // 목록에 없으면 미보유
+      }
+    } catch {
+      /* 무시 */
+    }
+
+    // 5) 매도 가능 수량
+    try {
+      const r = await getSellable(sym);
+      if (Number.isFinite(r.sellableQty)) out.sellableQty = r.sellableQty;
+    } catch {
+      /* 무시 */
+    }
+
+    return out;
   }
 
   /**
