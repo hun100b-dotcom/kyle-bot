@@ -130,6 +130,8 @@ function App() {
   const [formAccount, setFormAccount] = useState("");
   const [savedMsg, setSavedMsg] = useState("");
   const [guardPct, setGuardPct] = useState("15"); // 오입력 방지 한도(사용자 지정)
+  // [v0.2.8] 조건주문 편집 창 — 계산값에 묶이지 않고 오너가 직접 고칠 수 있게 한다.
+  const [ocoEdit, setOcoEdit] = useState<{ tp: string; sl: string; qty: string } | null>(null);
 
   // --- 연습 가격 조작 ---
   const [mockPrice, setMockPrice] = useState("");
@@ -276,10 +278,38 @@ function App() {
     });
   }
 
-  function confirmOco(lv: CalcLevel) {
-    const q = toNum(qty);
-    if (q === null || q <= 0 || !Number.isInteger(q)) {
-      alert("수량은 1 이상의 정수로 입력하세요. (예: 1)");
+  /** [v0.2.8] 조건주문 버튼 → 바로 전송하지 않고 "편집 창"을 연다(값 자유 수정). */
+  async function openOcoEditor(lv: CalcLevel) {
+    // 보유수량을 조회해 기본값으로. 실패하면 계산기 수량을 쓴다(막지 않음).
+    let defQty = qty;
+    try {
+      const held = await window.kyletool.sellable?.(symbol.trim().toUpperCase());
+      if (held && held > 0) defQty = String(held);
+    } catch {
+      /* 조회 실패해도 진행 */
+    }
+    setOcoEdit({ tp: String(lv.tp), sl: String(lv.sl), qty: defQty });
+  }
+
+  /** 편집 창의 값으로 실제 조건주문 요청을 만든다. */
+  function submitOcoFromEditor() {
+    if (!ocoEdit) return;
+    const tpv = toNum(ocoEdit.tp);
+    const slv = toNum(ocoEdit.sl);
+    const q = toNum(ocoEdit.qty);
+    if (tpv === null || slv === null || q === null || q <= 0) {
+      alert("익절가·손절가·수량을 숫자로 입력하세요.");
+      return;
+    }
+    const lv = { level: 1, entry: 0, tp: tpv, sl: slv } as CalcLevel;
+    setOcoEdit(null);
+    confirmOco(lv, q);
+  }
+
+  function confirmOco(lv: CalcLevel, qOverride?: number) {
+    const q = qOverride ?? toNum(qty);
+    if (q === null || q <= 0) {
+      alert("수량을 1 이상으로 입력하세요.");
       return;
     }
     const expire = defaultExpire();
@@ -673,7 +703,7 @@ ${msg}
                         <button className="mini" disabled={status.killSwitch} onClick={() => confirmEntry(lv)}>
                           진입 지정가
                         </button>{" "}
-                        <button className="mini" disabled={status.killSwitch} onClick={() => confirmOco(lv)}>
+                        <button className="mini" disabled={status.killSwitch} onClick={() => openOcoEditor(lv)}>
                           조건주문(익절+손절)
                         </button>
                       </td>
@@ -950,6 +980,94 @@ ${msg}
             </div>
           </section>
         </main>
+      )}
+
+      {/* ===== [v0.2.8] 조건주문 편집 창 — 값은 오너가 자유롭게 고친다 ===== */}
+      {ocoEdit && (
+        <div className="modal-back">
+          <div className="modal">
+            <h2>조건주문(익절+손절) — {symbol.toUpperCase()}</h2>
+            <p className="hint">
+              계산값을 참고로 채워뒀습니다. <b>원하는 값으로 자유롭게 고치세요.</b> 앱은 막지 않고 그대로 토스에
+              보냅니다(토스가 거부하면 그 응답을 보여드립니다).
+              {curPrice != null && <> 현재가 <b>{usdKrw(curPrice, fx)}</b></>}
+            </p>
+            <div className="form-row">
+              <label>
+                익절가 $
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={ocoEdit.tp}
+                  onChange={(e) => isNumericDraft(e.target.value) && setOcoEdit({ ...ocoEdit, tp: e.target.value })}
+                />
+              </label>
+              <label>
+                손절가 $
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={ocoEdit.sl}
+                  onChange={(e) => isNumericDraft(e.target.value) && setOcoEdit({ ...ocoEdit, sl: e.target.value })}
+                />
+              </label>
+              <label>
+                수량(주)
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={ocoEdit.qty}
+                  onChange={(e) => isNumericDraft(e.target.value) && setOcoEdit({ ...ocoEdit, qty: e.target.value })}
+                />
+              </label>
+            </div>
+            <div className="form-row">
+              <button
+                className="mini"
+                onClick={async () => {
+                  // [현재가 기준으로 다시 계산] 지금 시세를 다시 읽어 익절/손절을 현재가 기준으로 잡는다.
+                  try {
+                    const cur = await window.kyletool.quote(symbol.trim().toUpperCase());
+                    setCurPrice(cur);
+                    const t = toNum(tpPct) ?? 2;
+                    const l = toNum(slPct) ?? 10;
+                    setOcoEdit({
+                      ...ocoEdit,
+                      tp: String(roundPrice(cur * (1 + t / 100))),
+                      sl: String(roundPrice(cur * (1 - l / 100))),
+                    });
+                  } catch (e) {
+                    alert(`시세를 가져오지 못했습니다: ${String(e)}`);
+                  }
+                }}
+              >
+                ↻ 현재가 기준으로 다시 계산 (익절 +{tpPct}% / 손절 −{slPct}%)
+              </button>
+              <button
+                className="mini"
+                onClick={async () => {
+                  const held = await window.kyletool.sellable?.(symbol.trim().toUpperCase());
+                  if (held && held > 0) setOcoEdit({ ...ocoEdit, qty: String(held) });
+                  else alert("보유수량을 가져오지 못했습니다. 직접 입력하세요.");
+                }}
+              >
+                보유수량 불러오기
+              </button>
+            </div>
+            <p className="hint">
+              💡 토스 규칙: <b>익절가 &gt; 현재가 &gt; 손절가</b> 여야 등록됩니다. 어긋나면 토스가 거부할 수 있어요
+              (앱은 막지 않고 보냅니다).
+            </p>
+            <div className="form-row">
+              <button className="btn btn-start" disabled={busy} onClick={submitOcoFromEditor}>
+                조건주문 보내기
+              </button>
+              <button className="btn" disabled={busy} onClick={() => setOcoEdit(null)}>
+                취소
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ===== 자동 업데이트 팝업 ===== */}

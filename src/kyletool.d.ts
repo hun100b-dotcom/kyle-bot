@@ -84,6 +84,7 @@ interface KyletoolBridge {
   fx(): Promise<{ rate: number; source: "toss" | "manual" } | null>;
   setManualFx(rate: number): Promise<void>;
   buyingPower(): Promise<number | null>;
+  sellable(symbol: string): Promise<number | null>;
 
   calc(req: {
     technique: Technique;

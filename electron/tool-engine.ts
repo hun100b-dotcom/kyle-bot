@@ -26,6 +26,7 @@ import {
   getPrice,
   getAccounts,
   getBuyingPower,
+  getSellable,
   getExchangeRate,
   createOrder,
   createConditionalOrder,
@@ -411,6 +412,20 @@ export class ToolEngine extends EventEmitter {
     if (rate > 0) this.fxCache = { rate, atMs: Date.now(), source: "manual" };
   }
 
+  /**
+   * [v0.2.8] 보유(매도 가능) 수량 조회 — 조건주문 수량 기본값으로 쓴다.
+   *   계산기의 "살 수량"과 "이미 보유한 수량"은 다르므로, 조건주문은 보유수량이 기본이어야 한다.
+   */
+  async sellableQty(symbol: string): Promise<number | null> {
+    try {
+      await this.prepareBackend();
+      const r = await getSellable(symbol.toUpperCase());
+      return Number.isFinite(r.sellableQty) ? r.sellableQty : null;
+    } catch {
+      return null; // 조회 실패해도 막지 않는다(사용자가 직접 입력)
+    }
+  }
+
   async refreshBuyingPower(): Promise<number | null> {
     try {
       await this.prepareBackend();
@@ -493,11 +508,13 @@ export class ToolEngine extends EventEmitter {
     // [현재가 방어] cur가 0/음수/NaN이면 아래 편차 계산이 0으로 나누기(Infinity)나
     //   NaN이 되어 오차단·오통과가 생긴다(프리마켓 무거래 등). 먼저 막는다.
     if (!Number.isFinite(cur) || cur <= 0) {
-      throw new Error("현재가를 확인할 수 없습니다(무거래 시간대이거나 종목코드 확인). 잠시 후 다시 시도하세요.");
+      // [막지 않는다] 현재가를 못 가져와도 주문은 보낼 수 있다(가격은 사용자가 지정). 가드만 생략.
+      this.addJournal({ kind: "info", symbol, summary: "⚠️ 참고: 현재가 확인 실패(오입력 방지 검사 생략). 주문은 그대로 전송합니다." });
+      return 0;
     }
     // [오입력 방지] 기본은 꺼져 있어 어떤 가격이든 통과한다(오너 결정).
     //   설정 탭에서 켠 경우에만, 사용자가 정한 임계값으로 경고 차단한다.
-    if (this.priceGuardEnabled) {
+    if (this.priceGuardEnabled && cur > 0) {
       for (const p of entryPrices) {
         const dev = Math.abs((p - cur) / cur) * 100;
         if (dev > this.priceGuardPct) {
@@ -537,19 +554,17 @@ export class ToolEngine extends EventEmitter {
       available = bp.buyingPowerUsd;
       this.buyingPowerUsd = available; // 화면 표시용 캐시도 갱신
     } catch {
-      // 잔고 조회 자체가 실패하면 "확인 불가"이므로 안전하게 막는다.
-      throw new Error("매수 가능 금액을 확인하지 못했습니다. 잠시 후 다시 시도하세요.");
+      // [막지 않는다] 참고용 검사일 뿐이므로 조회 실패로 주문을 막지 않는다.
+      return;
     }
-    if (!Number.isFinite(available)) {
-      throw new Error("매수 가능 금액을 확인하지 못했습니다(응답 이상). 잠시 후 다시 시도하세요.");
-    }
+    if (!Number.isFinite(available)) return; // 응답 이상으로도 막지 않는다.
     if (need > available) {
-      throw new Error(
-        `주문 금액이 매수 가능 금액을 초과합니다.\n` +
-          `· 필요: $${need.toFixed(2)} (${price} × ${quantity}주)\n` +
-          `· 가능: $${available.toFixed(2)}\n` +
-          `수량을 줄이거나 예수금을 확인하세요.`,
-      );
+      // [v0.2.8 — 막지 않는다] 잔고 판단도 토스가 한다. 경고만 남기고 그대로 전송한다.
+      this.addJournal({
+        kind: "info",
+        symbol: "-",
+        summary: `⚠️ 참고: 필요 $${need.toFixed(2)} > 매수가능 $${available.toFixed(2)} — 토스가 거부할 수 있습니다. 그래도 전송합니다.`,
+      });
     }
   }
 
@@ -614,7 +629,13 @@ export class ToolEngine extends EventEmitter {
     const cur = await this.orderGate(symbol); // 익절/손절 감시가는 ±검사 대신 아래 OCO 규칙으로 검증
     // 스펙 규칙 사전 검증(서버 400 전에 친절한 한국어로)
     if (!(spec.tpTrigger > cur && cur > spec.slTrigger)) {
-      throw new Error(`OCO 규칙: 익절 감시가($${spec.tpTrigger}) > 현재가($${cur}) > 손절 감시가($${spec.slTrigger}) 여야 합니다.`);
+      // [v0.2.8 — 막지 않는다] 토스 스펙상 OCO는 "익절>현재가>손절"을 요구하지만 그 판단은 토스가 한다.
+      //   우리가 미리 막으면 시세가 움직이는 순간 오너가 기회를 놓친다. 경고만 남기고 그대로 전송.
+      this.addJournal({
+        kind: "info",
+        symbol,
+        summary: `⚠️ 참고: 토스 OCO 규칙(익절 $${spec.tpTrigger} > 현재가 $${cur} > 손절 $${spec.slTrigger})과 어긋납니다. 그래도 전송합니다 — 거부되면 토스 응답을 보여드립니다.`,
+      });
     }
 
     if (this.isDryRun()) {
@@ -666,7 +687,9 @@ export class ToolEngine extends EventEmitter {
   async cancelNormalOrder(orderId: string): Promise<JournalEntry> {
     if (this.killSwitch) throw new Error("킬 스위치가 켜져 있습니다.");
     await this.prepareBackend(); // 접속 상태(주소/모드) 단일 진실 소스 유지
-    if (isOrderFrozen(DateTime.now())) throw new Error("마감 1분 전 취소 불가 구간입니다(토스 제약).");
+    if (isOrderFrozen(DateTime.now())) {
+      this.addJournal({ kind: "info", symbol: "-", summary: "⚠️ 참고: 마감 1분 전은 토스가 취소를 거부할 수 있습니다. 그래도 시도합니다." });
+    }
     if (this.isDryRun()) {
       return this.addJournal({ kind: "dryrun", symbol: "-", summary: `[드라이런] 주문 취소 ${orderId} (실제 전송 안 함)` });
     }
