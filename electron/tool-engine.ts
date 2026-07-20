@@ -469,7 +469,16 @@ export class ToolEngine extends EventEmitter {
       const dev = Math.abs((p - cur) / cur) * 100;
       if (dev > 15) {
         throw new Error(
-          `가격 이상 감지: 진입가 $${p} 는 현재가 $${cur} 대비 ${dev.toFixed(1)}% 벗어남(±15% 제한). 오타인지 확인하세요.`,
+          `[안전장치: 가격 이상 감지] 주문을 보내지 않았습니다.
+` +
+            `· 입력한 진입가: $${p}
+` +
+            `· 현재가: $${cur}
+` +
+            `· 차이: ${dev.toFixed(1)}% (허용 한도 ±15%)
+
+` +
+            `진입가가 현재가에서 너무 멀어 오타로 판단했습니다. 진입가를 현재가 근처로 다시 입력하세요.`,
         );
       }
     }

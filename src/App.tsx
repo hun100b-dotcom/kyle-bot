@@ -31,6 +31,31 @@ const TECH_LABEL: Record<string, string> = {
   manual: "수동 입력",
 };
 
+/**
+ * [v0.2.6 입력 버그 수정] 숫자 입력 공통 처리.
+ *
+ * [무엇이 문제였나?]
+ *  1) <input type="number"> 는 오른쪽에 위아래 화살표(스피너)를 띄우는데, 필드에 포커스를 둔 채
+ *     마우스 휠을 굴리면 step 단위로 값이 제멋대로 바뀐다. step=0.0001 이었으므로 휠 4번이면
+ *     0.0004 가 입력된다 — 오너 화면에 찍힌 그 값이다.
+ *  2) 매 키입력마다 Number(...)로 바꿔 저장하면 "11." 같은 "입력 도중" 값이 11 로 뭉개져
+ *     소수점을 찍을 수 없고, 다 지우면 0/1 이 박혀 지워지지도 않는다.
+ *
+ * [해결] 입력 중에는 "문자열 그대로" 담아두고(변환·보정 금지), 계산/주문 시점에만 숫자로 바꾼다.
+ *   입력창은 type="text" + inputMode="decimal" 이라 스피너가 없고 휠로 값이 변하지 않는다.
+ */
+function isNumericDraft(v: string): boolean {
+  // 빈칸, "-", "1.", ".5", "11.33" 처럼 "입력 도중" 형태를 모두 허용한다(마지막에 검증).
+  return v === "" || /^-?\d*\.?\d*$/.test(v);
+}
+
+/** 문자열 입력값 → 숫자. 유효하지 않으면 null(계산/주문에서 안내 문구로 처리). */
+function toNum(v: string): number | null {
+  if (v.trim() === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 /** 가격을 유효 틱으로 절삭($1↑ 2자리 / $1↓ 4자리). lib/calc.ts와 동일 규칙. */
 function roundPrice(p: number): number {
   const s = p >= 1 ? 100 : 10000;
@@ -69,9 +94,9 @@ function App() {
   const [symbol, setSymbol] = useState("AAPL");
   const [curPrice, setCurPrice] = useState<number | null>(null);
   const [tech, setTech] = useState<Technique>("split3");
-  const [tpPct, setTpPct] = useState(2);
-  const [slPct, setSlPct] = useState(10);
-  const [qty, setQty] = useState(1);
+  const [tpPct, setTpPct] = useState("2"); // 문자열 보관(입력 중 뭉개짐 방지)
+  const [slPct, setSlPct] = useState("10");
+  const [qty, setQty] = useState("1");
   // 기법별 재료
   const [baseClose, setBaseClose] = useState("");
   const [ema200, setEma200] = useState("");
@@ -200,11 +225,22 @@ function App() {
       setCalcErr("캔들 기법은 '전봉이 양봉'일 때만 씁니다. 확인 체크를 해 주세요.");
       return;
     }
+    // [입력 검증] 계산 시점에만 숫자로 바꾸고, 비었거나 이상하면 한국어로 안내한다.
+    const tpNum = toNum(tpPct);
+    const slNum = toNum(slPct);
+    if (tpNum === null || tpNum <= 0) {
+      setCalcErr("익절 %를 0보다 큰 숫자로 입력하세요. (예: 2)");
+      return;
+    }
+    if (slNum === null || slNum <= 0) {
+      setCalcErr("손절 %를 0보다 큰 숫자로 입력하세요. (예: 10)");
+      return;
+    }
     try {
       const r = await window.kyletool.calc({
         technique: tech,
-        tpPct,
-        slPct,
+        tpPct: tpNum,
+        slPct: slNum,
         baseClose: baseClose ? Number(baseClose) : undefined,
         ema200: ema200 ? Number(ema200) : undefined,
         wallPrice: wallPrice ? Number(wallPrice) : undefined,
@@ -220,20 +256,30 @@ function App() {
   // --- 주문 팝업 만들기(전송은 팝업의 확인 버튼에서만) ---
 
   function confirmEntry(lv: CalcLevel) {
-    const total = lv.entry * qty;
+    const q = toNum(qty);
+    if (q === null || q <= 0 || !Number.isInteger(q)) {
+      alert("수량은 1 이상의 정수로 입력하세요. (예: 1)");
+      return;
+    }
+    const total = lv.entry * q;
     setPending({
       kind: "entry",
       title: `진입 지정가 매수 — ${symbol.toUpperCase()}`,
       lines: [
-        `진입가 ${usdKrw(lv.entry, fx)} × ${qty}주`,
+        `진입가 ${usdKrw(lv.entry, fx)} × ${q}주`,
         `예상 투입액 ${usdKrw(total, fx)}`,
         `주문 유효기간: 당일(DAY) — 미체결분은 자동 취소`,
       ],
-      send: () => window.kyletool.placeEntry({ symbol, price: lv.entry, quantity: qty }),
+      send: () => window.kyletool.placeEntry({ symbol, price: lv.entry, quantity: q }),
     });
   }
 
   function confirmOco(lv: CalcLevel) {
+    const q = toNum(qty);
+    if (q === null || q <= 0 || !Number.isInteger(q)) {
+      alert("수량은 1 이상의 정수로 입력하세요. (예: 1)");
+      return;
+    }
     const expire = defaultExpire();
     // 손절 지정가(orderPrice)는 감시가(trigger)보다 1% 아래로 둔다. 감시가=지정가면
     //   급락 시 지정가를 관통해 미체결될 수 있어, 아래로 벌려 즉시 체결 확률을 높인다.
@@ -242,7 +288,7 @@ function App() {
       kind: "oco",
       title: `조건주문(익절+손절 동시) 등록 — ${symbol.toUpperCase()} (보유 중일 때)`,
       lines: [
-        `수량 ${qty}주 / 익절 감시가 ${usdKrw(lv.tp, fx)} / 손절 감시가 ${usdKrw(lv.sl, fx)}`,
+        `수량 ${q}주 / 익절 감시가 ${usdKrw(lv.tp, fx)} / 손절 감시가 ${usdKrw(lv.sl, fx)}`,
         `손절 지정가 ${usdKrw(slLimit, fx)} (감시가 1% 아래 — 급락 시 체결 확보)`,
         `한쪽이 발동되면 다른 쪽은 자동 취소됩니다 (토스 서버가 감시 — 앱 꺼도 작동)`,
         `만료일 ${expire} / 규칙: 익절 감시가 > 현재가 > 손절 감시가`,
@@ -250,7 +296,7 @@ function App() {
       send: () =>
         window.kyletool.placeOco({
           symbol,
-          quantity: qty,
+          quantity: q,
           tpTrigger: lv.tp,
           tpPrice: lv.tp,
           slTrigger: lv.sl,
@@ -268,7 +314,12 @@ function App() {
       setPending(null);
       if (tab === "orders") await loadOrders();
     } catch (e) {
-      alert(`전송 실패: ${String(e).replace(/^Error:\s*(Error invoking remote method '[^']+':\s*Error:\s*)?/, "")}`);
+      const msg = String(e).replace(/^Error:\s*(Error invoking remote method '[^']+':\s*Error:\s*)?/, "");
+      alert(`주문이 전송되지 않았습니다.
+
+${msg}
+
+(위 사유가 해결되면 다시 시도하세요. 돈은 나가지 않았습니다.)`);
     } finally {
       setBusy(false);
     }
@@ -408,7 +459,8 @@ function App() {
               {fxFailed && (
                 <>
                   <input
-                    type="number"
+                    type="text"
+                    inputMode="decimal"
                     placeholder="환율 수동 입력 (예: 1390)"
                     value={manualFx}
                     onChange={(e) => setManualFxInput(e.target.value)}
@@ -423,7 +475,7 @@ function App() {
             {isMock && (
               <div className="form-row mock-box">
                 <span className="hint">🎮 연습: 가짜 서버 현재가 바꾸기</span>
-                <input type="number" step="0.01" placeholder="새 가격" value={mockPrice} onChange={(e) => setMockPrice(e.target.value)} />
+                <input type="text" inputMode="decimal" placeholder="새 가격" value={mockPrice} onChange={(e) => isNumericDraft(e.target.value) && setMockPrice(e.target.value)} />
                 <button
                   className="mini"
                   onClick={async () => {
@@ -462,11 +514,23 @@ function App() {
               <div className="form-row">
                 <label>
                   전봉 종가 $
-                  <input type="number" step="0.0001" value={baseClose} onChange={(e) => setBaseClose(e.target.value)} />
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    placeholder="예: 11.33"
+                    value={baseClose}
+                    onChange={(e) => isNumericDraft(e.target.value) && setBaseClose(e.target.value)}
+                  />
                 </label>
                 <label>
                   EMA200 $
-                  <input type="number" step="0.0001" value={ema200} onChange={(e) => setEma200(e.target.value)} />
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    placeholder="예: 11.33"
+                    value={ema200}
+                    onChange={(e) => isNumericDraft(e.target.value) && setEma200(e.target.value)}
+                  />
                 </label>
                 <span className="hint">전봉종가~EMA200을 3등분해 1·2·3분할 산출 (전봉종가 &gt; EMA200 필수)</span>
               </div>
@@ -475,7 +539,13 @@ function App() {
               <div className="form-row">
                 <label>
                   매수벽 가격 $
-                  <input type="number" step="0.0001" value={wallPrice} onChange={(e) => setWallPrice(e.target.value)} />
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    placeholder="예: 11.33"
+                    value={wallPrice}
+                    onChange={(e) => isNumericDraft(e.target.value) && setWallPrice(e.target.value)}
+                  />
                 </label>
                 <span className="hint">진입 = 벽 + 1틱. 벽인지 판단은 사람 몫(정량 기준 미확정)</span>
               </div>
@@ -484,7 +554,13 @@ function App() {
               <div className="form-row">
                 <label>
                   현재봉 시가 $
-                  <input type="number" step="0.0001" value={barOpen} onChange={(e) => setBarOpen(e.target.value)} />
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    placeholder="예: 11.33"
+                    value={barOpen}
+                    onChange={(e) => isNumericDraft(e.target.value) && setBarOpen(e.target.value)}
+                  />
                 </label>
                 <label className="radio">
                   <input type="checkbox" checked={candleYang} onChange={(e) => setCandleYang(e.target.checked)} />
@@ -496,7 +572,13 @@ function App() {
               <div className="form-row">
                 <label>
                   진입가 $
-                  <input type="number" step="0.0001" value={manualEntry} onChange={(e) => setManualEntry(e.target.value)} />
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    placeholder="예: 11.33"
+                    value={manualEntry}
+                    onChange={(e) => isNumericDraft(e.target.value) && setManualEntry(e.target.value)}
+                  />
                 </label>
               </div>
             )}
@@ -504,15 +586,33 @@ function App() {
             <div className="form-row">
               <label>
                 익절 %
-                <input type="number" step="0.1" value={tpPct} onChange={(e) => setTpPct(Number(e.target.value))} />
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  placeholder="예: 2"
+                  value={tpPct}
+                  onChange={(e) => isNumericDraft(e.target.value) && setTpPct(e.target.value)}
+                />
               </label>
               <label>
                 손절 %
-                <input type="number" step="0.1" value={slPct} onChange={(e) => setSlPct(Number(e.target.value))} />
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  placeholder="예: 10"
+                  value={slPct}
+                  onChange={(e) => isNumericDraft(e.target.value) && setSlPct(e.target.value)}
+                />
               </label>
               <label>
                 수량(주)
-                <input type="number" min="1" value={qty} onChange={(e) => setQty(Math.max(1, Number(e.target.value)))} />
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  placeholder="예: 1"
+                  value={qty}
+                  onChange={(e) => isNumericDraft(e.target.value) && setQty(e.target.value)}
+                />
               </label>
               <button className="btn btn-start" onClick={runCalc}>
                 계산하기
@@ -533,7 +633,7 @@ function App() {
                     <th>진입가</th>
                     <th>익절가 (+{tpPct}%)</th>
                     <th>손절가 (−{slPct}%)</th>
-                    <th>투입액 ({qty}주)</th>
+                    <th>투입액 ({qty || "?"}주)</th>
                     <th>주문 (확인 팝업 후 전송)</th>
                   </tr>
                 </thead>
@@ -544,7 +644,7 @@ function App() {
                       <td>{usdKrw(lv.entry, fx)}</td>
                       <td className="ok">{usdKrw(lv.tp, fx)}</td>
                       <td className="danger">{usdKrw(lv.sl, fx)}</td>
-                      <td>{usdKrw(lv.entry * qty, fx)}</td>
+                      <td>{usdKrw(lv.entry * (toNum(qty) ?? 0), fx)}</td>
                       <td>
                         <button className="mini" disabled={status.killSwitch} onClick={() => confirmEntry(lv)}>
                           진입 지정가
@@ -847,7 +947,7 @@ function App() {
                   </div>
                   <div>
                     <span>수량</span>
-                    <b>{qty}주</b>
+                    <b>{qty || "?"}주</b>
                   </div>
                 </div>
                 <p className="hint">아래 내용을 다시 확인한 뒤 전송하세요. 취소하려면 [취소]를 누르세요.</p>
