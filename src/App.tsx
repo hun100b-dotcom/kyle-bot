@@ -323,9 +323,13 @@ function App() {
           <span className={`badge ${isMock ? "badge-mock" : "badge-live"}`}>
             {isMock ? "연습 모드 (가짜 서버)" : "실서버"}
           </span>
-          {status.dryRun && (
-            <span className="badge badge-dry" title="소액(1주) 테스트를 사람이 통과시키기 전까지 실주문은 전송되지 않습니다">
-              주문 잠금 (드라이런)
+          {status.dryRun ? (
+            <span className="badge badge-dry" title="실주문 잠금 상태입니다. 주문 버튼을 눌러도 모의 기록만 남습니다">
+              🔒 주문 잠금 (드라이런)
+            </span>
+          ) : (
+            <span className="badge badge-liveorder" title="실제 돈으로 주문이 전송되는 상태입니다">
+              🔴 실주문 활성 — 실제 체결됩니다
             </span>
           )}
           <span className="badge">{SESSION_LABEL[status.session]} · 3개 장 모두 주문 가능</span>
@@ -334,9 +338,23 @@ function App() {
         <div className="controls">
           <button
             className={`btn btn-kill ${status.killSwitch ? "kill-on" : ""}`}
-            title="켜면 모든 주문 버튼이 잠깁니다(계산·조회는 가능)"
+            title="켜면 신규 주문이 잠기고, 미체결 주문·조건주문을 전량 취소합니다(계산·조회는 가능)"
             onClick={async () => {
-              await window.kyletool.setKillSwitch(!status.killSwitch);
+              const turningOn = !status.killSwitch;
+              if (
+                turningOn &&
+                !window.confirm(
+                  ["킬 스위치를 켭니다.", "", "신규 주문이 잠기고, 미체결 주문·조건주문을 전량 취소합니다.", "계속할까요?"].join("\n"),
+                )
+              )
+                return;
+              setBusy(true);
+              try {
+                await window.kyletool.setKillSwitch(turningOn);
+                if (tab === "orders") await loadOrders();
+              } finally {
+                setBusy(false);
+              }
               refreshStatus();
             }}
           >
@@ -686,6 +704,39 @@ function App() {
               </label>
             </div>
             <div className="settings-block">
+              <h3>실주문 활성화 {settings.liveOrdersEnabled ? "🔴 켜짐" : "🔒 꺼짐(안전)"}</h3>
+              <p className="hint">
+                꺼져 있으면 주문 버튼을 눌러도 <b>실제 주문이 나가지 않고 모의 기록만</b> 남습니다.
+                켜면 <b>실제 돈으로 주문이 전송</b>됩니다. 연습 모드에서는 이 설정과 무관하게 가짜 서버로만 갑니다.
+              </p>
+              <label className="radio">
+                <input
+                  type="checkbox"
+                  checked={settings.liveOrdersEnabled}
+                  onChange={async (e) => {
+                    const on = e.target.checked;
+                    if (on) {
+                      const ok = window.confirm(
+                        [
+                          "⚠️ 실주문을 활성화합니다.",
+                          "",
+                          "지금부터 주문 버튼을 누르면 실제 돈으로 주문이 전송되어 체결될 수 있습니다.",
+                          "",
+                          "계속할까요?",
+                        ].join("\n"),
+                      );
+                      if (!ok) return;
+                    }
+                    await window.kyletool.setLiveOrders(on);
+                    setSettings(await window.kyletool.getSettings());
+                    await refreshStatus();
+                  }}
+                />
+                <b>실제 주문 전송 허용</b> — 켜기 전에 경고 확인을 거칩니다
+              </label>
+            </div>
+
+            <div className="settings-block">
               <h3>토스 API 키 {settings.hasClientId && settings.hasClientSecret ? "✅ 저장됨" : "❌ 미등록"}</h3>
               <p className="hint">키는 이 컴퓨터의 앱 데이터 폴더(.env, 본인만 읽기)에만 저장되고 화면에 다시 표시되지 않습니다.</p>
               <div className="form-col">
@@ -785,9 +836,22 @@ function App() {
                 🔒 현재 <b>주문 잠금(드라이런)</b> — 아래 버튼을 눌러도 실제 주문은 나가지 않고 모의 기록만 남습니다.
               </p>
             ) : (
-              <p className="danger">
-                <b>⚠ 실제 주문이 전송됩니다.</b> 가격·수량을 다시 확인하세요.
-              </p>
+              <div className="live-confirm">
+                <p className="danger" style={{ fontSize: 15, fontWeight: 800 }}>
+                  ⚠ 실제 돈으로 주문이 전송됩니다
+                </p>
+                <div className="live-confirm-box">
+                  <div>
+                    <span>종목</span>
+                    <b>{symbol.toUpperCase()}</b>
+                  </div>
+                  <div>
+                    <span>수량</span>
+                    <b>{qty}주</b>
+                  </div>
+                </div>
+                <p className="hint">아래 내용을 다시 확인한 뒤 전송하세요. 취소하려면 [취소]를 누르세요.</p>
+              </div>
             )}
             <div className="form-row">
               <button className="btn btn-start" disabled={busy} onClick={sendPending}>

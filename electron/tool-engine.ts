@@ -76,7 +76,8 @@ export interface CalcResult {
 /** 도구 상태(화면 표시용) */
 export interface ToolStatus {
   mode: "mock" | "live";
-  dryRun: boolean; //        실서버 주문 잠금 여부(이 버전은 live=항상 true)
+  dryRun: boolean;
+  liveOrdersEnabled: boolean; // 실주문 활성화 토글 상태(빨간 배지 표시용)
   killSwitch: boolean;
   session: Session; //       지금 장 세션(정보 표시용 — 주문을 막지는 않음)
   orderFrozen: boolean; //   마감 1분 전 정정·취소 불가 구간 경고
@@ -118,6 +119,8 @@ export class ToolEngine extends EventEmitter {
 
   private mode: "mock" | "live" = "mock";
   private killSwitch = false;
+  /** [v0.2.5] 실주문 활성화 스위치. 기본 false(잠금) — 설정 탭에서 사용자가 명시적으로 켠다. */
+  private liveOrdersEnabled = false;
   private mock: ReturnType<typeof createMockTossServer> | null = null;
   private mockPort = 0;
 
@@ -162,6 +165,7 @@ export class ToolEngine extends EventEmitter {
       hasClientId: !!process.env.TOSS_CLIENT_ID,
       hasClientSecret: !!process.env.TOSS_CLIENT_SECRET,
       account: process.env.TOSS_ACCOUNT ?? "",
+      liveOrdersEnabled: this.liveOrdersEnabled, // 실주문 활성화 여부(설정 탭 토글 상태)
     };
   }
 
@@ -283,9 +287,63 @@ export class ToolEngine extends EventEmitter {
   // --------------------------------------------------------------------------
   // 킬 스위치: 모든 "주문" 버튼 잠금(조회·계산은 허용)
   // --------------------------------------------------------------------------
-  setKillSwitch(on: boolean): void {
+  /**
+   * setKillSwitch — 비상 정지.
+   *   [v0.2.5 실효화] 예전엔 "신규 주문 차단"만 했고 이미 걸린 미체결 주문은 그대로 남았다.
+   *   이제 켜는 순간 **미체결 주문·조건주문을 실제로 전량 취소**한다(실주문 모드일 때).
+   *   취소 자체가 실패해도 신규 차단은 유지되고, 무엇이 실패했는지 기록에 남긴다.
+   */
+  async setKillSwitch(on: boolean): Promise<void> {
     this.killSwitch = on;
-    this.addJournal({ kind: "info", symbol: "-", summary: on ? "🔴 킬 스위치 ON — 주문 버튼 전체 잠금" : "🟢 킬 스위치 OFF" });
+    this.addJournal({ kind: "info", symbol: "-", summary: on ? "🔴 킬 스위치 ON — 신규 주문 전체 잠금" : "🟢 킬 스위치 OFF" });
+    if (!on) return;
+
+    // 켜졌을 때: 살아있는 주문을 거둬들인다(읽기+취소). 드라이런이면 기록만.
+    try {
+      await this.prepareBackend();
+      const [open, conds] = await Promise.all([this.openOrders(), this.conditionals()]);
+      const dry = this.isDryRun();
+      let done = 0;
+      for (const o of open) {
+        try {
+          if (!dry) await cancelOrder(o.tossOrderId);
+          done++;
+        } catch (e) {
+          this.addJournal({ kind: "info", symbol: o.symbol ?? "-", summary: `⚠️ 주문 취소 실패 ${o.tossOrderId}: ${String(e).slice(0, 80)}` });
+        }
+      }
+      for (const c of conds) {
+        try {
+          if (!dry) await cancelConditionalOrder(c.conditionalOrderId);
+          done++;
+        } catch (e) {
+          this.addJournal({ kind: "info", symbol: "-", summary: `⚠️ 조건주문 취소 실패 ${c.conditionalOrderId}: ${String(e).slice(0, 80)}` });
+        }
+      }
+      this.addJournal({
+        kind: dry ? "dryrun" : "cancel",
+        symbol: "-",
+        summary: `${dry ? "[드라이런] " : ""}킬 스위치: 미체결 ${open.length}건 + 조건주문 ${conds.length}건 → ${done}건 취소${dry ? " 예정(실제 전송 안 함)" : " 완료"}`,
+      });
+    } catch (e) {
+      this.addJournal({ kind: "info", symbol: "-", summary: `⚠️ 킬 스위치 취소 처리 중 오류(신규 차단은 유지됨): ${String(e).slice(0, 100)}` });
+    }
+  }
+
+  /**
+   * setLiveOrders — 실주문 활성화 토글(해금). 기본은 꺼짐(잠금).
+   *   [안전 설계] 켜는 행위는 반드시 사람이 화면에서 경고를 확인한 뒤에만 일어난다(UI가 보장).
+   *   여기서는 상태만 바꾸고, 무엇이 바뀌었는지 기록에 크게 남긴다.
+   */
+  setLiveOrders(on: boolean): void {
+    this.liveOrdersEnabled = on;
+    this.addJournal({
+      kind: "info",
+      symbol: "-",
+      summary: on
+        ? "🔴🔴 실주문 활성화됨 — 이제 주문 버튼을 누르면 실제 돈으로 주문이 전송됩니다"
+        : "🔒 실주문 잠금(드라이런)으로 되돌림 — 주문은 모의 기록만 남습니다",
+    });
   }
 
   // --------------------------------------------------------------------------
@@ -418,15 +476,62 @@ export class ToolEngine extends EventEmitter {
     return cur;
   }
 
-  /** 이 주문이 실제로 나가도 되는가? 실서버 모드는 무조건 드라이런(잠금). */
+  /**
+   * assertAffordable — [B4 수정] 매수 주문이 "매수 가능 금액"을 넘지 않는지 실제로 막는다.
+   *
+   * [왜 필요했나?] 사전검증 함수(preflightBuyCheck)는 있었지만 주문 버튼이 부르지 않아
+   *   무용지물이었다(pre-flight에서 발견). 돈이 모자란 주문은 토스가 거부하는데, 그 전에
+   *   우리가 먼저 한국어로 막아야 사용자가 원인을 안다.
+   *
+   * [연습 모드는 건너뜀] 가짜 서버의 잔고는 의미가 없으므로 실서버에서만 검사한다.
+   */
+  private async assertAffordable(price: number, quantity: number): Promise<void> {
+    if (this.mode !== "live") return;
+    const need = price * quantity;
+    let available: number;
+    try {
+      const bp = await getBuyingPower("USD");
+      available = bp.buyingPowerUsd;
+      this.buyingPowerUsd = available; // 화면 표시용 캐시도 갱신
+    } catch {
+      // 잔고 조회 자체가 실패하면 "확인 불가"이므로 안전하게 막는다.
+      throw new Error("매수 가능 금액을 확인하지 못했습니다. 잠시 후 다시 시도하세요.");
+    }
+    if (!Number.isFinite(available)) {
+      throw new Error("매수 가능 금액을 확인하지 못했습니다(응답 이상). 잠시 후 다시 시도하세요.");
+    }
+    if (need > available) {
+      throw new Error(
+        `주문 금액이 매수 가능 금액을 초과합니다.\n` +
+          `· 필요: $${need.toFixed(2)} (${price} × ${quantity}주)\n` +
+          `· 가능: $${available.toFixed(2)}\n` +
+          `수량을 줄이거나 예수금을 확인하세요.`,
+      );
+    }
+  }
+
+  /**
+   * 이 주문이 실제로 나가도 되는가?
+   *
+   * [해금 구조 — v0.2.5]
+   *   예전엔 "실서버 모드면 무조건 드라이런"이라 코드를 다시 빌드해야만 실주문이 가능했다.
+   *   이제는 사용자가 설정 탭에서 "실주문 활성화"를 명시적으로 켰을 때만(liveOrdersEnabled)
+   *   실주문이 나간다. 기본값은 꺼짐(잠금)이라, 실수로 돈이 나갈 일은 없다.
+   *   - 연습 모드: 항상 실제 왕복(가짜 서버라 돈과 무관)
+   *   - 실서버 모드 + 토글 OFF: 드라이런(모의 기록만)  ← 기본
+   *   - 실서버 모드 + 토글 ON : 진짜 주문 전송
+   */
   private isDryRun(): boolean {
-    return this.mode === "live"; // 연습 모드(가짜 서버)만 실제 API 왕복(돈과 무관)
+    if (this.mode !== "live") return false; // 연습 모드는 가짜 서버라 실제 왕복
+    return !this.liveOrdersEnabled; // 실서버는 토글을 켠 경우에만 실주문
   }
 
   /** ① 진입: 일반 지정가 매수 */
   async placeEntry(spec: { symbol: string; price: number; quantity: number }): Promise<JournalEntry> {
     const symbol = spec.symbol.toUpperCase();
     await this.orderGate(symbol, [spec.price]);
+    // [B4] 매수 가능 금액 초과면 여기서 막는다(실서버에서만 검사).
+    await this.assertAffordable(spec.price, spec.quantity);
 
     if (this.isDryRun()) {
       return this.addJournal({
@@ -485,6 +590,8 @@ export class ToolEngine extends EventEmitter {
       expireDate: spec.expireDate,
       first: { orderSide: "SELL", triggerPrice: spec.tpTrigger, orderPrice: spec.tpPrice },
       second: { orderSide: "SELL", triggerPrice: spec.slTrigger, orderPrice: spec.slPrice },
+      // [B5] 멱등키: 네트워크 재시도로 조건주문이 두 번 등록되는 걸 막는다(진입 주문과 동일 원칙).
+      clientOrderId: makeClientOrderId(`oco${DateTime.now().toFormat("HHmmss")}`, 1, "oco"),
     });
     return this.addJournal({
       kind: "oco",
@@ -541,7 +648,8 @@ export class ToolEngine extends EventEmitter {
     const now = DateTime.now().setZone("Asia/Seoul");
     return {
       mode: this.mode,
-      dryRun: this.mode === "live", // 실서버 = 주문 잠금(모의 기록만). 연습 = 가짜 서버라 실제 왕복.
+      dryRun: this.isDryRun(),
+      liveOrdersEnabled: this.liveOrdersEnabled,
       killSwitch: this.killSwitch,
       session: getSession(now),
       orderFrozen: isOrderFrozen(now),

@@ -151,6 +151,7 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:settings:get", () => e.getSettings());
   ipcMain.handle("tool:settings:save", (_ev, input) => e.saveSettings(input));
   ipcMain.handle("tool:killSwitch", (_ev, on: boolean) => e.setKillSwitch(!!on));
+  ipcMain.handle("tool:liveOrders", (_ev, on: boolean) => e.setLiveOrders(!!on));
 
   ipcMain.handle("tool:quote", (_ev, symbol: string) => e.quote(symbol));
   ipcMain.handle("tool:fx", () => e.fx());
