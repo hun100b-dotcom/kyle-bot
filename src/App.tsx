@@ -199,6 +199,16 @@ function App() {
   // 매도 모달 / 근거 보기 모달
   const [sellModal, setSellModal] = useState<{ symbol: string; currency: string; heldQty: number; orderType: "LIMIT" | "MARKET"; qty: string; price: string } | null>(null);
   const [ratModal, setRatModal] = useState<TradeRationale | null>(null);
+  // [v0.3.4] 카드별 "상세 펼침" 상태. id(종목/주문번호)를 담은 집합. 기본은 전부 접힘.
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  function toggleExpand(id: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   // --- 설정 ---
   const [settings, setSettings] = useState<ToolSettings | null>(null);
@@ -1118,60 +1128,83 @@ ${msg}
             </div>
           </div>
 
-          {/* ── 보유 현황 ── */}
-          <section className="card wide">
-            <div className="sec-head">
-              <h2>보유 현황</h2>
-              {hold?.summary && (
-                <div className="hold-summary">
-                  <span>총평가 <b>{dollarWon(hold.summary.marketValueUsd, hold.summary.marketValueKrw)}</b></span>
-                  <span>
-                    평가손익{" "}
-                    <b className={pnlClass(hold.summary.pnlUsd)}>
-                      {hold.summary.pnlUsd != null ? `${hold.summary.pnlUsd >= 0 ? "+" : ""}${dollarWon(hold.summary.pnlUsd, hold.summary.pnlKrw)}` : "—"}
-                      {hold.summary.pnlRate != null && ` (${hold.summary.pnlRate >= 0 ? "+" : ""}${hold.summary.pnlRate.toFixed(2)}%)`}
-                    </b>
-                  </span>
-                  {hold.summary.dailyPnlUsd != null && (
-                    <span>당일 <b className={pnlClass(hold.summary.dailyPnlUsd)}>{hold.summary.dailyPnlUsd >= 0 ? "+" : ""}{dollarWon(hold.summary.dailyPnlUsd, hold.summary.dailyPnlKrw)}</b></span>
-                  )}
-                </div>
-              )}
+          {/* ── 상단 요약: 카드 3개(총평가 / 평가손익 / 당일) ── */}
+          {hold?.summary && (
+            <div className="sum-cards">
+              <div className="sum-card">
+                <span className="sum-k">총 평가금액</span>
+                <b className="sum-v">{dollarWon(hold.summary.marketValueUsd, hold.summary.marketValueKrw)}</b>
+              </div>
+              <div className={`sum-card ${pnlClass(hold.summary.pnlUsd)}`}>
+                <span className="sum-k">평가손익</span>
+                <b className="sum-v">
+                  {hold.summary.pnlRate != null ? `${hold.summary.pnlRate >= 0 ? "+" : ""}${hold.summary.pnlRate.toFixed(2)}%` : "—"}
+                </b>
+                <span className="sum-sub">
+                  {hold.summary.pnlUsd != null ? `${hold.summary.pnlUsd >= 0 ? "+" : ""}${dollarWon(hold.summary.pnlUsd, hold.summary.pnlKrw)}` : ""}
+                </span>
+              </div>
+              <div className={`sum-card ${pnlClass(hold.summary.dailyPnlUsd)}`}>
+                <span className="sum-k">당일 손익</span>
+                <b className="sum-v">
+                  {hold.summary.dailyPnlUsd != null ? `${hold.summary.dailyPnlUsd >= 0 ? "+" : ""}${dollarWon(hold.summary.dailyPnlUsd, hold.summary.dailyPnlKrw)}` : "—"}
+                </b>
+              </div>
             </div>
+          )}
+
+          {/* ── 보유 현황(접힘 기본: 손익%·손익액·현재가 3개만) ── */}
+          <section className="card wide">
+            <h2>보유 현황 <span className="hint small">{hold?.items.length ? `${hold.items.length}종목` : ""}</span></h2>
             {!hold || hold.items.length === 0 ? (
               <p className="hint">보유 종목이 없거나 아직 조회 전입니다. [↻ 새로고침]을 눌러 주세요.</p>
             ) : (
               <div className="hold-list">
-                {hold.items.map((h) => (
-                  <div key={h.symbol} className="hold-card">
-                    <div className="hc-main">
-                      <div className="hc-name">
-                        <b className="hc-sym">{h.symbol}</b>
-                        {h.name && <span className="hc-kor">{h.name}</span>}
-                        <span className="chip">{h.marketCountry === "KR" ? "🇰🇷 국내" : "🇺🇸 미국"}</span>
-                        <span className="chip">{h.currency}</span>
+                {hold.items.map((h) => {
+                  const open = expanded.has(h.symbol);
+                  return (
+                    <div key={h.symbol} className="hcard">
+                      {/* 1행: 종목명 ... 손익%(큼) */}
+                      <div className="hcard-r1">
+                        <div className="hcard-name min0">
+                          <b className="hcard-title">{h.name ?? h.symbol}</b>
+                          <span className="hcard-sub">{h.symbol} · {h.marketCountry === "KR" ? "🇰🇷" : "🇺🇸"}</span>
+                        </div>
+                        <b className={`hcard-pct ${pnlClass(h.pnlRate)}`}>
+                          {h.pnlRate != null ? `${h.pnlRate >= 0 ? "+" : ""}${h.pnlRate.toFixed(2)}%` : "—"}
+                        </b>
                       </div>
-                      <div className={`hc-pnl ${pnlClass(h.pnlAmt)}`}>
-                        {h.pnlRate != null ? `${h.pnlRate >= 0 ? "+" : ""}${h.pnlRate.toFixed(2)}%` : "—"}
-                        {h.pnlAmt != null && <span className="hc-pnl-amt"> ({h.pnlAmt >= 0 ? "+" : ""}{money(h.pnlAmt, h.currency, fx)})</span>}
+                      {/* 2행: 수량·현재가 ... 손익액(중간, 색) */}
+                      <div className="hcard-r2">
+                        <span className="muted">{h.quantity}주 · 현재가 {h.lastPrice != null ? money(h.lastPrice, h.currency, h.currency === "USD" ? fx : null) : "—"}</span>
+                        <span className={`hcard-amt ${pnlClass(h.pnlAmt)}`}>
+                          {h.pnlAmt != null ? `${h.pnlAmt >= 0 ? "+" : ""}${money(h.pnlAmt, h.currency, h.currency === "USD" ? fx : null)}` : ""}
+                        </span>
                       </div>
+                      {/* 액션 + 상세 토글 */}
+                      <div className="hcard-actions">
+                        <button className="mini btn-sell" disabled={status.killSwitch} onClick={() => openSell(h)}>매도</button>
+                        <button className="mini btn-oco" disabled={status.killSwitch} onClick={() => openOcoForHolding(h)}>익절/손절</button>
+                        <span className="grow" />
+                        <button className="mini ghost" onClick={() => toggleExpand(h.symbol)}>{open ? "접기 ▴" : "상세 ▾"}</button>
+                      </div>
+                      {/* 펼침: 나머지 정보 2열 정의목록 */}
+                      {open && (
+                        <dl className="hcard-detail">
+                          <div><dt>평균매입가</dt><dd>{h.avgPrice != null ? money(h.avgPrice, h.currency, null) : "—"}</dd></div>
+                          <div><dt>평가금액</dt><dd>{h.marketValueAmt != null ? money(h.marketValueAmt, h.currency, h.currency === "USD" ? fx : null) : "—"}</dd></div>
+                          <div><dt>매입원가</dt><dd>{h.purchaseAmt != null ? money(h.purchaseAmt, h.currency, h.currency === "USD" ? fx : null) : "—"}</dd></div>
+                          <div><dt>당일손익</dt><dd className={pnlClass(h.dailyPnlAmt)}>{h.dailyPnlAmt != null ? `${h.dailyPnlAmt >= 0 ? "+" : ""}${money(h.dailyPnlAmt, h.currency, null)}${h.dailyPnlRate != null ? ` (${h.dailyPnlRate.toFixed(2)}%)` : ""}` : "—"}</dd></div>
+                          <div><dt>수수료</dt><dd>{h.commission ?? "—"}</dd></div>
+                          <div><dt>세금</dt><dd>{h.tax ?? "—"}</dd></div>
+                          {h.rationale && (
+                            <div className="dl-wide"><dt>매매근거</dt><dd>{rationaleLine(h.rationale)}</dd></div>
+                          )}
+                        </dl>
+                      )}
                     </div>
-                    <div className="hc-grid">
-                      <span>수량 <b>{h.quantity}주</b></span>
-                      <span>평균매입가 <b>{h.avgPrice != null ? money(h.avgPrice, h.currency, null) : "—"}</b></span>
-                      <span>현재가 <b>{h.lastPrice != null ? money(h.lastPrice, h.currency, null) : "—"}</b></span>
-                      <span>평가금액 <b>{h.marketValueAmt != null ? money(h.marketValueAmt, h.currency, fx) : "—"}</b></span>
-                      <span>매입원가 <b>{h.purchaseAmt != null ? money(h.purchaseAmt, h.currency, fx) : "—"}</b></span>
-                      {h.dailyPnlAmt != null && <span>당일 <b className={pnlClass(h.dailyPnlAmt)}>{h.dailyPnlAmt >= 0 ? "+" : ""}{money(h.dailyPnlAmt, h.currency, null)}{h.dailyPnlRate != null && ` (${h.dailyPnlRate.toFixed(2)}%)`}</b></span>}
-                      {(h.commission != null || h.tax != null) && <span className="hint">수수료 {h.commission ?? 0} · 세금 {h.tax ?? 0}</span>}
-                    </div>
-                    <div className="hc-actions">
-                      <button className="mini btn-sell" disabled={status.killSwitch} onClick={() => openSell(h)}>매도</button>
-                      <button className="mini btn-oco" disabled={status.killSwitch} onClick={() => openOcoForHolding(h)}>익절/손절 걸기</button>
-                      {h.rationale && <button className="mini" onClick={() => setRatModal(h.rationale)}>근거 보기</button>}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </section>
@@ -1191,28 +1224,36 @@ ${msg}
                 <p className="hint">{ordStatus === "OPEN" ? "미체결 주문이 없습니다." : "체결·종료된 주문이 없습니다."}</p>
               ) : (
                 <div className="ord-list">
-                  {ordRows.map((o) => (
-                    <div key={o.orderId} className="ord-row">
-                      <div className="or-line1">
-                        <span className={`chip ${o.side === "SELL" ? "chip-sell" : "chip-buy"}`}>{o.side === "SELL" ? "매도" : "매수"}</span>
-                        <b>{o.symbol}</b>
-                        <span className="chip">{o.orderType === "MARKET" ? "시장가" : "지정가"}</span>
-                        <span className={`stbadge st-${o.statusStd}`}>{orderStatusKo(o.statusStd, o.statusRaw)}</span>
-                        <span className="grow" />
-                        {o.isOpen && (
-                          <button className="mini" disabled={status.killSwitch} onClick={async () => { await window.kyletool.cancelOrder(o.orderId).catch((e) => alert(String(e))); refreshStatusTab(); }}>취소</button>
+                  {ordRows.map((o) => {
+                    const cur = o.currency ?? "USD";
+                    const open = expanded.has(o.orderId);
+                    return (
+                      <div key={o.orderId} className="ord-row">
+                        {/* 기본: 방향·종목·상태 ... 핵심(가격·수량) */}
+                        <div className="or-line1">
+                          <span className={`chip ${o.side === "SELL" ? "chip-sell" : "chip-buy"}`}>{o.side === "SELL" ? "매도" : "매수"}</span>
+                          <b className="min0">{o.symbol}</b>
+                          <span className={`stbadge st-${o.statusStd}`}>{orderStatusKo(o.statusStd, o.statusRaw)}</span>
+                          <span className="grow" />
+                          <span className="muted small">{o.orderType === "MARKET" ? "시장가" : (o.price != null ? money(o.price, cur, null) : "—")} · {o.quantity ?? "—"}주</span>
+                          {o.isOpen && (
+                            <button className="mini" disabled={status.killSwitch} onClick={async () => { await window.kyletool.cancelOrder(o.orderId).catch((e) => alert(String(e))); refreshStatusTab(); }}>취소</button>
+                          )}
+                          <button className="mini ghost" onClick={() => toggleExpand(o.orderId)}>{open ? "▴" : "상세 ▾"}</button>
+                        </div>
+                        {open && (
+                          <dl className="ord-detail">
+                            {o.orderAmount != null && <div><dt>주문금액</dt><dd>{money(o.orderAmount, cur, cur === "USD" ? fx : null)}</dd></div>}
+                            {o.filledQty != null && o.filledQty > 0 && <div><dt>체결</dt><dd>{o.filledQty}주{o.avgFilledPrice != null ? ` @ ${money(o.avgFilledPrice, cur, null)}` : ""}</dd></div>}
+                            {(o.commission != null || o.tax != null) && <div><dt>수수료·세금</dt><dd>{o.commission ?? 0}{o.tax != null ? ` · ${o.tax}` : ""}</dd></div>}
+                            {o.orderedAt && <div><dt>주문시각</dt><dd>{fmtTime(o.orderedAt)}</dd></div>}
+                            {o.filledAt && <div><dt>체결시각</dt><dd>{fmtTime(o.filledAt)}</dd></div>}
+                            <div><dt>유형</dt><dd>{o.orderType === "MARKET" ? "시장가" : "지정가"} · {o.timeInForce ?? "DAY"}</dd></div>
+                          </dl>
                         )}
                       </div>
-                      <div className="or-line2 small">
-                        <span>수량 {o.quantity ?? "—"}주</span>
-                        <span>가격 {o.price != null ? money(o.price, o.currency ?? "USD", null) : (o.orderType === "MARKET" ? "시장가" : "—")}</span>
-                        {o.orderAmount != null && <span>주문금액 {money(o.orderAmount, o.currency ?? "USD", fx)}</span>}
-                        {o.filledQty != null && o.filledQty > 0 && <span>체결 {o.filledQty}주{o.avgFilledPrice != null && ` @ ${money(o.avgFilledPrice, o.currency ?? "USD", null)}`}</span>}
-                        {(o.commission != null || o.tax != null) && <span className="hint">수수료 {o.commission ?? 0}{o.tax != null && ` · 세금 ${o.tax}`}</span>}
-                        {o.orderedAt && <span className="hint">{fmtTime(o.orderedAt)}</span>}
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </section>
@@ -1226,45 +1267,46 @@ ${msg}
                 <p className="hint">{ordStatus === "OPEN" ? "진행 중인 조건주문이 없습니다." : "종료된 조건주문이 없습니다."}</p>
               ) : (
                 <div className="cond-list">
-                  {condRows.map((c) => (
-                    <div key={c.conditionalOrderId} className="cond-card">
-                      <div className="cc-head">
-                        <span className="chip chip-type">{c.type}</span>
-                        <b>{c.symbol}</b>
-                        <span className="chip">{c.quantity ?? "—"}주</span>
-                        <span className={`stbadge ${c.status === "WATCHING" ? "st-submitted" : "st-filled"}`}>{condStatusKo(c.status)}</span>
-                        <span className="grow" />
-                        {c.expireDate && <span className="hint small">만료 {c.expireDate}</span>}
-                        {c.isOpen && (
-                          <button className="mini" disabled={status.killSwitch} onClick={async () => { await window.kyletool.cancelConditional(c.conditionalOrderId).catch((e) => alert(String(e))); refreshStatusTab(); }}>삭제</button>
-                        )}
-                      </div>
-                      {/* 진입(first) → 청산(second) 2단 표시 */}
-                      <div className="cc-legs">
-                        {c.first && (
-                          <div className="leg">
-                            <span className="leg-no">① {c.type === "OTO" ? "진입(매수)" : "감시1"}</span>
-                            <span>감시가 {c.first.triggerPrice != null ? money(c.first.triggerPrice, "USD", null) : "—"}</span>
-                            {c.first.orderPrice != null && <span>지정가 {money(c.first.orderPrice, "USD", null)}</span>}
-                            <span className={`stbadge ${legBadge(c.first.status)}`}>{legStatusKo(c.first.status)}</span>
-                          </div>
-                        )}
-                        {c.second && (
-                          <div className="leg">
-                            <span className="leg-no">② {c.type === "OTO" ? "익절(매도)" : "감시2"}</span>
-                            <span>감시가 {c.second.triggerPrice != null ? money(c.second.triggerPrice, "USD", null) : "—"}</span>
-                            {c.second.orderPrice != null && <span>지정가 {money(c.second.orderPrice, "USD", null)}</span>}
-                            <span className={`stbadge ${legBadge(c.second.status)}`}>{legStatusKo(c.second.status)}</span>
-                          </div>
-                        )}
-                      </div>
-                      {c.rationale && (
-                        <div className="cc-rat small">
-                          <span className="tag">근거</span> {rationaleLine(c.rationale)}
+                  {condRows.map((c) => {
+                    const open = expanded.has(c.conditionalOrderId);
+                    return (
+                      <div key={c.conditionalOrderId} className="cond-card">
+                        {/* 기본: 타입·종목·상태 ... 만료 */}
+                        <div className="cc-head">
+                          <span className="chip chip-type">{c.type}</span>
+                          <b className="min0">{c.symbol}</b>
+                          <span className="muted small">{c.quantity ?? "—"}주</span>
+                          <span className={`stbadge ${c.status === "WATCHING" ? "st-submitted" : "st-filled"}`}>{condStatusKo(c.status)}</span>
+                          <span className="grow" />
+                          {c.expireDate && <span className="muted small">만료 {c.expireDate}</span>}
+                          {c.isOpen && (
+                            <button className="mini" disabled={status.killSwitch} onClick={async () => { await window.kyletool.cancelConditional(c.conditionalOrderId).catch((e) => alert(String(e))); refreshStatusTab(); }}>삭제</button>
+                          )}
+                          <button className="mini ghost" onClick={() => toggleExpand(c.conditionalOrderId)}>{open ? "▴" : "상세 ▾"}</button>
                         </div>
-                      )}
-                    </div>
-                  ))}
+                        {/* 기본: ① 진입 → ② 익절 2단(라벨 + 상태배지만) */}
+                        <div className="cc-steps">
+                          {c.first && (
+                            <span className="step">① {c.type === "OTO" ? "진입" : "감시1"} <span className={`stbadge ${legBadge(c.first.status)}`}>{legStatusKo(c.first.status)}</span></span>
+                          )}
+                          <span className="step-arrow">→</span>
+                          {c.second && (
+                            <span className="step">② {c.type === "OTO" ? "익절" : "감시2"} <span className={`stbadge ${legBadge(c.second.status)}`}>{legStatusKo(c.second.status)}</span></span>
+                          )}
+                        </div>
+                        {/* 펼침: 감시가·지정가·근거 */}
+                        {open && (
+                          <dl className="ord-detail">
+                            {c.first && <div className="dl-wide"><dt>① {c.type === "OTO" ? "진입" : "감시1"}</dt><dd>감시가 {c.first.triggerPrice != null ? money(c.first.triggerPrice, "USD", null) : "—"}{c.first.orderPrice != null ? ` · 지정가 ${money(c.first.orderPrice, "USD", null)}` : ""}</dd></div>}
+                            {c.second && <div className="dl-wide"><dt>② {c.type === "OTO" ? "익절" : "감시2"}</dt><dd>감시가 {c.second.triggerPrice != null ? money(c.second.triggerPrice, "USD", null) : "—"}{c.second.orderPrice != null ? ` · 지정가 ${money(c.second.orderPrice, "USD", null)}` : ""}</dd></div>}
+                            <div><dt>수량</dt><dd>{c.quantity ?? "—"}주</dd></div>
+                            <div><dt>유형</dt><dd>{c.orderType ?? "LIMIT"}</dd></div>
+                            {c.rationale && <div className="dl-wide"><dt>매매근거</dt><dd>{rationaleLine(c.rationale)}</dd></div>}
+                          </dl>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </section>
