@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld("kyletool", {
   // 설정
   getSettings: () => ipcRenderer.invoke("tool:settings:get"),
   saveSettings: (input) => ipcRenderer.invoke("tool:settings:save", input),
+  saveSeedSettings: (input) => ipcRenderer.invoke("tool:settings:seed", input), // [v0.3.0]
   setKillSwitch: (on) => ipcRenderer.invoke("tool:killSwitch", on),
   setLiveOrders: (on) => ipcRenderer.invoke("tool:liveOrders", on),
   setPriceGuard: (on, pct) => ipcRenderer.invoke("tool:priceGuard", on, pct),
@@ -25,6 +26,7 @@ contextBridge.exposeInMainWorld("kyletool", {
   fx: () => ipcRenderer.invoke("tool:fx"),
   setManualFx: (rate) => ipcRenderer.invoke("tool:fx:manual", rate),
   buyingPower: () => ipcRenderer.invoke("tool:buyingPower"),
+  accountSummary: () => ipcRenderer.invoke("tool:accountSummary"), // [v0.3.0]
   sellable: (symbol) => ipcRenderer.invoke("tool:sellable", symbol),
   capacity: (symbol, price) => ipcRenderer.invoke("tool:capacity", symbol, price),
 

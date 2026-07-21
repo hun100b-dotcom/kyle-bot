@@ -245,3 +245,45 @@ ul.hint { padding-left: 18px; }
 }
 .tag.warn { background: #4a3a1e; color: #ffcf7a; }
 .inline-check { font-size: 12px; font-weight: 400; color: #9aa3b2; }
+
+/* ===== [v0.3.0] 오더 티켓 레이아웃 ===== */
+.ticket { display: flex; flex-direction: column; gap: 12px; padding: 12px; }
+
+/* 상단 상시 바 */
+.statusbar {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding: 10px 14px; border-radius: 10px; background: #141821; border: 1px solid #262c38;
+}
+.sb-item { display: flex; align-items: baseline; gap: 6px; }
+.sb-k { color: #8a93a4; font-size: 12px; }
+.sb-item b { font-size: 15px; }
+/* 실주문 토글 — 상태가 한눈에 */
+.sb-live { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 6px 12px; border-radius: 8px; font-size: 15px; }
+.sb-live.off { background: #23272f; color: #cbd3e1; }
+.sb-live.on { background: #4a1420; color: #ff8a95; border: 1px solid #ff6b6b; }
+.sb-live input { width: 18px; height: 18px; }
+
+/* 본문 2단 */
+.ticket-grid { display: grid; grid-template-columns: minmax(340px, 1fr) minmax(360px, 1.1fr); gap: 12px; align-items: start; }
+@media (max-width: 820px) { .ticket-grid { grid-template-columns: 1fr; } }
+
+.sym-row { align-items: center; gap: 14px; }
+.sym-label { font-size: 13px; }
+.sym-input { font-size: 20px; font-weight: 700; text-transform: uppercase; width: 140px; }
+.cur-box { font-size: 15px; }
+.cur-price { font-size: 18px; color: #7fd1ff; }
+.tech-row { gap: 14px; flex-wrap: wrap; }
+
+/* 시드/수량 박스 */
+.seed-box { margin-top: 8px; padding: 10px 12px; border-radius: 8px; background: #171b24; border: 1px solid #262c38; }
+.seed-line { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 0; }
+.seed-line b { color: #e6ebf3; }
+.seed-line .mini { flex: none; }
+
+/* 결과 */
+.result-head { margin-bottom: 8px; font-size: 15px; }
+.result-table { width: 100%; }
+.result-empty { padding: 30px 12px; text-align: center; line-height: 1.7; }
+.order-cell { white-space: nowrap; }
+.btn-buy { background: #1f6feb; color: #fff; }
+.btn-oco { background: #2ea043; color: #fff; }

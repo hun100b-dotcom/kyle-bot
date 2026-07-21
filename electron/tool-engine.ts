@@ -167,6 +167,30 @@ function parseEnv(text: string): Record<string, string> {
 }
 
 // -----------------------------------------------------------------------------
+// [v0.3.0] 세션별 시드 진입 수량 계산(순수 함수 — 화면·엔진과 분리해 테스트 가능)
+// -----------------------------------------------------------------------------
+/**
+ * computeSeedQty — "시드의 몇 %로, 이 가격에 몇 주 살 수 있나"를 계산한다.
+ *
+ *   공식: floor( 시드금액 × (세션비율/100) ÷ ( 현재가 × (1 + 수수료율) ) )
+ *
+ *   - seedUsd     : 시드 기준 금액(달러). 매수가능금액 또는 오너가 정한 고정값.
+ *   - pct         : 이번 세션에 쓸 비율(예: 데이 90, 프리/본장 50).
+ *   - price       : 현재가(1주 가격, 달러).
+ *   - commission  : 수수료율(비율. 0.001 = 0.1%). 수수료로 1주 모자라는 사고를 막으려 반영.
+ *   값이 없거나 이상하면 null(화면은 "조회 불가"로 표시하고 강제하지 않는다).
+ */
+export function computeSeedQty(seedUsd: number | null, pct: number, price: number | null | undefined, commission: number | null): number | null {
+  if (seedUsd == null || !Number.isFinite(seedUsd) || seedUsd <= 0) return null;
+  if (!price || price <= 0) return null;
+  if (!Number.isFinite(pct) || pct < 0) return null;
+  const fee = commission ?? 0;
+  const budget = seedUsd * (pct / 100); // 이번 진입에 쓸 금액
+  const perShare = price * (1 + fee); // 수수료 포함 1주 실비용
+  return Math.max(0, Math.floor(budget / perShare));
+}
+
+// -----------------------------------------------------------------------------
 // 엔진 본체
 // -----------------------------------------------------------------------------
 
@@ -193,6 +217,17 @@ export class ToolEngine extends EventEmitter {
   private priceGuardPct = 15; // 켰을 때 쓸 기본 제안값(사용자가 바꿀 수 있음)
   /** [v0.2.7] 주문 확인 팝업 건너뛰기(기본 false = 팝업 표시) */
   private skipOrderConfirm = false;
+
+  // [v0.3.0] 세션별 시드 비율 — "지금 장에서 시드의 몇 %로 진입"인지.
+  //   데이마켓은 크게(90%), 프리·본장은 절반(50%)이 기본. 오너가 설정에서 바꾼다.
+  //   ⚠️ 이건 '제안 수량'을 계산해 보여줄 뿐, 주문을 막지 않는다(기존 원칙).
+  private seedDayPct = 90; //     데이마켓 진입 비율(%)
+  private seedPrePct = 50; //     프리마켓 진입 비율(%)
+  private seedRegularPct = 50; // 정규장(본장) 진입 비율(%)
+  // 시드 기준: "auto"=매수가능금액(예수금)을 시드로, "fixed"=오너가 정한 고정 금액을 시드로.
+  private seedBasis: "auto" | "fixed" = "auto";
+  private seedFixedUsd: number | null = null;
+
   private mock: ReturnType<typeof createMockTossServer> | null = null;
   private mockPort = 0;
 
@@ -231,6 +266,23 @@ export class ToolEngine extends EventEmitter {
     }
     const hasKeys = !!process.env.TOSS_CLIENT_ID && !!process.env.TOSS_CLIENT_SECRET;
     this.mode = process.env.TOSS_MOCK !== "true" && hasKeys ? "live" : "mock";
+
+    // [v0.3.0] 저장돼 있던 토글·시드 설정을 되살린다(앱 껐다 켜도 유지).
+    //   ⚠️ 특히 LIVE_ORDERS: 예전엔 저장을 안 해서 앱 켤 때마다 실주문이 꺼졌다(오너 불편 1위).
+    if (process.env.LIVE_ORDERS === "true") this.liveOrdersEnabled = true;
+    if (process.env.PRICE_GUARD === "true") this.priceGuardEnabled = true;
+    const pg = Number(process.env.PRICE_GUARD_PCT);
+    if (Number.isFinite(pg) && pg > 0) this.priceGuardPct = pg;
+    if (process.env.SKIP_CONFIRM === "true") this.skipOrderConfirm = true;
+    const day = Number(process.env.SEED_DAY_PCT);
+    if (Number.isFinite(day) && day >= 0) this.seedDayPct = day;
+    const pre = Number(process.env.SEED_PRE_PCT);
+    if (Number.isFinite(pre) && pre >= 0) this.seedPrePct = pre;
+    const reg = Number(process.env.SEED_REGULAR_PCT);
+    if (Number.isFinite(reg) && reg >= 0) this.seedRegularPct = reg;
+    if (process.env.SEED_BASIS === "fixed") this.seedBasis = "fixed";
+    const sf = Number(process.env.SEED_FIXED_USD);
+    if (Number.isFinite(sf) && sf > 0) this.seedFixedUsd = sf;
   }
 
   getSettings() {
@@ -243,7 +295,91 @@ export class ToolEngine extends EventEmitter {
       priceGuardEnabled: this.priceGuardEnabled,
       priceGuardPct: this.priceGuardPct,
       skipOrderConfirm: this.skipOrderConfirm,
+      // [v0.3.0] 세션별 시드 비율 + 시드 기준
+      seedDayPct: this.seedDayPct,
+      seedPrePct: this.seedPrePct,
+      seedRegularPct: this.seedRegularPct,
+      seedBasis: this.seedBasis,
+      seedFixedUsd: this.seedFixedUsd,
     };
+  }
+
+  /**
+   * [v0.3.0] 모든 설정을 .env 파일에 한 번에 다시 쓴다(단일 저장 경로).
+   *   비밀값(키·계좌)은 process.env에 이미 있으므로 그대로 유지된다.
+   *   [왜 한 곳으로?] 예전엔 saveSettings만 파일을 썼고 토글은 메모리에만 있어, 앱을 끄면
+   *   실주문 활성화·오입력방지·시드설정이 전부 초기화됐다. 이제 어떤 설정을 바꾸든 이 함수를
+   *   호출해 파일에 남긴다.
+   */
+  private persistEnv(): void {
+    const lines = [
+      "# Capri 매매도구 설정(자동 생성). 이 파일은 본인 컴퓨터에만 있습니다.",
+      `TOSS_MOCK=${this.mode === "mock" ? "true" : "false"}`,
+      `TOSS_BASE_URL=${this.mode === "live" ? ToolEngine.LIVE_BASE_URL : ""}`,
+      `TOSS_CLIENT_ID=${process.env.TOSS_CLIENT_ID ?? ""}`,
+      `TOSS_CLIENT_SECRET=${process.env.TOSS_CLIENT_SECRET ?? ""}`,
+      `TOSS_ACCOUNT=${process.env.TOSS_ACCOUNT ?? ""}`,
+      "DRY_RUN=true", // ★ 코드 레벨 잠금 표식(실주문은 아래 LIVE_ORDERS 토글로만 해금)
+      // --- 토글 상태(앱 재시작 후에도 유지) ---
+      `LIVE_ORDERS=${this.liveOrdersEnabled ? "true" : "false"}`,
+      `PRICE_GUARD=${this.priceGuardEnabled ? "true" : "false"}`,
+      `PRICE_GUARD_PCT=${this.priceGuardPct}`,
+      `SKIP_CONFIRM=${this.skipOrderConfirm ? "true" : "false"}`,
+      // --- 세션별 시드 비율 ---
+      `SEED_DAY_PCT=${this.seedDayPct}`,
+      `SEED_PRE_PCT=${this.seedPrePct}`,
+      `SEED_REGULAR_PCT=${this.seedRegularPct}`,
+      `SEED_BASIS=${this.seedBasis}`,
+      `SEED_FIXED_USD=${this.seedFixedUsd ?? ""}`,
+      "",
+    ].join("\n");
+    // 환경변수에도 반영(다음 loadEnv 없이도 일관되게)
+    process.env.LIVE_ORDERS = this.liveOrdersEnabled ? "true" : "false";
+    writeFileSync(this.envPath, lines, "utf8");
+    chmodSync(this.envPath, 0o600);
+  }
+
+  /**
+   * [v0.3.0] 세션별 시드 비율/기준 저장. 오너가 설정 탭에서 바꾼 값을 받아 반영·저장한다.
+   *   음수나 이상값은 무시하고, 저장 후 최신 설정을 돌려준다(화면 갱신용).
+   */
+  saveSeedSettings(input: {
+    seedDayPct?: number;
+    seedPrePct?: number;
+    seedRegularPct?: number;
+    seedBasis?: "auto" | "fixed";
+    seedFixedUsd?: number | null;
+  }) {
+    if (typeof input.seedDayPct === "number" && Number.isFinite(input.seedDayPct) && input.seedDayPct >= 0) this.seedDayPct = input.seedDayPct;
+    if (typeof input.seedPrePct === "number" && Number.isFinite(input.seedPrePct) && input.seedPrePct >= 0) this.seedPrePct = input.seedPrePct;
+    if (typeof input.seedRegularPct === "number" && Number.isFinite(input.seedRegularPct) && input.seedRegularPct >= 0)
+      this.seedRegularPct = input.seedRegularPct;
+    if (input.seedBasis === "auto" || input.seedBasis === "fixed") this.seedBasis = input.seedBasis;
+    // 고정 시드: null/빈값이면 해제, 양수면 설정
+    if (input.seedFixedUsd === null) this.seedFixedUsd = null;
+    else if (typeof input.seedFixedUsd === "number" && Number.isFinite(input.seedFixedUsd) && input.seedFixedUsd > 0)
+      this.seedFixedUsd = input.seedFixedUsd;
+    this.persistEnv();
+    this.addJournal({
+      kind: "info",
+      symbol: "-",
+      summary: `시드 설정 저장 — 데이 ${this.seedDayPct}% / 프리 ${this.seedPrePct}% / 본장 ${this.seedRegularPct}% · 기준 ${this.seedBasis === "auto" ? "매수가능금액" : `고정 $${this.seedFixedUsd ?? "-"}`}`,
+    });
+    return this.getSettings();
+  }
+
+  /** 현재 세션에 적용할 시드 비율(%)을 고른다. 애프터/마감은 본장 비율을 준용한다. */
+  private sessionPctFor(session: Session): number {
+    switch (session) {
+      case "day":
+        return this.seedDayPct;
+      case "pre":
+        return this.seedPrePct;
+      case "regular":
+        return this.seedRegularPct;
+      default:
+        return this.seedRegularPct; // after/closed: 본장 비율 준용(별도 설정 없음)
+    }
   }
 
   async saveSettings(input: { mode: "mock" | "live"; clientId?: string; clientSecret?: string; account?: string }) {
@@ -284,18 +420,7 @@ export class ToolEngine extends EventEmitter {
       }
     }
 
-    const lines = [
-      "# Capri 매매도구 설정(자동 생성). 이 파일은 본인 컴퓨터에만 있습니다.",
-      `TOSS_MOCK=${this.mode === "mock" ? "true" : "false"}`,
-      `TOSS_BASE_URL=${this.mode === "live" ? ToolEngine.LIVE_BASE_URL : ""}`,
-      `TOSS_CLIENT_ID=${process.env.TOSS_CLIENT_ID ?? ""}`,
-      `TOSS_CLIENT_SECRET=${process.env.TOSS_CLIENT_SECRET ?? ""}`,
-      `TOSS_ACCOUNT=${process.env.TOSS_ACCOUNT ?? ""}`,
-      "DRY_RUN=true", // ★ 실주문 잠금: 소액 테스트 통과 전까지 해제 불가(사용자 확정 사항)
-      "",
-    ].join("\n");
-    writeFileSync(this.envPath, lines, "utf8");
-    chmodSync(this.envPath, 0o600);
+    this.persistEnv(); // [v0.3.0] 모든 설정을 한 경로로 저장(토글·시드 포함)
     this.addJournal({ kind: "info", symbol: "-", summary: `설정 저장 (모드: ${this.mode === "mock" ? "연습" : "실서버(주문 잠금)"})` });
     return this.getSettings();
   }
@@ -416,6 +541,7 @@ export class ToolEngine extends EventEmitter {
   setPriceGuard(on: boolean, pct?: number): void {
     this.priceGuardEnabled = on;
     if (typeof pct === "number" && Number.isFinite(pct) && pct > 0) this.priceGuardPct = pct;
+    this.persistEnv(); // [v0.3.0] 껐다 켜도 유지
     this.addJournal({
       kind: "info",
       symbol: "-",
@@ -426,11 +552,13 @@ export class ToolEngine extends EventEmitter {
   /** [v0.2.7] 주문 확인 팝업 건너뛰기(기본 끔 = 팝업 표시). 화면에서만 쓰지만 상태는 여기 보관. */
   setSkipConfirm(on: boolean): void {
     this.skipOrderConfirm = on;
+    this.persistEnv(); // [v0.3.0] 껐다 켜도 유지
     this.addJournal({ kind: "info", symbol: "-", summary: on ? "주문 확인 팝업 건너뛰기 ON" : "주문 확인 팝업 표시 ON" });
   }
 
   setLiveOrders(on: boolean): void {
     this.liveOrdersEnabled = on;
+    this.persistEnv(); // [v0.3.0] ★ 실주문 토글 저장 — 앱 재시작 후에도 유지(오너 최우선 요구)
     this.addJournal({
       kind: "info",
       symbol: "-",
@@ -496,14 +624,27 @@ export class ToolEngine extends EventEmitter {
     maxBuyQty: number | null;
     heldQty: number | null;
     sellableQty: number | null;
+    // [v0.3.0] 세션별 시드 제안
+    session: Session;
+    sessionPct: number; //   이번 세션에 적용되는 비율(%)
+    seedBasis: "auto" | "fixed";
+    seedUsd: number | null; // 시드 기준 금액(달러)
+    seedQty: number | null; // 시드 비율로 살 수 있는 제안 수량
   }> {
     const sym = symbol.toUpperCase();
+    const session = getSession(DateTime.now().setZone("Asia/Seoul"));
+    const sessionPct = this.sessionPctFor(session);
     const out = {
       buyingPowerUsd: null as number | null,
       commissionRate: null as number | null,
       maxBuyQty: null as number | null,
       heldQty: null as number | null,
       sellableQty: null as number | null,
+      session,
+      sessionPct,
+      seedBasis: this.seedBasis,
+      seedUsd: null as number | null,
+      seedQty: null as number | null,
     };
     try {
       await this.prepareBackend();
@@ -564,6 +705,47 @@ export class ToolEngine extends EventEmitter {
       /* 무시 */
     }
 
+    // 6) [v0.3.0] 세션별 시드 제안 수량
+    //   시드 기준: auto=매수가능금액(방금 조회한 값), fixed=오너가 정한 고정 금액.
+    out.seedUsd = this.seedBasis === "fixed" ? this.seedFixedUsd : out.buyingPowerUsd;
+    out.seedQty = computeSeedQty(out.seedUsd, sessionPct, price, out.commissionRate);
+
+    return out;
+  }
+
+  /**
+   * [v0.3.0] 계좌 요약 — 상단 상시 바에 쓸 "예수금 + 보유 총손익"을 가볍게 조회한다.
+   *   holdings 응답 맨 위에 총손익(profitLoss)이 이미 들어 있어, 종목별 시세를 다시 안 불러도 된다.
+   *   실패는 null로 두고 화면이 "조회 불가"로 표시(주문 흐름과 무관, 표시용).
+   */
+  async accountSummary(): Promise<{ buyingPowerUsd: number | null; totalPnlUsd: number | null; totalPnlRate: number | null }> {
+    const out = { buyingPowerUsd: null as number | null, totalPnlUsd: null as number | null, totalPnlRate: null as number | null };
+    try {
+      await this.prepareBackend();
+    } catch {
+      return out;
+    }
+    try {
+      const bp = await getBuyingPower("USD");
+      if (Number.isFinite(bp.buyingPowerUsd)) {
+        out.buyingPowerUsd = bp.buyingPowerUsd;
+        this.buyingPowerUsd = bp.buyingPowerUsd;
+      }
+    } catch {
+      /* 무시 */
+    }
+    try {
+      const h = (await getHoldings()) as Record<string, unknown>;
+      // 응답 구조: { profitLoss: { amount: { usd }, rate }, ... }
+      const pl = h?.profitLoss as Record<string, unknown> | undefined;
+      const amt = pl?.amount as Record<string, unknown> | undefined;
+      const usd = Number(amt?.usd);
+      const rate = Number(pl?.rate);
+      if (Number.isFinite(usd)) out.totalPnlUsd = usd;
+      if (Number.isFinite(rate)) out.totalPnlRate = rate * 100; // 0.025 → 2.5%
+    } catch {
+      /* 무시 */
+    }
     return out;
   }
 

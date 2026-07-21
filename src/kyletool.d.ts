@@ -48,6 +48,26 @@ interface ToolSettings {
   hasClientId: boolean;
   hasClientSecret: boolean;
   account: string;
+  // [v0.3.0] 세션별 시드 비율 + 시드 기준
+  seedDayPct: number;
+  seedPrePct: number;
+  seedRegularPct: number;
+  seedBasis: "auto" | "fixed";
+  seedFixedUsd: number | null;
+}
+
+/** [v0.3.0] orderCapacity(capacity) 응답 — 주문가능/보유 + 세션 시드 제안 */
+interface Capacity {
+  buyingPowerUsd: number | null;
+  commissionRate: number | null;
+  maxBuyQty: number | null;
+  heldQty: number | null;
+  sellableQty: number | null;
+  session: "day" | "pre" | "regular" | "after" | "closed";
+  sessionPct: number;
+  seedBasis: "auto" | "fixed";
+  seedUsd: number | null;
+  seedQty: number | null;
 }
 
 interface OpenOrder {
@@ -119,6 +139,13 @@ interface KyletoolBridge {
   journal(): Promise<JournalEntry[]>;
   getSettings(): Promise<ToolSettings>;
   saveSettings(input: { mode: "mock" | "live"; clientId?: string; clientSecret?: string; account?: string }): Promise<ToolSettings>;
+  saveSeedSettings(input: {
+    seedDayPct?: number;
+    seedPrePct?: number;
+    seedRegularPct?: number;
+    seedBasis?: "auto" | "fixed";
+    seedFixedUsd?: number | null;
+  }): Promise<ToolSettings>;
   setKillSwitch(on: boolean): Promise<void>;
   setLiveOrders(on: boolean): Promise<void>;
   setPriceGuard(on: boolean, pct?: number): Promise<void>;
@@ -128,17 +155,9 @@ interface KyletoolBridge {
   fx(): Promise<{ rate: number; source: "toss" | "manual" } | null>;
   setManualFx(rate: number): Promise<void>;
   buyingPower(): Promise<number | null>;
+  accountSummary(): Promise<{ buyingPowerUsd: number | null; totalPnlUsd: number | null; totalPnlRate: number | null }>;
   sellable(symbol: string): Promise<number | null>;
-  capacity(
-    symbol: string,
-    price?: number,
-  ): Promise<{
-    buyingPowerUsd: number | null;
-    commissionRate: number | null;
-    maxBuyQty: number | null;
-    heldQty: number | null;
-    sellableQty: number | null;
-  }>;
+  capacity(symbol: string, price?: number): Promise<Capacity>;
 
   calc(req: {
     technique: Technique;

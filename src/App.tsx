@@ -174,16 +174,25 @@ function App() {
   const [formAccount, setFormAccount] = useState("");
   const [savedMsg, setSavedMsg] = useState("");
   const [guardPct, setGuardPct] = useState("15"); // 오입력 방지 한도(사용자 지정)
+  // [v0.3.0] 세션별 시드 비율 설정 입력칸(설정 탭). 문자열 보관(입력 중 뭉개짐 방지).
+  const [seedForm, setSeedForm] = useState<{ day: string; pre: string; regular: string; basis: "auto" | "fixed"; fixed: string }>({
+    day: "90",
+    pre: "50",
+    regular: "50",
+    basis: "auto",
+    fixed: "",
+  });
   // [v0.2.8] 조건주문 편집 창 — 계산값에 묶이지 않고 오너가 직접 고칠 수 있게 한다.
   const [ocoEdit, setOcoEdit] = useState<{ tp: string; sl: string; qty: string } | null>(null);
   // [v0.2.9] 토스에서 받아온 수량 정보(주문가능 최대 / 보유 / 매도가능). 표시용 참고값.
-  const [cap, setCap] = useState<{
-    buyingPowerUsd: number | null;
-    commissionRate: number | null;
-    maxBuyQty: number | null;
-    heldQty: number | null;
-    sellableQty: number | null;
-  } | null>(null);
+  // [v0.3.0] Capacity 타입: 주문가능/보유 + 세션 시드 제안(kyletool.d.ts 정의)
+  const [cap, setCap] = useState<Capacity | null>(null);
+
+  // [v0.3.0] 상단 상시 바용 계좌 요약(예수금 + 보유 총손익)
+  const [acct, setAcct] = useState<{ buyingPowerUsd: number | null; totalPnlUsd: number | null; totalPnlRate: number | null } | null>(null);
+  // [v0.3.0] "확정된" 종목. 한 글자 고칠 때마다 값이 날아가지 않도록, 엔터/포커스아웃 때만 확정한다.
+  const [committedSymbol, setCommittedSymbol] = useState("AAPL");
+  const [quoteErr, setQuoteErr] = useState(""); // 시세 조회 실패 시 인라인 안내(팝업 대신)
 
   // --- 연습 가격 조작 ---
   const [mockPrice, setMockPrice] = useState("");
@@ -202,6 +211,19 @@ function App() {
       setFormMode(s.mode);
       setFormAccount(s.account);
       if (s.priceGuardPct) setGuardPct(String(s.priceGuardPct));
+      // 시드 설정 입력칸 초기화(설정 탭)
+      setSeedForm({
+        day: String(s.seedDayPct),
+        pre: String(s.seedPrePct),
+        regular: String(s.seedRegularPct),
+        basis: s.seedBasis,
+        fixed: s.seedFixedUsd != null ? String(s.seedFixedUsd) : "",
+      });
+      // [v0.3.0] 실서버면 켜자마자 상단 바(예수금·손익)와 기본 종목 시세를 자동 로드한다.
+      if (s.mode === "live") {
+        void loadAccount();
+        void autoLoad("AAPL");
+      }
     });
     window.kyletool.appVersion?.().then(setAppVer).catch(() => {});
     const off = window.kyletool.onJournal((e) => setJournal((prev) => [...prev.slice(-99), e]));
@@ -228,6 +250,16 @@ function App() {
     return () => clearInterval(id);
   }, [autoRefresh, tab]);
 
+  // [v0.3.0] 자동 계산 — 재료·익절/손절%·기법이 바뀌면 0.35초 뒤 조용히 다시 계산한다.
+  //   [계산하기] 버튼을 없앤 대신 이 효과가 대신한다. 타이핑 중 잠깐 멈추면 결과가 갱신된다.
+  //   0.35초 지연(디바운스)을 두는 이유: 한 글자마다 계산하면 낭비이므로 "멈추면 계산"으로.
+  useEffect(() => {
+    if (tab !== "calc") return;
+    const id = setTimeout(() => void runCalc(true), 350);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tech, baseClose, ema200, wallPrice, barOpen, manualEntry, tpPct, slPct, candleYang, committedSymbol]);
+
   async function startDownloadUpdate() {
     setUpdateProgress(0);
     const r = await window.kyletool.downloadUpdate();
@@ -241,26 +273,53 @@ function App() {
     setStatus(await window.kyletool.status());
   }
 
-  async function loadQuote() {
-    setBusy(true);
+  /** [v0.3.0] 상단 바용 계좌 요약 로드(예수금+총손익). 실패해도 조용히 null. */
+  async function loadAccount() {
     try {
-      const cur = await window.kyletool.quote(symbol.trim().toUpperCase());
+      setAcct(await window.kyletool.accountSummary());
+    } catch {
+      setAcct(null);
+    }
+  }
+
+  /**
+   * [v0.3.0] 종목이 확정됐을 때 자동으로 시세·환율·주문가능수량·계좌를 한 번에 로드한다.
+   *   버튼을 없앤 대신 이 함수가 그 일을 대신한다. 조용히(silent) 처리해 팝업을 띄우지 않고,
+   *   실패하면 인라인 안내(quoteErr)만 남긴다.
+   */
+  async function autoLoad(sym: string) {
+    if (!sym) return;
+    setBusy(true);
+    setQuoteErr("");
+    try {
+      const cur = await window.kyletool.quote(sym);
       setCurPrice(cur);
-      await loadFx(); // 시세 볼 때 환율도 함께(둘 다 표시용)
-      await refreshCapacity(cur); // 주문가능 수량·보유 수량도 같이 갱신
+      await loadFx();
+      await refreshCapacity(cur);
+      await loadAccount();
       await refreshStatus();
     } catch (e) {
-      // 원시 에러를 그대로 보여주지 않고, 사람이 조치할 수 있는 한국어 안내로.
-      const raw = String(e).replace(/^Error:\s*(Error invoking remote method '[^']+':\s*Error:\s*)?/, "");
-      alert(
-        `시세 조회에 실패했어요.\n\n확인해 주세요:\n` +
-          `· [설정] 탭에서 실서버 모드 + Client ID/Secret/계좌번호(보통 1)를 저장했는지\n` +
-          `· 인터넷 연결 상태\n\n(자세한 메시지: ${raw})`,
-      );
+      setCurPrice(null);
+      setCap(null);
+      setQuoteErr(String(e).replace(/^Error:\s*(Error invoking remote method '[^']+':\s*Error:\s*)?/, ""));
     } finally {
       setBusy(false);
     }
   }
+
+  /**
+   * [v0.3.0] 종목 확정(엔터/포커스아웃). 실제로 종목이 바뀐 경우에만 값을 초기화하고 다시 로드한다.
+   *   한 글자만 고쳐 같은 종목이면 아무것도 하지 않아 입력값(전봉종가 등)이 보존된다.
+   */
+  async function commitSymbol() {
+    const sym = symbol.trim().toUpperCase();
+    if (!sym) return;
+    if (sym === committedSymbol && curPrice != null) return; // 안 바뀌었고 이미 로드됨 → 그대로
+    setCommittedSymbol(sym);
+    await autoLoad(sym);
+  }
+
+  // [v0.3.0] loadQuote(수동 조회 버튼)는 autoLoad(자동 로드)로 대체돼 제거됨.
 
   /** [v0.2.9] 토스에서 주문가능 수량·보유 수량을 받아와 화면에 표시(강제 아님, 참고용). */
   async function refreshCapacity(priceForCalc?: number) {
@@ -293,24 +352,39 @@ function App() {
     }
   }
 
-  /** 계산 실행 — lib/calc.ts(사양서 M1 검증 함수)를 엔진 경유로 호출 */
-  async function runCalc() {
+  /**
+   * 계산 실행 — lib/calc.ts(사양서 M1 검증 함수)를 엔진 경유로 호출.
+   * [v0.3.0] silent=true(자동 계산)면 입력이 덜 됐을 때 빨간 에러를 띄우지 않고 조용히 결과만 비운다.
+   *   (사람이 타이핑하는 중에 "값을 입력하세요" 경고가 번쩍이면 거슬리기 때문)
+   */
+  async function runCalc(silent = false) {
     setCalcErr("");
     setResult(null);
     if (tech === "candle" && !candleYang) {
-      setCalcErr("캔들 기법은 '전봉이 양봉'일 때만 씁니다. 확인 체크를 해 주세요.");
+      if (!silent) setCalcErr("캔들 기법은 '전봉이 양봉'일 때만 씁니다. 확인 체크를 해 주세요.");
       return;
     }
     // [입력 검증] 계산 시점에만 숫자로 바꾸고, 비었거나 이상하면 한국어로 안내한다.
     const tpNum = toNum(tpPct);
     const slNum = toNum(slPct);
     if (tpNum === null || tpNum <= 0) {
-      setCalcErr("익절 %를 0보다 큰 숫자로 입력하세요. (예: 2)");
+      if (!silent) setCalcErr("익절 %를 0보다 큰 숫자로 입력하세요. (예: 2)");
       return;
     }
     if (slNum === null || slNum <= 0) {
-      setCalcErr("손절 %를 0보다 큰 숫자로 입력하세요. (예: 10)");
+      if (!silent) setCalcErr("손절 %를 0보다 큰 숫자로 입력하세요. (예: 10)");
       return;
+    }
+    // [v0.3.0] 자동 계산은 기법별 필수 재료가 다 들어왔을 때만 엔진을 부른다.
+    //   (빈 입력으로 엔진을 부르면 "값을 입력하세요" 예외가 매번 나 로그가 지저분해진다.)
+    const ready =
+      (tech === "split3" && toNum(baseClose) !== null && toNum(ema200) !== null) ||
+      (tech === "orderbook" && toNum(wallPrice) !== null) ||
+      (tech === "candle" && toNum(barOpen) !== null) ||
+      (tech === "manual" && toNum(manualEntry) !== null);
+    if (!ready) {
+      if (!silent) setCalcErr("기법에 필요한 값을 입력하세요.");
+      return; // 조용히 대기(결과는 비운 상태)
     }
     try {
       const r = await window.kyletool.calc({
@@ -324,10 +398,10 @@ function App() {
         entry: manualEntry ? Number(manualEntry) : undefined,
       });
       setResult(r);
-      // 계산된 1분할 진입가 기준으로 "최대 몇 주" 다시 계산해 표시
-      if (r.levels[0]) void refreshCapacity(r.levels[0].entry);
+      // [v0.3.0] 자동 계산 중엔 매 입력마다 수량 API를 다시 부르지 않는다(네트워크 절약).
+      //   주문가능수량·시드는 종목 확정 시 현재가 기준으로 이미 로드돼 있다.
     } catch (e) {
-      setCalcErr(String(e).replace(/^Error:\s*(Error invoking remote method '[^']+':\s*Error:\s*)?/, ""));
+      if (!silent) setCalcErr(String(e).replace(/^Error:\s*(Error invoking remote method '[^']+':\s*Error:\s*)?/, ""));
     }
   }
 
@@ -522,6 +596,40 @@ ${msg}
     }
   }
 
+  /** [v0.3.0] 상단 바의 실주문 토글. 켤 때만 경고 확인을 거친다(끄는 건 즉시). 상태는 저장된다. */
+  async function toggleLiveOrders(on: boolean) {
+    if (on) {
+      const ok = window.confirm(
+        ["⚠️ 실주문을 활성화합니다.", "", "지금부터 주문 버튼을 누르면 실제 돈으로 주문이 전송됩니다.", "", "계속할까요?"].join("\n"),
+      );
+      if (!ok) return;
+    }
+    await window.kyletool.setLiveOrders(on);
+    setSettings(await window.kyletool.getSettings());
+    await refreshStatus();
+  }
+
+  /** [v0.3.0] 세션 시드 제안 수량을 수량칸에 넣는다(강제 아님 — 참고값을 채워줄 뿐). */
+  function applySeedQty() {
+    if (cap?.seedQty != null && cap.seedQty > 0) setQty(String(cap.seedQty));
+  }
+
+  /** [v0.3.0] 설정 탭에서 세션별 시드 비율/기준을 저장한다. */
+  async function saveSeed() {
+    const s = await window.kyletool.saveSeedSettings({
+      seedDayPct: toNum(seedForm.day) ?? undefined,
+      seedPrePct: toNum(seedForm.pre) ?? undefined,
+      seedRegularPct: toNum(seedForm.regular) ?? undefined,
+      seedBasis: seedForm.basis,
+      seedFixedUsd: seedForm.basis === "fixed" ? (toNum(seedForm.fixed) ?? null) : null,
+    });
+    setSettings(s);
+    setSavedMsg("시드 설정을 저장했습니다.");
+    setTimeout(() => setSavedMsg(""), 4000);
+    // 시드가 바뀌었으니 제안 수량도 즉시 갱신
+    if (curPrice != null) void refreshCapacity(curPrice);
+  }
+
   async function saveSettings() {
     const s = await window.kyletool.saveSettings({
       mode: formMode,
@@ -606,265 +714,238 @@ ${msg}
         ))}
       </nav>
 
-      {/* ===== ① 계산기 ===== */}
+      {/* ===== 1) 계산기 (오더 티켓) ===== */}
       {tab === "calc" && (
-        <main className="grid">
-          <section className="card">
-            <h2>1) 종목 · 시세 · 환율</h2>
-            <div className="form-row">
-              <label>
-                종목 코드
-                <input value={symbol} onChange={(e) => { setSymbol(e.target.value); setCap(null); setCurPrice(null); setResult(null); }} placeholder="예: AAPL" />
-              </label>
-              <button className="btn" disabled={busy} onClick={loadQuote}>
-                시세·환율 조회
-              </button>
-              {curPrice != null && <span className="quote">현재가 {usdKrw(curPrice, fx)}</span>}
+        <main className="ticket">
+          {/* --- 상단 상시 바: 실주문 토글 · 예수금 · 보유손익 · 세션 --- */}
+          <div className="statusbar">
+            <label className={`sb-live ${settings?.liveOrdersEnabled ? "on" : "off"}`}>
+              <input
+                type="checkbox"
+                checked={!!settings?.liveOrdersEnabled}
+                onChange={(e) => toggleLiveOrders(e.target.checked)}
+              />
+              <b>{settings?.liveOrdersEnabled ? "🔴 실주문 ON" : "🔒 실주문 OFF (모의)"}</b>
+            </label>
+            <div className="sb-item">
+              <span className="sb-k">예수금</span>
+              <b>{acct?.buyingPowerUsd != null ? usdKrw(acct.buyingPowerUsd, fx) : "—"}</b>
             </div>
-            <div className="form-row">
-              <span className="hint">
-                환율:{" "}
+            <div className="sb-item">
+              <span className="sb-k">보유손익</span>
+              <b className={pnlClass(acct?.totalPnlUsd ?? null)}>
+                {acct?.totalPnlUsd != null
+                  ? `${acct.totalPnlUsd >= 0 ? "+" : ""}${usdKrw(acct.totalPnlUsd, fx)}`
+                  : "—"}
+                {acct?.totalPnlRate != null && ` (${acct.totalPnlRate >= 0 ? "+" : ""}${acct.totalPnlRate.toFixed(2)}%)`}
+              </b>
+            </div>
+            <div className="sb-item">
+              <span className="sb-k">세션</span>
+              <b>{SESSION_LABEL[status.session]}</b>
+              {cap && <span className="hint"> · 시드 {cap.sessionPct}%</span>}
+            </div>
+            <button className="mini" disabled={busy} onClick={() => autoLoad(committedSymbol)} title="예수금·시세·수량 다시 불러오기">
+              ↻ 새로고침
+            </button>
+          </div>
+
+          {/* --- 본문: 왼쪽 입력 / 오른쪽 결과·주문 (한 화면) --- */}
+          <div className="ticket-grid">
+            {/* 왼쪽: 입력 */}
+            <section className="card">
+              <div className="form-row sym-row">
+                <label className="sym-label">
+                  종목
+                  <input
+                    className="sym-input"
+                    value={symbol}
+                    onChange={(e) => setSymbol(e.target.value.toUpperCase())}
+                    onKeyDown={(e) => { if (e.key === "Enter") commitSymbol(); }}
+                    onBlur={commitSymbol}
+                    placeholder="예: AAPL"
+                  />
+                </label>
+                <div className="cur-box">
+                  {curPrice != null ? (
+                    <>현재가 <b className="cur-price">{usdKrw(curPrice, fx)}</b></>
+                  ) : busy ? (
+                    <span className="hint">조회 중…</span>
+                  ) : (
+                    <span className="hint">종목 입력 후 Enter</span>
+                  )}
+                </div>
+              </div>
+              {quoteErr && <p className="danger small">⚠ 시세 조회 실패: {quoteErr} — [설정]에서 키·계좌 확인</p>}
+              <div className="hint small">
+                환율{" "}
                 {fx
-                  ? `1 USD = ₩${fx.toLocaleString()} (${fxSource === "toss" ? "토스 매매기준율 · 1분 갱신" : "수동 입력"})`
-                  : "미조회 — [시세·환율 조회]를 누르세요"}
-              </span>
-              <span className="hint">
-                💡 <b>원화(₩)는 참고용 환산</b>입니다. 환율은 1분마다 바뀌고 토스 화면과 조회 시점이 달라
-                몇백 원 차이가 날 수 있어요. <b>실제 주문·체결은 달러 기준</b>입니다.
-              </span>
+                  ? `1 USD = ₩${fx.toLocaleString()} (${fxSource === "toss" ? "매매기준율·참고용" : "수동"})`
+                  : "미조회"}
+                {" · 원화는 참고 환산이며 실제 주문·체결은 달러 기준"}
+              </div>
               {fxFailed && (
-                <>
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    placeholder="환율 수동 입력 (예: 1390)"
-                    value={manualFx}
-                    onChange={(e) => setManualFxInput(e.target.value)}
-                  />
-                  <button className="mini" onClick={applyManualFx}>
-                    적용
-                  </button>
-                  <span className="hint danger">자동 조회 실패 — 수동으로 입력해 주세요</span>
-                </>
+                <div className="form-row">
+                  <input type="text" inputMode="decimal" placeholder="환율 수동 입력 (예: 1390)" value={manualFx} onChange={(e) => setManualFxInput(e.target.value)} />
+                  <button className="mini" onClick={applyManualFx}>적용</button>
+                  <span className="hint danger">자동 조회 실패 — 수동 입력</span>
+                </div>
               )}
-            </div>
-            {isMock && (
-              <div className="form-row mock-box">
-                <span className="hint">🎮 연습: 가짜 서버 현재가 바꾸기</span>
-                <input type="text" inputMode="decimal" placeholder="새 가격" value={mockPrice} onChange={(e) => isNumericDraft(e.target.value) && setMockPrice(e.target.value)} />
-                <button
-                  className="mini"
-                  onClick={async () => {
-                    if (mockPrice) {
-                      await window.kyletool.mockSetPrice(symbol.trim().toUpperCase(), Number(mockPrice));
-                      loadQuote();
-                    }
-                  }}
-                >
-                  변경
-                </button>
-              </div>
-            )}
-          </section>
 
-          <section className="card">
-            <h2>2) 매매기법 선택 · 재료 입력</h2>
-            <div className="form-row">
-              {(["split3", "orderbook", "candle", "manual"] as Technique[]).map((t) => (
-                <label className="radio" key={t}>
-                  <input
-                    type="radio"
-                    checked={tech === t}
-                    onChange={() => {
-                      setTech(t);
-                      setResult(null);
-                      setCalcErr("");
-                    }}
-                  />
-                  {TECH_LABEL[t]}
-                </label>
-              ))}
-            </div>
+              {/* 기법 선택 */}
+              <div className="form-row tech-row">
+                {(["split3", "orderbook", "candle", "manual"] as Technique[]).map((t) => (
+                  <label className="radio" key={t}>
+                    <input type="radio" checked={tech === t} onChange={() => { setTech(t); setCalcErr(""); }} />
+                    {TECH_LABEL[t]}
+                  </label>
+                ))}
+              </div>
 
-            {tech === "split3" && (
-              <div className="form-row">
-                <label>
-                  전봉 종가 $
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    placeholder="예: 11.33"
-                    value={baseClose}
-                    onChange={(e) => isNumericDraft(e.target.value) && setBaseClose(e.target.value)}
-                  />
-                </label>
-                <label>
-                  EMA200 $
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    placeholder="예: 11.33"
-                    value={ema200}
-                    onChange={(e) => isNumericDraft(e.target.value) && setEma200(e.target.value)}
-                  />
-                </label>
-                <span className="hint">전봉종가~EMA200을 3등분해 1·2·3분할 산출 (전봉종가 &gt; EMA200 필수)</span>
-              </div>
-            )}
-            {tech === "orderbook" && (
-              <div className="form-row">
-                <label>
-                  매수벽 가격 $
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    placeholder="예: 11.33"
-                    value={wallPrice}
-                    onChange={(e) => isNumericDraft(e.target.value) && setWallPrice(e.target.value)}
-                  />
-                </label>
-                <span className="hint">진입 = 벽 + 1틱. 벽인지 판단은 사람 몫(정량 기준 미확정)</span>
-              </div>
-            )}
-            {tech === "candle" && (
-              <div className="form-row">
-                <label>
-                  현재봉 시가 $
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    placeholder="예: 11.33"
-                    value={barOpen}
-                    onChange={(e) => isNumericDraft(e.target.value) && setBarOpen(e.target.value)}
-                  />
-                </label>
-                <label className="radio">
-                  <input type="checkbox" checked={candleYang} onChange={(e) => setCandleYang(e.target.checked)} />
-                  전봉이 양봉(종가&gt;시가)임을 확인했습니다
-                </label>
-              </div>
-            )}
-            {tech === "manual" && (
-              <div className="form-row">
-                <label>
-                  진입가 $
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    placeholder="예: 11.33"
-                    value={manualEntry}
-                    onChange={(e) => isNumericDraft(e.target.value) && setManualEntry(e.target.value)}
-                  />
-                </label>
-              </div>
-            )}
+              {/* 기법별 재료 */}
+              {tech === "split3" && (
+                <div className="form-row">
+                  <label>전봉 종가 $
+                    <input type="text" inputMode="decimal" placeholder="예: 11.33" value={baseClose} onChange={(e) => isNumericDraft(e.target.value) && setBaseClose(e.target.value)} />
+                  </label>
+                  <label>EMA200 $
+                    <input type="text" inputMode="decimal" placeholder="예: 11.10" value={ema200} onChange={(e) => isNumericDraft(e.target.value) && setEma200(e.target.value)} />
+                  </label>
+                  <span className="hint">전봉종가~EMA200을 3등분해 1·2·3분할 산출 (전봉종가 &gt; EMA200 필수)</span>
+                </div>
+              )}
+              {tech === "orderbook" && (
+                <div className="form-row">
+                  <label>매수벽 가격 $
+                    <input type="text" inputMode="decimal" placeholder="예: 11.33" value={wallPrice} onChange={(e) => isNumericDraft(e.target.value) && setWallPrice(e.target.value)} />
+                  </label>
+                  <span className="hint">진입 = 벽 + 1틱. 벽 판단은 사람 몫</span>
+                </div>
+              )}
+              {tech === "candle" && (
+                <div className="form-row">
+                  <label>현재봉 시가 $
+                    <input type="text" inputMode="decimal" placeholder="예: 20.50" value={barOpen} onChange={(e) => isNumericDraft(e.target.value) && setBarOpen(e.target.value)} />
+                  </label>
+                  <label className="radio">
+                    <input type="checkbox" checked={candleYang} onChange={(e) => setCandleYang(e.target.checked)} />
+                    전봉이 양봉(종가&gt;시가)임을 확인
+                  </label>
+                </div>
+              )}
+              {tech === "manual" && (
+                <div className="form-row">
+                  <label>진입가 $
+                    <input type="text" inputMode="decimal" placeholder="예: 11.33" value={manualEntry} onChange={(e) => isNumericDraft(e.target.value) && setManualEntry(e.target.value)} />
+                  </label>
+                </div>
+              )}
 
-            <div className="form-row">
-              <label>
-                익절 %
-                <input
-                  type="text"
-                  inputMode="decimal"
-                  placeholder="예: 2"
-                  value={tpPct}
-                  onChange={(e) => isNumericDraft(e.target.value) && setTpPct(e.target.value)}
-                />
-              </label>
-              <label>
-                손절 %
-                <input
-                  type="text"
-                  inputMode="decimal"
-                  placeholder="예: 10"
-                  value={slPct}
-                  onChange={(e) => isNumericDraft(e.target.value) && setSlPct(e.target.value)}
-                />
-              </label>
-              <label>
-                수량(주)
-                <input
-                  type="text"
-                  inputMode="decimal"
-                  placeholder="예: 1 (소수주 가능)"
-                  value={qty}
-                  onChange={(e) => isNumericDraft(e.target.value) && setQty(e.target.value)}
-                />
-              </label>
-              {/* [v0.2.9] 토스에서 받아온 주문가능 수량 — 참고 표시이며 강제하지 않는다 */}
-              <div className="cap-box">
+              {/* 익절/손절/수량 */}
+              <div className="form-row">
+                <label>익절 %
+                  <input type="text" inputMode="decimal" placeholder="예: 2" value={tpPct} onChange={(e) => isNumericDraft(e.target.value) && setTpPct(e.target.value)} />
+                </label>
+                <label>손절 %
+                  <input type="text" inputMode="decimal" placeholder="예: 10" value={slPct} onChange={(e) => isNumericDraft(e.target.value) && setSlPct(e.target.value)} />
+                </label>
+                <label>수량(주)
+                  <input type="text" inputMode="decimal" placeholder="예: 1 (소수주 가능)" value={qty} onChange={(e) => isNumericDraft(e.target.value) && setQty(e.target.value)} />
+                </label>
+              </div>
+
+              {/* 세션 시드 제안 + 주문가능/보유 */}
+              <div className="seed-box">
                 {cap ? (
                   <>
-                    <span className="hint">
-                      주문가능 최대{" "}
-                      <b>{cap.maxBuyQty != null ? `${cap.maxBuyQty.toLocaleString()}주` : "—"}</b>
-                      {cap.buyingPowerUsd != null && ` (매수가능 $${cap.buyingPowerUsd.toLocaleString()} 기준`}
+                    <div className="seed-line">
+                      <span>
+                        <span className="tag">{SESSION_LABEL[cap.session]}</span>
+                        시드 <b>{cap.sessionPct}%</b> 설정 중 ·{" "}
+                        {cap.seedQty != null ? <>제안 <b>{cap.seedQty.toLocaleString()}주</b></> : "제안 —"}
+                        {cap.seedUsd != null && (
+                          <span className="hint"> (시드 {usdKrw(cap.seedUsd, fx)} × {cap.sessionPct}% {cap.seedBasis === "fixed" ? "· 고정" : "· 예수금"})</span>
+                        )}
+                      </span>
+                      {cap.seedQty != null && cap.seedQty > 0 && (
+                        <button className="mini" onClick={applySeedQty}>적용</button>
+                      )}
+                    </div>
+                    <div className="seed-line hint">
+                      주문가능 최대 <b>{cap.maxBuyQty != null ? `${cap.maxBuyQty.toLocaleString()}주` : "—"}</b>
+                      {cap.buyingPowerUsd != null && ` (매수가능 ${usdKrw(cap.buyingPowerUsd, fx)}`}
                       {cap.commissionRate != null && `, 수수료 ${(cap.commissionRate * 100).toFixed(3)}%`}
                       {cap.buyingPowerUsd != null && ")"}
-                    </span>
-                    {cap.maxBuyQty != null && cap.maxBuyQty > 0 && (
-                      <button className="mini" onClick={() => setQty(String(cap.maxBuyQty))}>
-                        최대
-                      </button>
-                    )}
-                    <span className="hint">
-                      · 보유 <b>{cap.heldQty != null ? `${cap.heldQty}주` : "—"}</b>
+                      {cap.maxBuyQty != null && cap.maxBuyQty > 0 && (
+                        <button className="mini" onClick={() => setQty(String(cap.maxBuyQty))}>최대</button>
+                      )}
+                    </div>
+                    <div className="seed-line hint">
+                      보유 <b>{cap.heldQty != null ? `${cap.heldQty}주` : "—"}</b>
                       {cap.sellableQty != null && ` (매도가능 ${cap.sellableQty}주)`}
-                    </span>
+                    </div>
                   </>
                 ) : (
-                  <span className="hint">주문가능 수량: [시세·환율 조회]를 누르면 표시됩니다</span>
+                  <span className="hint">종목을 입력하면 세션 시드·주문가능·보유 수량이 자동 표시됩니다.</span>
                 )}
               </div>
-              <button className="btn btn-start" onClick={runCalc}>
-                계산하기
-              </button>
-            </div>
-            {calcErr && <p className="danger">⚠ {calcErr}</p>}
-          </section>
-
-          {result && (
-            <section className="card wide">
-              <h2>
-                3) 계산 결과 — {TECH_LABEL[result.technique]} <span className="hint">{result.note}</span>
-              </h2>
-              <table>
-                <thead>
-                  <tr>
-                    <th>분할</th>
-                    <th>진입가</th>
-                    <th>익절가 (+{tpPct}%)</th>
-                    <th>손절가 (−{slPct}%)</th>
-                    <th>투입액 ({qty || "?"}주){cap?.maxBuyQty != null && <span className="hint"> / 최대 {cap.maxBuyQty}주</span>}</th>
-                    <th>주문 (확인 팝업 후 전송)</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.levels.map((lv) => (
-                    <tr key={lv.level}>
-                      <td>{lv.level}분할</td>
-                      <td>{usdKrw(lv.entry, fx)}</td>
-                      <td className="ok">{usdKrw(lv.tp, fx)}</td>
-                      <td className="danger">{usdKrw(lv.sl, fx)}</td>
-                      <td>{usdKrw(lv.entry * (toNum(qty) ?? 0), fx)}</td>
-                      <td>
-                        <button className="mini" disabled={status.killSwitch} onClick={() => confirmEntry(lv)}>
-                          진입 지정가
-                        </button>{" "}
-                        <button className="mini" disabled={status.killSwitch} onClick={() => openOcoEditor(lv)}>
-                          조건주문(익절+손절)
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <p className="hint">
-                💡 권장 순서: <b>진입 지정가</b>로 사고 → 체결 확인 후 <b>조건주문(익절+손절)</b> 등록.
-                조건주문 감시는 토스 서버가 하므로 이 앱을 꺼도 작동합니다.
-                {status.dryRun && " (현재 주문 잠금 — 전송 대신 모의 기록만 남습니다)"}
-              </p>
+              {calcErr && <p className="danger">⚠ {calcErr}</p>}
+              {isMock && (
+                <div className="form-row mock-box">
+                  <span className="hint">🎮 연습: 가짜 서버 현재가</span>
+                  <input type="text" inputMode="decimal" placeholder="새 가격" value={mockPrice} onChange={(e) => isNumericDraft(e.target.value) && setMockPrice(e.target.value)} />
+                  <button className="mini" onClick={async () => { if (mockPrice) { await window.kyletool.mockSetPrice(symbol.trim().toUpperCase(), Number(mockPrice)); autoLoad(symbol.trim().toUpperCase()); } }}>변경</button>
+                </div>
+              )}
             </section>
-          )}
+
+            {/* 오른쪽: 결과 + 주문 */}
+            <section className="card">
+              {result ? (
+                <>
+                  <div className="result-head">
+                    <b>{TECH_LABEL[result.technique]}</b> <span className="hint">{result.note}</span>
+                  </div>
+                  <table className="result-table">
+                    <thead>
+                      <tr>
+                        <th>분할</th>
+                        <th>진입가</th>
+                        <th>익절 (+{tpPct}%)</th>
+                        <th>손절 (−{slPct}%)</th>
+                        <th>투입액 ({qty || "?"}주)</th>
+                        <th>주문</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {result.levels.map((lv) => (
+                        <tr key={lv.level}>
+                          <td>{lv.level}분할</td>
+                          <td>{usdKrw(lv.entry, fx)}</td>
+                          <td className="ok">{usdKrw(lv.tp, fx)}</td>
+                          <td className="danger">{usdKrw(lv.sl, fx)}</td>
+                          <td>{usdKrw(lv.entry * (toNum(qty) ?? 0), fx)}</td>
+                          <td className="order-cell">
+                            <button className="mini btn-buy" disabled={status.killSwitch} onClick={() => confirmEntry(lv)}>진입 지정가</button>
+                            <button className="mini btn-oco" disabled={status.killSwitch} onClick={() => openOcoEditor(lv)}>조건주문</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <p className="hint">
+                    💡 1·2·3분할은 <b>동등한 후보</b>입니다(어느 것도 추천 아님). 순서: 진입 지정가로 매수 → 체결 확인 → 조건주문(익절+손절) 등록. 조건주문 감시는 토스 서버가 하므로 앱을 꺼도 작동합니다.
+                    {status.dryRun && " (현재 주문 잠금 — 전송 대신 모의 기록만)"}
+                  </p>
+                </>
+              ) : (
+                <div className="result-empty hint">
+                  왼쪽에 종목·재료·익절/손절%를 입력하면 <b>자동으로 계산</b>되어 여기 표가 나타납니다.
+                  <br />(계산·조회 버튼을 따로 누를 필요가 없습니다.)
+                </div>
+              )}
+            </section>
+          </div>
         </main>
       )}
 
@@ -1176,6 +1257,46 @@ ${msg}
                 />
                 <b>주문 확인 팝업 건너뛰기</b> — 버튼을 누르면 바로 전송(오발주 위험 ↑)
               </label>
+            </div>
+
+            {/* [v0.3.0] 세션별 시드 비율 설정 */}
+            <div className="settings-block">
+              <h3>세션별 시드 비율 (진입 수량 제안)</h3>
+              <p className="hint">
+                장(세션)마다 <b>시드의 몇 %로 진입</b>할지 정합니다. 계산기 화면이 현재 세션을 자동 판정해
+                <b> 제안 수량</b>을 보여줍니다(강제 아님 — 다른 수량을 넣어도 그대로 전송).
+              </p>
+              <div className="form-row">
+                <label>데이마켓 %
+                  <input type="text" inputMode="decimal" value={seedForm.day} onChange={(e) => isNumericDraft(e.target.value) && setSeedForm({ ...seedForm, day: e.target.value })} placeholder="90" />
+                </label>
+                <label>프리마켓 %
+                  <input type="text" inputMode="decimal" value={seedForm.pre} onChange={(e) => isNumericDraft(e.target.value) && setSeedForm({ ...seedForm, pre: e.target.value })} placeholder="50" />
+                </label>
+                <label>정규장(본장) %
+                  <input type="text" inputMode="decimal" value={seedForm.regular} onChange={(e) => isNumericDraft(e.target.value) && setSeedForm({ ...seedForm, regular: e.target.value })} placeholder="50" />
+                </label>
+              </div>
+              <p className="hint">시드 기준(무엇의 몇 %인지):</p>
+              <label className="radio">
+                <input type="radio" checked={seedForm.basis === "auto"} onChange={() => setSeedForm({ ...seedForm, basis: "auto" })} />
+                <b>매수가능금액 자동 사용</b> — 지금 계좌의 예수금(달러)을 시드로 (기본)
+              </label>
+              <label className="radio">
+                <input type="radio" checked={seedForm.basis === "fixed"} onChange={() => setSeedForm({ ...seedForm, basis: "fixed" })} />
+                <b>고정 시드 금액 직접 입력</b> — 아래 달러 금액을 시드로 사용
+              </label>
+              {seedForm.basis === "fixed" && (
+                <div className="form-row">
+                  <label>고정 시드 $
+                    <input type="text" inputMode="decimal" value={seedForm.fixed} onChange={(e) => isNumericDraft(e.target.value) && setSeedForm({ ...seedForm, fixed: e.target.value })} placeholder="예: 1000" />
+                  </label>
+                </div>
+              )}
+              <div className="form-row">
+                <button className="btn btn-start" onClick={saveSeed}>시드 설정 저장</button>
+                <span className="hint">예) 데이 90%, 시드 $1,000, 현재가 $10 → 제안 약 90주</span>
+              </div>
             </div>
 
             <div className="settings-block">

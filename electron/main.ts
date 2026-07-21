@@ -150,6 +150,7 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:journal", () => e.getJournal());
   ipcMain.handle("tool:settings:get", () => e.getSettings());
   ipcMain.handle("tool:settings:save", (_ev, input) => e.saveSettings(input));
+  ipcMain.handle("tool:settings:seed", (_ev, input) => e.saveSeedSettings(input)); // [v0.3.0] 세션 시드 설정
   ipcMain.handle("tool:killSwitch", (_ev, on: boolean) => e.setKillSwitch(!!on));
   ipcMain.handle("tool:liveOrders", (_ev, on: boolean) => e.setLiveOrders(!!on));
   ipcMain.handle("tool:priceGuard", (_ev, on: boolean, pct?: number) => e.setPriceGuard(!!on, pct));
@@ -159,6 +160,7 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:fx", () => e.fx());
   ipcMain.handle("tool:fx:manual", (_ev, rate: number) => e.setManualFx(rate));
   ipcMain.handle("tool:buyingPower", () => e.refreshBuyingPower());
+  ipcMain.handle("tool:accountSummary", () => e.accountSummary()); // [v0.3.0] 예수금+총손익
   ipcMain.handle("tool:sellable", (_ev, symbol: string) => e.sellableQty(symbol));
   ipcMain.handle("tool:capacity", (_ev, symbol: string, price?: number) => e.orderCapacity(symbol, price));
   ipcMain.handle("tool:calc", (_ev, req) => e.calc(req));
