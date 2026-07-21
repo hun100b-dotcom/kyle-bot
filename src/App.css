@@ -294,3 +294,7 @@ ul.hint { padding-left: 18px; }
   background: #4a3a1e; color: #ffcf7a; border: 1px solid #7a5a20; font-size: 13px;
 }
 .warn-box b { color: #ffe4a3; }
+
+/* [v0.3.2] 진입+익절(OTO) 버튼 — 매수(파랑)/조건(초록)과 구분되는 주황 */
+.btn-oto { background: #d97706; color: #fff; }
+.order-cell { white-space: normal; display: flex; flex-wrap: wrap; gap: 4px; }

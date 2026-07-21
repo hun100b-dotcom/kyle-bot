@@ -106,7 +106,7 @@ export interface ToolStatus {
 export interface TradeRationale {
   clientOrderId: string; //  열쇠(토스 주문과 매칭용)
   ts: string; //             주문 시각(KST)
-  kind: "entry" | "oco"; //  진입 지정가 / 조건주문
+  kind: "entry" | "oco" | "oto"; //  진입 지정가 / 조건주문(익절+손절) / 진입+익절(OTO)
   symbol: string;
   technique: Technique; //   사용한 기법
   level?: number; //         [삼분할] 몇 분할 타점인지(1/2/3)
@@ -1052,8 +1052,91 @@ export class ToolEngine extends EventEmitter {
     });
   }
 
-  // [OTO 제거됨] 진입→익절만 걸리고 손절이 안 걸려 반쪽짜리라 위험(오너 판단).
-  //   남은 주문 수단: ① 진입 지정가  ② 조건주문(OCO: 익절+손절 동시) 두 가지.
+  /**
+   * ③ [v0.3.2 부활] 진입+익절(OTO) — "사면서 익절까지 한 번에" (손절은 담지 않음, 오너가 수동).
+   *
+   * [OTO가 뭐길래?] One-Triggers-the-Other. first(진입 매수)가 체결되면 그때부터 second(익절 매도)
+   *   감시가 시작된다. 즉 "이 가격에 사고, 사지면 이 가격에 팔아라"를 한 주문으로 예약한다.
+   *   토스 앱에서 오너가 손으로 하던 "조건 구매 후 판매"가 바로 이것.
+   *
+   * [왜 미보유여도 되나?] OTO의 first는 '매수(BUY)'다. 아직 주식이 없어도 사는 주문이므로,
+   *   보유가 있어야 하는 OCO(둘 다 매도)와 달리 0주에서도 등록된다.
+   *
+   * [손절은 왜 안 담나?] 오너 지시. OTO는 다리가 2개뿐(first/second)이라 익절·손절을 동시에 못 담는다.
+   *   그래서 여기선 익절만 예약하고, 손절은 오너가 체결 후 수동으로 건다(확인 팝업에 명시).
+   *
+   * [스펙(공식 openapi.json 확인)]
+   *   type=OTO, orderType=LIMIT(지정가만), quantity/orderType/expireDate 그룹 공통,
+   *   first  = { orderSide:"BUY",  triggerPrice:진입가, orderPrice:진입가 }
+   *   second = { orderSide:"SELL", triggerPrice:익절가, orderPrice:익절가 }
+   *   clientOrderId(멱등키)로 중복 등록 방지.
+   */
+  async placeOto(spec: {
+    symbol: string;
+    quantity: number;
+    entryTrigger: number; // 진입 감시가(현재가 이하로 닿으면 매수)
+    entryPrice: number; //   진입 지정가
+    tpTrigger: number; //    익절 감시가(진입 체결 후, 이 가격 닿으면 매도)
+    tpPrice: number; //      익절 지정가
+    expireDate: string; //   YYYY-MM-DD
+    rationale?: RationaleInput;
+  }): Promise<JournalEntry> {
+    const symbol = spec.symbol.toUpperCase();
+    const cur = await this.orderGate(symbol); // 사전차단용 아님(막지 않음) — 현재가 참고·경고용
+    // [막지 않는다] 통상 진입가는 현재가 이하, 익절가는 진입가 위다. 어긋나도 전송하고 토스 판단에 맡긴다.
+    if (!(spec.tpTrigger > spec.entryTrigger)) {
+      this.addJournal({
+        kind: "info",
+        symbol,
+        summary: `⚠️ 참고: 익절가 $${spec.tpTrigger} 가 진입가 $${spec.entryTrigger} 보다 높지 않습니다. 그래도 전송합니다 — 거부되면 토스 응답을 보여드립니다.`,
+      });
+    }
+
+    // 근거 기록 열쇠 겸 멱등키(중복 전송 방지). 미리 만들어 주문·기록에 같은 값을 쓴다.
+    const clientOrderId = makeClientOrderId(`oto${DateTime.now().toFormat("HHmmss")}`, 1, "oto");
+
+    if (this.isDryRun()) {
+      this.saveRationale(spec.rationale, {
+        clientOrderId,
+        kind: "oto",
+        symbol,
+        quantity: spec.quantity,
+        priceAtOrder: cur,
+        dryRun: true,
+      });
+      return this.addJournal({
+        kind: "dryrun",
+        symbol,
+        summary: `[드라이런] OTO 등록 ${symbol} ${spec.quantity}주: 진입 $${spec.entryPrice} → 익절 $${spec.tpPrice} (손절 미포함·실주문 잠금)`,
+        detail: { ...spec, clientOrderId },
+      });
+    }
+    const c = await createConditionalOrder({
+      symbol,
+      type: "OTO",
+      quantity: spec.quantity,
+      orderType: "LIMIT",
+      expireDate: spec.expireDate,
+      first: { orderSide: "BUY", triggerPrice: spec.entryTrigger, orderPrice: spec.entryPrice },
+      second: { orderSide: "SELL", triggerPrice: spec.tpTrigger, orderPrice: spec.tpPrice },
+      clientOrderId,
+    });
+    this.saveRationale(spec.rationale, {
+      clientOrderId,
+      kind: "oto",
+      symbol,
+      quantity: spec.quantity,
+      priceAtOrder: cur,
+      dryRun: false,
+      tossOrderId: c.conditionalOrderId,
+    });
+    return this.addJournal({
+      kind: "oto",
+      symbol,
+      summary: `OTO 등록 완료 ${symbol} ${spec.quantity}주: 진입 $${spec.entryPrice} 체결 시 → 익절 $${spec.tpPrice} 자동 매도 (번호 ${c.conditionalOrderId}) — 손절 미포함, 토스 서버가 감시`,
+      detail: c,
+    });
+  }
 
   // --------------------------------------------------------------------------
   // 주문 현황(조회·취소) — 조회는 드라이런과 무관하게 실서버에서도 안전(읽기)
@@ -1139,7 +1222,7 @@ export class ToolEngine extends EventEmitter {
     input: RationaleInput | undefined,
     fixed: {
       clientOrderId: string;
-      kind: "entry" | "oco";
+      kind: "entry" | "oco" | "oto";
       symbol: string;
       quantity: number;
       priceAtOrder: number | null;

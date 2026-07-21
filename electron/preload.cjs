@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld("kyletool", {
   // 주문(화면의 확인 팝업 통과 후에만 호출됨)
   placeEntry: (spec) => ipcRenderer.invoke("tool:order:entry", spec),
   placeOco: (spec) => ipcRenderer.invoke("tool:order:oco", spec),
+  placeOto: (spec) => ipcRenderer.invoke("tool:order:oto", spec), // [v0.3.2] 진입+익절(OTO)
 
   // 주문 현황
   // [v0.2.10] 주문 근거(기법 스냅샷) 목록 / 보유 포지션 손익

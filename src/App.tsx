@@ -117,7 +117,7 @@ function defaultExpire(): string {
 
 // 주문 확인 팝업에 담기는 내용(무엇을 전송할지 사람이 최종 확인)
 interface PendingOrder {
-  kind: "entry" | "oco";
+  kind: "entry" | "oco" | "oto";
   title: string;
   lines: string[];
   send: () => Promise<JournalEntry>;
@@ -451,6 +451,42 @@ function App() {
           price: lv.entry,
           quantity: q,
           rationale: buildRationale(lv), // 기법 근거 동봉(주문 성공 시 기록됨)
+        }),
+    });
+  }
+
+  /**
+   * [v0.3.2] 진입+익절(OTO) — "사면서 익절까지 한 번에". 손절은 담지 않는다(오너 수동).
+   *   진입가·익절가·수량으로 토스 OTO 조건주문 1건을 만들어 확인 팝업을 띄운다.
+   *   미보유여도 OK: OTO의 first는 '매수'라 보유가 필요 없다(OCO와 다른 점).
+   */
+  function confirmOto(lv: CalcLevel) {
+    const q = toNum(qty);
+    if (q === null || q <= 0) {
+      alert("수량을 0보다 큰 숫자로 입력하세요. (예: 1 또는 0.5)");
+      return;
+    }
+    const expire = defaultExpire();
+    requestOrder({
+      kind: "oto",
+      title: `진입+익절 (OTO) — ${symbol.toUpperCase()} · 손절 미포함`,
+      lines: [
+        `진입(매수) ${usdKrw(lv.entry, fx)} × ${q}주`,
+        `→ 체결되면 익절(매도) ${usdKrw(lv.tp, fx)} 자동 등록 (+${tpPct}%)`,
+        `⚠️ 손절은 담기지 않습니다. 진입 체결 후 손절은 직접(수동) 걸어주세요.`,
+        `만료일 ${expire} · 지정가 · 토스 서버가 감시(앱 꺼도 작동)`,
+      ],
+      send: () =>
+        window.kyletool.placeOto({
+          symbol,
+          quantity: q,
+          entryTrigger: lv.entry, // 진입 감시가 = 진입 지정가
+          entryPrice: lv.entry,
+          tpTrigger: lv.tp, //       익절 감시가 = 익절 지정가
+          tpPrice: lv.tp,
+          expireDate: expire,
+          // 근거: 익절만 의미있으므로 손절(sl)은 근거에서 비운다.
+          rationale: { ...buildRationale(lv, { tp: lv.tp }), sl: undefined },
         }),
     });
   }
@@ -927,14 +963,17 @@ ${msg}
                           <td>{usdKrw(lv.entry * (toNum(qty) ?? 0), fx)}</td>
                           <td className="order-cell">
                             <button className="mini btn-buy" disabled={status.killSwitch} onClick={() => confirmEntry(lv)}>진입 지정가</button>
-                            <button className="mini btn-oco" disabled={status.killSwitch} onClick={() => openOcoEditor(lv)}>조건주문</button>
+                            <button className="mini btn-oto" disabled={status.killSwitch} onClick={() => confirmOto(lv)} title="사면서 익절까지 한 번에(손절 미포함)">진입+익절(OTO)</button>
+                            <button className="mini btn-oco" disabled={status.killSwitch} onClick={() => openOcoEditor(lv)} title="이미 보유 중일 때 익절+손절 동시">조건주문(익절+손절)</button>
                           </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                   <p className="hint">
-                    💡 1·2·3분할은 <b>동등한 후보</b>입니다(어느 것도 추천 아님). 순서: 진입 지정가로 매수 → 체결 확인 → 조건주문(익절+손절) 등록. 조건주문 감시는 토스 서버가 하므로 앱을 꺼도 작동합니다.
+                    💡 1·2·3분할은 <b>동등한 후보</b>입니다(어느 것도 추천 아님). 주문 3종:
+                    <br />· <b>진입 지정가</b> = 매수만. · <b>진입+익절(OTO)</b> = 사면서 익절까지 한 번에(<b>손절은 수동</b>). · <b>조건주문(익절+손절)</b> = <b>이미 보유 중</b>일 때 익절·손절 동시.
+                    <br />모든 감시는 토스 서버가 하므로 앱을 꺼도 작동합니다.
                     {status.dryRun && " (현재 주문 잠금 — 전송 대신 모의 기록만)"}
                   </p>
                 </>

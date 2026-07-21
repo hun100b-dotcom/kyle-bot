@@ -110,7 +110,7 @@ interface RationaleInput {
 interface TradeRationale extends RationaleInput {
   clientOrderId: string;
   ts: string;
-  kind: "entry" | "oco";
+  kind: "entry" | "oco" | "oto";
   symbol: string;
   quantity: number;
   priceAtOrder: number | null;
@@ -183,6 +183,16 @@ interface KyletoolBridge {
     tpPrice: number;
     slTrigger: number;
     slPrice: number;
+    expireDate: string;
+    rationale?: RationaleInput;
+  }): Promise<JournalEntry>;
+  placeOto(spec: {
+    symbol: string;
+    quantity: number;
+    entryTrigger: number;
+    entryPrice: number;
+    tpTrigger: number;
+    tpPrice: number;
     expireDate: string;
     rationale?: RationaleInput;
   }): Promise<JournalEntry>;
