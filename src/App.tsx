@@ -1342,6 +1342,16 @@ ${msg}
         <div className="modal-back">
           <div className="modal">
             <h2>조건주문(익절+손절) — {symbol.toUpperCase()}</h2>
+            {/* [v0.3.1] 보유 0주 안내 — 익절/손절은 '매도'라 보유분이 있어야 등록된다.
+                막지는 않고(원하면 그대로 전송), 이번 같은 422(insufficient-sellable-quantity)를
+                누르기 전에 이해하도록 친절히 알려준다. */}
+            {cap && (cap.sellableQty ?? cap.heldQty) === 0 && (
+              <div className="warn-box">
+                ⚠️ 이 종목은 <b>보유 0주</b>입니다. 익절·손절은 <b>매도</b>라 보유분이 있어야 토스에 등록돼요.
+                <br />
+                먼저 <b>[진입 지정가]로 매수 → 체결 확인</b> 후 걸어주세요. (그래도 보내면 토스가 "보유 수량 없음"으로 거부합니다)
+              </div>
+            )}
             <p className="hint">
               계산값을 참고로 채워뒀습니다. <b>원하는 값으로 자유롭게 고치세요.</b> 앱은 막지 않고 그대로 토스에
               보냅니다(토스가 거부하면 그 응답을 보여드립니다).
