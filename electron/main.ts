@@ -171,6 +171,11 @@ function registerIpc(e: ToolEngine): void {
   // [v0.2.10] 매매 근거 목록 / 보유 포지션(손익 포함) — 둘 다 읽기 전용이라 안전하다.
   ipcMain.handle("tool:rationales", () => e.getRationales());
   ipcMain.handle("tool:positions", () => e.positions());
+  // [v0.3.3] 주문 현황(토스 스타일) 리치 뷰
+  ipcMain.handle("tool:holdingsView", () => e.holdingsView());
+  ipcMain.handle("tool:ordersView", (_ev, status) => e.ordersView(status));
+  ipcMain.handle("tool:condOrdersView", (_ev, status) => e.condOrdersView(status));
+  ipcMain.handle("tool:order:sell", (_ev, spec) => e.placeSell(spec)); // 매도(사람이 버튼 눌러야 호출)
   ipcMain.handle("tool:orders:open", () => e.openOrders());
   ipcMain.handle("tool:orders:conditionals", () => e.conditionals());
   ipcMain.handle("tool:orders:cancel", (_ev, id: string) => e.cancelNormalOrder(id));

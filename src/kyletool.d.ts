@@ -134,6 +134,79 @@ interface PositionView {
   rationale: TradeRationale | null;
 }
 
+/** [v0.3.3] 보유 한 줄(holdings 전부 + 근거) */
+interface HoldingRow {
+  symbol: string;
+  name: string | null;
+  marketCountry: string | null;
+  currency: string;
+  quantity: number;
+  lastPrice: number | null;
+  avgPrice: number | null;
+  purchaseAmt: number | null;
+  marketValueAmt: number | null;
+  pnlAmt: number | null;
+  pnlRate: number | null;
+  dailyPnlAmt: number | null;
+  dailyPnlRate: number | null;
+  commission: number | null;
+  tax: number | null;
+  rationale: TradeRationale | null;
+}
+interface HoldingsSummary {
+  marketValueUsd: number | null;
+  marketValueKrw: number | null;
+  pnlUsd: number | null;
+  pnlKrw: number | null;
+  pnlRate: number | null;
+  dailyPnlUsd: number | null;
+  dailyPnlKrw: number | null;
+}
+interface OrderRow {
+  orderId: string;
+  symbol: string | null;
+  side: "BUY" | "SELL" | null;
+  orderType: string | null;
+  statusRaw: string | null;
+  statusStd: string;
+  price: number | null;
+  quantity: number | null;
+  orderAmount: number | null;
+  currency: string | null;
+  timeInForce: string | null;
+  orderedAt: string | null;
+  canceledAt: string | null;
+  filledQty: number | null;
+  avgFilledPrice: number | null;
+  filledAmount: number | null;
+  commission: number | null;
+  tax: number | null;
+  filledAt: string | null;
+  isOpen: boolean;
+}
+interface CondLegView {
+  legType: string | null;
+  status: string | null;
+  triggerPrice: number | null;
+  orderPrice: number | null;
+  triggeredOrderId: string | null;
+}
+interface CondOrderRow {
+  conditionalOrderId: string;
+  type: string | null;
+  status: string | null;
+  symbol: string | null;
+  market: string | null;
+  quantity: number | null;
+  orderType: string | null;
+  expireDate: string | null;
+  createdAt: string | null;
+  first: CondLegView | null;
+  second: CondLegView | null;
+  rationale: TradeRationale | null;
+  isOpen: boolean;
+}
+
 interface KyletoolBridge {
   status(): Promise<ToolStatus>;
   journal(): Promise<JournalEntry[]>;
@@ -198,6 +271,10 @@ interface KyletoolBridge {
   }): Promise<JournalEntry>;
   rationales(): Promise<TradeRationale[]>;
   positions(): Promise<PositionView[]>;
+  holdingsView(): Promise<{ summary: HoldingsSummary; items: HoldingRow[] }>;
+  ordersView(status: "OPEN" | "CLOSED"): Promise<OrderRow[]>;
+  condOrdersView(status: "OPEN" | "CLOSED"): Promise<CondOrderRow[]>;
+  placeSell(spec: { symbol: string; quantity: number; orderType: "LIMIT" | "MARKET"; price?: number }): Promise<JournalEntry>;
   openOrders(): Promise<OpenOrder[]>;
   conditionals(): Promise<CondOrder[]>;
   cancelOrder(id: string): Promise<JournalEntry>;

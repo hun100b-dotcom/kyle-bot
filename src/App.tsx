@@ -94,6 +94,37 @@ function pnlClass(v: number | null): string {
   return v > 0 ? "pnl-up" : v < 0 ? "pnl-down" : "";
 }
 
+/** [v0.3.3] 달러 금액 + (원화) 병기 — holdings가 준 실제 원화값이 있으면 그걸 쓰고, 없으면 fx로 환산 안 함. */
+function dollarWon(usd: number | null, krw: number | null): string {
+  if (usd == null && krw == null) return "—";
+  const d = usd != null ? `$${usd.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : "";
+  const w = krw != null ? `₩${Math.round(krw).toLocaleString()}` : "";
+  return d && w ? `${d} (${w})` : d || w;
+}
+
+/** ISO 시각을 'MM-DD HH:mm'로 짧게. 파싱 실패하면 앞부분만. */
+function fmtTime(iso: string): string {
+  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  return m ? `${m[2]}-${m[3]} ${m[4]}:${m[5]}` : iso.slice(0, 16);
+}
+
+/** 일반주문 상태(우리 표준 소문자)를 한국어로. */
+function orderStatusKo(std: string, raw: string | null): string {
+  const map: Record<string, string> = { submitted: "대기", partial: "일부체결", filled: "체결", cancelled: "취소·만료", failed: "거부", unknown: raw ?? "알수없음" };
+  return map[std] ?? (raw ?? std);
+}
+/** 조건주문 그룹 상태 한국어. */
+function condStatusKo(st: string | null): string {
+  return st === "WATCHING" ? "감시중" : st === "COMPLETED" ? "완료" : (st ?? "—");
+}
+/** 조건주문 다리(leg) 상태 한국어 + 배지 색 클래스. */
+function legStatusKo(st: string | null): string {
+  return st === "WATCHING" ? "감시중" : st === "HOLDING" ? "대기" : st === "COMPLETED" ? "완료" : (st ?? "—");
+}
+function legBadge(st: string | null): string {
+  return st === "WATCHING" ? "st-submitted" : st === "COMPLETED" ? "st-filled" : "st-hold";
+}
+
 /** 가격을 유효 틱으로 절삭($1↑ 2자리 / $1↓ 4자리). lib/calc.ts와 동일 규칙. */
 function roundPrice(p: number): number {
   const s = p >= 1 ? 100 : 10000;
@@ -156,15 +187,18 @@ function App() {
   const [pending, setPending] = useState<PendingOrder | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // --- 주문 현황 ---
-  const [openOrders, setOpenOrders] = useState<OpenOrder[]>([]);
-  const [conds, setConds] = useState<CondOrder[]>([]);
-  // [v0.2.10] 보유 포지션(손익 포함) + 매매 근거 기록
-  const [positions, setPositions] = useState<PositionView[]>([]);
-  const [rationales, setRationales] = useState<TradeRationale[]>([]);
+  // --- 주문 현황(v0.3.3 토스 스타일) ---
+  const [hold, setHold] = useState<{ summary: HoldingsSummary; items: HoldingRow[] } | null>(null);
+  const [ordRows, setOrdRows] = useState<OrderRow[]>([]);
+  const [condRows, setCondRows] = useState<CondOrderRow[]>([]);
+  const [ordTab, setOrdTab] = useState<"all" | "normal" | "cond">("all"); // 필터: 전체/일반/조건
+  const [ordStatus, setOrdStatus] = useState<"OPEN" | "CLOSED">("OPEN"); // 미체결/체결(종료)
   const [posBusy, setPosBusy] = useState(false);
   const [posAt, setPosAt] = useState<string>(""); // 마지막 갱신 시각(표시용)
   const [autoRefresh, setAutoRefresh] = useState(false); // 30초 자동 갱신 켜기/끄기
+  // 매도 모달 / 근거 보기 모달
+  const [sellModal, setSellModal] = useState<{ symbol: string; currency: string; heldQty: number; orderType: "LIMIT" | "MARKET"; qty: string; price: string } | null>(null);
+  const [ratModal, setRatModal] = useState<TradeRationale | null>(null);
 
   // --- 설정 ---
   const [settings, setSettings] = useState<ToolSettings | null>(null);
@@ -246,7 +280,7 @@ function App() {
   //   주문 현황 탭에 있을 때만 돌려서 불필요한 조회를 줄인다.
   useEffect(() => {
     if (!autoRefresh || tab !== "orders") return;
-    const id = setInterval(() => void loadPositions(), 30_000);
+    const id = setInterval(() => void refreshStatusTab(), 30_000);
     return () => clearInterval(id);
   }, [autoRefresh, tab]);
 
@@ -562,7 +596,7 @@ function App() {
       setBusy(true);
       try {
         await po.send();
-        if (tab === "orders") await loadOrders();
+        if (tab === "orders") await refreshStatusTab();
       } catch (e) {
         const msg = String(e).replace(/^Error:\s*(Error invoking remote method '[^']+':\s*Error:\s*)?/, "");
         alert(`주문이 전송되지 않았습니다.
@@ -584,7 +618,7 @@ ${msg}
     try {
       await pending.send();
       setPending(null);
-      if (tab === "orders") await loadOrders();
+      if (tab === "orders") await refreshStatusTab();
     } catch (e) {
       const msg = String(e).replace(/^Error:\s*(Error invoking remote method '[^']+':\s*Error:\s*)?/, "");
       alert(`주문이 전송되지 않았습니다.
@@ -597,39 +631,117 @@ ${msg}
     }
   }
 
-  /** [v0.2.10] 보유 포지션(손익)과 매매 근거를 다시 불러온다. 읽기 전용이라 언제 눌러도 안전. */
-  async function loadPositions() {
+  /**
+   * [v0.3.3] 주문 현황 탭 전체 새로고침 — 보유·일반주문·조건주문을 한 번에 불러온다.
+   *   전부 조회(읽기)만이라 언제 눌러도 안전. 한쪽이 실패해도 나머지는 보여준다(allSettled).
+   *   status(미체결 OPEN / 체결 CLOSED)에 따라 주문/조건주문을 그 상태로 조회한다.
+   */
+  async function refreshStatusTab(statusOverride?: "OPEN" | "CLOSED") {
+    const st = statusOverride ?? ordStatus;
     setPosBusy(true);
     try {
-      const [pRes, rRes] = await Promise.allSettled([window.kyletool.positions(), window.kyletool.rationales()]);
-      if (pRes.status === "fulfilled") setPositions(pRes.value);
-      if (rRes.status === "fulfilled") setRationales(rRes.value);
+      const [hRes, oRes, cRes] = await Promise.allSettled([
+        window.kyletool.holdingsView(),
+        window.kyletool.ordersView(st),
+        window.kyletool.condOrdersView(st),
+      ]);
+      if (hRes.status === "fulfilled") setHold(hRes.value);
+      if (oRes.status === "fulfilled") setOrdRows(oRes.value);
+      if (cRes.status === "fulfilled") setCondRows(cRes.value);
       setPosAt(new Date().toLocaleTimeString());
+      const fails: string[] = [];
+      if (hRes.status === "rejected") fails.push("보유");
+      if (oRes.status === "rejected") fails.push("일반주문");
+      if (cRes.status === "rejected") fails.push("조건주문");
+      if (fails.length === 3) {
+        alert(`${fails.join("·")} 조회 실패. [설정] 탭에서 실서버 모드·키·계좌를 확인해 주세요.`);
+      }
     } finally {
       setPosBusy(false);
     }
   }
 
-  async function loadOrders() {
-    void loadPositions(); // 주문 목록을 볼 땐 포지션 손익도 같이 갱신
-    setBusy(true);
+  /** 상태(미체결/체결) 필터를 바꾸면 그 상태로 주문·조건주문을 다시 불러온다. */
+  async function changeOrdStatus(st: "OPEN" | "CLOSED") {
+    setOrdStatus(st);
+    await refreshStatusTab(st);
+  }
+
+  /** [v0.3.3] 보유 행의 [매도] — 매도 모달을 연다. 매도가능수량을 조회해 기본값으로. */
+  async function openSell(row: HoldingRow) {
+    let def = row.quantity;
     try {
-      // [allSettled] 한쪽(일반/조건)이 실패해도 다른 쪽은 보여준다. 예전엔 Promise.all이라
-      //   조건주문 조회가 한 번 실패하면 정상인 일반주문까지 화면에서 통째로 사라졌다.
-      const [oRes, cRes] = await Promise.allSettled([window.kyletool.openOrders(), window.kyletool.conditionals()]);
-      if (oRes.status === "fulfilled") setOpenOrders(oRes.value);
-      if (cRes.status === "fulfilled") setConds(cRes.value);
-      const fails: string[] = [];
-      if (oRes.status === "rejected") fails.push("일반 주문");
-      if (cRes.status === "rejected") fails.push("조건 주문");
-      if (fails.length) {
-        alert(`${fails.join("·")} 목록을 불러오지 못했어요. [설정] 탭에서 실서버 모드·키·계좌(보통 1)를 저장했는지 확인해 주세요.`);
-      }
-    } catch (e) {
-      alert(`목록 조회 실패: ${String(e)}`);
-    } finally {
-      setBusy(false);
+      const q = await window.kyletool.sellable(row.symbol); // 매도가능 수량(1콜)
+      if (q != null && q > 0) def = q;
+    } catch {
+      /* 실패해도 보유수량을 기본값으로 */
     }
+    setSellModal({
+      symbol: row.symbol,
+      currency: row.currency,
+      heldQty: def,
+      orderType: "LIMIT",
+      qty: String(def),
+      price: row.lastPrice != null ? String(row.lastPrice) : "",
+    });
+  }
+
+  /** 매도 모달 → 확인 팝업 → (사람이 눌러야) 전송. 에이전트가 자동 발사하지 않는다. */
+  function submitSell() {
+    if (!sellModal) return;
+    const q = toNum(sellModal.qty);
+    if (q === null || q <= 0) {
+      alert("매도 수량을 0보다 큰 숫자로 입력하세요.");
+      return;
+    }
+    const isLimit = sellModal.orderType === "LIMIT";
+    const price = toNum(sellModal.price);
+    if (isLimit && (price === null || price <= 0)) {
+      alert("지정가 매도는 가격을 입력하세요. (시장가로 팔려면 '시장가'를 고르세요)");
+      return;
+    }
+    const sym = sellModal.symbol;
+    const cur = sellModal.currency;
+    setSellModal(null);
+    requestOrder({
+      kind: "entry",
+      title: `매도 — ${sym} (${isLimit ? "지정가" : "시장가"})`,
+      lines: [
+        `${sym} ${q}주 ${isLimit ? `지정가 ${money(price!, cur, fx)}` : "시장가"} 매도`,
+        isLimit ? `그 가격 이상에서 체결됩니다.` : `현재 시세로 즉시 체결을 시도합니다(정규장).`,
+        `⚠️ 실제 매도입니다. 수량·가격을 다시 확인하세요.`,
+      ],
+      send: () =>
+        window.kyletool.placeSell({
+          symbol: sym,
+          quantity: q,
+          orderType: sellModal.orderType,
+          price: isLimit ? price! : undefined,
+        }),
+    });
+  }
+
+  /** [v0.3.3] 보유 행의 [익절/손절 걸기] — 이 종목으로 OCO 편집창을 연다(현재가 기준 tp/sl 제안). */
+  async function openOcoForHolding(row: HoldingRow) {
+    setSymbol(row.symbol);
+    setCommittedSymbol(row.symbol);
+    let cur = row.lastPrice;
+    try {
+      cur = await window.kyletool.quote(row.symbol);
+      setCurPrice(cur);
+      const c = await window.kyletool.capacity(row.symbol, cur ?? undefined);
+      setCap(c);
+    } catch {
+      /* 조회 실패해도 진행 */
+    }
+    const t = toNum(tpPct) ?? 2;
+    const l = toNum(slPct) ?? 10;
+    const base = cur ?? row.lastPrice ?? 0;
+    setOcoEdit({
+      tp: String(roundPrice(base * (1 + t / 100))),
+      sl: String(roundPrice(base * (1 - l / 100))),
+      qty: String(row.quantity),
+    });
   }
 
   /** [v0.3.0] 상단 바의 실주문 토글. 켤 때만 경고 확인을 거친다(끄는 건 즉시). 상태는 저장된다. */
@@ -722,7 +834,7 @@ ${msg}
               setBusy(true);
               try {
                 await window.kyletool.setKillSwitch(turningOn);
-                if (tab === "orders") await loadOrders();
+                if (tab === "orders") await refreshStatusTab();
               } finally {
                 setBusy(false);
               }
@@ -742,7 +854,7 @@ ${msg}
             className={tab === t ? "tab active" : "tab"}
             onClick={() => {
               setTab(t);
-              if (t === "orders") loadOrders();
+              if (t === "orders") refreshStatusTab();
             }}
           >
             {{ calc: "계산기", orders: "주문 현황", journal: "기록", settings: "설정" }[t]}
@@ -988,192 +1100,175 @@ ${msg}
         </main>
       )}
 
-      {/* ===== ② 주문 현황 ===== */}
+      {/* ===== ② 주문 현황 (v0.3.3 토스 스타일) ===== */}
       {tab === "orders" && (
-        <main className="grid">
-          {/* [v0.2.10] 보유 포지션 — 매수가 대비 손익 %와 매매 근거를 한 장의 카드로 */}
+        <main className="statusmain">
+          {/* --- 공통 도구줄: 새로고침 · 자동갱신 · 상태(미체결/체결) --- */}
+          <div className="statusbar">
+            <button className="mini" disabled={posBusy} onClick={() => refreshStatusTab()}>↻ 새로고침</button>
+            <label className="inline-check">
+              <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} /> 30초마다 자동
+            </label>
+            {posAt && <span className="hint small">마지막 갱신 {posAt}</span>}
+            <span className="sb-sep" />
+            <span className="sb-k">상태</span>
+            <div className="seg">
+              <button className={ordStatus === "OPEN" ? "on" : ""} onClick={() => changeOrdStatus("OPEN")}>미체결</button>
+              <button className={ordStatus === "CLOSED" ? "on" : ""} onClick={() => changeOrdStatus("CLOSED")}>체결·종료</button>
+            </div>
+          </div>
+
+          {/* ── 보유 현황 ── */}
           <section className="card wide">
-            <h2>
-              보유 포지션 · 손익{" "}
-              <button className="mini" disabled={posBusy} onClick={loadPositions}>
-                새로고침
-              </button>{" "}
-              <label className="inline-check">
-                <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} /> 30초마다 자동
-              </label>
-              {posAt && <span className="hint small"> (마지막 갱신 {posAt})</span>}
-            </h2>
-            {positions.length === 0 ? (
-              <p className="hint">보유 중인 종목이 없거나 아직 조회하지 않았습니다. [새로고침]을 눌러 주세요.</p>
+            <div className="sec-head">
+              <h2>보유 현황</h2>
+              {hold?.summary && (
+                <div className="hold-summary">
+                  <span>총평가 <b>{dollarWon(hold.summary.marketValueUsd, hold.summary.marketValueKrw)}</b></span>
+                  <span>
+                    평가손익{" "}
+                    <b className={pnlClass(hold.summary.pnlUsd)}>
+                      {hold.summary.pnlUsd != null ? `${hold.summary.pnlUsd >= 0 ? "+" : ""}${dollarWon(hold.summary.pnlUsd, hold.summary.pnlKrw)}` : "—"}
+                      {hold.summary.pnlRate != null && ` (${hold.summary.pnlRate >= 0 ? "+" : ""}${hold.summary.pnlRate.toFixed(2)}%)`}
+                    </b>
+                  </span>
+                  {hold.summary.dailyPnlUsd != null && (
+                    <span>당일 <b className={pnlClass(hold.summary.dailyPnlUsd)}>{hold.summary.dailyPnlUsd >= 0 ? "+" : ""}{dollarWon(hold.summary.dailyPnlUsd, hold.summary.dailyPnlKrw)}</b></span>
+                  )}
+                </div>
+              )}
+            </div>
+            {!hold || hold.items.length === 0 ? (
+              <p className="hint">보유 종목이 없거나 아직 조회 전입니다. [↻ 새로고침]을 눌러 주세요.</p>
             ) : (
-              <div className="poslist">
-                {positions.map((p) => (
-                  <div key={p.symbol} className="poscard">
-                    <div className="posline1">
-                      <b className="possym">{p.symbol}</b>
-                      <span className="posqty">{p.quantity}주</span>
-                      <span className={`posPnl ${pnlClass(p.pnlPct)}`}>
-                        {p.pnlPct == null ? "손익 조회 불가" : `${p.pnlPct >= 0 ? "+" : ""}${p.pnlPct.toFixed(2)}%`}
-                      </span>
-                      {p.pnlUsd != null && (
-                        <span className={`small ${pnlClass(p.pnlUsd)}`}>
-                          ({p.pnlUsd >= 0 ? "+" : ""}
-                          {money(p.pnlUsd, p.currency, fx)})
-                        </span>
-                      )}
-                    </div>
-                    <div className="posline2 small">
-                      기준가 {p.entryPrice != null ? money(p.entryPrice, p.currency, null) : "-"}
-                      <span className="hint">
-                        {p.entrySource === "rationale" ? " (내 기록 진입가)" : p.entrySource === "toss" ? " (토스 평균매입가)" : ""}
-                      </span>
-                      {" · "}현재가 {p.currentPrice != null ? money(p.currentPrice, p.currency, null) : "조회 불가"}
-                      {p.avgPrice != null && p.entrySource === "rationale" && ` · 토스 평단 ${money(p.avgPrice, p.currency, null)}`}
-                    </div>
-                    {(p.toTpPct != null || p.toSlPct != null) && (
-                      <div className="posline3 small">
-                        {p.toTpPct != null && <span className="pnl-up">익절까지 {p.toTpPct >= 0 ? "+" : ""}{p.toTpPct.toFixed(2)}%p</span>}
-                        {p.toTpPct != null && p.toSlPct != null && " / "}
-                        {p.toSlPct != null && <span className="pnl-down">손절까지 {p.toSlPct.toFixed(2)}%p</span>}
+              <div className="hold-list">
+                {hold.items.map((h) => (
+                  <div key={h.symbol} className="hold-card">
+                    <div className="hc-main">
+                      <div className="hc-name">
+                        <b className="hc-sym">{h.symbol}</b>
+                        {h.name && <span className="hc-kor">{h.name}</span>}
+                        <span className="chip">{h.marketCountry === "KR" ? "🇰🇷 국내" : "🇺🇸 미국"}</span>
+                        <span className="chip">{h.currency}</span>
                       </div>
-                    )}
-                    <div className="posrationale small">
-                      {p.rationale ? (
-                        <>
-                          <span className="tag">근거</span> {rationaleLine(p.rationale)}{" "}
-                          <span className="hint">({p.rationale.ts})</span>
-                        </>
-                      ) : (
-                        <span className="hint">이 종목은 매매 근거 기록이 없습니다(v0.2.10 이전에 낸 주문).</span>
+                      <div className={`hc-pnl ${pnlClass(h.pnlAmt)}`}>
+                        {h.pnlRate != null ? `${h.pnlRate >= 0 ? "+" : ""}${h.pnlRate.toFixed(2)}%` : "—"}
+                        {h.pnlAmt != null && <span className="hc-pnl-amt"> ({h.pnlAmt >= 0 ? "+" : ""}{money(h.pnlAmt, h.currency, fx)})</span>}
+                      </div>
+                    </div>
+                    <div className="hc-grid">
+                      <span>수량 <b>{h.quantity}주</b></span>
+                      <span>평균매입가 <b>{h.avgPrice != null ? money(h.avgPrice, h.currency, null) : "—"}</b></span>
+                      <span>현재가 <b>{h.lastPrice != null ? money(h.lastPrice, h.currency, null) : "—"}</b></span>
+                      <span>평가금액 <b>{h.marketValueAmt != null ? money(h.marketValueAmt, h.currency, fx) : "—"}</b></span>
+                      <span>매입원가 <b>{h.purchaseAmt != null ? money(h.purchaseAmt, h.currency, fx) : "—"}</b></span>
+                      {h.dailyPnlAmt != null && <span>당일 <b className={pnlClass(h.dailyPnlAmt)}>{h.dailyPnlAmt >= 0 ? "+" : ""}{money(h.dailyPnlAmt, h.currency, null)}{h.dailyPnlRate != null && ` (${h.dailyPnlRate.toFixed(2)}%)`}</b></span>}
+                      {(h.commission != null || h.tax != null) && <span className="hint">수수료 {h.commission ?? 0} · 세금 {h.tax ?? 0}</span>}
+                    </div>
+                    <div className="hc-actions">
+                      <button className="mini btn-sell" disabled={status.killSwitch} onClick={() => openSell(h)}>매도</button>
+                      <button className="mini btn-oco" disabled={status.killSwitch} onClick={() => openOcoForHolding(h)}>익절/손절 걸기</button>
+                      {h.rationale && <button className="mini" onClick={() => setRatModal(h.rationale)}>근거 보기</button>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* --- 필터 탭 --- */}
+          <div className="seg seg-wide">
+            <button className={ordTab === "all" ? "on" : ""} onClick={() => setOrdTab("all")}>전체</button>
+            <button className={ordTab === "normal" ? "on" : ""} onClick={() => setOrdTab("normal")}>일반주문</button>
+            <button className={ordTab === "cond" ? "on" : ""} onClick={() => setOrdTab("cond")}>조건주문</button>
+          </div>
+
+          {/* ── 일반 주문 ── */}
+          {ordTab !== "cond" && (
+            <section className="card wide">
+              <h2>일반 주문 <span className="hint">({ordStatus === "OPEN" ? "미체결" : "체결·종료"})</span></h2>
+              {ordRows.length === 0 ? (
+                <p className="hint">{ordStatus === "OPEN" ? "미체결 주문이 없습니다." : "체결·종료된 주문이 없습니다."}</p>
+              ) : (
+                <div className="ord-list">
+                  {ordRows.map((o) => (
+                    <div key={o.orderId} className="ord-row">
+                      <div className="or-line1">
+                        <span className={`chip ${o.side === "SELL" ? "chip-sell" : "chip-buy"}`}>{o.side === "SELL" ? "매도" : "매수"}</span>
+                        <b>{o.symbol}</b>
+                        <span className="chip">{o.orderType === "MARKET" ? "시장가" : "지정가"}</span>
+                        <span className={`stbadge st-${o.statusStd}`}>{orderStatusKo(o.statusStd, o.statusRaw)}</span>
+                        <span className="grow" />
+                        {o.isOpen && (
+                          <button className="mini" disabled={status.killSwitch} onClick={async () => { await window.kyletool.cancelOrder(o.orderId).catch((e) => alert(String(e))); refreshStatusTab(); }}>취소</button>
+                        )}
+                      </div>
+                      <div className="or-line2 small">
+                        <span>수량 {o.quantity ?? "—"}주</span>
+                        <span>가격 {o.price != null ? money(o.price, o.currency ?? "USD", null) : (o.orderType === "MARKET" ? "시장가" : "—")}</span>
+                        {o.orderAmount != null && <span>주문금액 {money(o.orderAmount, o.currency ?? "USD", fx)}</span>}
+                        {o.filledQty != null && o.filledQty > 0 && <span>체결 {o.filledQty}주{o.avgFilledPrice != null && ` @ ${money(o.avgFilledPrice, o.currency ?? "USD", null)}`}</span>}
+                        {(o.commission != null || o.tax != null) && <span className="hint">수수료 {o.commission ?? 0}{o.tax != null && ` · 세금 ${o.tax}`}</span>}
+                        {o.orderedAt && <span className="hint">{fmtTime(o.orderedAt)}</span>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* ── 조건 주문 (OTO/OCO) ── */}
+          {ordTab !== "normal" && (
+            <section className="card wide">
+              <h2>조건 주문 <span className="hint">(OTO 진입+익절 / OCO 익절+손절 · 토스 서버 감시)</span></h2>
+              {condRows.length === 0 ? (
+                <p className="hint">{ordStatus === "OPEN" ? "진행 중인 조건주문이 없습니다." : "종료된 조건주문이 없습니다."}</p>
+              ) : (
+                <div className="cond-list">
+                  {condRows.map((c) => (
+                    <div key={c.conditionalOrderId} className="cond-card">
+                      <div className="cc-head">
+                        <span className="chip chip-type">{c.type}</span>
+                        <b>{c.symbol}</b>
+                        <span className="chip">{c.quantity ?? "—"}주</span>
+                        <span className={`stbadge ${c.status === "WATCHING" ? "st-submitted" : "st-filled"}`}>{condStatusKo(c.status)}</span>
+                        <span className="grow" />
+                        {c.expireDate && <span className="hint small">만료 {c.expireDate}</span>}
+                        {c.isOpen && (
+                          <button className="mini" disabled={status.killSwitch} onClick={async () => { await window.kyletool.cancelConditional(c.conditionalOrderId).catch((e) => alert(String(e))); refreshStatusTab(); }}>삭제</button>
+                        )}
+                      </div>
+                      {/* 진입(first) → 청산(second) 2단 표시 */}
+                      <div className="cc-legs">
+                        {c.first && (
+                          <div className="leg">
+                            <span className="leg-no">① {c.type === "OTO" ? "진입(매수)" : "감시1"}</span>
+                            <span>감시가 {c.first.triggerPrice != null ? money(c.first.triggerPrice, "USD", null) : "—"}</span>
+                            {c.first.orderPrice != null && <span>지정가 {money(c.first.orderPrice, "USD", null)}</span>}
+                            <span className={`stbadge ${legBadge(c.first.status)}`}>{legStatusKo(c.first.status)}</span>
+                          </div>
+                        )}
+                        {c.second && (
+                          <div className="leg">
+                            <span className="leg-no">② {c.type === "OTO" ? "익절(매도)" : "감시2"}</span>
+                            <span>감시가 {c.second.triggerPrice != null ? money(c.second.triggerPrice, "USD", null) : "—"}</span>
+                            {c.second.orderPrice != null && <span>지정가 {money(c.second.orderPrice, "USD", null)}</span>}
+                            <span className={`stbadge ${legBadge(c.second.status)}`}>{legStatusKo(c.second.status)}</span>
+                          </div>
+                        )}
+                      </div>
+                      {c.rationale && (
+                        <div className="cc-rat small">
+                          <span className="tag">근거</span> {rationaleLine(c.rationale)}
+                        </div>
                       )}
                     </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-
-          {/* [v0.2.10] 최근 주문의 매매 근거 목록 */}
-          <section className="card wide">
-            <h2>최근 주문 근거 (내가 왜 이 가격에 냈는가)</h2>
-            {rationales.length === 0 ? (
-              <p className="hint">
-                아직 기록된 근거가 없습니다. v0.2.10부터 <b>새로 내는 주문</b>에 근거가 자동으로 남습니다.
-              </p>
-            ) : (
-              <div className="ratlist">
-                {rationales.slice(0, 30).map((r) => (
-                  <div key={r.clientOrderId} className="ratcard">
-                    <div>
-                      <span className="tag">{r.kind === "entry" ? "진입" : "조건주문"}</span>
-                      {r.dryRun && <span className="tag warn">모의</span>} <b>{r.symbol}</b> · {rationaleLine(r)}
-                    </div>
-                    <div className="hint small">
-                      {r.ts} · 주문키 {r.clientOrderId}
-                      {r.tossOrderId ? ` · 토스번호 ${r.tossOrderId}` : ""}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-
-          <section className="card wide">
-            <h2>
-              미체결 일반 주문{" "}
-              <button className="mini" disabled={busy} onClick={loadOrders}>
-                새로고침
-              </button>
-            </h2>
-            {openOrders.length === 0 ? (
-              <p className="hint">미체결 주문이 없습니다.</p>
-            ) : (
-              <table>
-                <thead>
-                  <tr>
-                    <th>주문번호</th>
-                    <th>종목</th>
-                    <th>방향</th>
-                    <th>가격</th>
-                    <th>상태</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {openOrders.map((o) => (
-                    <tr key={o.tossOrderId}>
-                      <td className="mono">{o.tossOrderId}</td>
-                      <td>{o.symbol}</td>
-                      <td>{o.side === "BUY" ? "매수" : "매도"}</td>
-                      <td>{o.price != null ? usdKrw(o.price, fx) : "-"}</td>
-                      <td>{o.status}</td>
-                      <td>
-                        <button
-                          className="mini"
-                          disabled={status.killSwitch}
-                          onClick={async () => {
-                            await window.kyletool.cancelOrder(o.tossOrderId).catch((e) => alert(String(e)));
-                            loadOrders();
-                          }}
-                        >
-                          취소
-                        </button>
-                      </td>
-                    </tr>
                   ))}
-                </tbody>
-              </table>
-            )}
-          </section>
-
-          <section className="card wide">
-            <h2>조건주문 (OCO 익절+손절 — 토스 서버가 감시 중)</h2>
-            {conds.length === 0 ? (
-              <p className="hint">등록된 조건주문이 없습니다.</p>
-            ) : (
-              <table>
-                <thead>
-                  <tr>
-                    <th>번호</th>
-                    <th>종목</th>
-                    <th>타입</th>
-                    <th>1번 조건</th>
-                    <th>2번 조건</th>
-                    <th>수량</th>
-                    <th>만료</th>
-                    <th>상태</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {conds.map((c) => (
-                    <tr key={c.conditionalOrderId}>
-                      <td className="mono">{c.conditionalOrderId}</td>
-                      <td>{c.symbol}</td>
-                      <td>{c.type}</td>
-                      <td>{c.first ? `${c.first.orderSide === "BUY" ? "매수" : "매도"} @$${c.first.triggerPrice}` : "-"}</td>
-                      <td>{c.second ? `${c.second.orderSide === "BUY" ? "매수" : "매도"} @$${c.second.triggerPrice}` : "-"}</td>
-                      <td>{c.quantity}</td>
-                      <td className="small">{c.expireDate}</td>
-                      <td>{c.status}</td>
-                      <td>
-                        <button
-                          className="mini"
-                          disabled={status.killSwitch}
-                          onClick={async () => {
-                            await window.kyletool.cancelConditional(c.conditionalOrderId).catch((e) => alert(String(e)));
-                            loadOrders();
-                          }}
-                        >
-                          취소
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </section>
+                </div>
+              )}
+            </section>
+          )}
         </main>
       )}
 
@@ -1527,6 +1622,61 @@ ${msg}
             <p className="hint">
               💡 업데이트는 언제 해도 됩니다. "나중에"를 눌러도 앱은 그대로 사용할 수 있고, 다음에 켤 때 다시 안내합니다.
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* ===== [v0.3.3] 매도 모달 (보유 행의 [매도]) — 사람이 확인해야 전송 ===== */}
+      {sellModal && (
+        <div className="modal-back">
+          <div className="modal">
+            <h2>매도 — {sellModal.symbol}</h2>
+            <p className="hint">
+              보유(매도가능) <b>{sellModal.heldQty}주</b>. 원하는 수량·방식으로 파세요. 앱은 막지 않고 그대로 토스에 보냅니다.
+            </p>
+            <div className="form-row">
+              <label className="radio">
+                <input type="radio" checked={sellModal.orderType === "LIMIT"} onChange={() => setSellModal({ ...sellModal, orderType: "LIMIT" })} />
+                지정가(가격 지정)
+              </label>
+              <label className="radio">
+                <input type="radio" checked={sellModal.orderType === "MARKET"} onChange={() => setSellModal({ ...sellModal, orderType: "MARKET" })} />
+                시장가(현재 시세로 즉시)
+              </label>
+            </div>
+            <div className="form-row">
+              <label>수량(주)
+                <input type="text" inputMode="decimal" value={sellModal.qty} onChange={(e) => isNumericDraft(e.target.value) && setSellModal({ ...sellModal, qty: e.target.value })} />
+              </label>
+              <button className="mini" onClick={() => setSellModal({ ...sellModal, qty: String(sellModal.heldQty) })}>전량</button>
+              {sellModal.orderType === "LIMIT" && (
+                <label>매도가 $
+                  <input type="text" inputMode="decimal" value={sellModal.price} onChange={(e) => isNumericDraft(e.target.value) && setSellModal({ ...sellModal, price: e.target.value })} />
+                </label>
+              )}
+            </div>
+            <div className="form-row">
+              <button className="btn btn-start btn-sell" disabled={busy} onClick={submitSell}>매도 주문</button>
+              <button className="btn" disabled={busy} onClick={() => setSellModal(null)}>취소</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===== [v0.3.3] 근거 보기 모달 ===== */}
+      {ratModal && (
+        <div className="modal-back" onClick={() => setRatModal(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2>매매 근거 — {ratModal.symbol}</h2>
+            <p>{rationaleLine(ratModal)}</p>
+            <p className="hint small">
+              {ratModal.kind === "entry" ? "진입" : ratModal.kind === "oco" ? "조건주문" : "진입+익절(OTO)"} · {ratModal.ts}
+              {ratModal.tossOrderId ? ` · 토스번호 ${ratModal.tossOrderId}` : ""}
+              {ratModal.dryRun ? " · (모의)" : ""}
+            </p>
+            <div className="form-row">
+              <button className="btn" onClick={() => setRatModal(null)}>닫기</button>
+            </div>
           </div>
         </div>
       )}

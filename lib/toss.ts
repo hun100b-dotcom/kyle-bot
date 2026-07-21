@@ -635,6 +635,32 @@ export async function listOrders(query: { status: string; symbol?: string }): Pr
   };
 }
 
+/**
+ * [v0.3.3] listOrdersRaw — 주문 목록의 **원본(raw)** 을 그대로 돌려준다.
+ *   기존 listOrders는 화면에 필요한 몇 필드만 남기고 버리는데(주문시각·수수료·평균체결가 등),
+ *   "주문 현황" 화면은 그 버려진 정보까지 다 보여줘야 하므로 원본 배열을 그대로 준다.
+ *   ⚠️ 조회(GET)만. status 는 실스펙상 OPEN(미체결)/CLOSED(종료)만 허용.
+ */
+export async function listOrdersRaw(query: { status: string; symbol?: string }): Promise<{
+  orders: Record<string, unknown>[];
+  nextCursor?: string | null;
+  hasNext?: boolean;
+}> {
+  const raw = await tossFetch<{ orders?: Record<string, unknown>[]; nextCursor?: string | null; hasNext?: boolean }>(
+    ENDPOINTS.orders,
+    { query: query as Record<string, string>, withAccount: true },
+  );
+  return { orders: raw.orders ?? [], nextCursor: raw.nextCursor, hasNext: raw.hasNext };
+}
+
+/** [v0.3.3] listConditionalOrdersRaw — 조건주문 목록 원본 배열(leg.status·triggeredOrderId 등 포함). */
+export async function listConditionalOrdersRaw(status = "OPEN"): Promise<Record<string, unknown>[]> {
+  const raw = await tossFetch<unknown>(ENDPOINTS.conditionalOrders, { query: { status }, withAccount: true });
+  return Array.isArray(raw)
+    ? (raw as Record<string, unknown>[])
+    : (((raw as Record<string, unknown>)?.conditionalOrders as Record<string, unknown>[]) ?? []);
+}
+
 // =============================================================================
 // 7) 조건주문 API (2026-07-17 신규 — 공식 스펙 확인 완료)
 //    "감시가에 닿으면 지정가 주문"을 토스 서버가 대신 감시한다.

@@ -34,6 +34,9 @@ import {
   createConditionalOrder,
   listOrders,
   listConditionalOrders,
+  listOrdersRaw,
+  listConditionalOrdersRaw,
+  mapOrderStatus,
   cancelOrder,
   cancelConditionalOrder,
   clearTokenCache,
@@ -143,6 +146,92 @@ export interface PositionView {
   toTpPct: number | null; //      익절가까지 몇 %p 남았는지
   toSlPct: number | null; //      손절가까지 몇 %p 남았는지
   rationale: TradeRationale | null; // 이 종목의 가장 최근 매매 근거
+}
+
+// -----------------------------------------------------------------------------
+// [v0.3.3] 주문 현황 화면(토스 스타일)용 리치 뷰 타입 — holdings/orders/conditional 원본을
+//   빠짐없이 담아 화면에 그대로 뿌린다. 금액은 통화까지 함께 줘서 $/₩ 를 올바로 표기한다.
+// -----------------------------------------------------------------------------
+
+/** 보유 한 줄(holdings items[] 전부 + 우리 근거) */
+export interface HoldingRow {
+  symbol: string;
+  name: string | null; //          한글 종목명(예: 아이온큐)
+  marketCountry: string | null; //  US / KR
+  currency: string; //             USD / KRW
+  quantity: number; //             보유 수량(소수주 그대로)
+  lastPrice: number | null; //     현재가(holdings에 이미 포함 — 재조회 안 함)
+  avgPrice: number | null; //      평균매입가(averagePurchasePrice)
+  purchaseAmt: number | null; //   매입원가
+  marketValueAmt: number | null; // 평가금액(해당 통화)
+  pnlAmt: number | null; //        평가손익(해당 통화)
+  pnlRate: number | null; //       수익률 %(소수×100)
+  dailyPnlAmt: number | null; //   당일손익 금액
+  dailyPnlRate: number | null; //  당일손익 %
+  commission: number | null; //    수수료
+  tax: number | null; //           세금
+  rationale: TradeRationale | null; // 우리가 저장한 기법 근거(있으면)
+}
+
+/** 보유 요약(holdings 최상위) — 총평가·총손익·당일손익, 통화별 병기 */
+export interface HoldingsSummary {
+  marketValueUsd: number | null;
+  marketValueKrw: number | null;
+  pnlUsd: number | null;
+  pnlKrw: number | null;
+  pnlRate: number | null; //       총 수익률 %
+  dailyPnlUsd: number | null;
+  dailyPnlKrw: number | null;
+}
+
+/** 일반 주문 한 줄(원본 필드 전부) */
+export interface OrderRow {
+  orderId: string;
+  symbol: string | null;
+  side: "BUY" | "SELL" | null;
+  orderType: string | null; //     LIMIT / MARKET
+  statusRaw: string | null; //     토스 원본 대문자(FILLED 등)
+  statusStd: string; //            우리 표준 소문자(filled/submitted/cancelled…)
+  price: number | null;
+  quantity: number | null;
+  orderAmount: number | null;
+  currency: string | null;
+  timeInForce: string | null;
+  orderedAt: string | null; //     주문 시각(ISO+KST)
+  canceledAt: string | null;
+  filledQty: number | null; //     체결 수량
+  avgFilledPrice: number | null; // 평균 체결가
+  filledAmount: number | null;
+  commission: number | null;
+  tax: number | null;
+  filledAt: string | null;
+  isOpen: boolean; //              미체결(취소 가능) 여부
+}
+
+/** 조건주문 다리(leg) 한 개 */
+export interface CondLegView {
+  legType: string | null; //       STOP 등
+  status: string | null; //        WATCHING / HOLDING / COMPLETED
+  triggerPrice: number | null;
+  orderPrice: number | null;
+  triggeredOrderId: string | null; // 발동되면 실제 주문 ID로 연결
+}
+
+/** 조건주문 한 줄(OTO/OCO) */
+export interface CondOrderRow {
+  conditionalOrderId: string;
+  type: string | null; //          OCO / OTO / SINGLE
+  status: string | null; //        WATCHING / COMPLETED
+  symbol: string | null;
+  market: string | null;
+  quantity: number | null;
+  orderType: string | null;
+  expireDate: string | null;
+  createdAt: string | null;
+  first: CondLegView | null; //    진입(먼저 감시)
+  second: CondLegView | null; //   청산(익절/손절)
+  rationale: TradeRationale | null;
+  isOpen: boolean; //              진행 중(삭제 가능) 여부
 }
 
 /** 주문/기록 저널 한 줄(파일로 영속) */
@@ -1319,6 +1408,213 @@ export class ToolEngine extends EventEmitter {
       });
     }
     return out;
+  }
+
+  // ==========================================================================
+  // [v0.3.3] 주문 현황(토스 스타일) — 보유/일반주문/조건주문 리치 뷰 + 매도 주문
+  //   전부 조회(GET)만. 실제 매도/취소/삭제는 사람이 버튼을 눌러야만 나간다.
+  // ==========================================================================
+
+  /** 문자열/숫자 무엇이 와도 안전하게 number|null 로. (토스는 금액을 전부 문자열로 준다) */
+  private num(v: unknown): number | null {
+    if (v === null || v === undefined || v === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  /** 이 종목의 가장 최근 매매 근거를 찾는다(진입 우선). 없으면 null. */
+  private rationaleFor(symbol: string): TradeRationale | null {
+    const mine = this.rationales.filter((r) => r.symbol === symbol.toUpperCase());
+    return [...mine].reverse().find((r) => r.kind === "entry" || r.kind === "oto") ?? mine[mine.length - 1] ?? null;
+  }
+
+  /**
+   * [v0.3.3] 보유 현황(요약 + 종목별) — holdings 응답을 빠짐없이 가공한다.
+   *   ⚠️ 종목 현재가(lastPrice)가 holdings 안에 이미 들어 있으므로, 종목마다 시세를 또 부르지 않는다.
+   */
+  async holdingsView(): Promise<{ summary: HoldingsSummary; items: HoldingRow[] }> {
+    const empty: HoldingsSummary = {
+      marketValueUsd: null, marketValueKrw: null, pnlUsd: null, pnlKrw: null, pnlRate: null, dailyPnlUsd: null, dailyPnlKrw: null,
+    };
+    try {
+      await this.prepareBackend();
+    } catch {
+      return { summary: empty, items: [] };
+    }
+    let h: Record<string, unknown>;
+    try {
+      h = (await getHoldings()) as Record<string, unknown>;
+    } catch {
+      return { summary: empty, items: [] };
+    }
+    // 최상위 요약(총평가·총손익·당일손익). 금액은 {krw,usd} 두 통화로 온다.
+    const mv = h.marketValue as Record<string, unknown> | undefined;
+    const mvAmt = mv?.amount as Record<string, unknown> | undefined;
+    const pl = h.profitLoss as Record<string, unknown> | undefined;
+    const plAmt = pl?.amount as Record<string, unknown> | undefined;
+    const dpl = h.dailyProfitLoss as Record<string, unknown> | undefined;
+    const dplAmt = dpl?.amount as Record<string, unknown> | undefined;
+    const summary: HoldingsSummary = {
+      marketValueUsd: this.num(mvAmt?.usd),
+      marketValueKrw: this.num(mvAmt?.krw),
+      pnlUsd: this.num(plAmt?.usd),
+      pnlKrw: this.num(plAmt?.krw),
+      pnlRate: pl?.rate != null ? (this.num(pl.rate) ?? 0) * 100 : null,
+      dailyPnlUsd: this.num(dplAmt?.usd),
+      dailyPnlKrw: this.num(dplAmt?.krw),
+    };
+
+    const items: HoldingRow[] = [];
+    const rows = (h.items as Array<Record<string, unknown>>) ?? [];
+    for (const it of rows) {
+      const symbol = String(it.symbol ?? "").toUpperCase();
+      if (!symbol) continue;
+      const currency = String(it.currency ?? (String(it.marketCountry) === "KR" ? "KRW" : "USD"));
+      const iMv = it.marketValue as Record<string, unknown> | undefined;
+      const iPl = it.profitLoss as Record<string, unknown> | undefined;
+      const iDpl = it.dailyProfitLoss as Record<string, unknown> | undefined;
+      const cost = it.cost as Record<string, unknown> | undefined;
+      items.push({
+        symbol,
+        name: (it.name as string) ?? null,
+        marketCountry: (it.marketCountry as string) ?? null,
+        currency,
+        quantity: this.num(it.quantity) ?? 0,
+        lastPrice: this.num(it.lastPrice),
+        avgPrice: this.num(it.averagePurchasePrice ?? it.averagePrice),
+        purchaseAmt: this.num(iMv?.purchaseAmount),
+        marketValueAmt: this.num(iMv?.amount),
+        pnlAmt: this.num(iPl?.amount),
+        pnlRate: iPl?.rate != null ? (this.num(iPl.rate) ?? 0) * 100 : null,
+        dailyPnlAmt: this.num(iDpl?.amount),
+        dailyPnlRate: iDpl?.rate != null ? (this.num(iDpl.rate) ?? 0) * 100 : null,
+        commission: this.num(cost?.commission),
+        tax: this.num(cost?.tax),
+        rationale: this.rationaleFor(symbol),
+      });
+    }
+    return { summary, items };
+  }
+
+  /**
+   * [v0.3.3] 일반 주문 목록(원본 필드 전부). status=OPEN(미체결)/CLOSED(종료).
+   *   기존 openOrders는 몇 필드만 남겼는데, 이건 주문시각·수수료·평균체결가까지 다 담는다.
+   */
+  async ordersView(status: "OPEN" | "CLOSED"): Promise<OrderRow[]> {
+    await this.prepareBackend();
+    this.assertAccountReady();
+    const raw = await listOrdersRaw({ status });
+    return raw.orders.map((o) => {
+      const ex = o.execution as Record<string, unknown> | undefined;
+      const statusRaw = (o.status as string) ?? null;
+      const statusStd = mapOrderStatus(statusRaw ?? "PENDING");
+      return {
+        orderId: String(o.orderId ?? ""),
+        symbol: (o.symbol as string) ?? null,
+        side: (o.side as "BUY" | "SELL") ?? null,
+        orderType: (o.orderType as string) ?? null,
+        statusRaw,
+        statusStd,
+        price: this.num(o.price),
+        quantity: this.num(o.quantity),
+        orderAmount: this.num(o.orderAmount),
+        currency: (o.currency as string) ?? null,
+        timeInForce: (o.timeInForce as string) ?? null,
+        orderedAt: (o.orderedAt as string) ?? null,
+        canceledAt: (o.canceledAt as string) ?? null,
+        filledQty: this.num(ex?.filledQuantity),
+        avgFilledPrice: this.num(ex?.averageFilledPrice),
+        filledAmount: this.num(ex?.filledAmount),
+        commission: this.num(ex?.commission),
+        tax: this.num(ex?.tax),
+        filledAt: (ex?.filledAt as string) ?? null,
+        isOpen: status === "OPEN" && (statusStd === "submitted" || statusStd === "partial"),
+      };
+    });
+  }
+
+  /**
+   * [v0.3.3] 조건주문 목록(원본 필드 전부). status=OPEN/CLOSED.
+   *   ⚠️ 목록 응답에 orderSide 가 없어서 first/second 순서로 진입/청산을 구분한다.
+   *   우리가 저장한 근거(clientOrderId=conditionalOrderId)를 붙여 함께 보여준다.
+   */
+  async condOrdersView(status: "OPEN" | "CLOSED"): Promise<CondOrderRow[]> {
+    await this.prepareBackend();
+    this.assertAccountReady();
+    const raw = await listConditionalOrdersRaw(status);
+    const leg = (v: unknown): CondLegView | null => {
+      if (!v || typeof v !== "object") return null;
+      const o = v as Record<string, unknown>;
+      return {
+        legType: (o.type as string) ?? null,
+        status: (o.status as string) ?? null,
+        triggerPrice: this.num(o.triggerPrice),
+        orderPrice: this.num(o.orderPrice),
+        triggeredOrderId: (o.triggeredOrderId as string) ?? null,
+      };
+    };
+    return raw.map((c) => {
+      const id = String(c.conditionalOrderId ?? c.id ?? "");
+      const grpStatus = (c.status as string) ?? null;
+      // 근거 매칭: 우리는 조건주문 등록 시 tossOrderId 에 conditionalOrderId 를 저장했다.
+      const rationale = this.rationales.filter((r) => r.tossOrderId === id).slice(-1)[0] ?? null;
+      return {
+        conditionalOrderId: id,
+        type: (c.type as string) ?? null,
+        status: grpStatus,
+        symbol: (c.symbol as string) ?? null,
+        market: (c.market as string) ?? null,
+        quantity: this.num(c.quantity),
+        orderType: (c.orderType as string) ?? null,
+        expireDate: (c.expireDate as string) ?? null,
+        createdAt: (c.createdAt as string) ?? null,
+        first: leg(c.first),
+        second: leg(c.second),
+        rationale,
+        isOpen: grpStatus === "WATCHING",
+      };
+    });
+  }
+
+  /**
+   * [v0.3.3] 매도 주문 — 보유 종목을 판다. 지정가(LIMIT)/시장가(MARKET) 선택.
+   *   ⚠️ 사전차단 없음(전송 후 토스 판단). 실주문 잠금(드라이런)이면 모의 기록만.
+   *   ❌ 에이전트가 자동으로 부르지 않는다 — 반드시 화면의 [매도] 버튼(사람)에서만 호출된다.
+   */
+  async placeSell(spec: {
+    symbol: string;
+    quantity: number;
+    orderType: "LIMIT" | "MARKET";
+    price?: number; // LIMIT일 때만
+  }): Promise<JournalEntry> {
+    const symbol = spec.symbol.toUpperCase();
+    if (this.killSwitch) throw new Error("킬 스위치가 켜져 있습니다.");
+    await this.prepareBackend();
+    this.assertAccountReady();
+    const clientOrderId = makeClientOrderId(`sell${DateTime.now().toFormat("HHmmss")}`, 1, "sell");
+
+    if (this.isDryRun()) {
+      return this.addJournal({
+        kind: "dryrun",
+        symbol,
+        summary: `[드라이런] 매도 ${spec.orderType === "MARKET" ? "시장가" : `지정가 $${spec.price}`} ${symbol} ${spec.quantity}주 (실주문 잠금 — 전송 안 함)`,
+        detail: { ...spec, clientOrderId },
+      });
+    }
+    const o = await createOrder({
+      symbol,
+      side: "SELL",
+      orderType: spec.orderType,
+      price: spec.orderType === "LIMIT" ? spec.price : undefined,
+      quantity: spec.quantity,
+      clientOrderId,
+    });
+    return this.addJournal({
+      kind: "entry",
+      symbol,
+      summary: `매도 접수 ${spec.orderType === "MARKET" ? "시장가" : `지정가 $${spec.price}`} ${symbol} ${spec.quantity}주 (주문번호 ${o.tossOrderId}, 상태 ${o.status})`,
+      detail: o,
+    });
   }
 
   getJournal(): JournalEntry[] {

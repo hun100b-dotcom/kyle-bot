@@ -42,6 +42,10 @@ contextBridge.exposeInMainWorld("kyletool", {
   // [v0.2.10] 주문 근거(기법 스냅샷) 목록 / 보유 포지션 손익
   rationales: () => ipcRenderer.invoke("tool:rationales"),
   positions: () => ipcRenderer.invoke("tool:positions"),
+  holdingsView: () => ipcRenderer.invoke("tool:holdingsView"),
+  ordersView: (status) => ipcRenderer.invoke("tool:ordersView", status),
+  condOrdersView: (status) => ipcRenderer.invoke("tool:condOrdersView", status),
+  placeSell: (spec) => ipcRenderer.invoke("tool:order:sell", spec),
   openOrders: () => ipcRenderer.invoke("tool:orders:open"),
   conditionals: () => ipcRenderer.invoke("tool:orders:conditionals"),
   cancelOrder: (id) => ipcRenderer.invoke("tool:orders:cancel", id),
