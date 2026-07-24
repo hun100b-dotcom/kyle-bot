@@ -181,6 +181,9 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:strength:stop", (_ev, symbol: string) => e.stopStrength(symbol));
   ipcMain.handle("tool:strength:get", (_ev, symbol: string) => e.getStrengthState(symbol));
   e.on("strength", (state) => win?.webContents.send("tool:strengthEvent", state));
+  // [v0.6.0] 종목 스크리너(탐색) — 온디맨드 스캔 + 진행률 이벤트 중계
+  ipcMain.handle("tool:screener:scan", (_ev, bodyRatio?: number) => e.scanScreener(bodyRatio));
+  e.on("screener:progress", (p) => win?.webContents.send("tool:screenerProgress", p));
   ipcMain.handle("tool:positions", () => e.positions());
   // [v0.3.3] 주문 현황(토스 스타일) 리치 뷰
   ipcMain.handle("tool:holdingsView", () => e.holdingsView());

@@ -20,12 +20,15 @@ import { EventEmitter } from "node:events";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { DateTime } from "luxon";
-import { getSession, isOrderFrozen, type Session } from "../lib/session";
+import { getSession, getSessionStart, isOrderFrozen, type Session } from "../lib/session";
 import { calcSplit3, calcOrderbook, calcCandle, roundPrice, getTick, type SplitOrder } from "../lib/calc";
 import { strengthFromTicks, type Side } from "../lib/strength";
+import { aggregate1mTo5m, ema, ichimoku, scanSessionPattern, type Candle } from "../lib/indicators";
 import {
   getPrice,
   getTrades,
+  getRankings,
+  getCandles1mPaged,
   getAccounts,
   getBuyingPower,
   getSellable,
@@ -384,6 +387,47 @@ export interface StrengthState {
 }
 
 // -----------------------------------------------------------------------------
+// [v0.6.0] 종목 스크리너(탐색) — 온디맨드 스캔
+// -----------------------------------------------------------------------------
+// 거래량 상위 종목을 훑어 "현재가>EMA200 & 현재가>이치모쿠 구름 & 장시작후 최고점 이후
+// 첫 음봉 도지(+다음 봉 음봉)" 조건을 만족하는 후보를 찾는다. [스캔] 버튼으로만 돈다.
+
+export type ScreenStatus = "confirmed" | "watch" | "none" | "insufficient";
+
+/** 스크리너 결과 한 종목 */
+export interface ScreenResult {
+  rank: number; //           거래량 순위
+  symbol: string;
+  price: number | null; //   현재가
+  ema200: number | null; //  5분봉 EMA200(close)
+  cloudTop: number | null; // 이치모쿠 구름 위 경계 max(스팬A,B)
+  aboveEma: boolean; //      현재가 > EMA200
+  aboveCloud: boolean; //    현재가 > 구름top
+  status: ScreenStatus; //   confirmed(🔴)/watch(🟡)/none/insufficient
+  sessionHigh: number | null; // 현재 장 시작 이후 최고 고가
+  proximityPct: number | null; // 현재가가 세션 고점 대비 몇 %(음수면 고점 아래)
+  n1m: number; //            수집한 1분봉 수(데이터 충분성 참고)
+  n5m: number; //            합성한 5분봉 수
+  note?: string; //          데이터 부족·오류 등 사유
+}
+
+/** 스캔 진행 상황(진행률 바) */
+export interface ScreenProgress {
+  phase: "ranking" | "scanning" | "done";
+  done: number; //  처리한 종목 수
+  total: number; // 전체 종목 수
+  symbol: string; // 지금 처리 중인 종목
+}
+
+/** 스캔 최종 결과 */
+export interface ScreenRun {
+  scannedAt: string; //  스캔 시각(KST)
+  total: number; //      스캔한 종목 수
+  bodyRatio: number; //  사용한 도지 몸통비율
+  results: ScreenResult[]; // 후보(confirmed·watch) + 참고 목록
+}
+
+// -----------------------------------------------------------------------------
 // 엔진 본체
 // -----------------------------------------------------------------------------
 
@@ -408,6 +452,8 @@ export class ToolEngine extends EventEmitter {
     { timer: ReturnType<typeof setInterval>; intervalSec: number; lastPrice?: number; lastSide: Side; seen: Set<string>; lastError: string | null }
   >();
   private static readonly STRENGTH_MAX_SAMPLES = 500; // 종목당 보관 상한(오래된 것부터 정리)
+  /** [v0.6.0] 스크리너 중복 실행 방지(스캔 중 또 누르면 무시). */
+  private screenBusy = false;
 
   private mode: "mock" | "live" = "mock";
   private killSwitch = false;
@@ -1678,6 +1724,112 @@ export class ToolEngine extends EventEmitter {
       if (run) run.lastError = msg;
       this.emit("strength", this.getStrengthState(sym)); // 오류도 화면에 알림(다음 주기 재시도)
     }
+  }
+
+  // --------------------------------------------------------------------------
+  // [v0.6.0] 종목 스크리너(탐색) — 거래량 상위 60종목 온디맨드 스캔
+  //   ⚠️ 읽기 전용(랭킹·캔들 조회만). 주문 로직과 완전히 분리. [스캔] 버튼으로만 실행.
+  // --------------------------------------------------------------------------
+
+  /**
+   * scanScreener — 거래량 상위 종목을 훑어 조건 만족 후보를 찾는다.
+   *   진행 상황은 "screener:progress" 이벤트로 화면에 실시간 전달하고, 최종 결과는 반환한다.
+   *   @param bodyRatio 도지 몸통비율 상한(0.1~0.5, 기본 0.3). 화면 슬라이더로 조절.
+   *   @param count 스캔할 상위 종목 수(기본 60).
+   */
+  async scanScreener(bodyRatio = 0.3, count = 60): Promise<ScreenRun> {
+    if (this.screenBusy) throw new Error("이미 스캔이 진행 중입니다. 끝날 때까지 기다려 주세요.");
+    this.screenBusy = true;
+    const br = Math.min(0.5, Math.max(0.1, bodyRatio)); // 0.1~0.5로 안전 보정
+    try {
+      await this.prepareBackend();
+
+      // 1) 거래량 랭킹으로 스캔 대상 종목 확보
+      this.emit("screener:progress", { phase: "ranking", done: 0, total: count, symbol: "" } as ScreenProgress);
+      const rankings = await getRankings(count);
+      const total = rankings.length;
+
+      // 2) 현재 활성 장의 시작 시각(최고점 추적 기준). 장 마감 중이면 최근 8시간으로 폴백.
+      const now = DateTime.now().setZone("Asia/Seoul");
+      const sessionStart = getSessionStart(now);
+      const sessionStartMs = sessionStart ? sessionStart.toMillis() : now.toMillis() - 8 * 3600_000;
+
+      const results: ScreenResult[] = [];
+      let done = 0;
+      for (const rk of rankings) {
+        this.emit("screener:progress", { phase: "scanning", done, total, symbol: rk.symbol } as ScreenProgress);
+        try {
+          // 1분봉을 과거로 당겨 ~1000개 이상 확보(EMA200엔 5분봉 200개=1분봉 1000개 필요)
+          const oneMin = await getCandles1mPaged(rk.symbol, 1000);
+          const candles5m: Candle[] = aggregate1mTo5m(oneMin);
+          const closes = candles5m.map((c) => c.close);
+          // 데이터 부족(EMA200 불가 = 5분봉 200개 미만)이면 건너뛴다
+          if (candles5m.length < 200) {
+            results.push(this.insufficientResult(rk, oneMin.length, candles5m.length));
+            done++;
+            continue;
+          }
+
+          const price = Number.isFinite(rk.lastPrice) ? rk.lastPrice : candles5m[candles5m.length - 1].close;
+          const ema200 = ema(closes, 200);
+          const cloud = ichimoku(candles5m);
+          const pat = scanSessionPattern(candles5m, sessionStartMs, br);
+
+          const aboveEma = ema200 != null && price > ema200;
+          const aboveCloud = cloud != null && price > cloud.cloudTop;
+          // 가격 게이트(EMA·구름)를 못 넘으면 패턴이 있어도 후보 아님 → none
+          const status: ScreenStatus = aboveEma && aboveCloud ? pat.status : "none";
+          const proximityPct = pat.sessionHigh && Number.isFinite(price) ? ((price - pat.sessionHigh) / pat.sessionHigh) * 100 : null;
+
+          results.push({
+            rank: rk.rank,
+            symbol: rk.symbol,
+            price,
+            ema200,
+            cloudTop: cloud?.cloudTop ?? null,
+            aboveEma,
+            aboveCloud,
+            status,
+            sessionHigh: pat.sessionHigh,
+            proximityPct,
+            n1m: oneMin.length,
+            n5m: candles5m.length,
+          });
+        } catch (err) {
+          // 한 종목 실패가 전체 스캔을 죽이지 않게(개별 오류는 '데이터 부족'류로 표시)
+          const msg = err instanceof Error ? err.message : String(err);
+          results.push({ ...this.insufficientResult(rk, 0, 0), note: `오류: ${msg}` });
+        }
+        done++;
+      }
+
+      this.emit("screener:progress", { phase: "done", done, total, symbol: "" } as ScreenProgress);
+      // 정렬: 확정(🔴) → 관찰(🟡) → 나머지. 같은 등급이면 랭킹 순.
+      const order: Record<ScreenStatus, number> = { confirmed: 0, watch: 1, none: 2, insufficient: 3 };
+      results.sort((a, b) => order[a.status] - order[b.status] || a.rank - b.rank);
+      return { scannedAt: now.toFormat("MM-dd HH:mm:ss"), total, bodyRatio: br, results };
+    } finally {
+      this.screenBusy = false;
+    }
+  }
+
+  /** 데이터 부족(저유동성 등) 결과 한 줄을 만든다. */
+  private insufficientResult(rk: { rank: number; symbol: string; lastPrice: number }, n1m: number, n5m: number): ScreenResult {
+    return {
+      rank: rk.rank,
+      symbol: rk.symbol,
+      price: Number.isFinite(rk.lastPrice) ? rk.lastPrice : null,
+      ema200: null,
+      cloudTop: null,
+      aboveEma: false,
+      aboveCloud: false,
+      status: "insufficient",
+      sessionHigh: null,
+      proximityPct: null,
+      n1m,
+      n5m,
+      note: "데이터 부족(1분봉 부족)",
+    };
   }
 
   /**

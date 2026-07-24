@@ -58,6 +58,14 @@ contextBridge.exposeInMainWorld("kyletool", {
     ipcRenderer.on("tool:strengthEvent", h);
     return () => ipcRenderer.removeListener("tool:strengthEvent", h);
   },
+
+  // [v0.6.0] 종목 스크리너(탐색) — 스캔 + 진행률 구독
+  screenerScan: (bodyRatio) => ipcRenderer.invoke("tool:screener:scan", bodyRatio),
+  onScreenerProgress: (cb) => {
+    const h = (_ev, p) => cb(p);
+    ipcRenderer.on("tool:screenerProgress", h);
+    return () => ipcRenderer.removeListener("tool:screenerProgress", h);
+  },
   positions: () => ipcRenderer.invoke("tool:positions"),
   holdingsView: () => ipcRenderer.invoke("tool:holdingsView"),
   ordersView: (status) => ipcRenderer.invoke("tool:ordersView", status),

@@ -160,6 +160,36 @@ interface StrengthState {
   lastError: string | null;
 }
 
+/** [v0.6.0] 스크리너 결과 한 종목 */
+type ScreenStatus = "confirmed" | "watch" | "none" | "insufficient";
+interface ScreenResult {
+  rank: number;
+  symbol: string;
+  price: number | null;
+  ema200: number | null;
+  cloudTop: number | null;
+  aboveEma: boolean;
+  aboveCloud: boolean;
+  status: ScreenStatus;
+  sessionHigh: number | null;
+  proximityPct: number | null;
+  n1m: number;
+  n5m: number;
+  note?: string;
+}
+interface ScreenProgress {
+  phase: "ranking" | "scanning" | "done";
+  done: number;
+  total: number;
+  symbol: string;
+}
+interface ScreenRun {
+  scannedAt: string;
+  total: number;
+  bodyRatio: number;
+  results: ScreenResult[];
+}
+
 /** 보유 포지션 한 줄(근거 + 실시간 손익) */
 interface PositionView {
   symbol: string;
@@ -331,6 +361,9 @@ interface KyletoolBridge {
   strengthStop(symbol: string): Promise<StrengthState>;
   strengthGet(symbol: string): Promise<StrengthState>;
   onStrength(cb: (state: StrengthState) => void): () => void;
+  // [v0.6.0] 종목 스크리너(탐색)
+  screenerScan(bodyRatio?: number): Promise<ScreenRun>;
+  onScreenerProgress(cb: (p: ScreenProgress) => void): () => void;
   positions(): Promise<PositionView[]>;
   holdingsView(): Promise<{ summary: HoldingsSummary; items: HoldingRow[] }>;
   ordersView(status: "OPEN" | "CLOSED"): Promise<OrderRow[]>;

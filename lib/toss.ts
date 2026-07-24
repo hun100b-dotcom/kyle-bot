@@ -34,6 +34,7 @@ const ENDPOINTS = {
   orderbook: "/api/v1/orderbook",
   candles: "/api/v1/candles",
   trades: "/api/v1/trades", // [v0.5.0] 개별 체결(틱) — 체결강도 추정의 원천
+  rankings: "/api/v1/rankings", // [v0.6.0] 거래량 랭킹 — 스크리너 스캔 대상
   accounts: "/api/v1/accounts", // 계좌 목록(여기서 accountSeq 획득)
   holdings: "/api/v1/holdings", // 보유 종목
   buyingPower: "/api/v1/buying-power",
@@ -417,6 +418,9 @@ class RateLimiter {
   }
 }
 const priceLimiter = new RateLimiter(PRICE_MIN_INTERVAL_MS);
+// [v0.6.0] 캔들·틱은 MARKET_DATA_CHART 그룹(실측 rate limit 초당 5회). 210ms 간격(≈4.7/초)으로
+//   안전하게 페이싱한다. 스크리너가 60종목×여러 페이지를 직렬로 당길 때 429를 피하는 핵심.
+const chartLimiter = new RateLimiter(210);
 
 async function safeText(res: Response): Promise<string> {
   try {
@@ -498,11 +502,103 @@ export async function getOrderbook(symbol: string): Promise<unknown> {
   return tossFetch<unknown>(ENDPOINTS.orderbook, { query: { symbol } });
 }
 
-/** getCandles — 캔들(봉) 조회.
- *  [v0.5.0 버그수정] 캔들도 `symbol`(단수)라야 200. (interval 은 실스펙상 "1m"/"1d"만, count 최대 200.) */
-export async function getCandles(symbol: string, interval = "1m", count = 200): Promise<unknown> {
+/** getCandles — 캔들(봉) 원본 응답 조회(페이지네이션 커서 before 지원).
+ *  [v0.5.0 버그수정] 캔들도 `symbol`(단수)라야 200. (interval 은 실스펙상 "1m"/"1d"만, count 최대 200.)
+ *  [v0.6.0] before(ISO8601)를 주면 "그 시각 이하"의 과거 봉을 준다. 응답은 { candles, nextBefore }. */
+export async function getCandles(symbol: string, interval = "1m", count = 200, before?: string): Promise<CandlesPage> {
+  await chartLimiter.wait();
+  const query: Record<string, string | number> = { symbol, interval, count };
+  if (before) query.before = before;
+  return tossFetch<CandlesPage>(ENDPOINTS.candles, { query });
+}
+
+/** 캔들 원본 한 건(문자열 필드) — 실스펙. */
+export interface CandleRaw {
+  timestamp: string;
+  openPrice: string;
+  highPrice: string;
+  lowPrice: string;
+  closePrice: string;
+  volume: string;
+  currency?: string;
+}
+/** 캔들 조회 응답(한 페이지) — nextBefore 로 과거를 이어 당긴다. */
+export interface CandlesPage {
+  candles: CandleRaw[];
+  nextBefore?: string | null;
+}
+/** 숫자로 정규화한 봉(스크리너 계산용). time = 봉 시각(ms). */
+export interface CandleNum {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+/**
+ * getCandles1mPaged — 1분봉을 before 커서로 과거로 당겨 minCount개 이상 모은다.
+ *   토스는 한 번에 200개·과거 커서(before/nextBefore)만 주므로 여러 번 이어 붙인다.
+ *   @param minCount 목표 개수(예: 1000). 이만큼 모이거나 더 과거가 없으면 멈춘다.
+ *   @param maxPages 안전 상한(무한루프 방지). 기본 12페이지(≈2400개).
+ *   반환: 시각 오름차순, 중복 제거된 숫자 봉 배열.
+ */
+export async function getCandles1mPaged(symbol: string, minCount = 1000, maxPages = 12): Promise<CandleNum[]> {
+  const seen = new Set<number>(); // time(ms) 기준 중복 제거
+  const out: CandleNum[] = [];
+  let before: string | undefined;
+  for (let page = 0; page < maxPages; page++) {
+    const res = await getCandles(symbol, "1m", 200, before);
+    const arr = res?.candles ?? [];
+    if (arr.length === 0) break;
+    for (const c of arr) {
+      const time = Date.parse(c.timestamp);
+      if (!Number.isFinite(time) || seen.has(time)) continue;
+      seen.add(time);
+      out.push({
+        time,
+        open: Number(c.openPrice),
+        high: Number(c.highPrice),
+        low: Number(c.lowPrice),
+        close: Number(c.closePrice),
+        volume: Number(c.volume),
+      });
+    }
+    if (out.length >= minCount) break; // 충분히 모음
+    if (!res.nextBefore) break; //         더 과거가 없음
+    if (res.nextBefore === before) break; // 커서가 안 움직이면 중단(안전)
+    before = res.nextBefore;
+  }
+  out.sort((a, b) => a.time - b.time); // 오름차순(과거→현재)
+  return out;
+}
+
+/** 거래량 랭킹 한 줄(실스펙: result.rankings[]). */
+export interface RankingItem {
+  rank: number;
+  symbol: string;
+  lastPrice: number; // price.lastPrice 를 숫자로
+  tradingVolume: number;
+}
+
+/**
+ * getRankings — 시장 거래량 상위 종목(스크리너 스캔 대상).
+ *   실스펙: GET /api/v1/rankings?type=MARKET_TRADING_VOLUME&marketCountry=US&duration=realtime&count=N
+ *   응답: { rankings: [{ rank, symbol, price:{lastPrice}, tradingVolume }] }
+ */
+export async function getRankings(count = 60, type = "MARKET_TRADING_VOLUME", marketCountry = "US"): Promise<RankingItem[]> {
   await priceLimiter.wait();
-  return tossFetch<unknown>(ENDPOINTS.candles, { query: { symbol, interval, count } });
+  const res = await tossFetch<{ rankings?: Array<{ rank: number; symbol: string; price?: { lastPrice?: string }; tradingVolume?: string }> }>(
+    ENDPOINTS.rankings,
+    { query: { type, marketCountry, duration: "realtime", count } },
+  );
+  return (res?.rankings ?? []).map((r) => ({
+    rank: r.rank,
+    symbol: r.symbol,
+    lastPrice: Number(r.price?.lastPrice),
+    tradingVolume: Number(r.tradingVolume),
+  }));
 }
 
 /** 개별 체결(틱) 한 건: 실제 응답은 문자열들. 방향(매수/매도) 정보는 없다 → 틱룰로 추정한다. */
@@ -516,7 +612,7 @@ export interface TradeRaw {
 /** getTrades — 개별 체결(틱) 목록. 실스펙: `symbol`(단수), count 최대 50, 과거 커서 없음(최근 것만).
  *  체결강도(매수/매도×100)를 계산하려면 이 원천 데이터에 틱룰(lib/strength.ts)을 적용한다. */
 export async function getTrades(symbol: string, count = 50): Promise<TradeRaw[]> {
-  await priceLimiter.wait();
+  await chartLimiter.wait(); // [v0.6.0] 체결도 차트 그룹 rate limit(초당 5회)에 맞춰 페이싱
   const arr = await tossFetch<TradeRaw[]>(ENDPOINTS.trades, { query: { symbol, count } });
   return arr ?? [];
 }

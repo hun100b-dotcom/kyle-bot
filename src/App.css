@@ -423,3 +423,13 @@ ul.hint { padding-left: 18px; }
 /* 스파크라인: 부모 색을 기준선에 물려주기 위해 color 지정(다크/라이트 자동) */
 .str-spark { display: block; color: #8a93a4; margin: 6px 0 14px; border: 1px solid #2a2f3a; border-radius: 8px; background: #0f131a; }
 .str-table { margin-top: 6px; }
+
+/* ===== [v0.6.0] 탐색(스크리너) ===== */
+.screen-controls { margin: 10px 0 6px; }
+.screen-controls input[type="range"] { width: 100%; accent-color: #2ea043; }
+.screen-prog { margin: 12px 0; }
+.screen-prog-bar { height: 10px; background: #0f131a; border: 1px solid #2a2f3a; border-radius: 6px; overflow: hidden; }
+.screen-prog-fill { height: 100%; background: linear-gradient(90deg, #1f6feb, #2ea043); transition: width 0.3s ease; }
+.screen-table { margin-top: 6px; }
+.screen-row { cursor: pointer; }
+.screen-row:hover td { background: #1d2330; }

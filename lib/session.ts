@@ -165,3 +165,26 @@ export function getSession(now: DateTime): Session {
   //           세션 구간을 판정하므로, 휴장일이면 'closed'로 덮어쓰는 캘린더 검사를
   //           앞단에 추가해야 한다. (겨울 상대시각/애프터 매매 여부도 S2에서 확정)
 }
+
+/**
+ * [v0.6.0] getSessionStart — 지금(now)이 속한 "현재 활성 장(場)의 시작 시각"을 반환한다.
+ *   스크리너의 "장 시작 이후 최고점" 추적 기준으로 쓴다. 장이 닫혀 있으면 null.
+ *
+ *   세션 시작 오프셋(개장 기준): 데이 +0h · 프리 +8h · 정규장 +13.5h · 애프터 +20h.
+ *   getSession과 같은 앵커(오늘/어제 개장)를 보고, now가 걸린 세션의 '시작점'을 돌려준다.
+ */
+export function getSessionStart(now: DateTime): DateTime | null {
+  const kst = now.setZone("Asia/Seoul");
+  const todayOpen = getDayMarketOpen(kst);
+  const yesterdayOpen = getDayMarketOpen(kst.minus({ days: 1 }));
+
+  for (const open of [todayOpen, yesterdayOpen]) {
+    const offset = kst.diff(open, "hours").hours; // 개장 이후 흐른 시간(시간)
+    if (offset < 0) continue; //                     아직 개장 전(이 앵커는 미래)
+    if (offset < DAY_OPEN_HOURS) return open; //                                  데이 시작 = 개장
+    if (offset < PRE_END_HOURS) return open.plus({ hours: DAY_OPEN_HOURS }); //    프리 시작 = 개장+8h
+    if (offset < REGULAR_END_HOURS) return open.plus({ hours: PRE_END_HOURS }); // 정규장 시작 = 개장+13.5h
+    if (offset < AFTER_END_HOURS) return open.plus({ hours: REGULAR_END_HOURS }); // 애프터 시작 = 개장+20h
+  }
+  return null; // 어느 앵커에서도 세션에 안 걸림 = 장 닫힘
+}

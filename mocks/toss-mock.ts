@@ -186,14 +186,68 @@ export function createMockTossServer() {
     }
 
     if (path === "/api/v1/candles" && method === "GET") {
+      // [v0.6.0] 스크리너용: 실스펙 필드(openPrice 등) + before/nextBefore 페이지네이션.
+      //   결정적 가상 1분봉을 최근 HORIZON_MIN분까지 생성해, 200개씩 과거로 넘겨준다.
       const sym = (url.searchParams.get("symbol") ?? url.searchParams.get("symbols") ?? "AAPL").split(",")[0];
       const cur = priceOf(state.prices, sym);
-      return sendResult(res, 200, {
-        symbol: sym,
-        candles: [
-          { time: "T-1", open: String(cur - 0.02), high: String(cur + 0.03), low: String(cur - 0.03), close: String(cur + 0.02), volume: "12000" },
-        ],
-      });
+      const count = Math.min(Number(url.searchParams.get("count") ?? 200) || 200, 200);
+      const before = url.searchParams.get("before");
+      const HORIZON_MIN = 1300; // 모의 1분봉 최대 과거(분) — EMA200(5분봉 200개=1분봉 1000개)에 충분
+      const MIN = 60_000;
+      const nowMin = Math.floor(Date.now() / MIN) * MIN;
+      const oldestAllowed = nowMin - HORIZON_MIN * MIN;
+      let top = before ? Math.min(Date.parse(before), nowMin) : nowMin;
+      top = Math.floor(top / MIN) * MIN;
+      // 종목별로 조금씩 다른 가격대(결정적): 심볼 글자합으로 오프셋
+      const symOffset = sym.split("").reduce((s, ch) => s + ch.charCodeAt(0), 0) % 20;
+      const base = cur + symOffset * 0.01;
+      const candleAt = (t: number) => {
+        const minsAgo = (nowMin - t) / MIN; // 0=지금, 클수록 과거
+        // 과거일수록 살짝 낮게(완만한 상승) + 잔물결 → EMA200 아래에서 현재가 위로
+        const p = base * (1 - minsAgo * 0.00002) + Math.sin(t / 6e6) * base * 0.001;
+        const open = Math.round(p * 100) / 100;
+        const close = Math.round((p + base * 0.0002) * 100) / 100;
+        const high = Math.round((Math.max(open, close) + base * 0.0006) * 100) / 100;
+        const low = Math.round((Math.min(open, close) - base * 0.0006) * 100) / 100;
+        return {
+          timestamp: new Date(t).toISOString(),
+          openPrice: String(open),
+          highPrice: String(high),
+          lowPrice: String(low),
+          closePrice: String(close),
+          volume: String(1000 + ((t / MIN) % 500)),
+          currency: "USD",
+        };
+      };
+      const candles = [];
+      for (let k = 0; k < count; k++) {
+        const t = top - k * MIN; // 최신→과거 순
+        if (t < oldestAllowed) break;
+        candles.push(candleAt(t));
+      }
+      const oldest = candles.length ? Date.parse(candles[candles.length - 1].timestamp) : null;
+      const nextBefore = oldest && oldest - MIN >= oldestAllowed ? new Date(oldest - MIN).toISOString() : null;
+      return sendResult(res, 200, { candles, nextBefore });
+    }
+
+    // [v0.6.0] 거래량 랭킹 — 스크리너 스캔 대상(가상 상위 종목).
+    if (path === "/api/v1/rankings" && method === "GET") {
+      const count = Math.min(Number(url.searchParams.get("count") ?? 100) || 100, 100);
+      const bases = ["AAPL", "NVDA", "TSLA", "SOFI", "AMD", "PLTR", "AMZN", "META", "MSFT", "GOOGL", "NU", "BITO"];
+      const rankings = [];
+      for (let i = 0; i < count; i++) {
+        const symbol = i < bases.length ? bases[i] : `SYM${String(i + 1).padStart(2, "0")}`;
+        const cur = priceOf(state.prices, symbol);
+        rankings.push({
+          rank: i + 1,
+          symbol,
+          currency: "USD",
+          price: { lastPrice: String(cur), basePrice: String(cur), changeRate: "0.0" },
+          tradingVolume: String(1_000_000 - i * 1000),
+          tradingAmount: String((1_000_000 - i * 1000) * cur),
+        });
+      }
+      return sendResult(res, 200, { rankedAt: new Date().toISOString(), rankings });
     }
 
     // [v0.5.0] 개별 체결(틱) — 체결강도 추정용 가상 데이터.

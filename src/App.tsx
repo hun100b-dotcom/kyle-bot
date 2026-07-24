@@ -188,7 +188,12 @@ interface PendingOrder {
 
 function App() {
   const [status, setStatus] = useState<ToolStatus | null>(null);
-  const [tab, setTab] = useState<"calc" | "splits" | "strength" | "orders" | "journal" | "settings">("calc");
+  const [tab, setTab] = useState<"calc" | "screener" | "splits" | "strength" | "orders" | "journal" | "settings">("calc");
+  // [v0.6.0] 종목 스크리너(탐색). 결과·진행률·스캔중 여부·도지 몸통비율 슬라이더.
+  const [screenRun, setScreenRun] = useState<ScreenRun | null>(null);
+  const [screenBusy, setScreenBusy] = useState(false);
+  const [screenProg, setScreenProg] = useState<ScreenProgress | null>(null);
+  const [bodyRatio, setBodyRatio] = useState(0.3);
   const [journal, setJournal] = useState<JournalEntry[]>([]);
   // [v0.4.0] 내 삼분할 기록(여러 종목 동시 운용). 저장 목록 + 저장 시 메모 입력칸.
   const [splits, setSplits] = useState<SavedSplit[]>([]);
@@ -319,6 +324,8 @@ function App() {
     const offStr = window.kyletool.onStrength?.((state) => {
       setStrState((prev) => (state.symbol === (prev?.symbol ?? state.symbol) ? state : prev));
     });
+    // [v0.6.0] 스크리너 진행률 실시간 표시
+    const offScr = window.kyletool.onScreenerProgress?.((p) => setScreenProg(p));
     // 업데이트 이벤트 구독(있음/진행률/완료). 오류는 조용히 무시(앱 정상 동작 우선).
     const offUpd = window.kyletool.onUpdate?.({
       available: (info) => setUpdate(info),
@@ -331,6 +338,7 @@ function App() {
     return () => {
       off();
       offStr?.();
+      offScr?.();
       offUpd?.();
     };
   }, []);
@@ -835,6 +843,34 @@ ${msg}
     }
   }
 
+  // -------------------------------------------------------------------------
+  // [v0.6.0] 종목 스크리너(탐색) — 온디맨드 스캔
+  // -------------------------------------------------------------------------
+
+  /** [스캔] — 거래량 상위 60종목을 훑어 조건 만족 후보를 찾는다(1~2분 소요). */
+  async function runScan() {
+    if (screenBusy) return;
+    setScreenBusy(true);
+    setScreenProg({ phase: "ranking", done: 0, total: 60, symbol: "" });
+    try {
+      const run = await window.kyletool.screenerScan(bodyRatio);
+      setScreenRun(run);
+    } catch (e) {
+      alert("스캔 실패: " + String(e));
+    } finally {
+      setScreenBusy(false);
+      setScreenProg(null);
+    }
+  }
+
+  /** 결과 행 클릭 → 계산기 탭에 그 종목을 자동으로 채운다(삼분할 타점 계산으로 이어지게). */
+  function pickScreenSymbol(symbol: string) {
+    setSymbol(symbol);
+    setCommittedSymbol(symbol);
+    setTab("calc");
+    void autoLoad(symbol); // 예수금·시세·수량 자동 로드
+  }
+
   /** [내 삼분할 기록] 카드에서 "체결강도 보기"를 누르면 이 종목으로 체결강도 탭 열기. */
   function openStrengthFor(symbol: string) {
     setStrSym(symbol);
@@ -1029,7 +1065,7 @@ ${msg}
 
       {/* ===== 탭 ===== */}
       <nav className="tabs">
-        {(["calc", "splits", "strength", "orders", "journal", "settings"] as const).map((t) => (
+        {(["calc", "screener", "splits", "strength", "orders", "journal", "settings"] as const).map((t) => (
           <button
             key={t}
             className={tab === t ? "tab active" : "tab"}
@@ -1040,7 +1076,7 @@ ${msg}
               if (t === "strength") void loadStrength(strSym); // 저장된 시계열 불러오기
             }}
           >
-            {{ calc: "계산기", splits: "내 삼분할 기록", strength: "체결강도", orders: "주문 현황", journal: "기록", settings: "설정" }[t]}
+            {{ calc: "계산기", screener: "탐색", splits: "내 삼분할 기록", strength: "체결강도", orders: "주문 현황", journal: "기록", settings: "설정" }[t]}
           </button>
         ))}
       </nav>
@@ -1294,6 +1330,92 @@ ${msg}
               )}
             </section>
           </div>
+        </main>
+      )}
+
+      {/* ===== ①-1) 탐색(스크리너) (v0.6.0) ===== */}
+      {tab === "screener" && (
+        <main className="grid">
+          <section className="card wide">
+            <div className="split-list-head">
+              <h2>탐색 <span className="hint">(거래량 상위 60종목 스캔)</span></h2>
+              <button className="mini btn-start" disabled={screenBusy} onClick={() => void runScan()}>
+                {screenBusy ? "스캔 중…" : "🔍 스캔"}
+              </button>
+            </div>
+            <p className="hint">
+              거래량 상위 60종목을 훑어 <b>①현재가&gt;5분봉 EMA200</b>, <b>②현재가&gt;이치모쿠 구름 위</b>,
+              <b> ③장 시작 이후 최고점 뒤 첫 음봉 도지</b>, <b>④그 다음 5분봉도 음봉</b>이면 후보로 잡습니다.
+              1분봉을 과거로 당겨 5분봉으로 합성해 계산합니다(종목당 ~1,000개+). <b>1~2분</b> 걸립니다.
+              <br/>🔴 <b>확정</b>(도지+다음 음봉) · 🟡 <b>관찰</b>(첫 음봉 도지, 다음 봉 대기). 행을 누르면 계산기에 종목이 채워집니다.
+            </p>
+
+            {/* 도지 몸통비율 슬라이더 */}
+            <div className="screen-controls">
+              <label className="str-field" style={{ flex: 1, maxWidth: 360 }}>
+                <span className="sb-k">음봉 도지 몸통비율 상한: <b>{(bodyRatio * 100).toFixed(0)}%</b> (작을수록 엄격)</span>
+                <input type="range" min={0.1} max={0.5} step={0.05} value={bodyRatio} disabled={screenBusy}
+                  onChange={(e) => setBodyRatio(Number(e.target.value))} />
+              </label>
+            </div>
+
+            {/* 진행률 바 */}
+            {screenBusy && screenProg && (
+              <div className="screen-prog">
+                <div className="screen-prog-bar">
+                  <div className="screen-prog-fill" style={{ width: `${screenProg.total ? Math.round((screenProg.done / screenProg.total) * 100) : 0}%` }} />
+                </div>
+                <div className="hint">
+                  {screenProg.phase === "ranking" ? "거래량 랭킹 불러오는 중…"
+                    : screenProg.phase === "done" ? "정리 중…"
+                    : `${screenProg.done}/${screenProg.total} · ${screenProg.symbol} 분석 중…`}
+                </div>
+              </div>
+            )}
+
+            {/* 결과 */}
+            {screenRun && !screenBusy && (() => {
+              const cand = screenRun.results.filter((r) => r.status === "confirmed" || r.status === "watch");
+              const insufficient = screenRun.results.filter((r) => r.status === "insufficient").length;
+              return (
+                <>
+                  <p className="hint">
+                    {screenRun.scannedAt} 스캔 · {screenRun.total}종목 중 <b className="ok">후보 {cand.length}개</b>
+                    {insufficient > 0 && <span> · 데이터 부족 {insufficient}개 제외</span>}
+                  </p>
+                  {cand.length === 0 ? (
+                    <div className="result-empty hint">조건을 만족하는 후보가 없습니다. (몸통비율을 높이거나 장중에 다시 시도해 보세요.)</div>
+                  ) : (
+                    <table className="result-table screen-table">
+                      <thead>
+                        <tr><th>상태</th><th>순위</th><th>종목</th><th>현재가</th><th>EMA200</th><th>구름top</th><th>세션고점</th><th>근접도</th></tr>
+                      </thead>
+                      <tbody>
+                        {cand.map((r) => (
+                          <tr key={r.symbol} className="screen-row" onClick={() => pickScreenSymbol(r.symbol)} title="클릭하면 계산기에 이 종목이 채워집니다">
+                            <td>{r.status === "confirmed" ? "🔴 확정" : "🟡 관찰"}</td>
+                            <td>{r.rank}</td>
+                            <td><b>{r.symbol}</b></td>
+                            <td>{r.price != null ? usdKrw(r.price, fx) : "—"}</td>
+                            <td>{r.ema200 != null ? `$${r.ema200.toFixed(2)}` : "—"}</td>
+                            <td>{r.cloudTop != null ? `$${r.cloudTop.toFixed(2)}` : "—"}</td>
+                            <td>{r.sessionHigh != null ? `$${r.sessionHigh.toFixed(2)}` : "—"}</td>
+                            <td className={r.proximityPct != null && r.proximityPct >= 0 ? "ok" : "danger"}>
+                              {r.proximityPct != null ? `${r.proximityPct >= 0 ? "+" : ""}${r.proximityPct.toFixed(2)}%` : "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </>
+              );
+            })()}
+
+            {!screenRun && !screenBusy && (
+              <div className="result-empty hint">[🔍 스캔]을 누르면 거래량 상위 60종목을 훑어 후보를 찾습니다. (읽기 전용 — 주문과 무관)</div>
+            )}
+          </section>
         </main>
       )}
 
