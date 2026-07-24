@@ -345,6 +345,15 @@ export function removeSavedSplit(list: SavedSplit[], id: string): SavedSplit[] {
   return list.filter((rec) => rec.id !== id);
 }
 
+/**
+ * renameSavedSplit — 특정 기록(id)의 제목(메모)을 새 값으로 바꾼다(순수 함수).
+ *   [불변성] 원본을 건드리지 않고 새 배열을 돌려준다. 앞뒤 공백은 정리한다.
+ *   (제목이 곧 memo 필드다 — 저장 시 넣은 자유 이름/메모를 나중에 편집하는 것.)
+ */
+export function renameSavedSplit(list: SavedSplit[], id: string, memo: string): SavedSplit[] {
+  return list.map((rec) => (rec.id === id ? { ...rec, memo: (memo ?? "").trim() } : rec));
+}
+
 // -----------------------------------------------------------------------------
 // [v0.5.0] 체결강도(Trade Strength) 기록 — 온디맨드 시계열 샘플링
 // -----------------------------------------------------------------------------
@@ -1525,6 +1534,13 @@ export class ToolEngine extends EventEmitter {
   /** 특정 기록의 특정 분할에 대해 [진입완료] 체크를 뒤집는다. */
   toggleSplitEntered(id: string, level: number): SavedSplit[] {
     this.splits = toggleSavedLevel(this.splits, id, level);
+    this.persistSplits();
+    return this.getSplits();
+  }
+
+  /** 기록의 제목(메모)을 수정한다(연필 → 인라인 편집). 파일에 반영, 앱 재시작해도 유지. */
+  renameSplit(id: string, memo: string): SavedSplit[] {
+    this.splits = renameSavedSplit(this.splits, id, memo);
     this.persistSplits();
     return this.getSplits();
   }

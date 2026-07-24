@@ -175,6 +175,7 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:splits:add", (_ev, input) => e.addSplit(input));
   ipcMain.handle("tool:splits:delete", (_ev, id: string) => e.deleteSplit(id));
   ipcMain.handle("tool:splits:toggle", (_ev, id: string, level: number) => e.toggleSplitEntered(id, level));
+  ipcMain.handle("tool:splits:rename", (_ev, id: string, memo: string) => e.renameSplit(id, memo)); // [v0.5.1] 제목 수정
   // [v0.5.0] 체결강도 기록(온디맨드 시계열) — 시작/중지/조회 + 실시간 이벤트 중계
   ipcMain.handle("tool:strength:start", (_ev, symbol: string, intervalSec?: number) => e.startStrength(symbol, intervalSec));
   ipcMain.handle("tool:strength:stop", (_ev, symbol: string) => e.stopStrength(symbol));

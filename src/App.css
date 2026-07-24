@@ -396,6 +396,10 @@ ul.hint { padding-left: 18px; }
 .split-done td { opacity: 0.55; }
 .split-check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; }
 .btn-str { background: #23324a; color: #cfe0ff; margin-left: 8px; }
+.btn-edit { background: #2a2f3a; color: #cbd3e1; margin-left: 8px; }
+/* 제목 인라인 편집: 입력칸 + 저장/취소 버튼 한 줄 */
+.split-edit { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.split-edit .split-memo-input { min-width: 200px; flex: 0 1 320px; }
 
 /* ===== [v0.5.0] 체결강도 기록 ===== */
 .str-controls { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin: 12px 0; }

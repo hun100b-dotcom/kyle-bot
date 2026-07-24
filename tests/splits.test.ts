@@ -21,6 +21,7 @@ import {
   buildSavedLevels,
   toggleSavedLevel,
   removeSavedSplit,
+  renameSavedSplit,
   type SavedSplit,
 } from "../electron/tool-engine";
 
@@ -78,6 +79,25 @@ describe("순수 함수 — 기록 삭제(removeSavedSplit)", () => {
   });
 });
 
+describe("순수 함수 — 제목(메모) 수정(renameSavedSplit)", () => {
+  const list: SavedSplit[] = [
+    { id: "A", ts: "", symbol: "AAPL", technique: "split3", levels: [], tpPct: null, slPct: null, qty: null, memo: "원래 제목" },
+    { id: "B", ts: "", symbol: "NVDA", technique: "split3", levels: [], tpPct: null, slPct: null, qty: null, memo: "엔비디아" },
+  ];
+  it("지정한 id의 제목만 바뀌고 다른 기록은 그대로다", () => {
+    const out = renameSavedSplit(list, "A", "눌림목 1차");
+    expect(out.find((r) => r.id === "A")!.memo).toBe("눌림목 1차");
+    expect(out.find((r) => r.id === "B")!.memo).toBe("엔비디아");
+  });
+  it("앞뒤 공백은 정리한다", () => {
+    expect(renameSavedSplit(list, "A", "  공백정리  ").find((r) => r.id === "A")!.memo).toBe("공백정리");
+  });
+  it("원본 배열을 바꾸지 않는다(불변성)", () => {
+    renameSavedSplit(list, "A", "바뀜");
+    expect(list.find((r) => r.id === "A")!.memo).toBe("원래 제목");
+  });
+});
+
 describe("엔진 왕복 — 실제 파일에 저장하고 다시 읽는다(연습 모드)", () => {
   it("addSplit → getSplits → toggle → delete 가 파일까지 반영된다", () => {
     // 임시 폴더로만 동작(실계좌·실파일 절대 안 건드림), forceMock으로 연습 모드 강제
@@ -105,13 +125,18 @@ describe("엔진 왕복 — 실제 파일에 저장하고 다시 읽는다(연�
       const aapl = list.find((r) => r.id === id)!;
       expect(aapl.levels.find((lv) => lv.level === 1)!.entered).toBe(true);
 
-      // 4) 새 엔진으로 같은 폴더를 읽어도(=앱 재시작) 저장 내용이 유지된다
+      // 4) 제목(메모) 수정 — 파일에 반영되어야 한다
+      list = eng.renameSplit(id, "  1차 눌림목  ");
+      expect(list.find((r) => r.id === id)!.memo).toBe("1차 눌림목"); // 공백 정리됨
+
+      // 5) 새 엔진으로 같은 폴더를 읽어도(=앱 재시작) 저장 내용이 유지된다(체크 + 수정한 제목)
       const eng2 = new ToolEngine(dir, { forceMock: true });
       const reloaded = eng2.getSplits();
       expect(reloaded).toHaveLength(2);
       expect(reloaded.find((r) => r.id === id)!.levels.find((lv) => lv.level === 1)!.entered).toBe(true);
+      expect(reloaded.find((r) => r.id === id)!.memo).toBe("1차 눌림목"); // 수정한 제목 유지
 
-      // 5) 삭제
+      // 6) 삭제
       const afterDel = eng2.deleteSplit(id);
       expect(afterDel).toHaveLength(1);
       expect(afterDel.find((r) => r.id === id)).toBeUndefined();

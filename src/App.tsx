@@ -194,6 +194,9 @@ function App() {
   const [splits, setSplits] = useState<SavedSplit[]>([]);
   const [splitMemo, setSplitMemo] = useState(""); // 계산기에서 [기록 저장] 누를 때 함께 남길 메모
   const [splitSaved, setSplitSaved] = useState(""); // 저장 직후 잠깐 뜨는 안내("저장됨 ✓")
+  // [v0.5.1] 저장된 기록의 제목(메모) 인라인 편집 — 편집 중인 기록 id + 입력값.
+  const [editSplitId, setEditSplitId] = useState<string | null>(null);
+  const [editSplitText, setEditSplitText] = useState("");
   // [v0.5.0] 체결강도 기록. 대상 종목·간격 입력 + 현재 상태(현재값·시계열).
   const [strSym, setStrSym] = useState("AAPL"); //     기록 대상 종목
   const [strIv, setStrIv] = useState("10"); //         폴링 간격(초) 선택값
@@ -773,6 +776,29 @@ ${msg}
     }
   }
 
+  /** [제목 수정] 시작 — 이 기록을 편집 모드로 바꾸고 현재 제목을 입력칸에 채운다. */
+  function startEditSplit(id: string, currentMemo: string) {
+    setEditSplitId(id);
+    setEditSplitText(currentMemo);
+  }
+
+  /** 편집 취소(원래 표시로 되돌림). */
+  function cancelEditSplit() {
+    setEditSplitId(null);
+    setEditSplitText("");
+  }
+
+  /** 편집 저장 — 새 제목을 파일에 반영(앱 재시작해도 유지)하고 편집 모드 종료. */
+  async function saveEditSplit(id: string) {
+    try {
+      setSplits(await window.kyletool.splitsRename(id, editSplitText));
+      setEditSplitId(null);
+      setEditSplitText("");
+    } catch (e) {
+      alert("제목 수정 실패: " + String(e));
+    }
+  }
+
   // -------------------------------------------------------------------------
   // [v0.5.0] 체결강도 기록 — 시작/중지/조회
   //   엔진이 켜져 있는 동안 주기적으로 샘플링하고, 그 결과를 onStrength 이벤트로 보내온다.
@@ -1342,7 +1368,33 @@ ${msg}
 
                   <div className="split-card-foot">
                     {s.qty != null && <span className="hint">계획 수량 {s.qty}주 · </span>}
-                    <span className="hint">{s.memo ? `📝 ${s.memo}` : "메모 없음"}</span>
+                    {editSplitId === s.id ? (
+                      // 편집 모드: 제목 입력칸 + 저장/취소 (Enter=저장, Esc=취소)
+                      <span className="split-edit">
+                        <input
+                          type="text"
+                          className="split-memo-input"
+                          autoFocus
+                          value={editSplitText}
+                          placeholder="제목/메모 입력"
+                          onChange={(e) => setEditSplitText(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") void saveEditSplit(s.id);
+                            if (e.key === "Escape") cancelEditSplit();
+                          }}
+                        />
+                        <button className="mini btn-save" onClick={() => void saveEditSplit(s.id)}>저장</button>
+                        <button className="mini" onClick={cancelEditSplit}>취소</button>
+                      </span>
+                    ) : (
+                      // 표시 모드: 제목 + [✏ 제목 수정]
+                      <>
+                        <span className="hint">{s.memo ? `📝 ${s.memo}` : "메모 없음"}</span>
+                        <button className="mini btn-edit" onClick={() => startEditSplit(s.id, s.memo)} title="이 기록의 제목(메모) 수정">
+                          ✏ 제목 수정
+                        </button>
+                      </>
+                    )}
                     <button className="mini btn-str" onClick={() => openStrengthFor(s.symbol)} title="이 종목의 체결강도 기록 화면 열기">
                       📈 체결강도 보기
                     </button>

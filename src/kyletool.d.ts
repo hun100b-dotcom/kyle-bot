@@ -325,6 +325,7 @@ interface KyletoolBridge {
   }): Promise<SavedSplit[]>;
   splitsDelete(id: string): Promise<SavedSplit[]>;
   splitsToggle(id: string, level: number): Promise<SavedSplit[]>;
+  splitsRename(id: string, memo: string): Promise<SavedSplit[]>; // [v0.5.1] 제목(메모) 수정
   // [v0.5.0] 체결강도 기록(온디맨드 시계열)
   strengthStart(symbol: string, intervalSec?: number): Promise<StrengthState>;
   strengthStop(symbol: string): Promise<StrengthState>;

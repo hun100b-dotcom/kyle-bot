@@ -47,6 +47,7 @@ contextBridge.exposeInMainWorld("kyletool", {
   splitsAdd: (input) => ipcRenderer.invoke("tool:splits:add", input),
   splitsDelete: (id) => ipcRenderer.invoke("tool:splits:delete", id),
   splitsToggle: (id, level) => ipcRenderer.invoke("tool:splits:toggle", id, level),
+  splitsRename: (id, memo) => ipcRenderer.invoke("tool:splits:rename", id, memo), // [v0.5.1] 제목 수정
 
   // [v0.5.0] 체결강도 기록(온디맨드 시계열) — 시작/중지/조회 + 실시간 구독
   strengthStart: (symbol, intervalSec) => ipcRenderer.invoke("tool:strength:start", symbol, intervalSec),
