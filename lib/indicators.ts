@@ -50,6 +50,25 @@ export function aggregate1mTo5m(oneMin: Candle[]): Candle[] {
 }
 
 /**
+ * dropIncompleteBucket — "아직 형성 중(미완성)인 마지막 5분봉"을 제거한다.
+ *
+ *   [왜 필요한가? — 정확성의 핵심]
+ *     5분봉은 [T, T+5분) 구간이 다 지나야 '완성'된다. 아직 진행 중인 봉으로 판정하면,
+ *     스캔 시점엔 음봉 도지였다가 봉이 마감되며 양봉으로 바뀌어 판정이 뒤집힐 수 있다.
+ *     특히 하이킨아시는 봉이 진행되는 내내 값이 계속 변하므로 더 위험하다.
+ *     그래서 도지·음봉·다음봉·최고점·지표를 모두 '완성된 봉'으로만 계산한다.
+ *
+ *   판정: 버킷 시작 T에 대해 (T + 5분) ≤ now 이면 그 5분 창이 끝났으므로 '완성'.
+ *   now 이후로 끝나는(=아직 진행 중) 봉은 버린다. (보통 마지막 1개만 해당)
+ *
+ *   @param candles5m 5분봉(합성 결과)
+ *   @param nowMs     현재 시각(ms epoch). 엔진이 DateTime.now()로 넘긴다.
+ */
+export function dropIncompleteBucket(candles5m: Candle[], nowMs: number): Candle[] {
+  return candles5m.filter((c) => c.time + FIVE_MIN_MS <= nowMs);
+}
+
+/**
  * toHeikinAshi — 일반 캔들을 하이킨아시(平均足) 캔들로 변환한다.
  *
  *   [하이킨아시란?] "노이즈를 줄여 추세를 매끄럽게 보는" 변형 캔들. 트레이딩뷰에서

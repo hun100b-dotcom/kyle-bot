@@ -183,7 +183,7 @@ function ScreenEvidenceView({ ev, price }: { ev: ScreenEvidence; price: number |
     c ? `${c.time} · 시$${c.open} 고$${c.high} 저$${c.low} 종$${c.close} · ${c.bearish ? "음봉 ▼" : "양봉 ▲"}` : "(아직 없음)";
   return (
     <div className="evid-box">
-      <div className="evid-note">※ 하이킨아시(平均足) 캔들 기준 · 시각 KST</div>
+      <div className="evid-note">※ 하이킨아시(平均足) 캔들 기준 · <b>완성된(마감된) 5분봉만 판정</b>(형성 중 봉 제외) · 시각 KST</div>
       <div className="evid-filters">
         {chip(ev.filters.priceBand, "현재가 $1~9")}
         {chip(ev.filters.aboveEma, "현재가>EMA200")}
@@ -1398,6 +1398,7 @@ ${msg}
               거래량 상위 60종목을 훑어 <b>①현재가 $1~$9</b>, <b>②현재가&gt;EMA200</b>, <b>③현재가&gt;이치모쿠 구름 위</b>,
               <b> ④장 시작 이후 최고점 뒤 첫 음봉 도지</b>, <b>⑤그 다음 봉도 음봉</b>이면 후보로 잡습니다.
               판정은 <b>하이킨아시(平均足) 캔들 기준</b>입니다(트레이딩뷰 HA 차트와 일치 — EMA200·이치모쿠·도지·음봉 모두 HA).
+              <b>형성 중인 마지막 5분봉은 제외</b>하고 <b>완성된(마감된) 봉만</b> 판정합니다(봉 마감 후 음↔양 뒤집힘 방지).
               1분봉을 과거로 당겨 5분봉→HA로 변환해 계산합니다. <b>1~2분</b> 걸립니다.
               <br/>🔴 <b>확정</b>(도지+다음 음봉) · 🟡 <b>관찰</b>(첫 음봉 도지, 다음 봉 대기). <b>▸ 근거</b>를 펼치면 기준 캔들을 확인할 수 있고, 다른 곳을 누르면 계산기에 종목이 채워집니다.
             </p>

@@ -23,7 +23,7 @@ import { DateTime } from "luxon";
 import { getSession, getSessionStart, isOrderFrozen, type Session } from "../lib/session";
 import { calcSplit3, calcOrderbook, calcCandle, roundPrice, getTick, type SplitOrder } from "../lib/calc";
 import { strengthFromTicks, type Side } from "../lib/strength";
-import { aggregate1mTo5m, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, type Candle, type SessionPattern } from "../lib/indicators";
+import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, type Candle, type SessionPattern } from "../lib/indicators";
 import {
   getPrice,
   getTrades,
@@ -1790,17 +1790,19 @@ export class ToolEngine extends EventEmitter {
         try {
           // 1분봉을 과거로 당겨 ~1000개 이상 확보(EMA200엔 5분봉 200개=1분봉 1000개 필요)
           const oneMin = await getCandles1mPaged(rk.symbol, 1000);
-          const raw5m: Candle[] = aggregate1mTo5m(oneMin);
-          // 데이터 부족(EMA200 불가 = 5분봉 200개 미만)이면 건너뛴다
+          // [v0.6.2] 형성 중(미완성)인 마지막 5분봉은 판정에서 제외한다(완성된 봉만 사용).
+          //   진행 중 봉으로 판정하면 봉 마감 후 음↔양이 뒤집혀 오판정이 난다(특히 HA).
+          const raw5m: Candle[] = dropIncompleteBucket(aggregate1mTo5m(oneMin), now.toMillis());
+          // 데이터 부족(EMA200 불가 = 완성된 5분봉 200개 미만)이면 건너뛴다
           if (raw5m.length < 200) {
             results.push(this.insufficientResult(rk, oneMin.length, raw5m.length));
             done++;
             continue;
           }
 
-          // [v0.6.1] 핵심 변경: 도지·음봉·세션최고점·EMA200·이치모쿠를 '하이킨아시' 기준으로.
-          //   사용자는 하이킨아시 차트로 판단하므로 일반캔들과 어긋나지 않게 맞춘다.
-          const candles5m = toHeikinAshi(raw5m); // 판정에 쓰는 캔들(HA)
+          // [v0.6.1] 도지·음봉·세션최고점·EMA200·이치모쿠를 '하이킨아시' 기준으로(사용자 차트와 일치).
+          //   [v0.6.2] 위에서 미완성 봉을 뺀 '완성된' 5분봉만 HA로 변환 → 트리거 도지·다음 확정봉이 모두 완성봉.
+          const candles5m = toHeikinAshi(raw5m); // 판정에 쓰는 캔들(HA, 완성봉만)
           const closes = candles5m.map((c) => c.close);
 
           const price = Number.isFinite(rk.lastPrice) ? rk.lastPrice : raw5m[raw5m.length - 1].close;

@@ -13,7 +13,7 @@ import { DateTime } from "luxon";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { aggregate1mTo5m, toHeikinAshi, inPriceBand, ema, ichimoku, isBearishDoji, scanSessionPattern, type Candle } from "../lib/indicators";
+import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, isBearishDoji, scanSessionPattern, type Candle } from "../lib/indicators";
 import { getSessionStart, getSession } from "../lib/session";
 import { ToolEngine } from "../electron/tool-engine";
 
@@ -114,6 +114,33 @@ describe("세션 패턴(scanSessionPattern)", () => {
     const r = scanSessionPattern([before, highC, dojiC, bearC], 0, 0.3);
     expect(r.sessionHigh).toBe(100); // 200이 아니라 100
     expect(r.status).toBe("confirmed");
+  });
+});
+
+describe("미완성 5분봉 제외(dropIncompleteBucket)", () => {
+  // 버킷 시작 0/5분/10분. 봉 [T,T+5분)은 now≥T+5분이라야 완성.
+  const c0 = c(0, 1, 1, 1, 1);
+  const c5 = c(5 * MIN, 2, 2, 2, 2);
+  const c10 = c(10 * MIN, 3, 3, 3, 3);
+  it("아직 끝나지 않은 마지막 봉(10분 버킷)을 now=12분이면 버린다", () => {
+    const out = dropIncompleteBucket([c0, c5, c10], 12 * MIN);
+    expect(out.map((x) => x.time)).toEqual([0, 5 * MIN]); // 10분 버킷 제외(끝=15분>12분)
+  });
+  it("그 봉이 마감되면(now=15분) 다시 포함된다", () => {
+    expect(dropIncompleteBucket([c0, c5, c10], 15 * MIN).map((x) => x.time)).toEqual([0, 5 * MIN, 10 * MIN]);
+  });
+
+  it("[핵심] 확정 음봉이 아직 형성 중이면 confirmed가 아니라 watch로 남는다", () => {
+    // 최고점(0) → 음봉 도지(5분) → 음봉(10분, 아직 형성 중)
+    const high = c(0, 98, 100, 97, 99);
+    const doji = c(5 * MIN, 99, 99.5, 98.5, 98.9);
+    const bear = c(10 * MIN, 98.9, 99, 98, 98.2);
+    // now=12분: 10분 봉 미완성 → 제외 → 도지까지만 → watch (성급한 확정 방지)
+    const pending = dropIncompleteBucket([high, doji, bear], 12 * MIN);
+    expect(scanSessionPattern(pending, 0, 0.3).status).toBe("watch");
+    // now=15분: 10분 봉 완성 → 포함 → confirmed
+    const done = dropIncompleteBucket([high, doji, bear], 15 * MIN);
+    expect(scanSessionPattern(done, 0, 0.3).status).toBe("confirmed");
   });
 });
 
