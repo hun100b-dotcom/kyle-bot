@@ -169,7 +169,8 @@ export function createMockTossServer() {
     }
 
     if (path === "/api/v1/orderbook" && method === "GET") {
-      const sym = (url.searchParams.get("symbols") ?? "AAPL").split(",")[0];
+      // [v0.5.0] 실서버는 symbol(단수)를 쓰지만, 목은 둘 다 받아 준다(예전 테스트 호환).
+      const sym = (url.searchParams.get("symbol") ?? url.searchParams.get("symbols") ?? "AAPL").split(",")[0];
       const cur = priceOf(state.prices, sym);
       return sendResult(res, 200, {
         symbol: sym,
@@ -185,7 +186,7 @@ export function createMockTossServer() {
     }
 
     if (path === "/api/v1/candles" && method === "GET") {
-      const sym = (url.searchParams.get("symbols") ?? "AAPL").split(",")[0];
+      const sym = (url.searchParams.get("symbol") ?? url.searchParams.get("symbols") ?? "AAPL").split(",")[0];
       const cur = priceOf(state.prices, sym);
       return sendResult(res, 200, {
         symbol: sym,
@@ -193,6 +194,31 @@ export function createMockTossServer() {
           { time: "T-1", open: String(cur - 0.02), high: String(cur + 0.03), low: String(cur - 0.03), close: String(cur + 0.02), volume: "12000" },
         ],
       });
+    }
+
+    // [v0.5.0] 개별 체결(틱) — 체결강도 추정용 가상 데이터.
+    //   실스펙: symbol(단수), count 최대 50, 최근 것만. 응답 = [{price, volume, timestamp, currency}].
+    //   방향 필드는 실서버에도 없다(그래서 앱이 틱룰로 추정). 여기선 "매수 우세로 보이는"
+    //   지그재그(위로 좀 더 자주 움직이는) 가상 틱을 결정적으로 생성해, 앱·테스트가 붙을 값을 준다.
+    if (path === "/api/v1/trades" && method === "GET") {
+      const sym = (url.searchParams.get("symbol") ?? url.searchParams.get("symbols") ?? "AAPL").split(",")[0];
+      const cur = priceOf(state.prices, sym);
+      const count = Math.min(Number(url.searchParams.get("count") ?? 50) || 50, 50);
+      const now = Date.now();
+      const trades = [];
+      let px = cur - 0.1; // 창 시작가(아래에서 위로 올라오며 매수 우세를 연출)
+      for (let i = 0; i < count; i++) {
+        // 3틱 중 2틱은 업틱, 1틱은 다운틱(결정적 패턴) → 매수 체결량이 더 크게 잡히도록
+        const step = i % 3 === 2 ? -0.01 : 0.01;
+        px = Math.round((px + step) * 100) / 100;
+        trades.push({
+          price: String(px),
+          volume: String(3 + (i % 5)), // 3~7주로 변동
+          timestamp: new Date(now - (count - i) * 1000).toISOString(), // 과거→현재 순
+          currency: "USD",
+        });
+      }
+      return sendResult(res, 200, trades);
     }
 
     // ---------- 3) 계좌 ----------

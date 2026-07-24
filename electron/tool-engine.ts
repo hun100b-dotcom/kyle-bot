@@ -22,8 +22,10 @@ import { join } from "node:path";
 import { DateTime } from "luxon";
 import { getSession, isOrderFrozen, type Session } from "../lib/session";
 import { calcSplit3, calcOrderbook, calcCandle, roundPrice, getTick, type SplitOrder } from "../lib/calc";
+import { strengthFromTicks, type Side } from "../lib/strength";
 import {
   getPrice,
+  getTrades,
   getAccounts,
   getBuyingPower,
   getSellable,
@@ -344,6 +346,35 @@ export function removeSavedSplit(list: SavedSplit[], id: string): SavedSplit[] {
 }
 
 // -----------------------------------------------------------------------------
+// [v0.5.0] 체결강도(Trade Strength) 기록 — 온디맨드 시계열 샘플링
+// -----------------------------------------------------------------------------
+// 사용자가 [기록 시작]을 누른 종목에 대해, 켜져 있는 동안 주기적으로 체결(틱)을
+// 받아 틱룰로 체결강도를 계산해 한 줄씩 저장한다(시계열). 자율 루프가 아니라
+// "사람이 켠 동안만 도는" 온디맨드 도구다(카프리 원칙 유지).
+
+/** 체결강도 시계열 한 점(파일에 저장되는 단위) */
+export interface StrengthSample {
+  ts: string; //             수집 시각(KST, 사람이 읽는 형식)
+  tsMs: number; //           수집 시각(밀리초 — 스파크라인 정렬용)
+  price: number | null; //   그 순간 마지막 체결가
+  buyVol: number; //         이 창에서 매수로 분류된 체결량
+  sellVol: number; //        이 창에서 매도로 분류된 체결량
+  strength: number | null; // (매수/매도)×100. 매도 0이면 null("매수 일방")
+  nTicks: number; //         표본 틱 수(신뢰도 참고)
+  session: string; //        데이/프리/본장 등(국면 표시)
+}
+
+/** 화면에 돌려주는 체결강도 상태(현재값 + 최근 시계열) */
+export interface StrengthState {
+  symbol: string;
+  running: boolean; //       지금 기록 중인가
+  intervalSec: number; //    폴링 간격(초)
+  latest: StrengthSample | null; // 가장 최근 샘플
+  samples: StrengthSample[]; //     최근 시계열(오래된→최신)
+  lastError: string | null; //      마지막 샘플링 오류(있으면 화면에 안내)
+}
+
+// -----------------------------------------------------------------------------
 // 엔진 본체
 // -----------------------------------------------------------------------------
 
@@ -359,6 +390,15 @@ export class ToolEngine extends EventEmitter {
   /** [v0.4.0] 삼분할 타점 기록 파일 경로/메모리 캐시(여러 종목 동시 운용용). 근거와 별도 파일. */
   private splitsPath: string;
   private splits: SavedSplit[] = [];
+  /** [v0.5.0] 체결강도 시계열 파일 경로 + 종목별 시계열(메모리 캐시). */
+  private strengthPath: string;
+  private strengthSeries: Record<string, StrengthSample[]> = {};
+  /** [v0.5.0] 현재 '기록 중'인 종목들의 타이머·연속 상태(틱룰 seed·중복제거·간격·오류). */
+  private strengthRuns = new Map<
+    string,
+    { timer: ReturnType<typeof setInterval>; intervalSec: number; lastPrice?: number; lastSide: Side; seen: Set<string>; lastError: string | null }
+  >();
+  private static readonly STRENGTH_MAX_SAMPLES = 500; // 종목당 보관 상한(오래된 것부터 정리)
 
   private mode: "mock" | "live" = "mock";
   private killSwitch = false;
@@ -401,12 +441,14 @@ export class ToolEngine extends EventEmitter {
     this.journalPath = join(userDataDir, "kylebot-journal.json");
     this.rationalePath = join(userDataDir, "kylebot-rationale.json");
     this.splitsPath = join(userDataDir, "kylebot-splits.json"); // [v0.4.0] 삼분할 기록 파일
+    this.strengthPath = join(userDataDir, "kylebot-strength.json"); // [v0.5.0] 체결강도 시계열
     this.loadEnv();
     // [개발 검증용] E2E 등 자동 검증은 절대 실서버를 건드리면 안 되므로 연습 모드 강제.
     if (opts?.forceMock) this.mode = "mock";
     this.loadJournal();
     this.loadRationales();
     this.loadSplits();
+    this.loadStrength();
   }
 
   // --------------------------------------------------------------------------
@@ -1485,6 +1527,141 @@ export class ToolEngine extends EventEmitter {
     this.splits = toggleSavedLevel(this.splits, id, level);
     this.persistSplits();
     return this.getSplits();
+  }
+
+  // --------------------------------------------------------------------------
+  // [v0.5.0] 체결강도 기록 — 온디맨드 시계열 샘플링(시작/중지/조회)
+  //   ⚠️ 읽기 전용(trades 조회만). 주문 로직과 완전히 분리.
+  // --------------------------------------------------------------------------
+
+  /** 시계열 파일 읽기(없거나 깨졌으면 빈 객체 — 앱은 계속 동작). */
+  private loadStrength(): void {
+    try {
+      this.strengthSeries = existsSync(this.strengthPath)
+        ? (JSON.parse(readFileSync(this.strengthPath, "utf8")) as Record<string, StrengthSample[]>)
+        : {};
+    } catch {
+      this.strengthSeries = {};
+    }
+  }
+
+  /** 시계열을 파일에 원자적으로 저장. */
+  private persistStrength(): void {
+    const tmp = this.strengthPath + ".tmp";
+    writeFileSync(tmp, JSON.stringify(this.strengthSeries, null, 2), "utf8");
+    renameSync(tmp, this.strengthPath);
+  }
+
+  /** 지금 이 종목을 기록 중인가. */
+  isStrengthRunning(symbol: string): boolean {
+    return this.strengthRuns.has((symbol || "").toUpperCase().trim());
+  }
+
+  /**
+   * startStrength — 이 종목의 체결강도 기록을 시작한다(이미 켜져 있으면 그대로 유지).
+   *   즉시 한 번 샘플링하고, 이후 intervalSec 마다 반복한다. 화면은 이벤트로 갱신을 받는다.
+   *   @param intervalSec 폴링 간격(초). 5~15 권장, 기본 10. 범위 밖이면 보정.
+   */
+  startStrength(symbol: string, intervalSec = 10): StrengthState {
+    const sym = (symbol || "").toUpperCase().trim();
+    if (!sym) throw new Error("종목 코드를 입력하세요.");
+    const iv = Math.min(60, Math.max(3, Math.floor(intervalSec) || 10)); // 3~60초로 안전 보정
+    if (this.strengthRuns.has(sym)) return this.getStrengthState(sym); // 중복 시작 방지
+
+    // 연속 상태 초기화: 틱룰 seed(직전가/방향)와 중복제거 집합.
+    const run = { timer: setInterval(() => void this.sampleStrengthOnce(sym), iv * 1000), intervalSec: iv, lastSide: "buy" as Side, seen: new Set<string>(), lastError: null as string | null };
+    this.strengthRuns.set(sym, run);
+    void this.sampleStrengthOnce(sym); // 시작 즉시 1회(기다리지 않게)
+    this.addJournal({ kind: "info", symbol: sym, summary: `체결강도 기록 시작 (${iv}초 간격)` });
+    return this.getStrengthState(sym);
+  }
+
+  /** stopStrength — 기록 중지(타이머 해제). 저장된 시계열은 남는다. */
+  stopStrength(symbol: string): StrengthState {
+    const sym = (symbol || "").toUpperCase().trim();
+    const run = this.strengthRuns.get(sym);
+    if (run) {
+      clearInterval(run.timer);
+      this.strengthRuns.delete(sym);
+      this.addJournal({ kind: "info", symbol: sym, summary: "체결강도 기록 중지" });
+    }
+    return this.getStrengthState(sym);
+  }
+
+  /** 앱 종료 시 모든 타이머 정리(누수 방지). main.ts의 before-quit에서 호출. */
+  stopAllStrength(): void {
+    for (const run of this.strengthRuns.values()) clearInterval(run.timer);
+    this.strengthRuns.clear();
+  }
+
+  /** 현재 상태(현재값 + 최근 시계열)를 화면에 돌려준다. */
+  getStrengthState(symbol: string): StrengthState {
+    const sym = (symbol || "").toUpperCase().trim();
+    const samples = this.strengthSeries[sym] ?? [];
+    const run = this.strengthRuns.get(sym);
+    return {
+      symbol: sym,
+      running: !!run,
+      intervalSec: run?.intervalSec ?? 10,
+      latest: samples.length ? samples[samples.length - 1] : null,
+      samples: samples.slice(-120), // 최근 120개만 화면으로(스파크라인·표에 충분)
+      lastError: run?.lastError ?? null,
+    };
+  }
+
+  /**
+   * sampleStrengthOnce — 체결강도 한 점을 수집한다(타이머가 부르는 실제 작업).
+   *   ① trades(최근 ~50틱) 조회 → ② 숫자로 정규화 + 중복 제거 → ③ 틱룰 분류·강도 계산
+   *   → ④ 샘플 한 줄 저장 → ⑤ 화면에 이벤트로 알림. 오류는 삼켜서(다음 주기 재시도) 앱을 지킨다.
+   */
+  private async sampleStrengthOnce(sym: string): Promise<void> {
+    const run = this.strengthRuns.get(sym);
+    if (!run) return; // 중지된 사이 타이머가 늦게 도착한 경우
+    try {
+      await this.prepareBackend();
+      const raw = await getTrades(sym, 50);
+      // 문자열 → 숫자 정규화(이상값은 버림)
+      const ticks = raw
+        .map((t) => ({ price: Number(t.price), volume: Number(t.volume), timestamp: t.timestamp }))
+        .filter((t) => Number.isFinite(t.price) && Number.isFinite(t.volume) && t.volume > 0);
+
+      // [중복 제거] trades는 커서가 없어 폴링 사이 같은 틱이 겹친다.
+      //   (timestamp|price|volume)를 열쇠로, 이번 창에서 '처음 보는' 틱만 남긴다.
+      //   단, 창 전체가 이미 다 본 틱이면(=신규 0) 강도는 직전 값을 유지하는 셈이 되므로,
+      //   표시용으로는 '이번 창 전체'로 계산하되 seed 연속성은 유지한다(HTS식 롤링 강도).
+      const fresh = ticks.filter((t) => !run.seen.has(`${t.timestamp}|${t.price}|${t.volume}`));
+      for (const t of ticks) run.seen.add(`${t.timestamp}|${t.price}|${t.volume}`);
+      if (run.seen.size > 5000) run.seen = new Set([...run.seen].slice(-2000)); // 메모리 상한
+
+      // 강도 계산: '이번에 받은 창(최근 50틱)' 기준(롤링). seed로 직전가·방향을 이어 붙인다.
+      const { result, lastPrice, lastSide } = strengthFromTicks(ticks, run.lastPrice, run.lastSide);
+      run.lastPrice = lastPrice;
+      run.lastSide = lastSide;
+      run.lastError = null;
+
+      const now = DateTime.now().setZone("Asia/Seoul");
+      const sample: StrengthSample = {
+        ts: now.toFormat("MM-dd HH:mm:ss"),
+        tsMs: now.toMillis(),
+        price: lastPrice ?? null,
+        buyVol: result.buyVol,
+        sellVol: result.sellVol,
+        strength: result.strength,
+        nTicks: result.nTicks,
+        session: getSession(now),
+      };
+      void fresh; // (참고: 신규 틱 수는 향후 연구용. MVP 표시는 롤링 창 기준.)
+
+      const arr = this.strengthSeries[sym] ?? (this.strengthSeries[sym] = []);
+      arr.push(sample);
+      if (arr.length > ToolEngine.STRENGTH_MAX_SAMPLES) arr.shift();
+      this.persistStrength();
+      this.emit("strength", this.getStrengthState(sym)); // 화면 실시간 갱신
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (run) run.lastError = msg;
+      this.emit("strength", this.getStrengthState(sym)); // 오류도 화면에 알림(다음 주기 재시도)
+    }
   }
 
   /**

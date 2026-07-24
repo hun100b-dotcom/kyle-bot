@@ -33,6 +33,7 @@ const ENDPOINTS = {
   prices: "/api/v1/prices",
   orderbook: "/api/v1/orderbook",
   candles: "/api/v1/candles",
+  trades: "/api/v1/trades", // [v0.5.0] 개별 체결(틱) — 체결강도 추정의 원천
   accounts: "/api/v1/accounts", // 계좌 목록(여기서 accountSeq 획득)
   holdings: "/api/v1/holdings", // 보유 종목
   buyingPower: "/api/v1/buying-power",
@@ -489,16 +490,35 @@ export async function getPrice(symbol: string): Promise<PriceResponse> {
   return { symbol: p.symbol, price, currency: p.currency, timestamp: p.timestamp };
 }
 
-/** getOrderbook — 호가 조회. (세부 응답 필드는 TODO(실시세 붙일 때 확정)) */
+/** getOrderbook — 호가 조회.
+ *  [v0.5.0 버그수정] 실제 토스 스펙상 호가는 파라미터가 `symbol`(단수)라야 200이 온다.
+ *  예전엔 `symbols`(복수)로 보내 실서버에서 400(요청 필드 오류)이 났다. (현재가 /prices 만 복수형이다.) */
 export async function getOrderbook(symbol: string): Promise<unknown> {
   await priceLimiter.wait();
-  return tossFetch<unknown>(ENDPOINTS.orderbook, { query: { symbols: symbol } });
+  return tossFetch<unknown>(ENDPOINTS.orderbook, { query: { symbol } });
 }
 
-/** getCandles — 캔들(봉) 조회. (interval/count 파라미터 및 응답 필드는 TODO(실시세 확정)) */
+/** getCandles — 캔들(봉) 조회.
+ *  [v0.5.0 버그수정] 캔들도 `symbol`(단수)라야 200. (interval 은 실스펙상 "1m"/"1d"만, count 최대 200.) */
 export async function getCandles(symbol: string, interval = "1m", count = 200): Promise<unknown> {
   await priceLimiter.wait();
-  return tossFetch<unknown>(ENDPOINTS.candles, { query: { symbols: symbol, interval, count } });
+  return tossFetch<unknown>(ENDPOINTS.candles, { query: { symbol, interval, count } });
+}
+
+/** 개별 체결(틱) 한 건: 실제 응답은 문자열들. 방향(매수/매도) 정보는 없다 → 틱룰로 추정한다. */
+export interface TradeRaw {
+  price: string; //     체결가(문자열)
+  volume: string; //    체결 수량(문자열)
+  timestamp: string; // 체결 시각(ISO8601)
+  currency: string;
+}
+
+/** getTrades — 개별 체결(틱) 목록. 실스펙: `symbol`(단수), count 최대 50, 과거 커서 없음(최근 것만).
+ *  체결강도(매수/매도×100)를 계산하려면 이 원천 데이터에 틱룰(lib/strength.ts)을 적용한다. */
+export async function getTrades(symbol: string, count = 50): Promise<TradeRaw[]> {
+  await priceLimiter.wait();
+  const arr = await tossFetch<TradeRaw[]>(ENDPOINTS.trades, { query: { symbol, count } });
+  return arr ?? [];
 }
 
 // =============================================================================

@@ -395,3 +395,27 @@ ul.hint { padding-left: 18px; }
 /* 진입완료한 분할 줄은 살짝 흐리게(끝난 느낌) */
 .split-done td { opacity: 0.55; }
 .split-check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; }
+.btn-str { background: #23324a; color: #cfe0ff; margin-left: 8px; }
+
+/* ===== [v0.5.0] 체결강도 기록 ===== */
+.str-controls { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
+.str-field { display: flex; flex-direction: column; gap: 4px; }
+.str-sym-input, .str-iv {
+  padding: 7px 10px; font-size: 14px; background: #0f131a; color: #e6e9ef;
+  border: 1px solid #2a2f3a; border-radius: 8px;
+}
+.str-sym-input { width: 120px; font-weight: 700; text-transform: uppercase; }
+.str-sym-input:disabled, .str-iv:disabled { opacity: 0.6; }
+.btn-start { background: #2ea043; color: #fff; }
+.btn-stop { background: #b3352f; color: #fff; }
+.str-live { font-size: 13px; }
+
+.str-now { display: flex; align-items: center; gap: 18px; margin: 14px 0; flex-wrap: wrap; }
+.str-big { font-size: 42px; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1; }
+.str-oneway { color: #b45309; }        /* 매수 일방(∞) = 주황 */
+.str-meta { font-size: 14px; }
+.str-meta > div { margin: 2px 0; }
+
+/* 스파크라인: 부모 색을 기준선에 물려주기 위해 color 지정(다크/라이트 자동) */
+.str-spark { display: block; color: #8a93a4; margin: 6px 0 14px; border: 1px solid #2a2f3a; border-radius: 8px; background: #0f131a; }
+.str-table { margin-top: 6px; }

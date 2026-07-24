@@ -139,6 +139,27 @@ interface SavedSplit {
   memo: string;
 }
 
+/** [v0.5.0] 체결강도 시계열 한 점 */
+interface StrengthSample {
+  ts: string;
+  tsMs: number;
+  price: number | null;
+  buyVol: number;
+  sellVol: number;
+  strength: number | null; // (매수/매도)×100. 매도 0이면 null("매수 일방")
+  nTicks: number;
+  session: string;
+}
+/** [v0.5.0] 체결강도 상태(현재값 + 최근 시계열) */
+interface StrengthState {
+  symbol: string;
+  running: boolean;
+  intervalSec: number;
+  latest: StrengthSample | null;
+  samples: StrengthSample[];
+  lastError: string | null;
+}
+
 /** 보유 포지션 한 줄(근거 + 실시간 손익) */
 interface PositionView {
   symbol: string;
@@ -304,6 +325,11 @@ interface KyletoolBridge {
   }): Promise<SavedSplit[]>;
   splitsDelete(id: string): Promise<SavedSplit[]>;
   splitsToggle(id: string, level: number): Promise<SavedSplit[]>;
+  // [v0.5.0] 체결강도 기록(온디맨드 시계열)
+  strengthStart(symbol: string, intervalSec?: number): Promise<StrengthState>;
+  strengthStop(symbol: string): Promise<StrengthState>;
+  strengthGet(symbol: string): Promise<StrengthState>;
+  onStrength(cb: (state: StrengthState) => void): () => void;
   positions(): Promise<PositionView[]>;
   holdingsView(): Promise<{ summary: HoldingsSummary; items: HoldingRow[] }>;
   ordersView(status: "OPEN" | "CLOSED"): Promise<OrderRow[]>;

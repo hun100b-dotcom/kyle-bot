@@ -175,6 +175,11 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:splits:add", (_ev, input) => e.addSplit(input));
   ipcMain.handle("tool:splits:delete", (_ev, id: string) => e.deleteSplit(id));
   ipcMain.handle("tool:splits:toggle", (_ev, id: string, level: number) => e.toggleSplitEntered(id, level));
+  // [v0.5.0] 체결강도 기록(온디맨드 시계열) — 시작/중지/조회 + 실시간 이벤트 중계
+  ipcMain.handle("tool:strength:start", (_ev, symbol: string, intervalSec?: number) => e.startStrength(symbol, intervalSec));
+  ipcMain.handle("tool:strength:stop", (_ev, symbol: string) => e.stopStrength(symbol));
+  ipcMain.handle("tool:strength:get", (_ev, symbol: string) => e.getStrengthState(symbol));
+  e.on("strength", (state) => win?.webContents.send("tool:strengthEvent", state));
   ipcMain.handle("tool:positions", () => e.positions());
   // [v0.3.3] 주문 현황(토스 스타일) 리치 뷰
   ipcMain.handle("tool:holdingsView", () => e.holdingsView());
@@ -253,6 +258,7 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", async () => {
+  engine?.stopAllStrength(); // [v0.5.0] 체결강도 폴링 타이머 정리(누수 방지)
   await engine?.stopMock();
   app.quit();
 });

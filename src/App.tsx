@@ -138,6 +138,38 @@ function usdKrw(usd: number, fx: number | null): string {
   return `${dollar} (₩${Math.round(usd * fx).toLocaleString()})`;
 }
 
+/**
+ * [v0.5.0] Sparkline — 체결강도 시계열을 외부 라이브러리 없이 SVG로 그리는 미니 차트.
+ *   가로=시간(오래된→최신), 세로=체결강도. 100 기준선을 회색 점선으로 그려
+ *   위(매수우세)/아래(매도우세)를 한눈에 보게 한다. 값이 null(매수 일방)인 점은 이어 그리지 않는다.
+ */
+function Sparkline({ samples }: { samples: StrengthSample[] }) {
+  const W = 640, H = 90, PAD = 6;
+  const vals = samples.map((s) => s.strength).filter((v): v is number => v != null);
+  if (vals.length < 2) return null;
+  // 세로 범위: 실제 값 + 100(기준선)을 포함하도록. 너무 납작하지 않게 최소 폭 부여.
+  const lo = Math.min(100, ...vals), hi = Math.max(100, ...vals);
+  const span = Math.max(hi - lo, 10);
+  const x = (i: number) => PAD + (i / (samples.length - 1)) * (W - 2 * PAD);
+  const y = (v: number) => PAD + (1 - (v - lo) / span) * (H - 2 * PAD);
+  // 값이 있는 점만 선으로 잇는다. null(매수 일방) 구간에서는 선을 끊고, 다음 값에서 새로 시작(M).
+  let d = "";
+  let penDown = false; // 직전 점이 유효해서 선을 잇는 중인지
+  samples.forEach((s, i) => {
+    if (s.strength == null) { penDown = false; return; }
+    d += `${penDown ? "L" : "M"} ${x(i).toFixed(1)} ${y(s.strength).toFixed(1)} `;
+    penDown = true;
+  });
+  const y100 = y(100);
+  return (
+    <svg className="str-spark" viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none" role="img" aria-label="체결강도 추세">
+      {/* 100 기준선 */}
+      <line x1={PAD} y1={y100} x2={W - PAD} y2={y100} stroke="currentColor" strokeOpacity="0.35" strokeDasharray="4 4" />
+      <path d={d.trim()} fill="none" stroke="#3b82f6" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 /** 조건주문 만료일 기본값: (KST 기준) 오늘 + 30일.
  *   [주의] toISOString()은 UTC라, KST 새벽(00~09시)엔 하루 이르게 찍힌다.
  *   그래서 KST 오프셋(+9h)을 더한 뒤 날짜를 뽑아 KST 날짜와 일치시킨다. */
@@ -156,12 +188,16 @@ interface PendingOrder {
 
 function App() {
   const [status, setStatus] = useState<ToolStatus | null>(null);
-  const [tab, setTab] = useState<"calc" | "splits" | "orders" | "journal" | "settings">("calc");
+  const [tab, setTab] = useState<"calc" | "splits" | "strength" | "orders" | "journal" | "settings">("calc");
   const [journal, setJournal] = useState<JournalEntry[]>([]);
   // [v0.4.0] 내 삼분할 기록(여러 종목 동시 운용). 저장 목록 + 저장 시 메모 입력칸.
   const [splits, setSplits] = useState<SavedSplit[]>([]);
   const [splitMemo, setSplitMemo] = useState(""); // 계산기에서 [기록 저장] 누를 때 함께 남길 메모
   const [splitSaved, setSplitSaved] = useState(""); // 저장 직후 잠깐 뜨는 안내("저장됨 ✓")
+  // [v0.5.0] 체결강도 기록. 대상 종목·간격 입력 + 현재 상태(현재값·시계열).
+  const [strSym, setStrSym] = useState("AAPL"); //     기록 대상 종목
+  const [strIv, setStrIv] = useState("10"); //         폴링 간격(초) 선택값
+  const [strState, setStrState] = useState<StrengthState | null>(null); // 엔진이 주는 현재 상태
 
   // --- 계산기 입력 상태 ---
   const [symbol, setSymbol] = useState("AAPL");
@@ -276,6 +312,10 @@ function App() {
     });
     window.kyletool.appVersion?.().then(setAppVer).catch(() => {});
     const off = window.kyletool.onJournal((e) => setJournal((prev) => [...prev.slice(-99), e]));
+    // [v0.5.0] 체결강도 실시간 갱신: 지금 화면에서 보고 있는 종목의 이벤트만 반영.
+    const offStr = window.kyletool.onStrength?.((state) => {
+      setStrState((prev) => (state.symbol === (prev?.symbol ?? state.symbol) ? state : prev));
+    });
     // 업데이트 이벤트 구독(있음/진행률/완료). 오류는 조용히 무시(앱 정상 동작 우선).
     const offUpd = window.kyletool.onUpdate?.({
       available: (info) => setUpdate(info),
@@ -287,6 +327,7 @@ function App() {
     });
     return () => {
       off();
+      offStr?.();
       offUpd?.();
     };
   }, []);
@@ -732,6 +773,49 @@ ${msg}
     }
   }
 
+  // -------------------------------------------------------------------------
+  // [v0.5.0] 체결강도 기록 — 시작/중지/조회
+  //   엔진이 켜져 있는 동안 주기적으로 샘플링하고, 그 결과를 onStrength 이벤트로 보내온다.
+  //   화면은 이벤트를 받아 현재값·시계열을 갱신한다(자율 아님 — 사용자가 켠 동안만).
+  // -------------------------------------------------------------------------
+
+  /** 저장된(또는 현재) 체결강도 상태를 불러와 화면에 반영. */
+  async function loadStrength(symbol: string) {
+    try {
+      setStrState(await window.kyletool.strengthGet(symbol));
+    } catch (e) {
+      console.error("체결강도 조회 실패", e);
+    }
+  }
+
+  /** [기록 시작] — 이 종목의 체결강도 폴링을 시작. */
+  async function startStrength() {
+    const sym = (strSym || "").toUpperCase().trim();
+    if (!sym) { alert("종목 코드를 입력하세요."); return; }
+    try {
+      setStrState(await window.kyletool.strengthStart(sym, toNum(strIv) ?? 10));
+    } catch (e) {
+      alert("기록 시작 실패: " + String(e));
+    }
+  }
+
+  /** [중지] — 이 종목의 폴링을 멈춘다(저장된 시계열은 남는다). */
+  async function stopStrength() {
+    const sym = (strSym || "").toUpperCase().trim();
+    try {
+      setStrState(await window.kyletool.strengthStop(sym));
+    } catch (e) {
+      alert("중지 실패: " + String(e));
+    }
+  }
+
+  /** [내 삼분할 기록] 카드에서 "체결강도 보기"를 누르면 이 종목으로 체결강도 탭 열기. */
+  function openStrengthFor(symbol: string) {
+    setStrSym(symbol);
+    setTab("strength");
+    void loadStrength(symbol);
+  }
+
   /** 상태(미체결/체결) 필터를 바꾸면 그 상태로 주문·조건주문을 다시 불러온다. */
   async function changeOrdStatus(st: "OPEN" | "CLOSED") {
     setOrdStatus(st);
@@ -919,7 +1003,7 @@ ${msg}
 
       {/* ===== 탭 ===== */}
       <nav className="tabs">
-        {(["calc", "splits", "orders", "journal", "settings"] as const).map((t) => (
+        {(["calc", "splits", "strength", "orders", "journal", "settings"] as const).map((t) => (
           <button
             key={t}
             className={tab === t ? "tab active" : "tab"}
@@ -927,9 +1011,10 @@ ${msg}
               setTab(t);
               if (t === "orders") refreshStatusTab();
               if (t === "splits") refreshSplits(); // 탭 열 때 최신 목록 다시 읽기
+              if (t === "strength") void loadStrength(strSym); // 저장된 시계열 불러오기
             }}
           >
-            {{ calc: "계산기", splits: "내 삼분할 기록", orders: "주문 현황", journal: "기록", settings: "설정" }[t]}
+            {{ calc: "계산기", splits: "내 삼분할 기록", strength: "체결강도", orders: "주문 현황", journal: "기록", settings: "설정" }[t]}
           </button>
         ))}
       </nav>
@@ -1258,10 +1343,110 @@ ${msg}
                   <div className="split-card-foot">
                     {s.qty != null && <span className="hint">계획 수량 {s.qty}주 · </span>}
                     <span className="hint">{s.memo ? `📝 ${s.memo}` : "메모 없음"}</span>
+                    <button className="mini btn-str" onClick={() => openStrengthFor(s.symbol)} title="이 종목의 체결강도 기록 화면 열기">
+                      📈 체결강도 보기
+                    </button>
                   </div>
                 </div>
               );
             })}
+          </section>
+        </main>
+      )}
+
+      {/* ===== ①-3) 체결강도 기록 (v0.5.0 — 온디맨드 시계열) ===== */}
+      {tab === "strength" && (
+        <main className="grid">
+          <section className="card wide">
+            <h2>체결강도 기록 <span className="hint">(매수체결량 ÷ 매도체결량 × 100)</span></h2>
+            <p className="hint">
+              종목을 정하고 <b>[기록 시작]</b>을 누르면, 켜져 있는 동안 <b>주기적으로 체결(틱)</b>을 받아
+              <b> 틱룰(업틱=매수·다운틱=매도)</b>로 체결강도를 계산해 시계열로 저장합니다(앱을 껐다 켜도 유지).
+              <b> 100 위=매수 우세, 아래=매도 우세.</b> ※ 방향은 <b>추정치</b>입니다(토스가 매수/매도 방향을 직접 주지 않음).
+            </p>
+
+            {/* --- 조작줄: 종목 · 간격 · 시작/중지 --- */}
+            <div className="str-controls">
+              <label className="str-field">
+                <span className="sb-k">종목</span>
+                <input
+                  type="text"
+                  className="str-sym-input"
+                  value={strSym}
+                  disabled={!!strState?.running}
+                  onChange={(e) => setStrSym(e.target.value.toUpperCase())}
+                  onBlur={() => void loadStrength(strSym)}
+                />
+              </label>
+              <label className="str-field">
+                <span className="sb-k">간격</span>
+                <select className="str-iv" value={strIv} disabled={!!strState?.running} onChange={(e) => setStrIv(e.target.value)}>
+                  <option value="5">5초</option>
+                  <option value="10">10초</option>
+                  <option value="15">15초</option>
+                </select>
+              </label>
+              {strState?.running ? (
+                <button className="mini btn-stop" onClick={() => void stopStrength()}>■ 기록 중지</button>
+              ) : (
+                <button className="mini btn-start" onClick={() => void startStrength()}>● 기록 시작</button>
+              )}
+              {strState?.running && <span className="ok str-live">● 기록 중 ({strState.intervalSec}초 간격)</span>}
+            </div>
+
+            {strState?.lastError && (
+              <div className="note red" style={{ fontSize: 13 }}>⚠️ 조회 오류: {strState.lastError} (다음 주기에 다시 시도합니다)</div>
+            )}
+
+            {/* --- 현재값 --- */}
+            {(() => {
+              const latest = strState?.latest ?? null;
+              const v = latest?.strength ?? null;
+              const cls = v == null ? "str-oneway" : v >= 100 ? "ok" : "danger";
+              const label = v == null ? (latest && latest.buyVol > 0 ? "매수 일방(∞)" : "—") : v.toFixed(1);
+              return (
+                <div className="str-now">
+                  <div className={`str-big ${cls}`}>{label}</div>
+                  <div className="str-meta">
+                    <div>매수량 <b className="ok">{latest ? latest.buyVol.toLocaleString() : "—"}</b> · 매도량 <b className="danger">{latest ? latest.sellVol.toLocaleString() : "—"}</b></div>
+                    <div className="hint">
+                      {latest ? `표본 ${latest.nTicks}틱 · ${latest.session} · ${latest.ts}` : "아직 표본 없음 — [기록 시작]을 눌러 주세요."}
+                      {latest?.price != null && ` · 체결가 ${usdKrw(latest.price, fx)}`}
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* --- 스파크라인(100 기준선) --- */}
+            {strState && strState.samples.length >= 2 && <Sparkline samples={strState.samples} />}
+
+            {/* --- 최근 값 표(최신이 위) --- */}
+            {strState && strState.samples.length > 0 && (
+              <table className="result-table str-table">
+                <thead>
+                  <tr><th>시각</th><th>체결강도</th><th>매수량</th><th>매도량</th><th>표본</th></tr>
+                </thead>
+                <tbody>
+                  {[...strState.samples].slice(-12).reverse().map((s, i) => (
+                    <tr key={s.tsMs + "-" + i}>
+                      <td>{s.ts}</td>
+                      <td className={s.strength == null ? "str-oneway" : s.strength >= 100 ? "ok" : "danger"}>
+                        {s.strength == null ? (s.buyVol > 0 ? "∞" : "—") : s.strength.toFixed(1)}
+                      </td>
+                      <td>{s.buyVol.toLocaleString()}</td>
+                      <td>{s.sellVol.toLocaleString()}</td>
+                      <td>{s.nTicks}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            <p className="hint">
+              💡 스캘핑 참고: 하락 중 <b>체결강도 바닥 반전</b>=삼분할 진입 근거, 반등 후 <b>정점 꺾임</b>=익절 근거.
+              단독 판단 금지 — 가격·거래량·캔들과 함께 보세요. (자세한 방법론: docs/체결강도_분석 문서)
+            </p>
           </section>
         </main>
       )}
