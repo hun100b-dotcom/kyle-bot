@@ -445,3 +445,17 @@ ul.hint { padding-left: 18px; }
 .evid-table { width: auto; border: none; }
 .evid-table td { border: none; padding: 3px 10px 3px 0; font-size: 13px; }
 .evid-table td:first-child { color: #8a93a4; white-space: nowrap; }
+
+/* ===== [v0.7.0] 매매분석(체결강도 자동 기록) ===== */
+.trade-stats { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+.tstat { border: 1px solid #2a2f3a; border-radius: 10px; padding: 8px 14px; background: #171b24; display: flex; flex-direction: column; gap: 2px; min-width: 120px; }
+.tstat b { font-size: 15px; }
+.tstat.highlight { border-color: #3a4560; background: #141a28; }
+.trade-table td { vertical-align: top; }
+.trade-win td { background: rgba(20, 51, 31, 0.35); }
+.trade-loss td { background: rgba(51, 27, 27, 0.35); }
+.warn-txt { color: #ffcf7a; }
+.mode-tag { font-size: 11px; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.mode-mock { background: #23324a; color: #cfe0ff; }
+.mode-dryrun { background: #3a2e12; color: #ffcf7a; }
+.mode-real { background: #3a2020; color: #ff9d9d; }

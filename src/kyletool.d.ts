@@ -217,6 +217,39 @@ interface ScreenRun {
   results: ScreenResult[];
 }
 
+/** [v0.7.0] 체결강도 자동 기록 트레이드 */
+interface TradeSnapshot {
+  strength: number | null;
+  buyVol: number;
+  sellVol: number;
+  rising: boolean | null;
+}
+interface StrengthTrade {
+  id: string;
+  symbol: string;
+  mode: "mock" | "dryrun" | "real";
+  entryTs: string;
+  entryPrice: number;
+  entry: TradeSnapshot | null;
+  exitTs: string | null;
+  exitPrice: number | null;
+  exit: TradeSnapshot | null;
+  exitKind: "tp" | "sl" | "manual" | null;
+  resultPct: number | null;
+  outcome: "win" | "loss" | null;
+}
+interface TradeStats {
+  total: number;
+  open: number;
+  closed: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+  avgEntryStrengthWin: number | null;
+  avgEntryStrengthLoss: number | null;
+  avgResultPct: number | null;
+}
+
 /** 보유 포지션 한 줄(근거 + 실시간 손익) */
 interface PositionView {
   symbol: string;
@@ -391,6 +424,12 @@ interface KyletoolBridge {
   // [v0.6.0] 종목 스크리너(탐색)
   screenerScan(bodyRatio?: number): Promise<ScreenRun>;
   onScreenerProgress(cb: (p: ScreenProgress) => void): () => void;
+  // [v0.7.0] 체결강도 자동 기록(매매 연동)
+  tradesList(): Promise<StrengthTrade[]>;
+  tradesStats(): Promise<TradeStats>;
+  tradesClose(id: string, exitPrice: number, kind: "tp" | "sl" | "manual"): Promise<StrengthTrade[]>;
+  tradesDelete(id: string): Promise<StrengthTrade[]>;
+  onTrades(cb: (log: StrengthTrade[]) => void): () => void;
   positions(): Promise<PositionView[]>;
   holdingsView(): Promise<{ summary: HoldingsSummary; items: HoldingRow[] }>;
   ordersView(status: "OPEN" | "CLOSED"): Promise<OrderRow[]>;

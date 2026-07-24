@@ -94,6 +94,18 @@ function pnlClass(v: number | null): string {
   return v > 0 ? "pnl-up" : v < 0 ? "pnl-down" : "";
 }
 
+/** [v0.7.0] 체결강도 값 색상(100 기준). null(매수 일방)은 주황. */
+function strClass(v: number | null | undefined): string {
+  if (v == null) return "str-oneway";
+  return v >= 100 ? "ok" : "danger";
+}
+/** 체결강도 값 표시. null(매도0=매수 일방)이면 ∞, 없으면 —. */
+function fmtStr(v: number | null | undefined): string {
+  if (v === null) return "∞";
+  if (v === undefined) return "—";
+  return v.toFixed(1);
+}
+
 /** [v0.3.3] 달러 금액 + (원화) 병기 — holdings가 준 실제 원화값이 있으면 그걸 쓰고, 없으면 fx로 환산 안 함. */
 function dollarWon(usd: number | null, krw: number | null): string {
   if (usd == null && krw == null) return "—";
@@ -231,7 +243,10 @@ interface PendingOrder {
 
 function App() {
   const [status, setStatus] = useState<ToolStatus | null>(null);
-  const [tab, setTab] = useState<"calc" | "screener" | "splits" | "strength" | "orders" | "journal" | "settings">("calc");
+  const [tab, setTab] = useState<"calc" | "screener" | "splits" | "strength" | "trades" | "orders" | "journal" | "settings">("calc");
+  // [v0.7.0] 체결강도 자동 기록(매매 연동) — 트레이드 목록 + 요약.
+  const [trades, setTrades] = useState<StrengthTrade[]>([]);
+  const [tradeStats, setTradeStats] = useState<TradeStats | null>(null);
   // [v0.6.0] 종목 스크리너(탐색). 결과·진행률·스캔중 여부·도지 몸통비율 슬라이더.
   const [screenRun, setScreenRun] = useState<ScreenRun | null>(null);
   const [screenBusy, setScreenBusy] = useState(false);
@@ -370,6 +385,8 @@ function App() {
     });
     // [v0.6.0] 스크리너 진행률 실시간 표시
     const offScr = window.kyletool.onScreenerProgress?.((p) => setScreenProg(p));
+    // [v0.7.0] 매매 시 자동 기록된 트레이드가 갱신되면 목록·요약 새로고침
+    const offTrd = window.kyletool.onTrades?.(() => void refreshTrades());
     // 업데이트 이벤트 구독(있음/진행률/완료). 오류는 조용히 무시(앱 정상 동작 우선).
     const offUpd = window.kyletool.onUpdate?.({
       available: (info) => setUpdate(info),
@@ -383,6 +400,7 @@ function App() {
       off();
       offStr?.();
       offScr?.();
+      offTrd?.();
       offUpd?.();
     };
   }, []);
@@ -907,6 +925,48 @@ ${msg}
     }
   }
 
+  // -------------------------------------------------------------------------
+  // [v0.7.0] 체결강도 자동 기록(매매 연동) — 목록/요약/수동청산/삭제
+  // -------------------------------------------------------------------------
+
+  /** 트레이드 목록 + 요약을 다시 읽어 화면 갱신. */
+  async function refreshTrades() {
+    try {
+      const [list, stats] = await Promise.all([window.kyletool.tradesList(), window.kyletool.tradesStats()]);
+      setTrades(list);
+      setTradeStats(stats);
+    } catch (e) {
+      console.error("트레이드 조회 실패", e);
+    }
+  }
+
+  /** 미청산 트레이드 수동 청산 — 확정가·구분(익절/손절/수동)을 받아 마감. */
+  async function closeTrade(t: StrengthTrade) {
+    const priceStr = prompt(`청산가를 입력하세요 (${t.symbol}, 진입 $${t.entryPrice})`, String(t.entryPrice));
+    if (priceStr == null) return;
+    const px = toNum(priceStr);
+    if (px == null || px <= 0) { alert("청산가를 숫자로 입력하세요."); return; }
+    const k = prompt("구분: tp(익절) / sl(손절) / manual(수동) 중 하나", "manual");
+    const kind = k === "tp" || k === "sl" ? k : "manual";
+    try {
+      await window.kyletool.tradesClose(t.id, px, kind);
+      await refreshTrades();
+    } catch (e) {
+      alert("청산 기록 실패: " + String(e));
+    }
+  }
+
+  /** 트레이드 삭제(잘못 기록된 것 정리). */
+  async function deleteTrade(id: string) {
+    if (!confirm("이 트레이드 기록을 삭제할까요?")) return;
+    try {
+      await window.kyletool.tradesDelete(id);
+      await refreshTrades();
+    } catch (e) {
+      alert("삭제 실패: " + String(e));
+    }
+  }
+
   /** 결과 행의 [근거] 펼치기/접기 토글. */
   function toggleEvid(symbol: string) {
     setOpenEvid((prev) => {
@@ -1119,7 +1179,7 @@ ${msg}
 
       {/* ===== 탭 ===== */}
       <nav className="tabs">
-        {(["calc", "screener", "splits", "strength", "orders", "journal", "settings"] as const).map((t) => (
+        {(["calc", "screener", "splits", "strength", "trades", "orders", "journal", "settings"] as const).map((t) => (
           <button
             key={t}
             className={tab === t ? "tab active" : "tab"}
@@ -1128,9 +1188,10 @@ ${msg}
               if (t === "orders") refreshStatusTab();
               if (t === "splits") refreshSplits(); // 탭 열 때 최신 목록 다시 읽기
               if (t === "strength") void loadStrength(strSym); // 저장된 시계열 불러오기
+              if (t === "trades") void refreshTrades(); // 자동 기록 트레이드 불러오기
             }}
           >
-            {{ calc: "계산기", screener: "탐색", splits: "내 삼분할 기록", strength: "체결강도", orders: "주문 현황", journal: "기록", settings: "설정" }[t]}
+            {{ calc: "계산기", screener: "탐색", splits: "내 삼분할 기록", strength: "체결강도", trades: "매매분석", orders: "주문 현황", journal: "기록", settings: "설정" }[t]}
           </button>
         ))}
       </nav>
@@ -1694,6 +1755,67 @@ ${msg}
               💡 스캘핑 참고: 하락 중 <b>체결강도 바닥 반전</b>=삼분할 진입 근거, 반등 후 <b>정점 꺾임</b>=익절 근거.
               단독 판단 금지 — 가격·거래량·캔들과 함께 보세요. (자세한 방법론: docs/체결강도_분석 문서)
             </p>
+          </section>
+        </main>
+      )}
+
+      {/* ===== ①-4) 매매분석 (v0.7.0 — 체결강도 자동 기록) ===== */}
+      {tab === "trades" && (
+        <main className="grid">
+          <section className="card wide">
+            <div className="split-list-head">
+              <h2>매매분석 <span className="hint">(카프리로 주문할 때 진입·청산 체결강도 자동 기록)</span></h2>
+              <button className="mini" onClick={() => void refreshTrades()}>↻ 새로고침</button>
+            </div>
+            <p className="hint">
+              계산기·탐색에서 <b>진입 주문</b>을 내면 그 순간의 체결강도가 <b>자동 스냅샷</b>되고, <b>매도</b>하면 청산 체결강도+결과(%)가 기록됩니다.
+              지금은 <b>드라이런/모의</b>라 <b>페이퍼(모의) 데이터</b>로 쌓이고, <b>실주문을 켜면 그대로 실데이터</b>로 이어집니다.
+              <br/>※ 토스 서버가 처리하는 OCO/OTO 익절·손절은 앱이 체결을 직접 못 보므로, 아래 <b>[청산 기록]</b>으로 확정가를 넣어 마감하세요.
+            </p>
+
+            {/* 요약 카드 */}
+            {tradeStats && (
+              <div className="trade-stats">
+                <div className="tstat"><span className="sb-k">전체/청산</span><b>{tradeStats.total} / {tradeStats.closed}</b></div>
+                <div className="tstat"><span className="sb-k">승률</span><b>{tradeStats.winRate != null ? `${tradeStats.winRate}% (${tradeStats.wins}승 ${tradeStats.losses}패)` : "—"}</b></div>
+                <div className="tstat"><span className="sb-k">평균 결과</span><b className={pnlClass(tradeStats.avgResultPct)}>{tradeStats.avgResultPct != null ? `${tradeStats.avgResultPct >= 0 ? "+" : ""}${tradeStats.avgResultPct}%` : "—"}</b></div>
+                <div className="tstat highlight"><span className="sb-k">진입 시 평균 체결강도 — 수익</span><b className="ok">{tradeStats.avgEntryStrengthWin ?? "—"}</b></div>
+                <div className="tstat highlight"><span className="sb-k">진입 시 평균 체결강도 — 손실</span><b className="danger">{tradeStats.avgEntryStrengthLoss ?? "—"}</b></div>
+              </div>
+            )}
+            {tradeStats && tradeStats.avgEntryStrengthWin != null && tradeStats.avgEntryStrengthLoss != null && (
+              <p className="hint">
+                💡 수익 트레이드의 진입 시 평균 체결강도가 손실보다 <b>{tradeStats.avgEntryStrengthWin > tradeStats.avgEntryStrengthLoss ? "높습니다" : "낮습니다"}</b>
+                {" "}({tradeStats.avgEntryStrengthWin} vs {tradeStats.avgEntryStrengthLoss}). 표본이 쌓일수록 신뢰도가 올라갑니다.
+              </p>
+            )}
+
+            {trades.length === 0 ? (
+              <div className="result-empty hint">아직 기록된 트레이드가 없습니다. 계산기/탐색에서 진입 주문을 내보세요(드라이런도 기록됩니다).</div>
+            ) : (
+              <table className="result-table trade-table">
+                <thead>
+                  <tr><th>모드</th><th>종목</th><th>진입</th><th>진입 강도</th><th>청산</th><th>청산 강도</th><th>결과</th><th></th></tr>
+                </thead>
+                <tbody>
+                  {trades.map((t) => (
+                    <tr key={t.id} className={t.outcome === "win" ? "trade-win" : t.outcome === "loss" ? "trade-loss" : ""}>
+                      <td><span className={`mode-tag mode-${t.mode}`}>{ { mock: "모의", dryrun: "드라이런", real: "실거래" }[t.mode] }</span></td>
+                      <td><b>{t.symbol}</b></td>
+                      <td>{t.entryTs}<br/><span className="hint">${t.entryPrice}</span></td>
+                      <td className={strClass(t.entry?.strength)}>{fmtStr(t.entry?.strength)}</td>
+                      <td>{t.exitTs ? <>{t.exitTs}<br/><span className="hint">${t.exitPrice} · { { tp: "익절", sl: "손절", manual: "수동" }[t.exitKind ?? "manual"] }</span></> : <span className="warn-txt">미청산</span>}</td>
+                      <td className={strClass(t.exit?.strength)}>{fmtStr(t.exit?.strength)}</td>
+                      <td className={t.resultPct == null ? "" : t.resultPct >= 0 ? "ok" : "danger"}>{t.resultPct != null ? `${t.resultPct >= 0 ? "+" : ""}${t.resultPct}%` : "—"}</td>
+                      <td className="order-cell">
+                        {t.outcome == null && <button className="mini btn-start" onClick={() => void closeTrade(t)}>청산 기록</button>}
+                        <button className="mini btn-del" onClick={() => void deleteTrade(t.id)}>🗑</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </section>
         </main>
       )}

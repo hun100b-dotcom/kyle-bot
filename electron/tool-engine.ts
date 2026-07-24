@@ -461,6 +461,77 @@ export interface ScreenRun {
 }
 
 // -----------------------------------------------------------------------------
+// [v0.7.0] 체결강도 자동 기록(Option A — 카프리 매매 연동)
+// -----------------------------------------------------------------------------
+// 카프리로 주문(→토스 체결)하므로 진입·청산 시점을 앱이 안다. 그 순간의 체결강도를
+// 자동 스냅샷해 트레이드 결과와 짝지어 쌓고 분석한다. 시장데이터는 읽기 전용.
+
+/** 진입/청산 순간의 체결강도 스냅샷(틱룰 계산 결과). */
+export interface TradeSnapshot {
+  strength: number | null; // (매수/매도)×100. 매도 0이면 null("매수 일방")
+  buyVol: number;
+  sellVol: number;
+  rising: boolean | null; // (참고) 스냅샷 시점 체결강도가 상승 중이었나 — MVP에선 null(추후)
+}
+
+/** 자동 기록된 트레이드 한 건(진입 + 청산 + 결과). */
+export interface StrengthTrade {
+  id: string;
+  symbol: string;
+  mode: "mock" | "dryrun" | "real"; // 페이퍼(모의)인지 실거래인지 구분 태그
+  entryTs: string; //   진입 시각(KST)
+  entryPrice: number; // 진입가(주문 전송가)
+  entry: TradeSnapshot | null; // 진입 순간 체결강도
+  exitTs: string | null; //   청산 시각(미청산이면 null)
+  exitPrice: number | null; // 청산가
+  exit: TradeSnapshot | null; // 청산 순간 체결강도
+  exitKind: "tp" | "sl" | "manual" | null; // 익절/손절/수동
+  resultPct: number | null; // (청산가-진입가)/진입가×100
+  outcome: "win" | "loss" | null; // 수익/손실
+}
+
+/** 트레이드 분석 요약(수익 vs 손실의 진입 시 평균 체결강도 등). */
+export interface TradeStats {
+  total: number;
+  open: number; //   미청산
+  closed: number; // 청산 완료
+  wins: number;
+  losses: number;
+  winRate: number | null; //             승률 %(청산 기준)
+  avgEntryStrengthWin: number | null; //  수익 트레이드의 진입 시 평균 체결강도
+  avgEntryStrengthLoss: number | null; // 손실 트레이드의 진입 시 평균 체결강도
+  avgResultPct: number | null; //         청산 트레이드 평균 결과%
+}
+
+/** 평균 도우미(값이 없으면 null). */
+function avgOrNull(nums: number[]): number | null {
+  if (nums.length === 0) return null;
+  return Math.round((nums.reduce((s, v) => s + v, 0) / nums.length) * 10) / 10;
+}
+
+/**
+ * summarizeTrades — 트레이드 목록을 분석 요약으로(순수 함수, 테스트 용이).
+ *   핵심 질문: "수익 난 트레이드는 진입 때 체결강도가 손실 트레이드보다 높았나?"
+ */
+export function summarizeTrades(trades: StrengthTrade[]): TradeStats {
+  const closed = trades.filter((t) => t.outcome != null);
+  const wins = closed.filter((t) => t.outcome === "win");
+  const losses = closed.filter((t) => t.outcome === "loss");
+  const entS = (arr: StrengthTrade[]) => avgOrNull(arr.map((t) => t.entry?.strength).filter((v): v is number => v != null));
+  return {
+    total: trades.length,
+    open: trades.filter((t) => t.outcome == null).length,
+    closed: closed.length,
+    wins: wins.length,
+    losses: losses.length,
+    winRate: closed.length ? Math.round((wins.length / closed.length) * 1000) / 10 : null,
+    avgEntryStrengthWin: entS(wins),
+    avgEntryStrengthLoss: entS(losses),
+    avgResultPct: avgOrNull(closed.map((t) => t.resultPct).filter((v): v is number => v != null)),
+  };
+}
+
+// -----------------------------------------------------------------------------
 // 엔진 본체
 // -----------------------------------------------------------------------------
 
@@ -487,6 +558,9 @@ export class ToolEngine extends EventEmitter {
   private static readonly STRENGTH_MAX_SAMPLES = 500; // 종목당 보관 상한(오래된 것부터 정리)
   /** [v0.6.0] 스크리너 중복 실행 방지(스캔 중 또 누르면 무시). */
   private screenBusy = false;
+  /** [v0.7.0] 체결강도 자동 기록 트레이드 저장 파일 + 메모리 캐시. */
+  private tradesPath: string;
+  private trades: StrengthTrade[] = [];
 
   private mode: "mock" | "live" = "mock";
   private killSwitch = false;
@@ -530,6 +604,7 @@ export class ToolEngine extends EventEmitter {
     this.rationalePath = join(userDataDir, "kylebot-rationale.json");
     this.splitsPath = join(userDataDir, "kylebot-splits.json"); // [v0.4.0] 삼분할 기록 파일
     this.strengthPath = join(userDataDir, "kylebot-strength.json"); // [v0.5.0] 체결강도 시계열
+    this.tradesPath = join(userDataDir, "kylebot-trades.json"); // [v0.7.0] 자동 기록 트레이드
     this.loadEnv();
     // [개발 검증용] E2E 등 자동 검증은 절대 실서버를 건드리면 안 되므로 연습 모드 강제.
     if (opts?.forceMock) this.mode = "mock";
@@ -537,6 +612,7 @@ export class ToolEngine extends EventEmitter {
     this.loadRationales();
     this.loadSplits();
     this.loadStrength();
+    this.loadTrades();
   }
 
   // --------------------------------------------------------------------------
@@ -1235,6 +1311,7 @@ export class ToolEngine extends EventEmitter {
         priceAtOrder: cur,
         dryRun: true,
       });
+      void this.recordEntry(symbol, spec.price, this.currentMode()); // [v0.7.0] 진입 체결강도 자동 스냅샷(주문과 무관)
       return this.addJournal({
         kind: "dryrun",
         symbol,
@@ -1260,6 +1337,7 @@ export class ToolEngine extends EventEmitter {
       dryRun: false,
       tossOrderId: o.tossOrderId,
     });
+    void this.recordEntry(symbol, spec.price, this.currentMode()); // [v0.7.0] 진입 체결강도 자동 스냅샷(주문과 무관)
     return this.addJournal({
       kind: "entry",
       symbol,
@@ -1392,6 +1470,7 @@ export class ToolEngine extends EventEmitter {
         priceAtOrder: cur,
         dryRun: true,
       });
+      void this.recordEntry(symbol, spec.entryPrice, this.currentMode()); // [v0.7.0] 진입(OTO) 체결강도 자동 스냅샷
       return this.addJournal({
         kind: "dryrun",
         symbol,
@@ -1418,6 +1497,7 @@ export class ToolEngine extends EventEmitter {
       dryRun: false,
       tossOrderId: c.conditionalOrderId,
     });
+    void this.recordEntry(symbol, spec.entryPrice, this.currentMode()); // [v0.7.0] 진입(OTO) 체결강도 자동 스냅샷
     return this.addJournal({
       kind: "oto",
       symbol,
@@ -1757,6 +1837,148 @@ export class ToolEngine extends EventEmitter {
       if (run) run.lastError = msg;
       this.emit("strength", this.getStrengthState(sym)); // 오류도 화면에 알림(다음 주기 재시도)
     }
+  }
+
+  // --------------------------------------------------------------------------
+  // [v0.7.0] 체결강도 자동 기록(Option A) — 진입·청산 순간 스냅샷 + 결과
+  //   ⚠️ 전부 '주문 흐름 밖'에서 fire-and-forget + try/catch. 주문 로직/반환값/토글 불변.
+  // --------------------------------------------------------------------------
+
+  private loadTrades(): void {
+    try {
+      this.trades = existsSync(this.tradesPath) ? (JSON.parse(readFileSync(this.tradesPath, "utf8")) as StrengthTrade[]) : [];
+    } catch {
+      this.trades = [];
+    }
+  }
+
+  private persistTrades(): void {
+    const tmp = this.tradesPath + ".tmp";
+    writeFileSync(tmp, JSON.stringify(this.trades, null, 2), "utf8");
+    renameSync(tmp, this.tradesPath);
+  }
+
+  /** 지금 모드가 페이퍼(mock/dryrun)인지 실거래(real)인지 태그. */
+  private currentMode(): "mock" | "dryrun" | "real" {
+    if (this.mode === "mock") return "mock";
+    return this.isDryRun() ? "dryrun" : "real";
+  }
+
+  /** 체결강도 스냅샷(읽기 전용). 실패해도 null만 돌려주고 절대 예외를 위로 던지지 않는다. */
+  private async snapshotStrength(symbol: string): Promise<TradeSnapshot | null> {
+    try {
+      const raw = await getTrades(symbol, 50);
+      const ticks = raw
+        .map((t) => ({ price: Number(t.price), volume: Number(t.volume), timestamp: t.timestamp }))
+        .filter((t) => Number.isFinite(t.price) && Number.isFinite(t.volume) && t.volume > 0);
+      const { result } = strengthFromTicks(ticks);
+      return { strength: result.strength, buyVol: result.buyVol, sellVol: result.sellVol, rising: null };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * recordEntry — 진입 주문 순간, 트레이드를 '열고' 진입 시 체결강도를 스냅샷한다.
+   *   ⚠️ 주문 메서드에서 `void this.recordEntry(...)`로 부른다(대기하지 않음 → 주문 응답 지연·오류 무관).
+   */
+  private async recordEntry(symbol: string, price: number, mode: "mock" | "dryrun" | "real"): Promise<void> {
+    try {
+      const now = DateTime.now().setZone("Asia/Seoul");
+      const snap = await this.snapshotStrength(symbol);
+      const trade: StrengthTrade = {
+        id: String(now.toMillis()) + "-" + symbol,
+        symbol,
+        mode,
+        entryTs: now.toFormat("MM-dd HH:mm:ss"),
+        entryPrice: price,
+        entry: snap,
+        exitTs: null,
+        exitPrice: null,
+        exit: null,
+        exitKind: null,
+        resultPct: null,
+        outcome: null,
+      };
+      this.trades.push(trade);
+      if (this.trades.length > 1000) this.trades.shift();
+      this.persistTrades();
+      this.emit("trades", this.getTradeLog());
+    } catch {
+      /* 기록 실패는 주문과 무관 — 삼킨다 */
+    }
+  }
+
+  /**
+   * recordExit — 청산(매도) 순간, 그 종목의 '가장 최근 미청산 트레이드'를 닫고 결과를 계산한다.
+   *   @param kind 익절(tp)/손절(sl)/수동(manual). placeSell은 manual로 부른다.
+   */
+  private async recordExit(symbol: string, exitPrice: number | null, kind: "tp" | "sl" | "manual", _mode: "mock" | "dryrun" | "real"): Promise<void> {
+    try {
+      // 가장 최근 미청산 트레이드(같은 종목)를 찾는다.
+      let idx = -1;
+      for (let i = this.trades.length - 1; i >= 0; i--) {
+        if (this.trades[i].symbol === symbol && this.trades[i].outcome == null) { idx = i; break; }
+      }
+      if (idx === -1) return; // 짝지을 진입이 없으면 무시(수동 진입 등)
+      // 청산가가 없으면(시장가 매도 등) 현재가로 대체.
+      let px = exitPrice;
+      if (px == null || !Number.isFinite(px)) {
+        try { px = (await getPrice(symbol)).price; } catch { px = null; }
+      }
+      const snap = await this.snapshotStrength(symbol);
+      const t = this.trades[idx];
+      const now = DateTime.now().setZone("Asia/Seoul");
+      t.exitTs = now.toFormat("MM-dd HH:mm:ss");
+      t.exitPrice = px;
+      t.exit = snap;
+      t.exitKind = kind;
+      t.resultPct = px != null && t.entryPrice ? Math.round(((px - t.entryPrice) / t.entryPrice) * 10000) / 100 : null;
+      t.outcome = t.resultPct == null ? null : t.resultPct > 0 ? "win" : "loss";
+      this.persistTrades();
+      this.emit("trades", this.getTradeLog());
+    } catch {
+      /* 기록 실패는 주문과 무관 */
+    }
+  }
+
+  /** 트레이드 목록(최신이 위). 화면 표시용. */
+  getTradeLog(): StrengthTrade[] {
+    return [...this.trades].reverse();
+  }
+
+  /** 트레이드 분석 요약. */
+  getTradeStats(): TradeStats {
+    return summarizeTrades(this.trades);
+  }
+
+  /**
+   * closeTradeManual — 토스 서버가 처리한 OCO/OTO 익절·손절은 앱이 관측 못 하므로,
+   *   사용자가 분석 화면에서 확정가·구분(tp/sl/manual)을 넣어 트레이드를 수동 마감한다.
+   */
+  async closeTradeManual(id: string, exitPrice: number, kind: "tp" | "sl" | "manual"): Promise<StrengthTrade[]> {
+    const t = this.trades.find((x) => x.id === id);
+    if (t && t.outcome == null) {
+      const snap = await this.snapshotStrength(t.symbol);
+      const now = DateTime.now().setZone("Asia/Seoul");
+      t.exitTs = now.toFormat("MM-dd HH:mm:ss");
+      t.exitPrice = exitPrice;
+      t.exit = snap;
+      t.exitKind = kind;
+      t.resultPct = Number.isFinite(exitPrice) && t.entryPrice ? Math.round(((exitPrice - t.entryPrice) / t.entryPrice) * 10000) / 100 : null;
+      t.outcome = t.resultPct == null ? null : t.resultPct > 0 ? "win" : "loss";
+      this.persistTrades();
+      this.emit("trades", this.getTradeLog());
+    }
+    return this.getTradeLog();
+  }
+
+  /** 트레이드 한 건 삭제(잘못 기록된 것 정리용). */
+  deleteTrade(id: string): StrengthTrade[] {
+    this.trades = this.trades.filter((t) => t.id !== id);
+    this.persistTrades();
+    this.emit("trades", this.getTradeLog());
+    return this.getTradeLog();
   }
 
   // --------------------------------------------------------------------------
@@ -2183,6 +2405,7 @@ export class ToolEngine extends EventEmitter {
     const clientOrderId = makeClientOrderId(`sell${DateTime.now().toFormat("HHmmss")}`, 1, "sell");
 
     if (this.isDryRun()) {
+      void this.recordExit(symbol, spec.price ?? null, "manual", this.currentMode()); // [v0.7.0] 청산 체결강도+결과 자동 기록
       return this.addJournal({
         kind: "dryrun",
         symbol,
@@ -2198,6 +2421,7 @@ export class ToolEngine extends EventEmitter {
       quantity: spec.quantity,
       clientOrderId,
     });
+    void this.recordExit(symbol, spec.price ?? null, "manual", this.currentMode()); // [v0.7.0] 청산 체결강도+결과 자동 기록
     return this.addJournal({
       kind: "entry",
       symbol,

@@ -184,6 +184,12 @@ function registerIpc(e: ToolEngine): void {
   // [v0.6.0] 종목 스크리너(탐색) — 온디맨드 스캔 + 진행률 이벤트 중계
   ipcMain.handle("tool:screener:scan", (_ev, bodyRatio?: number) => e.scanScreener(bodyRatio));
   e.on("screener:progress", (p) => win?.webContents.send("tool:screenerProgress", p));
+  // [v0.7.0] 체결강도 자동 기록(매매 연동) — 목록/요약/수동청산/삭제 + 실시간 이벤트
+  ipcMain.handle("tool:trades:list", () => e.getTradeLog());
+  ipcMain.handle("tool:trades:stats", () => e.getTradeStats());
+  ipcMain.handle("tool:trades:close", (_ev, id: string, exitPrice: number, kind: "tp" | "sl" | "manual") => e.closeTradeManual(id, exitPrice, kind));
+  ipcMain.handle("tool:trades:delete", (_ev, id: string) => e.deleteTrade(id));
+  e.on("trades", (log) => win?.webContents.send("tool:tradesEvent", log));
   ipcMain.handle("tool:positions", () => e.positions());
   // [v0.3.3] 주문 현황(토스 스타일) 리치 뷰
   ipcMain.handle("tool:holdingsView", () => e.holdingsView());

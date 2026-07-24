@@ -66,6 +66,17 @@ contextBridge.exposeInMainWorld("kyletool", {
     ipcRenderer.on("tool:screenerProgress", h);
     return () => ipcRenderer.removeListener("tool:screenerProgress", h);
   },
+
+  // [v0.7.0] 체결강도 자동 기록(매매 연동)
+  tradesList: () => ipcRenderer.invoke("tool:trades:list"),
+  tradesStats: () => ipcRenderer.invoke("tool:trades:stats"),
+  tradesClose: (id, exitPrice, kind) => ipcRenderer.invoke("tool:trades:close", id, exitPrice, kind),
+  tradesDelete: (id) => ipcRenderer.invoke("tool:trades:delete", id),
+  onTrades: (cb) => {
+    const h = (_ev, log) => cb(log);
+    ipcRenderer.on("tool:tradesEvent", h);
+    return () => ipcRenderer.removeListener("tool:tradesEvent", h);
+  },
   positions: () => ipcRenderer.invoke("tool:positions"),
   holdingsView: () => ipcRenderer.invoke("tool:holdingsView"),
   ordersView: (status) => ipcRenderer.invoke("tool:ordersView", status),
