@@ -118,6 +118,27 @@ interface TradeRationale extends RationaleInput {
   dryRun: boolean;
 }
 
+/** [v0.4.0] 저장된 삼분할 타점 한 줄(계산 결과 + '진입완료' 체크) */
+interface SavedSplitLevel {
+  level: number;
+  entry: number;
+  tp: number;
+  sl: number;
+  entered: boolean;
+}
+/** [v0.4.0] 저장된 삼분할 기록 한 건(종목 하나의 3개 타점 묶음) */
+interface SavedSplit {
+  id: string;
+  ts: string;
+  symbol: string;
+  technique: Technique;
+  levels: SavedSplitLevel[];
+  tpPct: number | null;
+  slPct: number | null;
+  qty: number | null;
+  memo: string;
+}
+
 /** 보유 포지션 한 줄(근거 + 실시간 손익) */
 interface PositionView {
   symbol: string;
@@ -270,6 +291,19 @@ interface KyletoolBridge {
     rationale?: RationaleInput;
   }): Promise<JournalEntry>;
   rationales(): Promise<TradeRationale[]>;
+  // [v0.4.0] 삼분할 타점 기록(여러 종목 동시 운용)
+  splitsList(): Promise<SavedSplit[]>;
+  splitsAdd(input: {
+    symbol: string;
+    technique: Technique;
+    levels: CalcLevel[];
+    tpPct: number | null;
+    slPct: number | null;
+    qty: number | null;
+    memo?: string;
+  }): Promise<SavedSplit[]>;
+  splitsDelete(id: string): Promise<SavedSplit[]>;
+  splitsToggle(id: string, level: number): Promise<SavedSplit[]>;
   positions(): Promise<PositionView[]>;
   holdingsView(): Promise<{ summary: HoldingsSummary; items: HoldingRow[] }>;
   ordersView(status: "OPEN" | "CLOSED"): Promise<OrderRow[]>;

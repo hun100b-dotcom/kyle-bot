@@ -373,3 +373,25 @@ ul.hint { padding-left: 18px; }
 .cc-steps { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 13px; color: #cfd6e2; flex-wrap: wrap; }
 .step { display: inline-flex; align-items: center; gap: 6px; }
 .step-arrow { color: #6b7280; }
+
+/* ===== [v0.4.0] 내 삼분할 기록 ===== */
+/* 계산기 결과의 [기록 저장] 줄(메모칸 + 버튼 + 저장됨 안내) */
+.split-save { display: flex; align-items: center; gap: 8px; margin: 6px 0 10px; flex-wrap: wrap; }
+.split-memo-input {
+  flex: 1; min-width: 140px; padding: 6px 10px; font-size: 13px;
+  background: #0f131a; color: #e6e9ef; border: 1px solid #2a2f3a; border-radius: 8px;
+}
+.btn-save { background: #6d5ae0; color: #fff; }   /* 저장 = 보라(주문 버튼들과 색 구분) */
+.split-saved-msg { font-size: 12px; white-space: nowrap; }
+
+/* 기록 목록 */
+.split-list-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.split-card { border: 1px solid #2a2f3a; border-radius: 10px; padding: 10px 14px; background: #171b24; margin-top: 12px; }
+.split-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.split-symbol { font-size: 15px; }
+.split-card-meta { display: inline-flex; align-items: center; gap: 10px; }
+.btn-del { background: #3a2020; color: #ff9d9d; }
+.split-card-foot { margin-top: 6px; }
+/* 진입완료한 분할 줄은 살짝 흐리게(끝난 느낌) */
+.split-done td { opacity: 0.55; }
+.split-check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; }

@@ -170,6 +170,11 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:order:oto", (_ev, spec) => e.placeOto(spec)); // [v0.3.2] 진입+익절(OTO)
   // [v0.2.10] 매매 근거 목록 / 보유 포지션(손익 포함) — 둘 다 읽기 전용이라 안전하다.
   ipcMain.handle("tool:rationales", () => e.getRationales());
+  // [v0.4.0] 삼분할 타점 기록(여러 종목 동시 운용) — 저장/조회/삭제/진입완료 체크
+  ipcMain.handle("tool:splits:list", () => e.getSplits());
+  ipcMain.handle("tool:splits:add", (_ev, input) => e.addSplit(input));
+  ipcMain.handle("tool:splits:delete", (_ev, id: string) => e.deleteSplit(id));
+  ipcMain.handle("tool:splits:toggle", (_ev, id: string, level: number) => e.toggleSplitEntered(id, level));
   ipcMain.handle("tool:positions", () => e.positions());
   // [v0.3.3] 주문 현황(토스 스타일) 리치 뷰
   ipcMain.handle("tool:holdingsView", () => e.holdingsView());

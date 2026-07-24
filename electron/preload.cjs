@@ -41,6 +41,12 @@ contextBridge.exposeInMainWorld("kyletool", {
   // 주문 현황
   // [v0.2.10] 주문 근거(기법 스냅샷) 목록 / 보유 포지션 손익
   rationales: () => ipcRenderer.invoke("tool:rationales"),
+
+  // [v0.4.0] 삼분할 타점 기록(여러 종목 동시 운용) — 저장/조회/삭제/진입완료 체크
+  splitsList: () => ipcRenderer.invoke("tool:splits:list"),
+  splitsAdd: (input) => ipcRenderer.invoke("tool:splits:add", input),
+  splitsDelete: (id) => ipcRenderer.invoke("tool:splits:delete", id),
+  splitsToggle: (id, level) => ipcRenderer.invoke("tool:splits:toggle", id, level),
   positions: () => ipcRenderer.invoke("tool:positions"),
   holdingsView: () => ipcRenderer.invoke("tool:holdingsView"),
   ordersView: (status) => ipcRenderer.invoke("tool:ordersView", status),

@@ -156,8 +156,12 @@ interface PendingOrder {
 
 function App() {
   const [status, setStatus] = useState<ToolStatus | null>(null);
-  const [tab, setTab] = useState<"calc" | "orders" | "journal" | "settings">("calc");
+  const [tab, setTab] = useState<"calc" | "splits" | "orders" | "journal" | "settings">("calc");
   const [journal, setJournal] = useState<JournalEntry[]>([]);
+  // [v0.4.0] 내 삼분할 기록(여러 종목 동시 운용). 저장 목록 + 저장 시 메모 입력칸.
+  const [splits, setSplits] = useState<SavedSplit[]>([]);
+  const [splitMemo, setSplitMemo] = useState(""); // 계산기에서 [기록 저장] 누를 때 함께 남길 메모
+  const [splitSaved, setSplitSaved] = useState(""); // 저장 직후 잠깐 뜨는 안내("저장됨 ✓")
 
   // --- 계산기 입력 상태 ---
   const [symbol, setSymbol] = useState("AAPL");
@@ -250,6 +254,7 @@ function App() {
   useEffect(() => {
     refreshStatus();
     window.kyletool.journal().then(setJournal);
+    void refreshSplits(); // [v0.4.0] 저장해 둔 삼분할 기록 불러오기(앱 켤 때 1회)
     window.kyletool.getSettings().then((s) => {
       setSettings(s);
       setFormMode(s.mode);
@@ -671,6 +676,62 @@ ${msg}
     }
   }
 
+  // -------------------------------------------------------------------------
+  // [v0.4.0] 내 삼분할 기록 — 저장/조회/삭제/진입완료 체크
+  //   목적: A종목 삼분할을 저장해 두면, B·C·D를 새로 계산해도 A 타점이 안 사라진다.
+  //   저장은 엔진(tool-engine)이 파일에 남기므로 앱을 껐다 켜도 유지된다.
+  // -------------------------------------------------------------------------
+
+  /** 저장 목록을 파일에서 다시 읽어 화면에 반영. */
+  async function refreshSplits() {
+    try {
+      setSplits(await window.kyletool.splitsList());
+    } catch (e) {
+      console.error("삼분할 기록 조회 실패", e);
+    }
+  }
+
+  /** 계산기의 [기록 저장] — 지금 계산 결과(타점 3개)를 종목·%·수량·메모와 함께 저장. */
+  async function saveCurrentSplit() {
+    if (!result) return; // 계산 결과가 없으면 저장할 게 없다
+    try {
+      const updated = await window.kyletool.splitsAdd({
+        symbol: committedSymbol || symbol,
+        technique: result.technique,
+        levels: result.levels,
+        tpPct: toNum(tpPct),
+        slPct: toNum(slPct),
+        qty: toNum(qty),
+        memo: splitMemo,
+      });
+      setSplits(updated);
+      setSplitMemo(""); // 메모칸 비우기
+      setSplitSaved("저장됨 ✓ — [내 삼분할 기록] 탭에서 확인");
+      setTimeout(() => setSplitSaved(""), 3000); // 3초 뒤 안내 사라짐
+    } catch (e) {
+      alert("기록 저장 실패: " + String(e));
+    }
+  }
+
+  /** 기록 한 건 삭제(휴지통). */
+  async function deleteSplit(id: string) {
+    if (!confirm("이 기록을 삭제할까요? (되돌릴 수 없습니다)")) return;
+    try {
+      setSplits(await window.kyletool.splitsDelete(id));
+    } catch (e) {
+      alert("삭제 실패: " + String(e));
+    }
+  }
+
+  /** 특정 기록의 특정 분할에 [진입완료] 체크를 켜고/끈다. */
+  async function toggleSplitEntered(id: string, level: number) {
+    try {
+      setSplits(await window.kyletool.splitsToggle(id, level));
+    } catch (e) {
+      alert("체크 반영 실패: " + String(e));
+    }
+  }
+
   /** 상태(미체결/체결) 필터를 바꾸면 그 상태로 주문·조건주문을 다시 불러온다. */
   async function changeOrdStatus(st: "OPEN" | "CLOSED") {
     setOrdStatus(st);
@@ -858,16 +919,17 @@ ${msg}
 
       {/* ===== 탭 ===== */}
       <nav className="tabs">
-        {(["calc", "orders", "journal", "settings"] as const).map((t) => (
+        {(["calc", "splits", "orders", "journal", "settings"] as const).map((t) => (
           <button
             key={t}
             className={tab === t ? "tab active" : "tab"}
             onClick={() => {
               setTab(t);
               if (t === "orders") refreshStatusTab();
+              if (t === "splits") refreshSplits(); // 탭 열 때 최신 목록 다시 읽기
             }}
           >
-            {{ calc: "계산기", orders: "주문 현황", journal: "기록", settings: "설정" }[t]}
+            {{ calc: "계산기", splits: "내 삼분할 기록", orders: "주문 현황", journal: "기록", settings: "설정" }[t]}
           </button>
         ))}
       </nav>
@@ -1064,6 +1126,20 @@ ${msg}
                   <div className="result-head">
                     <b>{TECH_LABEL[result.technique]}</b> <span className="hint">{result.note}</span>
                   </div>
+                  {/* [v0.4.0] 기록 저장 — 지금 타점 3개를 '내 삼분할 기록'에 남겨, 종목을 바꿔도 안 사라지게. */}
+                  <div className="split-save">
+                    <input
+                      type="text"
+                      className="split-memo-input"
+                      placeholder="메모(선택): 예) 데이마켓 눌림목 후보"
+                      value={splitMemo}
+                      onChange={(e) => setSplitMemo(e.target.value)}
+                    />
+                    <button className="mini btn-save" onClick={() => void saveCurrentSplit()} title="이 종목의 3개 타점을 기록으로 저장(앱을 껐다 켜도 유지)">
+                      💾 기록 저장
+                    </button>
+                    {splitSaved && <span className="ok split-saved-msg">{splitSaved}</span>}
+                  </div>
                   <table className="result-table">
                     <thead>
                       <tr>
@@ -1107,6 +1183,86 @@ ${msg}
               )}
             </section>
           </div>
+        </main>
+      )}
+
+      {/* ===== ①-2) 내 삼분할 기록 (v0.4.0 — 여러 종목 동시 운용) ===== */}
+      {tab === "splits" && (
+        <main className="grid">
+          <section className="card wide">
+            <div className="split-list-head">
+              <h2>내 삼분할 기록</h2>
+              <button className="mini" onClick={() => void refreshSplits()}>↻ 새로고침</button>
+            </div>
+            <p className="hint">
+              계산기에서 <b>💾 기록 저장</b>을 누르면 여기에 쌓입니다. 종목을 바꿔 계산해도 사라지지 않고,
+              <b> 앱을 껐다 켜도 유지</b>됩니다. 여러 종목(A·B·C·D)의 삼분할 타점을 한눈에 관리하세요.
+              <br />※ 이 기록은 <b>메모일 뿐</b>이며 실제 주문과는 무관합니다. 주문은 [계산기] 탭에서 냅니다.
+            </p>
+
+            {splits.length === 0 && (
+              <div className="result-empty hint">
+                아직 저장된 기록이 없습니다. [계산기] 탭에서 삼분할을 계산한 뒤 <b>💾 기록 저장</b>을 눌러 보세요.
+              </div>
+            )}
+
+            {/* 저장된 종목들을 카드로 하나씩 — 최신이 위 */}
+            {splits.map((s) => {
+              const doneCount = s.levels.filter((lv) => lv.entered).length; // 진입완료 개수(진행도 표시)
+              return (
+                <div key={s.id} className="split-card">
+                  <div className="split-card-head">
+                    <div>
+                      <b className="split-symbol">{s.symbol}</b>
+                      <span className="hint"> · {TECH_LABEL[s.technique]}</span>
+                      <span className="hint"> · 진입 {doneCount}/{s.levels.length}</span>
+                    </div>
+                    <div className="split-card-meta">
+                      <span className="hint">{s.ts} 저장</span>
+                      <button className="mini btn-del" onClick={() => void deleteSplit(s.id)} title="이 기록 삭제">🗑 삭제</button>
+                    </div>
+                  </div>
+
+                  <table className="result-table">
+                    <thead>
+                      <tr>
+                        <th>분할</th>
+                        <th>진입가</th>
+                        <th>익절{s.tpPct != null ? ` (+${s.tpPct}%)` : ""}</th>
+                        <th>손절{s.slPct != null ? ` (−${s.slPct}%)` : ""}</th>
+                        <th>진입완료</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {s.levels.map((lv) => (
+                        <tr key={lv.level} className={lv.entered ? "split-done" : ""}>
+                          <td>{lv.level}분할</td>
+                          <td>{usdKrw(lv.entry, fx)}</td>
+                          <td className="ok">{usdKrw(lv.tp, fx)}</td>
+                          <td className="danger">{usdKrw(lv.sl, fx)}</td>
+                          <td>
+                            <label className="split-check">
+                              <input
+                                type="checkbox"
+                                checked={lv.entered}
+                                onChange={() => void toggleSplitEntered(s.id, lv.level)}
+                              />
+                              <span>{lv.entered ? "진입함" : "대기"}</span>
+                            </label>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+
+                  <div className="split-card-foot">
+                    {s.qty != null && <span className="hint">계획 수량 {s.qty}주 · </span>}
+                    <span className="hint">{s.memo ? `📝 ${s.memo}` : "메모 없음"}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </section>
         </main>
       )}
 

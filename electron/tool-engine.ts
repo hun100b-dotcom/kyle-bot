@@ -280,6 +280,70 @@ export function computeSeedQty(seedUsd: number | null, pct: number, price: numbe
 }
 
 // -----------------------------------------------------------------------------
+// [v0.4.0] 삼분할 타점 "기록" — 여러 종목을 동시에 굴리기 위한 저장 기능
+// -----------------------------------------------------------------------------
+// [왜 만들었나? — 오너가 겪은 실제 불편]
+//   계산기는 한 번에 "한 종목"만 계산해 보여준다. A종목 삼분할을 계산해 진입하다가
+//   B종목을 새로 입력하면, A의 3개 타점(진입가1/2/3)이 화면에서 사라진다.
+//   그러면 A~D 여러 종목을 동시에 지켜보며 나눠 담는 매매를 할 수가 없다.
+//
+// [해결]
+//   계산 결과를 [기록 저장] 버튼으로 파일에 남겨 두면, 종목을 바꿔 계산해도
+//   저장한 타점들이 "내 삼분할 기록" 탭에 그대로 쌓여 있다. 앱을 껐다 켜도 유지된다
+//   (기존 매매근거·저널과 똑같은 'JSON 파일 저장' 방식을 그대로 재사용).
+//
+// [저장 방식] userData 폴더의 kylebot-splits.json 한 파일. 시크릿·계좌정보는 담지 않는다
+//   (종목·가격·메모 같은 계산 결과뿐 — 유출돼도 민감하지 않은 값들).
+
+/** 저장된 삼분할 타점 한 줄(분할 레벨 하나). 계산 결과 + '진입완료' 체크 상태. */
+export interface SavedSplitLevel {
+  level: number; //   몇 분할 타점인지(1/2/3)
+  entry: number; //   진입가
+  tp: number; //      이 타점의 익절가
+  sl: number; //      이 타점의 손절가
+  entered: boolean; // 오너가 [진입완료]를 체크했는지(실제 주문과 무관한 '내 메모용' 표시)
+}
+
+/** 저장된 삼분할 기록 한 건(종목 하나에 대한 3개 타점 묶음). */
+export interface SavedSplit {
+  id: string; //          고유 번호(저장 시각 밀리초 기반 — 삭제·체크의 열쇠)
+  ts: string; //          저장 시각(KST, 사람이 읽는 형식)
+  symbol: string; //      종목 코드
+  technique: Technique; // 어떤 기법으로 뽑은 타점인지(보통 삼분할)
+  levels: SavedSplitLevel[]; // 3개 타점(진입가·익절·손절·진입완료)
+  tpPct: number | null; //     익절 %(참고 표시용)
+  slPct: number | null; //     손절 %(참고 표시용)
+  qty: number | null; //       저장 당시 계획 수량(참고 — 강제 아님)
+  memo: string; //             오너 자유 메모
+}
+
+/**
+ * buildSavedLevels — 계산 결과(CalcLevel[])를 저장용 타점(SavedSplitLevel[])으로 바꾼다.
+ *   진입완료(entered)는 처음엔 전부 false(아직 안 들어감)로 시작한다. 순수 함수라 테스트가 쉽다.
+ */
+export function buildSavedLevels(levels: CalcLevel[]): SavedSplitLevel[] {
+  return levels.map((lv) => ({ level: lv.level, entry: lv.entry, tp: lv.tp, sl: lv.sl, entered: false }));
+}
+
+/**
+ * toggleSavedLevel — 특정 기록(id)의 특정 분할(level)에 대해 '진입완료' 체크를 뒤집는다.
+ *   [불변성] 원본 배열을 건드리지 않고 새 배열을 돌려준다(React 상태·파일 저장 모두 안전).
+ *   순수 함수 — 시간·파일 없이 로직만 검증 가능.
+ */
+export function toggleSavedLevel(list: SavedSplit[], id: string, level: number): SavedSplit[] {
+  return list.map((rec) =>
+    rec.id !== id
+      ? rec
+      : { ...rec, levels: rec.levels.map((lv) => (lv.level === level ? { ...lv, entered: !lv.entered } : lv)) },
+  );
+}
+
+/** removeSavedSplit — 특정 기록(id) 한 건을 목록에서 뺀다(순수 함수). */
+export function removeSavedSplit(list: SavedSplit[], id: string): SavedSplit[] {
+  return list.filter((rec) => rec.id !== id);
+}
+
+// -----------------------------------------------------------------------------
 // 엔진 본체
 // -----------------------------------------------------------------------------
 
@@ -292,6 +356,9 @@ export class ToolEngine extends EventEmitter {
    *  '데이터'라 오래 남겨야 한다. 섞으면 저널이 잘릴 때 근거까지 사라진다. */
   private rationalePath: string;
   private rationales: TradeRationale[] = [];
+  /** [v0.4.0] 삼분할 타점 기록 파일 경로/메모리 캐시(여러 종목 동시 운용용). 근거와 별도 파일. */
+  private splitsPath: string;
+  private splits: SavedSplit[] = [];
 
   private mode: "mock" | "live" = "mock";
   private killSwitch = false;
@@ -333,11 +400,13 @@ export class ToolEngine extends EventEmitter {
     this.envPath = join(userDataDir, ".env");
     this.journalPath = join(userDataDir, "kylebot-journal.json");
     this.rationalePath = join(userDataDir, "kylebot-rationale.json");
+    this.splitsPath = join(userDataDir, "kylebot-splits.json"); // [v0.4.0] 삼분할 기록 파일
     this.loadEnv();
     // [개발 검증용] E2E 등 자동 검증은 절대 실서버를 건드리면 안 되므로 연습 모드 강제.
     if (opts?.forceMock) this.mode = "mock";
     this.loadJournal();
     this.loadRationales();
+    this.loadSplits();
   }
 
   // --------------------------------------------------------------------------
@@ -1339,6 +1408,83 @@ export class ToolEngine extends EventEmitter {
   /** 최근 근거 목록(화면 표시용). 최신이 위로 오게 뒤집어 준다. */
   getRationales(): TradeRationale[] {
     return this.rationales.slice(-200).reverse();
+  }
+
+  // --------------------------------------------------------------------------
+  // [v0.4.0] 삼분할 타점 기록 저장/조회/삭제/체크 (여러 종목 동시 운용용)
+  //   저장 방식은 매매근거·저널과 동일: JSON 파일 + 임시파일 원자적 교체.
+  //   ⚠️ 이 기능은 '기록'일 뿐 주문을 내지 않는다(실주문 로직과 완전히 분리).
+  // --------------------------------------------------------------------------
+
+  /** 기록 파일 읽기(없거나 깨졌으면 빈 목록 — 앱은 계속 동작해야 한다). */
+  private loadSplits(): void {
+    try {
+      this.splits = existsSync(this.splitsPath)
+        ? (JSON.parse(readFileSync(this.splitsPath, "utf8")) as SavedSplit[])
+        : [];
+    } catch {
+      this.splits = [];
+    }
+  }
+
+  /** 메모리의 기록 목록을 파일에 원자적으로 저장(쓰다 만 파일 방지). */
+  private persistSplits(): void {
+    const tmp = this.splitsPath + ".tmp";
+    writeFileSync(tmp, JSON.stringify(this.splits, null, 2), "utf8");
+    renameSync(tmp, this.splitsPath);
+  }
+
+  /**
+   * addSplit — 계산 결과 한 종목분을 기록으로 저장한다.
+   *   화면(App.tsx)이 계산 결과의 타점(levels)과 종목·%·수량·메모를 보내면,
+   *   고유 id와 저장 시각을 붙여 목록 맨 앞(최신)에 추가하고 파일에 저장한다.
+   *   반환값은 갱신된 전체 목록(화면이 바로 다시 그리게).
+   */
+  addSplit(input: {
+    symbol: string;
+    technique: Technique;
+    levels: CalcLevel[];
+    tpPct: number | null;
+    slPct: number | null;
+    qty: number | null;
+    memo?: string;
+  }): SavedSplit[] {
+    const now = DateTime.now().setZone("Asia/Seoul");
+    const rec: SavedSplit = {
+      // id: 저장 시각(밀리초) — 사람이 같은 순간에 두 번 누르긴 어렵고, 삭제·체크의 열쇠로 충분.
+      id: String(now.toMillis()),
+      ts: now.toFormat("MM-dd HH:mm:ss"),
+      symbol: (input.symbol || "").toUpperCase().trim(),
+      technique: input.technique,
+      levels: buildSavedLevels(input.levels), // 진입완료는 전부 false로 시작
+      tpPct: input.tpPct,
+      slPct: input.slPct,
+      qty: input.qty,
+      memo: (input.memo ?? "").trim(),
+    };
+    this.splits.unshift(rec); // 최신이 맨 위
+    if (this.splits.length > 500) this.splits.pop(); // 너무 쌓이면 오래된 것부터 정리
+    this.persistSplits();
+    return this.getSplits();
+  }
+
+  /** 저장된 삼분할 기록 목록(최신이 위). 화면 표시용. */
+  getSplits(): SavedSplit[] {
+    return this.splits;
+  }
+
+  /** 기록 한 건 삭제(휴지통 아이콘). 순수 함수 removeSavedSplit로 목록을 새로 만든 뒤 저장. */
+  deleteSplit(id: string): SavedSplit[] {
+    this.splits = removeSavedSplit(this.splits, id);
+    this.persistSplits();
+    return this.getSplits();
+  }
+
+  /** 특정 기록의 특정 분할에 대해 [진입완료] 체크를 뒤집는다. */
+  toggleSplitEntered(id: string, level: number): SavedSplit[] {
+    this.splits = toggleSavedLevel(this.splits, id, level);
+    this.persistSplits();
+    return this.getSplits();
   }
 
   /**
