@@ -433,3 +433,15 @@ ul.hint { padding-left: 18px; }
 .screen-table { margin-top: 6px; }
 .screen-row { cursor: pointer; }
 .screen-row:hover td { background: #1d2330; }
+.btn-evid { background: #23324a; color: #cfe0ff; white-space: nowrap; }
+/* 근거 펼침 영역 */
+.evid-row > td { background: #10141c; padding: 0; }
+.evid-box { padding: 12px 14px; }
+.evid-note { font-size: 12px; color: #8a93a4; margin-bottom: 8px; }
+.evid-filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.evid-chip { font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid #2a2f3a; }
+.evid-chip.pass { background: #14331f; color: #6ee7a0; border-color: #1f5a37; }
+.evid-chip.fail { background: #331b1b; color: #ff9d9d; border-color: #5a2020; }
+.evid-table { width: auto; border: none; }
+.evid-table td { border: none; padding: 3px 10px 3px 0; font-size: 13px; }
+.evid-table td:first-child { color: #8a93a4; white-space: nowrap; }

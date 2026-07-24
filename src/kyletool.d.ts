@@ -162,12 +162,36 @@ interface StrengthState {
 
 /** [v0.6.0] 스크리너 결과 한 종목 */
 type ScreenStatus = "confirmed" | "watch" | "none" | "insufficient";
+interface EvidenceCandle {
+  time: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  bearish: boolean;
+}
+interface ScreenEvidence {
+  mode: "ha" | "normal";
+  sessionStart: string;
+  sessionHigh: number | null;
+  sessionHighTime: string | null;
+  doji: (EvidenceCandle & { bodyRatio: number | null }) | null;
+  next: EvidenceCandle | null;
+  filters: {
+    priceBand: boolean;
+    aboveEma: boolean;
+    aboveCloud: boolean;
+    firstDoji: boolean;
+    nextBearish: boolean;
+  };
+}
 interface ScreenResult {
   rank: number;
   symbol: string;
   price: number | null;
   ema200: number | null;
   cloudTop: number | null;
+  priceInBand: boolean;
   aboveEma: boolean;
   aboveCloud: boolean;
   status: ScreenStatus;
@@ -175,6 +199,7 @@ interface ScreenResult {
   proximityPct: number | null;
   n1m: number;
   n5m: number;
+  evidence: ScreenEvidence | null;
   note?: string;
 }
 interface ScreenProgress {

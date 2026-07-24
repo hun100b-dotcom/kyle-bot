@@ -23,7 +23,7 @@ import { DateTime } from "luxon";
 import { getSession, getSessionStart, isOrderFrozen, type Session } from "../lib/session";
 import { calcSplit3, calcOrderbook, calcCandle, roundPrice, getTick, type SplitOrder } from "../lib/calc";
 import { strengthFromTicks, type Side } from "../lib/strength";
-import { aggregate1mTo5m, ema, ichimoku, scanSessionPattern, type Candle } from "../lib/indicators";
+import { aggregate1mTo5m, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, type Candle, type SessionPattern } from "../lib/indicators";
 import {
   getPrice,
   getTrades,
@@ -394,20 +394,49 @@ export interface StrengthState {
 
 export type ScreenStatus = "confirmed" | "watch" | "none" | "insufficient";
 
+/** 근거용 캔들 한 줄(하이킨아시 OHLC + 음/양). 시각은 KST 문자열. */
+export interface EvidenceCandle {
+  time: string; //  HH:mm (KST)
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  bearish: boolean; // 종가<시가(음봉)
+}
+
+/** 결과 한 종목의 판정 근거(펼치면 보이는 상세). 값은 하이킨아시(기본) 기준. */
+export interface ScreenEvidence {
+  mode: "ha" | "normal"; //   판정에 쓴 캔들 종류(기본 ha)
+  sessionStart: string; //     현재 활성 장 시작(KST)
+  sessionHigh: number | null; // 세션 최고(HA 고가)
+  sessionHighTime: string | null; // 그 시각
+  doji: (EvidenceCandle & { bodyRatio: number | null }) | null; // 기준 음봉 도지
+  next: EvidenceCandle | null; //  도지 다음 봉
+  filters: {
+    priceBand: boolean; //   현재가 $1~$9
+    aboveEma: boolean; //    현재가 > EMA200
+    aboveCloud: boolean; //  현재가 > 구름top
+    firstDoji: boolean; //   최고점 이후 첫 음봉 도지 존재
+    nextBearish: boolean; // 그 다음 봉도 음봉
+  };
+}
+
 /** 스크리너 결과 한 종목 */
 export interface ScreenResult {
   rank: number; //           거래량 순위
   symbol: string;
   price: number | null; //   현재가
-  ema200: number | null; //  5분봉 EMA200(close)
-  cloudTop: number | null; // 이치모쿠 구름 위 경계 max(스팬A,B)
+  ema200: number | null; //  5분봉 EMA200(하이킨아시 종가 기준)
+  cloudTop: number | null; // 이치모쿠 구름 위 경계 max(스팬A,B) (HA 기준)
+  priceInBand: boolean; //   현재가 $1~$9
   aboveEma: boolean; //      현재가 > EMA200
   aboveCloud: boolean; //    현재가 > 구름top
   status: ScreenStatus; //   confirmed(🔴)/watch(🟡)/none/insufficient
-  sessionHigh: number | null; // 현재 장 시작 이후 최고 고가
+  sessionHigh: number | null; // 현재 장 시작 이후 최고(HA 고가)
   proximityPct: number | null; // 현재가가 세션 고점 대비 몇 %(음수면 고점 아래)
   n1m: number; //            수집한 1분봉 수(데이터 충분성 참고)
   n5m: number; //            합성한 5분봉 수
+  evidence: ScreenEvidence | null; // 판정 근거(펼침용)
   note?: string; //          데이터 부족·오류 등 사유
 }
 
@@ -1761,24 +1790,29 @@ export class ToolEngine extends EventEmitter {
         try {
           // 1분봉을 과거로 당겨 ~1000개 이상 확보(EMA200엔 5분봉 200개=1분봉 1000개 필요)
           const oneMin = await getCandles1mPaged(rk.symbol, 1000);
-          const candles5m: Candle[] = aggregate1mTo5m(oneMin);
-          const closes = candles5m.map((c) => c.close);
+          const raw5m: Candle[] = aggregate1mTo5m(oneMin);
           // 데이터 부족(EMA200 불가 = 5분봉 200개 미만)이면 건너뛴다
-          if (candles5m.length < 200) {
-            results.push(this.insufficientResult(rk, oneMin.length, candles5m.length));
+          if (raw5m.length < 200) {
+            results.push(this.insufficientResult(rk, oneMin.length, raw5m.length));
             done++;
             continue;
           }
 
-          const price = Number.isFinite(rk.lastPrice) ? rk.lastPrice : candles5m[candles5m.length - 1].close;
+          // [v0.6.1] 핵심 변경: 도지·음봉·세션최고점·EMA200·이치모쿠를 '하이킨아시' 기준으로.
+          //   사용자는 하이킨아시 차트로 판단하므로 일반캔들과 어긋나지 않게 맞춘다.
+          const candles5m = toHeikinAshi(raw5m); // 판정에 쓰는 캔들(HA)
+          const closes = candles5m.map((c) => c.close);
+
+          const price = Number.isFinite(rk.lastPrice) ? rk.lastPrice : raw5m[raw5m.length - 1].close;
+          const priceInBand = inPriceBand(price, 1, 9); // [v0.6.1] 가격 필터 $1~$9
           const ema200 = ema(closes, 200);
           const cloud = ichimoku(candles5m);
-          const pat = scanSessionPattern(candles5m, sessionStartMs, br);
+          const pat = scanSessionPattern(candles5m, sessionStartMs, br); // HA 캔들로 패턴 판정
 
           const aboveEma = ema200 != null && price > ema200;
           const aboveCloud = cloud != null && price > cloud.cloudTop;
-          // 가격 게이트(EMA·구름)를 못 넘으면 패턴이 있어도 후보 아님 → none
-          const status: ScreenStatus = aboveEma && aboveCloud ? pat.status : "none";
+          // 하드 게이트(가격대·EMA·구름)를 못 넘으면 패턴이 있어도 후보 아님 → none
+          const status: ScreenStatus = priceInBand && aboveEma && aboveCloud ? pat.status : "none";
           const proximityPct = pat.sessionHigh && Number.isFinite(price) ? ((price - pat.sessionHigh) / pat.sessionHigh) * 100 : null;
 
           results.push({
@@ -1787,6 +1821,7 @@ export class ToolEngine extends EventEmitter {
             price,
             ema200,
             cloudTop: cloud?.cloudTop ?? null,
+            priceInBand,
             aboveEma,
             aboveCloud,
             status,
@@ -1794,6 +1829,7 @@ export class ToolEngine extends EventEmitter {
             proximityPct,
             n1m: oneMin.length,
             n5m: candles5m.length,
+            evidence: this.buildEvidence(sessionStart, pat, { priceInBand, aboveEma, aboveCloud }),
           });
         } catch (err) {
           // 한 종목 실패가 전체 스캔을 죽이지 않게(개별 오류는 '데이터 부족'류로 표시)
@@ -1815,12 +1851,14 @@ export class ToolEngine extends EventEmitter {
 
   /** 데이터 부족(저유동성 등) 결과 한 줄을 만든다. */
   private insufficientResult(rk: { rank: number; symbol: string; lastPrice: number }, n1m: number, n5m: number): ScreenResult {
+    const price = Number.isFinite(rk.lastPrice) ? rk.lastPrice : null;
     return {
       rank: rk.rank,
       symbol: rk.symbol,
-      price: Number.isFinite(rk.lastPrice) ? rk.lastPrice : null,
+      price,
       ema200: null,
       cloudTop: null,
+      priceInBand: inPriceBand(price, 1, 9),
       aboveEma: false,
       aboveCloud: false,
       status: "insufficient",
@@ -1828,7 +1866,34 @@ export class ToolEngine extends EventEmitter {
       proximityPct: null,
       n1m,
       n5m,
+      evidence: null,
       note: "데이터 부족(1분봉 부족)",
+    };
+  }
+
+  /** 판정 근거(펼침용)를 만든다. 캔들은 하이킨아시 기준, 시각은 KST. */
+  private buildEvidence(
+    sessionStart: DateTime | null,
+    pat: SessionPattern,
+    gates: { priceInBand: boolean; aboveEma: boolean; aboveCloud: boolean },
+  ): ScreenEvidence {
+    const r = (n: number) => Math.round(n * 10000) / 10000; // 소수 4자리
+    const hm = (ms: number) => DateTime.fromMillis(ms).setZone("Asia/Seoul").toFormat("HH:mm");
+    const toEv = (c: Candle): EvidenceCandle => ({ time: hm(c.time), open: r(c.open), high: r(c.high), low: r(c.low), close: r(c.close), bearish: c.close < c.open });
+    return {
+      mode: "ha",
+      sessionStart: sessionStart ? sessionStart.setZone("Asia/Seoul").toFormat("MM-dd HH:mm") : "(장 마감·최근 8h)",
+      sessionHigh: pat.sessionHigh != null ? r(pat.sessionHigh) : null,
+      sessionHighTime: pat.highTime != null ? hm(pat.highTime) : null,
+      doji: pat.dojiCandle ? { ...toEv(pat.dojiCandle), bodyRatio: pat.dojiBodyRatio != null ? r(pat.dojiBodyRatio) : null } : null,
+      next: pat.nextCandle ? toEv(pat.nextCandle) : null,
+      filters: {
+        priceBand: gates.priceInBand,
+        aboveEma: gates.aboveEma,
+        aboveCloud: gates.aboveCloud,
+        firstDoji: pat.dojiIndex >= 0,
+        nextBearish: pat.nextCandle ? pat.nextCandle.close < pat.nextCandle.open : false,
+      },
     };
   }
 

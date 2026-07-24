@@ -50,6 +50,48 @@ export function aggregate1mTo5m(oneMin: Candle[]): Candle[] {
 }
 
 /**
+ * toHeikinAshi — 일반 캔들을 하이킨아시(平均足) 캔들로 변환한다.
+ *
+ *   [하이킨아시란?] "노이즈를 줄여 추세를 매끄럽게 보는" 변형 캔들. 트레이딩뷰에서
+ *   차트 종류를 Heikin Ashi로 바꾸면 보이는 그 캔들이다. 실제 체결가가 아니라 평균값이다.
+ *
+ *   공식(표준):
+ *     HA종가 = (시+고+저+종) / 4
+ *     HA시가 = (직전 HA시가 + 직전 HA종가) / 2   (첫 봉은 (시+종)/2)
+ *     HA고가 = max(해당봉 고가, HA시가, HA종가)
+ *     HA저가 = min(해당봉 저가, HA시가, HA종가)
+ *   시각·거래량은 원본 그대로 둔다.
+ *
+ *   [왜 필요한가?] 사용자는 하이킨아시 차트로 도지·음봉을 판단한다. 일반캔들로 판정하면
+ *   음/양·도지가 사용자 눈과 어긋난다(예: 일반 음봉이 HA에선 양봉). 그래서 도지·음봉·
+ *   세션최고점·EMA200·이치모쿠까지 HA 기준으로 계산해 트레이딩뷰 HA 차트와 맞춘다.
+ */
+export function toHeikinAshi(candles: Candle[]): Candle[] {
+  const out: Candle[] = [];
+  let prevOpen = 0;
+  let prevClose = 0;
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    const haClose = (c.open + c.high + c.low + c.close) / 4;
+    const haOpen = i === 0 ? (c.open + c.close) / 2 : (prevOpen + prevClose) / 2;
+    const haHigh = Math.max(c.high, haOpen, haClose);
+    const haLow = Math.min(c.low, haOpen, haClose);
+    out.push({ time: c.time, open: haOpen, high: haHigh, low: haLow, close: haClose, volume: c.volume });
+    prevOpen = haOpen;
+    prevClose = haClose;
+  }
+  return out;
+}
+
+/**
+ * inPriceBand — 현재가가 [min, max] 가격대 안(포함)인지. 스크리너 가격 필터용.
+ *   기본 $1~$9 (초저가·고가 종목 제외). 값이 없거나 범위 밖이면 false.
+ */
+export function inPriceBand(price: number | null | undefined, min = 1, max = 9): boolean {
+  return price != null && Number.isFinite(price) && price >= min && price <= max;
+}
+
+/**
  * ema — 지수이동평균의 '마지막 값'을 돌려준다(부족하면 null).
  *   시드는 처음 period개의 단순평균(SMA), 그 뒤로 EMA 재귀:
  *   EMA_t = 값_t × k + EMA_(t-1) × (1-k),  k = 2/(period+1).
@@ -125,8 +167,12 @@ export type PatternStatus = "confirmed" | "watch" | "none";
 
 export interface SessionPattern {
   sessionHigh: number | null; // 현재 장 시작 이후 최고 고가
+  highTime: number | null; //   그 최고점을 만든 봉의 시각(ms, 없으면 null)
   highIndex: number; //         그 최고점을 만든 봉 인덱스(sessionCandles 기준, 없으면 -1)
   dojiIndex: number; //         최고점 이후 첫 음봉 도지 인덱스(없으면 -1)
+  dojiCandle: Candle | null; // 기준으로 잡은 첫 음봉 도지 봉(근거 표시용)
+  dojiBodyRatio: number | null; // 그 도지의 몸통비율(=몸통/범위, 근거 표시용)
+  nextCandle: Candle | null; // 도지 다음 봉(근거 표시용)
   status: PatternStatus; //     confirmed(도지+다음음봉) / watch(도지만) / none
 }
 
@@ -146,7 +192,8 @@ export interface SessionPattern {
 export function scanSessionPattern(candles5m: Candle[], sessionStartMs: number, bodyRatioMax = 0.3): SessionPattern {
   // 현재 장 봉만 추린다(원래 인덱스 매핑은 필요 없어 새 배열로 다룬다).
   const s = candles5m.filter((c) => c.time >= sessionStartMs);
-  if (s.length === 0) return { sessionHigh: null, highIndex: -1, dojiIndex: -1, status: "none" };
+  const empty: SessionPattern = { sessionHigh: null, highTime: null, highIndex: -1, dojiIndex: -1, dojiCandle: null, dojiBodyRatio: null, nextCandle: null, status: "none" };
+  if (s.length === 0) return empty;
 
   // 1) 최고 고가와 그 인덱스(마지막으로 최고를 찍은 봉).
   let sessionHigh = -Infinity;
@@ -154,17 +201,24 @@ export function scanSessionPattern(candles5m: Candle[], sessionStartMs: number, 
   s.forEach((c, i) => {
     if (c.high >= sessionHigh) { sessionHigh = c.high; highIndex = i; } // '>=' → 동점이면 뒤 봉으로 갱신
   });
+  const highTime = highIndex >= 0 ? s[highIndex].time : null;
 
   // 2) 최고점 이후 첫 음봉 도지.
   let dojiIndex = -1;
   for (let i = highIndex + 1; i < s.length; i++) {
     if (isBearishDoji(s[i], bodyRatioMax)) { dojiIndex = i; break; }
   }
-  if (dojiIndex === -1) return { sessionHigh, highIndex, dojiIndex, status: "none" };
+  if (dojiIndex === -1) return { ...empty, sessionHigh, highTime, highIndex };
+
+  // 근거용: 도지 봉과 몸통비율.
+  const dojiCandle = s[dojiIndex];
+  const range = dojiCandle.high - dojiCandle.low;
+  const dojiBodyRatio = range > 0 ? (dojiCandle.open - dojiCandle.close) / range : null;
 
   // 3) 도지 다음 봉 판정.
-  const next = s[dojiIndex + 1];
-  if (!next) return { sessionHigh, highIndex, dojiIndex, status: "watch" }; // 다음 봉 대기
+  const next = s[dojiIndex + 1] ?? null;
+  const base = { sessionHigh, highTime, highIndex, dojiIndex, dojiCandle, dojiBodyRatio, nextCandle: next };
+  if (!next) return { ...base, status: "watch" }; //                    다음 봉 대기
   const nextBearish = next.close < next.open;
-  return { sessionHigh, highIndex, dojiIndex, status: nextBearish ? "confirmed" : "none" };
+  return { ...base, status: nextBearish ? "confirmed" : "none" };
 }

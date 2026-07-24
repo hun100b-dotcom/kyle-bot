@@ -13,7 +13,7 @@ import { DateTime } from "luxon";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { aggregate1mTo5m, ema, ichimoku, isBearishDoji, scanSessionPattern, type Candle } from "../lib/indicators";
+import { aggregate1mTo5m, toHeikinAshi, inPriceBand, ema, ichimoku, isBearishDoji, scanSessionPattern, type Candle } from "../lib/indicators";
 import { getSessionStart, getSession } from "../lib/session";
 import { ToolEngine } from "../electron/tool-engine";
 
@@ -117,6 +117,41 @@ describe("세션 패턴(scanSessionPattern)", () => {
   });
 });
 
+describe("하이킨아시 변환(toHeikinAshi)", () => {
+  it("첫 봉: HA종가=(O+H+L+C)/4, HA시가=(O+C)/2", () => {
+    const ha = toHeikinAshi([c(0, 10, 12, 8, 11)]);
+    expect(ha[0].close).toBeCloseTo(10.25, 6); // (10+12+8+11)/4
+    expect(ha[0].open).toBeCloseTo(10.5, 6); //  (10+11)/2
+    expect(ha[0].high).toBeCloseTo(12, 6); //    max(12, 10.5, 10.25)
+    expect(ha[0].low).toBeCloseTo(8, 6); //      min(8, 10.5, 10.25)
+    expect(ha[0].close < ha[0].open).toBe(true); // HA 음봉
+  });
+  it("둘째 봉: HA시가=(직전 HA시가+직전 HA종가)/2", () => {
+    const ha = toHeikinAshi([c(0, 10, 12, 8, 11), c(1, 11, 13, 10, 12)]);
+    expect(ha[1].open).toBeCloseTo((10.5 + 10.25) / 2, 6); // 10.375
+    expect(ha[1].close).toBeCloseTo(11.5, 6); // (11+13+10+12)/4
+    expect(ha[1].close > ha[1].open).toBe(true); // HA 양봉
+  });
+  it("일반캔들과 음/양이 달라질 수 있다(하이킨아시의 핵심)", () => {
+    // 일반: 종가11>시가10 → 양봉. 하이킨아시: 종가10.25<시가10.5 → 음봉.
+    const g = c(0, 10, 12, 8, 11);
+    expect(g.close > g.open).toBe(true); // 일반 양봉
+    const ha = toHeikinAshi([g])[0];
+    expect(ha.close < ha.open).toBe(true); // HA 음봉 (반대!)
+  });
+});
+
+describe("가격 필터(inPriceBand $1~$9)", () => {
+  it("$1·$5·$9는 통과, $0.5·$9.01은 탈락, null 탈락", () => {
+    expect(inPriceBand(1)).toBe(true);
+    expect(inPriceBand(5)).toBe(true);
+    expect(inPriceBand(9)).toBe(true);
+    expect(inPriceBand(0.5)).toBe(false);
+    expect(inPriceBand(9.01)).toBe(false);
+    expect(inPriceBand(null)).toBe(false);
+  });
+});
+
 describe("세션 시작시각(getSessionStart)", () => {
   it("서머 정규장(2026-07-16 23:00 KST)의 시작은 22:30", () => {
     const now = DateTime.fromObject({ year: 2026, month: 7, day: 16, hour: 23, minute: 0 }, { zone: "Asia/Seoul" });
@@ -147,6 +182,11 @@ describe("엔진 스캔 왕복(연습 모드 + 목 서버)", () => {
       const ok = run.results.find((r) => r.status !== "insufficient")!;
       expect(ok.ema200).not.toBeNull();
       expect(ok.cloudTop).not.toBeNull();
+      // [v0.6.1] 근거(evidence)와 가격밴드 필터가 붙는다
+      expect(ok.evidence).not.toBeNull();
+      expect(ok.evidence!.mode).toBe("ha"); // 하이킨아시 기준
+      expect(typeof ok.priceInBand).toBe("boolean");
+      expect(ok.evidence!.filters).toHaveProperty("priceBand");
       eng.stopAllStrength();
     } finally {
       rmSync(dir, { recursive: true, force: true });

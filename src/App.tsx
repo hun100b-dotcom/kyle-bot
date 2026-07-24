@@ -13,7 +13,7 @@
 //   ④ 설정: 연습/실서버 모드, 토스 API 키(값은 화면에 재표시 안 됨)
 // =============================================================================
 
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import "./App.css";
 
 const SESSION_LABEL: Record<string, string> = {
@@ -170,6 +170,46 @@ function Sparkline({ samples }: { samples: StrengthSample[] }) {
   );
 }
 
+/**
+ * [v0.6.1] ScreenEvidenceView — 스크리너 판정 근거(펼침).
+ *   기준 도지 캔들·다음 봉(하이킨아시 OHLC), 세션 최고점, 5개 필터 통과/실패를 사람이 눈으로
+ *   검증할 수 있게 보여준다. "이 도지를 기준으로 잡았고 다음 음봉이 이거"를 확인하는 화면.
+ */
+function ScreenEvidenceView({ ev, price }: { ev: ScreenEvidence; price: number | null }) {
+  const chip = (ok: boolean, label: string) => (
+    <span className={`evid-chip ${ok ? "pass" : "fail"}`}>{ok ? "✓" : "✗"} {label}</span>
+  );
+  const candleLine = (c: EvidenceCandle | null) =>
+    c ? `${c.time} · 시$${c.open} 고$${c.high} 저$${c.low} 종$${c.close} · ${c.bearish ? "음봉 ▼" : "양봉 ▲"}` : "(아직 없음)";
+  return (
+    <div className="evid-box">
+      <div className="evid-note">※ 하이킨아시(平均足) 캔들 기준 · 시각 KST</div>
+      <div className="evid-filters">
+        {chip(ev.filters.priceBand, "현재가 $1~9")}
+        {chip(ev.filters.aboveEma, "현재가>EMA200")}
+        {chip(ev.filters.aboveCloud, "현재가>구름top")}
+        {chip(ev.filters.firstDoji, "최고점 후 첫 음봉 도지")}
+        {chip(ev.filters.nextBearish, "다음 봉도 음봉")}
+      </div>
+      <table className="evid-table">
+        <tbody>
+          <tr><td>현재가</td><td>{price != null ? `$${price}` : "—"}</td></tr>
+          <tr><td>현재 장 시작</td><td>{ev.sessionStart}</td></tr>
+          <tr><td>세션 최고점(HA)</td><td>{ev.sessionHigh != null ? `$${ev.sessionHigh}${ev.sessionHighTime ? ` @ ${ev.sessionHighTime}` : ""}` : "—"}</td></tr>
+          <tr>
+            <td>기준 음봉 도지</td>
+            <td>
+              {candleLine(ev.doji)}
+              {ev.doji?.bodyRatio != null && <span className="hint"> · 몸통비율 {(ev.doji.bodyRatio * 100).toFixed(1)}%</span>}
+            </td>
+          </tr>
+          <tr><td>도지 다음 봉</td><td>{candleLine(ev.next)}</td></tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 /** 조건주문 만료일 기본값: (KST 기준) 오늘 + 30일.
  *   [주의] toISOString()은 UTC라, KST 새벽(00~09시)엔 하루 이르게 찍힌다.
  *   그래서 KST 오프셋(+9h)을 더한 뒤 날짜를 뽑아 KST 날짜와 일치시킨다. */
@@ -194,6 +234,7 @@ function App() {
   const [screenBusy, setScreenBusy] = useState(false);
   const [screenProg, setScreenProg] = useState<ScreenProgress | null>(null);
   const [bodyRatio, setBodyRatio] = useState(0.3);
+  const [openEvid, setOpenEvid] = useState<Set<string>>(new Set()); // 근거 펼친 종목들
   const [journal, setJournal] = useState<JournalEntry[]>([]);
   // [v0.4.0] 내 삼분할 기록(여러 종목 동시 운용). 저장 목록 + 저장 시 메모 입력칸.
   const [splits, setSplits] = useState<SavedSplit[]>([]);
@@ -863,6 +904,16 @@ ${msg}
     }
   }
 
+  /** 결과 행의 [근거] 펼치기/접기 토글. */
+  function toggleEvid(symbol: string) {
+    setOpenEvid((prev) => {
+      const next = new Set(prev);
+      if (next.has(symbol)) next.delete(symbol);
+      else next.add(symbol);
+      return next;
+    });
+  }
+
   /** 결과 행 클릭 → 계산기 탭에 그 종목을 자동으로 채운다(삼분할 타점 계산으로 이어지게). */
   function pickScreenSymbol(symbol: string) {
     setSymbol(symbol);
@@ -1344,10 +1395,11 @@ ${msg}
               </button>
             </div>
             <p className="hint">
-              거래량 상위 60종목을 훑어 <b>①현재가&gt;5분봉 EMA200</b>, <b>②현재가&gt;이치모쿠 구름 위</b>,
-              <b> ③장 시작 이후 최고점 뒤 첫 음봉 도지</b>, <b>④그 다음 5분봉도 음봉</b>이면 후보로 잡습니다.
-              1분봉을 과거로 당겨 5분봉으로 합성해 계산합니다(종목당 ~1,000개+). <b>1~2분</b> 걸립니다.
-              <br/>🔴 <b>확정</b>(도지+다음 음봉) · 🟡 <b>관찰</b>(첫 음봉 도지, 다음 봉 대기). 행을 누르면 계산기에 종목이 채워집니다.
+              거래량 상위 60종목을 훑어 <b>①현재가 $1~$9</b>, <b>②현재가&gt;EMA200</b>, <b>③현재가&gt;이치모쿠 구름 위</b>,
+              <b> ④장 시작 이후 최고점 뒤 첫 음봉 도지</b>, <b>⑤그 다음 봉도 음봉</b>이면 후보로 잡습니다.
+              판정은 <b>하이킨아시(平均足) 캔들 기준</b>입니다(트레이딩뷰 HA 차트와 일치 — EMA200·이치모쿠·도지·음봉 모두 HA).
+              1분봉을 과거로 당겨 5분봉→HA로 변환해 계산합니다. <b>1~2분</b> 걸립니다.
+              <br/>🔴 <b>확정</b>(도지+다음 음봉) · 🟡 <b>관찰</b>(첫 음봉 도지, 다음 봉 대기). <b>▸ 근거</b>를 펼치면 기준 캔들을 확인할 수 있고, 다른 곳을 누르면 계산기에 종목이 채워집니다.
             </p>
 
             {/* 도지 몸통비율 슬라이더 */}
@@ -1388,23 +1440,38 @@ ${msg}
                   ) : (
                     <table className="result-table screen-table">
                       <thead>
-                        <tr><th>상태</th><th>순위</th><th>종목</th><th>현재가</th><th>EMA200</th><th>구름top</th><th>세션고점</th><th>근접도</th></tr>
+                        <tr><th>근거</th><th>상태</th><th>순위</th><th>종목</th><th>현재가</th><th>EMA200</th><th>구름top</th><th>세션고점</th><th>근접도</th></tr>
                       </thead>
                       <tbody>
-                        {cand.map((r) => (
-                          <tr key={r.symbol} className="screen-row" onClick={() => pickScreenSymbol(r.symbol)} title="클릭하면 계산기에 이 종목이 채워집니다">
-                            <td>{r.status === "confirmed" ? "🔴 확정" : "🟡 관찰"}</td>
-                            <td>{r.rank}</td>
-                            <td><b>{r.symbol}</b></td>
-                            <td>{r.price != null ? usdKrw(r.price, fx) : "—"}</td>
-                            <td>{r.ema200 != null ? `$${r.ema200.toFixed(2)}` : "—"}</td>
-                            <td>{r.cloudTop != null ? `$${r.cloudTop.toFixed(2)}` : "—"}</td>
-                            <td>{r.sessionHigh != null ? `$${r.sessionHigh.toFixed(2)}` : "—"}</td>
-                            <td className={r.proximityPct != null && r.proximityPct >= 0 ? "ok" : "danger"}>
-                              {r.proximityPct != null ? `${r.proximityPct >= 0 ? "+" : ""}${r.proximityPct.toFixed(2)}%` : "—"}
-                            </td>
-                          </tr>
-                        ))}
+                        {cand.map((r) => {
+                          const open = openEvid.has(r.symbol);
+                          return (
+                          <Fragment key={r.symbol}>
+                            <tr className="screen-row" onClick={() => pickScreenSymbol(r.symbol)} title="클릭하면 계산기에 이 종목이 채워집니다">
+                              <td>
+                                <button className="mini btn-evid" onClick={(e) => { e.stopPropagation(); toggleEvid(r.symbol); }} title="판정 근거 펼치기/접기">
+                                  {open ? "▾ 근거" : "▸ 근거"}
+                                </button>
+                              </td>
+                              <td>{r.status === "confirmed" ? "🔴 확정" : "🟡 관찰"}</td>
+                              <td>{r.rank}</td>
+                              <td><b>{r.symbol}</b></td>
+                              <td>{r.price != null ? usdKrw(r.price, fx) : "—"}</td>
+                              <td>{r.ema200 != null ? `$${r.ema200.toFixed(2)}` : "—"}</td>
+                              <td>{r.cloudTop != null ? `$${r.cloudTop.toFixed(2)}` : "—"}</td>
+                              <td>{r.sessionHigh != null ? `$${r.sessionHigh.toFixed(2)}` : "—"}</td>
+                              <td className={r.proximityPct != null && r.proximityPct >= 0 ? "ok" : "danger"}>
+                                {r.proximityPct != null ? `${r.proximityPct >= 0 ? "+" : ""}${r.proximityPct.toFixed(2)}%` : "—"}
+                              </td>
+                            </tr>
+                            {open && r.evidence && (
+                              <tr className="evid-row">
+                                <td colSpan={9}><ScreenEvidenceView ev={r.evidence} price={r.price} /></td>
+                              </tr>
+                            )}
+                          </Fragment>
+                          );
+                        })}
                       </tbody>
                     </table>
                   )}
