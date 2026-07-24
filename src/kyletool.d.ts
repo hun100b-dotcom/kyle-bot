@@ -175,13 +175,14 @@ interface ScreenEvidence {
   sessionStart: string;
   sessionHigh: number | null;
   sessionHighTime: string | null;
-  doji: (EvidenceCandle & { bodyRatio: number | null }) | null;
+  doji: (EvidenceCandle & { bodyRatio: number | null; upperWickPct: number | null; lowerWickPct: number | null }) | null;
   next: EvidenceCandle | null;
   filters: {
     priceBand: boolean;
     aboveEma: boolean;
     aboveCloud: boolean;
     firstDoji: boolean;
+    bothWicks: boolean;
     nextBearish: boolean;
   };
 }
@@ -212,6 +213,7 @@ interface ScreenRun {
   scannedAt: string;
   total: number;
   bodyRatio: number;
+  excludedEtf: number;
   results: ScreenResult[];
 }
 

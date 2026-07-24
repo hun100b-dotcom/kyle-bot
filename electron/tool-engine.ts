@@ -28,6 +28,7 @@ import {
   getPrice,
   getTrades,
   getRankings,
+  getStocks,
   getCandles1mPaged,
   getAccounts,
   getBuyingPower,
@@ -410,13 +411,15 @@ export interface ScreenEvidence {
   sessionStart: string; //     현재 활성 장 시작(KST)
   sessionHigh: number | null; // 세션 최고(HA 고가)
   sessionHighTime: string | null; // 그 시각
-  doji: (EvidenceCandle & { bodyRatio: number | null }) | null; // 기준 음봉 도지
+  // 기준 음봉 도지 — 몸통·위/아래 꼬리 비율까지(망치형·유성형 배제 근거)
+  doji: (EvidenceCandle & { bodyRatio: number | null; upperWickPct: number | null; lowerWickPct: number | null }) | null;
   next: EvidenceCandle | null; //  도지 다음 봉
   filters: {
     priceBand: boolean; //   현재가 $1~$9
     aboveEma: boolean; //    현재가 > EMA200
     aboveCloud: boolean; //  현재가 > 구름top
     firstDoji: boolean; //   최고점 이후 첫 음봉 도지 존재
+    bothWicks: boolean; //   [v0.6.3] 위·아래 꼬리 둘 다 존재(망치형·유성형 아님)
     nextBearish: boolean; // 그 다음 봉도 음봉
   };
 }
@@ -451,8 +454,9 @@ export interface ScreenProgress {
 /** 스캔 최종 결과 */
 export interface ScreenRun {
   scannedAt: string; //  스캔 시각(KST)
-  total: number; //      스캔한 종목 수
+  total: number; //      실제 스캔한 종목 수(ETF 제외 후)
   bodyRatio: number; //  사용한 도지 몸통비율
+  excludedEtf: number; // [v0.6.3] ETF·레버리지·인버스로 제외한 종목 수
   results: ScreenResult[]; // 후보(confirmed·watch) + 참고 목록
 }
 
@@ -1775,7 +1779,26 @@ export class ToolEngine extends EventEmitter {
 
       // 1) 거래량 랭킹으로 스캔 대상 종목 확보
       this.emit("screener:progress", { phase: "ranking", done: 0, total: count, symbol: "" } as ScreenProgress);
-      const rankings = await getRankings(count);
+      const ranked = await getRankings(count);
+
+      // 1-b) [v0.6.3] ETF·레버리지·인버스 배제 — 종목 메타(securityType)를 한 번에 조회해 걸러낸다.
+      //   securityType이 "STOCK"인 일반 주식만 남긴다(ETF/ETN 등은 전부 제외). 메타 조회가 실패하면
+      //   (안전하게) 전부 통과시킨다 — 필터 때문에 스캔 자체가 막히지 않도록.
+      let rankings = ranked;
+      let excludedEtf = 0;
+      try {
+        const metas = await getStocks(ranked.map((r) => r.symbol));
+        const typeBySym = new Map(metas.map((m) => [m.symbol, m]));
+        rankings = ranked.filter((r) => {
+          const m = typeBySym.get(r.symbol);
+          if (!m) return true; // 메타 없으면 통과(정보 부족을 이유로 배제하지 않음)
+          const isStock = m.securityType === "STOCK"; // ETF/ETN 등은 제외
+          if (!isStock) excludedEtf++;
+          return isStock;
+        });
+      } catch {
+        /* 메타 조회 실패 → 필터 생략(스캔은 계속) */
+      }
       const total = rankings.length;
 
       // 2) 현재 활성 장의 시작 시각(최고점 추적 기준). 장 마감 중이면 최근 8시간으로 폴백.
@@ -1845,7 +1868,7 @@ export class ToolEngine extends EventEmitter {
       // 정렬: 확정(🔴) → 관찰(🟡) → 나머지. 같은 등급이면 랭킹 순.
       const order: Record<ScreenStatus, number> = { confirmed: 0, watch: 1, none: 2, insufficient: 3 };
       results.sort((a, b) => order[a.status] - order[b.status] || a.rank - b.rank);
-      return { scannedAt: now.toFormat("MM-dd HH:mm:ss"), total, bodyRatio: br, results };
+      return { scannedAt: now.toFormat("MM-dd HH:mm:ss"), total, bodyRatio: br, excludedEtf, results };
     } finally {
       this.screenBusy = false;
     }
@@ -1887,13 +1910,21 @@ export class ToolEngine extends EventEmitter {
       sessionStart: sessionStart ? sessionStart.setZone("Asia/Seoul").toFormat("MM-dd HH:mm") : "(장 마감·최근 8h)",
       sessionHigh: pat.sessionHigh != null ? r(pat.sessionHigh) : null,
       sessionHighTime: pat.highTime != null ? hm(pat.highTime) : null,
-      doji: pat.dojiCandle ? { ...toEv(pat.dojiCandle), bodyRatio: pat.dojiBodyRatio != null ? r(pat.dojiBodyRatio) : null } : null,
+      doji: pat.dojiCandle
+        ? {
+            ...toEv(pat.dojiCandle),
+            bodyRatio: pat.dojiBodyRatio != null ? r(pat.dojiBodyRatio) : null,
+            upperWickPct: pat.dojiUpperWickPct != null ? r(pat.dojiUpperWickPct) : null,
+            lowerWickPct: pat.dojiLowerWickPct != null ? r(pat.dojiLowerWickPct) : null,
+          }
+        : null,
       next: pat.nextCandle ? toEv(pat.nextCandle) : null,
       filters: {
         priceBand: gates.priceInBand,
         aboveEma: gates.aboveEma,
         aboveCloud: gates.aboveCloud,
         firstDoji: pat.dojiIndex >= 0,
+        bothWicks: pat.dojiUpperWickPct != null && pat.dojiLowerWickPct != null && pat.dojiUpperWickPct >= 0.1 && pat.dojiLowerWickPct >= 0.1,
         nextBearish: pat.nextCandle ? pat.nextCandle.close < pat.nextCandle.open : false,
       },
     };

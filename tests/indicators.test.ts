@@ -75,17 +75,24 @@ describe("이치모쿠 구름(ichimoku)", () => {
   });
 });
 
-describe("음봉 도지(isBearishDoji)", () => {
-  it("종가<시가 + 몸통이 범위의 30% 이하면 도지", () => {
-    // open 100, close 99.9 (몸통 0.1), high 100.5 low 99.5 (범위 1.0) → 0.1/1.0=10% ≤ 30%
+describe("음봉 도지(isBearishDoji) — 양쪽 꼬리 조건 포함", () => {
+  it("음봉 + 작은 몸통 + 위·아래 꼬리 둘 다 → 도지", () => {
+    // 몸통 0.1(10%), 윗꼬리 0.5(50%), 아래꼬리 0.4(40%) → 통과
     expect(isBearishDoji(c(0, 100, 100.5, 99.5, 99.9), 0.3)).toBe(true);
   });
   it("양봉이면(종가≥시가) 도지 아님", () => {
     expect(isBearishDoji(c(0, 100, 100.5, 99.5, 100.2), 0.3)).toBe(false);
   });
   it("몸통이 크면(범위의 30% 초과) 도지 아님", () => {
-    // 몸통 0.5, 범위 1.0 → 50% > 30%
     expect(isBearishDoji(c(0, 100, 100.4, 99.4, 99.5), 0.3)).toBe(false);
+  });
+  it("[망치형] 아래꼬리만 길고 윗꼬리 거의 없음 → 도지 아님", () => {
+    // 윗꼬리 0.05/범위1.55 ≈ 3.2% < 10% → 제외
+    expect(isBearishDoji(c(0, 100, 100.05, 98.5, 99.9), 0.3)).toBe(false);
+  });
+  it("[유성형/비석] 윗꼬리만 길고 아래꼬리 거의 없음 → 도지 아님", () => {
+    // 아래꼬리 0.02/범위1.62 ≈ 1.2% < 10% → 제외
+    expect(isBearishDoji(c(0, 100, 101.5, 99.88, 99.9), 0.3)).toBe(false);
   });
 });
 
@@ -114,6 +121,16 @@ describe("세션 패턴(scanSessionPattern)", () => {
     const r = scanSessionPattern([before, highC, dojiC, bearC], 0, 0.3);
     expect(r.sessionHigh).toBe(100); // 200이 아니라 100
     expect(r.status).toBe("confirmed");
+  });
+
+  it("[신고가 무효화] 도지+음봉 뒤 신고가가 나오면 그 셋업은 무효(none)", () => {
+    // 최고점(100) → 도지 → 음봉(=원래 confirmed) → 이후 신고가 105
+    const newHigh = c(3 * MIN, 99, 105, 99, 104);
+    const r = scanSessionPattern([highC, dojiC, bearC, newHigh], 0, 0.3);
+    expect(r.sessionHigh).toBe(105); // 최고점이 신고가로 이동
+    expect(r.status).toBe("none"); // 말아올려 신고가 → 무효
+    // 신고가가 없으면 그대로 confirmed
+    expect(scanSessionPattern([highC, dojiC, bearC], 0, 0.3).status).toBe("confirmed");
   });
 });
 
@@ -214,9 +231,26 @@ describe("엔진 스캔 왕복(연습 모드 + 목 서버)", () => {
       expect(ok.evidence!.mode).toBe("ha"); // 하이킨아시 기준
       expect(typeof ok.priceInBand).toBe("boolean");
       expect(ok.evidence!.filters).toHaveProperty("priceBand");
+      // [v0.6.3] 도지 꼬리 필터 칩이 근거에 있다
+      expect(ok.evidence!.filters).toHaveProperty("bothWicks");
       eng.stopAllStrength();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 30_000); // 페이지네이션·페이싱 때문에 넉넉히
+
+  it("[v0.6.3] ETF·레버리지 종목은 스캔에서 배제된다(mock BITO=ETF)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-etf-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      // 상위 12종목에 BITO(mock에서 ETF) 포함 → 배제되어야 한다
+      const run = await eng.scanScreener(0.3, 12);
+      expect(run.excludedEtf).toBeGreaterThanOrEqual(1); // 최소 1개(BITO) 제외
+      expect(run.results.some((r) => r.symbol === "BITO")).toBe(false); // 결과에 ETF 없음
+      expect(run.total).toBe(12 - run.excludedEtf); // 스캔 대상은 제외 후 수
+      eng.stopAllStrength();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000); // 12종목 페이지네이션 → 넉넉히
 });

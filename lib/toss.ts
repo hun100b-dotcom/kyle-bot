@@ -35,6 +35,7 @@ const ENDPOINTS = {
   candles: "/api/v1/candles",
   trades: "/api/v1/trades", // [v0.5.0] 개별 체결(틱) — 체결강도 추정의 원천
   rankings: "/api/v1/rankings", // [v0.6.0] 거래량 랭킹 — 스크리너 스캔 대상
+  stocks: "/api/v1/stocks", // [v0.6.3] 종목 메타(유형 STOCK/ETF, 레버리지) — ETF 배제용
   accounts: "/api/v1/accounts", // 계좌 목록(여기서 accountSeq 획득)
   holdings: "/api/v1/holdings", // 보유 종목
   buyingPower: "/api/v1/buying-power",
@@ -572,6 +573,36 @@ export async function getCandles1mPaged(symbol: string, minCount = 1000, maxPage
   }
   out.sort((a, b) => a.time - b.time); // 오름차순(과거→현재)
   return out;
+}
+
+/** 종목 메타(스크리너 ETF 배제용). 실스펙 /api/v1/stocks 응답 필드. */
+export interface StockMeta {
+  symbol: string;
+  name?: string;
+  securityType: string; //   "STOCK" | "ETF" (그 외 값도 올 수 있어 문자열로 둔다)
+  isCommonShare?: boolean;
+  leverageFactor: number | null; // 주식은 null, ETF는 배수(예: 3=레버리지, -3=인버스, 1=일반ETF)
+}
+
+/**
+ * getStocks — 여러 종목의 메타(유형/레버리지)를 한 번에 조회.
+ *   실스펙: GET /api/v1/stocks?symbols=A,B,C (콤마구분, 최대 200개).
+ *   스크리너가 랭킹 60종목을 한 방에 조회해 ETF·레버리지·인버스를 걸러내는 데 쓴다.
+ */
+export async function getStocks(symbols: string[]): Promise<StockMeta[]> {
+  if (symbols.length === 0) return [];
+  await priceLimiter.wait();
+  const arr = await tossFetch<Array<{ symbol: string; name?: string; securityType?: string; isCommonShare?: boolean; leverageFactor?: string | number | null }>>(
+    ENDPOINTS.stocks,
+    { query: { symbols: symbols.slice(0, 200).join(",") } },
+  );
+  return (arr ?? []).map((s) => ({
+    symbol: s.symbol,
+    name: s.name,
+    securityType: String(s.securityType ?? ""),
+    isCommonShare: s.isCommonShare,
+    leverageFactor: s.leverageFactor == null || s.leverageFactor === "" ? null : Number(s.leverageFactor),
+  }));
 }
 
 /** 거래량 랭킹 한 줄(실스펙: result.rankings[]). */

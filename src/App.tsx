@@ -189,6 +189,7 @@ function ScreenEvidenceView({ ev, price }: { ev: ScreenEvidence; price: number |
         {chip(ev.filters.aboveEma, "현재가>EMA200")}
         {chip(ev.filters.aboveCloud, "현재가>구름top")}
         {chip(ev.filters.firstDoji, "최고점 후 첫 음봉 도지")}
+        {chip(ev.filters.bothWicks, "위·아래 꼬리 둘 다(망치형 아님)")}
         {chip(ev.filters.nextBearish, "다음 봉도 음봉")}
       </div>
       <table className="evid-table">
@@ -200,7 +201,9 @@ function ScreenEvidenceView({ ev, price }: { ev: ScreenEvidence; price: number |
             <td>기준 음봉 도지</td>
             <td>
               {candleLine(ev.doji)}
-              {ev.doji?.bodyRatio != null && <span className="hint"> · 몸통비율 {(ev.doji.bodyRatio * 100).toFixed(1)}%</span>}
+              {ev.doji?.bodyRatio != null && <span className="hint"> · 몸통 {(ev.doji.bodyRatio * 100).toFixed(1)}%</span>}
+              {ev.doji?.upperWickPct != null && <span className="hint"> · 윗꼬리 {(ev.doji.upperWickPct * 100).toFixed(1)}%</span>}
+              {ev.doji?.lowerWickPct != null && <span className="hint"> · 아래꼬리 {(ev.doji.lowerWickPct * 100).toFixed(1)}%</span>}
             </td>
           </tr>
           <tr><td>도지 다음 봉</td><td>{candleLine(ev.next)}</td></tr>
@@ -1395,8 +1398,9 @@ ${msg}
               </button>
             </div>
             <p className="hint">
-              거래량 상위 60종목을 훑어 <b>①현재가 $1~$9</b>, <b>②현재가&gt;EMA200</b>, <b>③현재가&gt;이치모쿠 구름 위</b>,
-              <b> ④장 시작 이후 최고점 뒤 첫 음봉 도지</b>, <b>⑤그 다음 봉도 음봉</b>이면 후보로 잡습니다.
+              거래량 상위 60종목(<b>ETF·레버리지·인버스 제외</b>)을 훑어 <b>①현재가 $1~$9</b>, <b>②현재가&gt;EMA200</b>, <b>③현재가&gt;이치모쿠 구름 위</b>,
+              <b> ④장 시작 이후 최고점 뒤 첫 음봉 도지(위·아래 꼬리 둘 다 있는 것 — 망치형 배제)</b>, <b>⑤그 다음 봉도 음봉</b>이면 후보로 잡습니다.
+              도지 이후 <b>신고가가 다시 나오면 무효</b>(말아올린 종목 제외).
               판정은 <b>하이킨아시(平均足) 캔들 기준</b>입니다(트레이딩뷰 HA 차트와 일치 — EMA200·이치모쿠·도지·음봉 모두 HA).
               <b>형성 중인 마지막 5분봉은 제외</b>하고 <b>완성된(마감된) 봉만</b> 판정합니다(봉 마감 후 음↔양 뒤집힘 방지).
               1분봉을 과거로 당겨 5분봉→HA로 변환해 계산합니다. <b>1~2분</b> 걸립니다.
@@ -1434,6 +1438,7 @@ ${msg}
                 <>
                   <p className="hint">
                     {screenRun.scannedAt} 스캔 · {screenRun.total}종목 중 <b className="ok">후보 {cand.length}개</b>
+                    {screenRun.excludedEtf > 0 && <span> · ETF/레버리지 {screenRun.excludedEtf}개 제외</span>}
                     {insufficient > 0 && <span> · 데이터 부족 {insufficient}개 제외</span>}
                   </p>
                   {cand.length === 0 ? (

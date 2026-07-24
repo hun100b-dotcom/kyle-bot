@@ -169,17 +169,36 @@ export function ichimoku(candles: Candle[], tenkanP = 9, kijunP = 26, senkouBP =
   return { spanA, spanB, cloudTop: Math.max(spanA, spanB), cloudBottom: Math.min(spanA, spanB) };
 }
 
+/** 꼬리(그림자) 크기를 전체범위 대비 비율로 반환. 위/아래 꼬리 존재 여부 판단·근거 표시용. */
+export function candleWicks(c: Candle): { upper: number; lower: number; upperPct: number | null; lowerPct: number | null } {
+  const range = c.high - c.low;
+  const bodyTop = Math.max(c.open, c.close);
+  const bodyBottom = Math.min(c.open, c.close);
+  const upper = c.high - bodyTop; //   윗꼬리 길이
+  const lower = bodyBottom - c.low; // 아래꼬리 길이
+  return { upper, lower, upperPct: range > 0 ? upper / range : null, lowerPct: range > 0 ? lower / range : null };
+}
+
+/** [v0.6.3] 유효 도지의 최소 꼬리 비율 — 위·아래 꼬리가 각각 전체범위의 이 비율 이상이어야 한다.
+ *  망치형(아래꼬리만)·유성형/비석(윗꼬리만)·민둥봉(꼬리 없음)을 배제하기 위한 기준(노이즈 방지). */
+export const WICK_MIN_RATIO = 0.1; // 10%
+
 /**
- * isBearishDoji — "음봉 도지"인지 판정.
- *   음봉(종가<시가) + 몸통이 아주 작음(|시가-종가| ≤ 전체범위 × bodyRatioMax).
- *   bodyRatioMax 기본 0.3 (몸통이 전체 범위의 30% 이하). 범위(high-low)가 0이면 도지 아님.
+ * isBearishDoji — "음봉 도지"인지 판정. [v0.6.3] 양쪽 꼬리 조건 추가.
+ *   ① 음봉(종가<시가)
+ *   ② 몸통이 작음(|시가-종가| ≤ 전체범위 × bodyRatioMax, 기본 0.3)
+ *   ③ 위꼬리·아래꼬리가 '둘 다' 의미 있게 존재(각각 ≥ 전체범위 × wickMinRatio, 기본 10%)
+ *      → 망치형(아래꼬리만)·유성형/비석(윗꼬리만)·민둥봉(꼬리 없음)은 도지 아님.
+ *   범위(high-low)가 0이면 도지 아님.
  */
-export function isBearishDoji(c: Candle, bodyRatioMax = 0.3): boolean {
+export function isBearishDoji(c: Candle, bodyRatioMax = 0.3, wickMinRatio = WICK_MIN_RATIO): boolean {
   const range = c.high - c.low;
   if (range <= 0) return false;
-  if (c.close >= c.open) return false; // 음봉이어야 함
-  const body = c.open - c.close; // 음봉이므로 양수
-  return body <= bodyRatioMax * range;
+  if (c.close >= c.open) return false; // ① 음봉이어야 함
+  const body = c.open - c.close; //       음봉이므로 양수
+  if (body > bodyRatioMax * range) return false; // ② 몸통 작아야 함
+  const { upper, lower } = candleWicks(c); //        ③ 양쪽 꼬리 존재
+  return upper >= wickMinRatio * range && lower >= wickMinRatio * range;
 }
 
 export type PatternStatus = "confirmed" | "watch" | "none";
@@ -191,6 +210,8 @@ export interface SessionPattern {
   dojiIndex: number; //         최고점 이후 첫 음봉 도지 인덱스(없으면 -1)
   dojiCandle: Candle | null; // 기준으로 잡은 첫 음봉 도지 봉(근거 표시용)
   dojiBodyRatio: number | null; // 그 도지의 몸통비율(=몸통/범위, 근거 표시용)
+  dojiUpperWickPct: number | null; // [v0.6.3] 그 도지의 윗꼬리 비율
+  dojiLowerWickPct: number | null; // [v0.6.3] 그 도지의 아래꼬리 비율
   nextCandle: Candle | null; // 도지 다음 봉(근거 표시용)
   status: PatternStatus; //     confirmed(도지+다음음봉) / watch(도지만) / none
 }
@@ -208,36 +229,42 @@ export interface SessionPattern {
  *     3) 도지 다음 봉이 있고 음봉이면 → confirmed. 다음 봉이 아직 없으면 → watch.
  *        다음 봉이 양봉이면 패턴이 깨진 것 → none.
  */
-export function scanSessionPattern(candles5m: Candle[], sessionStartMs: number, bodyRatioMax = 0.3): SessionPattern {
+export function scanSessionPattern(candles5m: Candle[], sessionStartMs: number, bodyRatioMax = 0.3, wickMinRatio = WICK_MIN_RATIO): SessionPattern {
   // 현재 장 봉만 추린다(원래 인덱스 매핑은 필요 없어 새 배열로 다룬다).
   const s = candles5m.filter((c) => c.time >= sessionStartMs);
-  const empty: SessionPattern = { sessionHigh: null, highTime: null, highIndex: -1, dojiIndex: -1, dojiCandle: null, dojiBodyRatio: null, nextCandle: null, status: "none" };
+  const empty: SessionPattern = { sessionHigh: null, highTime: null, highIndex: -1, dojiIndex: -1, dojiCandle: null, dojiBodyRatio: null, dojiUpperWickPct: null, dojiLowerWickPct: null, nextCandle: null, status: "none" };
   if (s.length === 0) return empty;
 
-  // 1) 최고 고가와 그 인덱스(마지막으로 최고를 찍은 봉).
+  // 1) 세션 '전체' 최고 고가와, 그 최고를 마지막으로 찍은 봉의 인덱스.
+  //    [v0.6.3 신고가 무효화 — 임의 N봉 창을 쓰지 않는 이유]
+  //    highIndex는 "세션에서 가장 높이 오른(마지막) 봉"이다. 도지는 아래(2)에서 'highIndex 이후'만
+  //    찾으므로, 만약 도지 뒤에 가격이 '신고가'를 다시 냈다면 그 신고가 봉이 새 최고점이 되어
+  //    highIndex가 그쪽으로 이동한다 → 이전 도지는 'highIndex 이후'가 아니게 되어 자동 폐기된다.
+  //    즉 "말아올려 신고가를 낸" 셋업은 저절로 무효가 된다(고정 창 없이, 최고점 갱신만으로).
   let sessionHigh = -Infinity;
   let highIndex = -1;
   s.forEach((c, i) => {
-    if (c.high >= sessionHigh) { sessionHigh = c.high; highIndex = i; } // '>=' → 동점이면 뒤 봉으로 갱신
+    if (c.high >= sessionHigh) { sessionHigh = c.high; highIndex = i; } // '>=' → 동점(재terminal)이어도 뒤 봉으로 갱신
   });
   const highTime = highIndex >= 0 ? s[highIndex].time : null;
 
-  // 2) 최고점 이후 첫 음봉 도지.
+  // 2) 최고점 이후 첫 '유효 음봉 도지'(몸통 작음 + 양쪽 꼬리 존재).
   let dojiIndex = -1;
   for (let i = highIndex + 1; i < s.length; i++) {
-    if (isBearishDoji(s[i], bodyRatioMax)) { dojiIndex = i; break; }
+    if (isBearishDoji(s[i], bodyRatioMax, wickMinRatio)) { dojiIndex = i; break; }
   }
   if (dojiIndex === -1) return { ...empty, sessionHigh, highTime, highIndex };
 
-  // 근거용: 도지 봉과 몸통비율.
+  // 근거용: 도지 봉의 몸통·꼬리 비율.
   const dojiCandle = s[dojiIndex];
   const range = dojiCandle.high - dojiCandle.low;
   const dojiBodyRatio = range > 0 ? (dojiCandle.open - dojiCandle.close) / range : null;
+  const wk = candleWicks(dojiCandle);
 
   // 3) 도지 다음 봉 판정.
   const next = s[dojiIndex + 1] ?? null;
-  const base = { sessionHigh, highTime, highIndex, dojiIndex, dojiCandle, dojiBodyRatio, nextCandle: next };
-  if (!next) return { ...base, status: "watch" }; //                    다음 봉 대기
+  const base = { sessionHigh, highTime, highIndex, dojiIndex, dojiCandle, dojiBodyRatio, dojiUpperWickPct: wk.upperPct, dojiLowerWickPct: wk.lowerPct, nextCandle: next };
+  if (!next) return { ...base, status: "watch" as PatternStatus }; //   다음 봉 대기
   const nextBearish = next.close < next.open;
-  return { ...base, status: nextBearish ? "confirmed" : "none" };
+  return { ...base, status: (nextBearish ? "confirmed" : "none") as PatternStatus };
 }

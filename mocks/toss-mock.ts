@@ -250,6 +250,23 @@ export function createMockTossServer() {
       return sendResult(res, 200, { rankedAt: new Date().toISOString(), rankings });
     }
 
+    // [v0.6.3] 종목 메타(유형/레버리지) — ETF 배제 필터용. 몇몇 심볼을 ETF로 표시해 필터를 시연.
+    if (path === "/api/v1/stocks" && method === "GET") {
+      const syms = (url.searchParams.get("symbols") ?? "").split(",").filter(Boolean);
+      const ETFS: Record<string, number> = { BITO: 1, TQQQ: 3, SQQQ: -3, SOXL: 3 }; // 가상 ETF(레버리지 배수)
+      const out = syms.map((symbol) => {
+        const isEtf = symbol in ETFS;
+        return {
+          symbol,
+          name: symbol,
+          securityType: isEtf ? "ETF" : "STOCK",
+          isCommonShare: true,
+          leverageFactor: isEtf ? String(ETFS[symbol]) : null,
+        };
+      });
+      return sendResult(res, 200, out);
+    }
+
     // [v0.5.0] 개별 체결(틱) — 체결강도 추정용 가상 데이터.
     //   실스펙: symbol(단수), count 최대 50, 최근 것만. 응답 = [{price, volume, timestamp, currency}].
     //   방향 필드는 실서버에도 없다(그래서 앱이 틱룰로 추정). 여기선 "매수 우세로 보이는"
