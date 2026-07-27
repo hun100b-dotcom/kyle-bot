@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { DateTime } from "luxon";
 import { getSession, getSessionStart, isOrderFrozen, type Session } from "../lib/session";
 import { calcSplit3, calcOrderbook, calcCandle, roundPrice, getTick, type SplitOrder } from "../lib/calc";
+import { encryptSecret, decryptSecret, deriveSyncId } from "../lib/keysync"; // [v0.8.0] 키 기기 간 동기화(클라이언트 암호화)
 import { strengthFromTicks, type Side } from "../lib/strength";
 import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, type Candle, type SessionPattern } from "../lib/indicators";
 import {
@@ -787,6 +788,77 @@ export class ToolEngine extends EventEmitter {
     this.persistEnv(); // [v0.3.0] 모든 설정을 한 경로로 저장(토글·시드 포함)
     this.addJournal({ kind: "info", symbol: "-", summary: `설정 저장 (모드: ${this.mode === "mock" ? "연습" : "실서버(주문 잠금)"})` });
     return this.getSettings();
+  }
+
+  // --------------------------------------------------------------------------
+  // [v0.8.0] 토스 키 기기 간 동기화 — Supabase에 "암호문만" 저장/복원
+  //   ⚠️ 평문 키는 절대 클라우드에 올리지 않는다. 오너의 마스터 비밀번호(passphrase)로
+  //   기기에서 암호화한 뒤 암호문만 저장한다. passphrase 는 어디에도 저장하지 않는다.
+  // --------------------------------------------------------------------------
+  //  아래 두 값은 "공개용(publishable) anon 키/URL"이라 앱에 넣어도 안전하다.
+  //  (실제 보호는 RLS + 클라이언트 암호화가 한다. 토스 실키와는 무관하다.)
+  private static readonly SUPABASE_URL = "https://hmjxrqhcwjyfkvlcejfc.supabase.co";
+  private static readonly SUPABASE_ANON =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhtanhycWhjd2p5Zmt2bGNlamZjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMwNTEwNTMsImV4cCI6MjA4ODYyNzA1M30.gr9poC-5808qHRoYc-5WH3dTqXupEEJpDdztv2fddog";
+
+  private supabaseHeaders(): Record<string, string> {
+    return {
+      apikey: ToolEngine.SUPABASE_ANON,
+      Authorization: `Bearer ${ToolEngine.SUPABASE_ANON}`,
+      "Content-Type": "application/json",
+    };
+  }
+
+  /**
+   * [v0.8.0] 지금 이 기기의 토스 키를 마스터 비밀번호로 암호화해 클라우드에 올린다(다른 기기가 받도록).
+   *   ❌ 주문과 무관한 저장 작업이다. 평문은 올라가지 않는다.
+   */
+  async syncPushKeys(passphrase: string): Promise<{ ok: boolean; message: string }> {
+    const clientId = process.env.TOSS_CLIENT_ID ?? "";
+    const clientSecret = process.env.TOSS_CLIENT_SECRET ?? "";
+    const account = process.env.TOSS_ACCOUNT ?? "";
+    if (!clientId || !clientSecret) {
+      return { ok: false, message: "먼저 [설정]에서 Client ID/Secret을 입력·저장한 뒤 동기화하세요." };
+    }
+    try {
+      const rec = await encryptSecret({ clientId, clientSecret, account }, passphrase);
+      // upsert: 같은 sync_id면 갱신, 없으면 삽입 (PostgREST merge-duplicates)
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_secrets?on_conflict=sync_id`, {
+        method: "POST",
+        headers: { ...this.supabaseHeaders(), Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({ sync_id: rec.syncId, ciphertext: rec.ciphertext, salt: rec.salt, iv: rec.iv, updated_at: new Date().toISOString() }),
+      });
+      if (!res.ok) return { ok: false, message: `클라우드 저장 실패(HTTP ${res.status}). 잠시 후 다시 시도하세요.` };
+      this.addJournal({ kind: "info", symbol: "-", summary: "🔐 토스 키를 암호화해 클라우드에 저장(다른 기기에서 같은 비밀번호로 불러올 수 있음)" });
+      return { ok: true, message: "클라우드에 암호화 저장했습니다. 다른 기기에서 같은 마스터 비밀번호로 [불러오기] 하세요." };
+    } catch (e) {
+      return { ok: false, message: String(e).replace(/^Error:\s*/, "") };
+    }
+  }
+
+  /**
+   * [v0.8.0] 클라우드에서 암호문을 받아 마스터 비밀번호로 복호화해 이 기기에 적용한다.
+   *   복호화 성공 시 saveSettings로 로컬 .env에도 저장하고 토큰을 재발급한다(즉시 사용 가능).
+   */
+  async syncPullKeys(passphrase: string): Promise<{ ok: boolean; message: string }> {
+    try {
+      const syncId = await deriveSyncId(passphrase);
+      const url = `${ToolEngine.SUPABASE_URL}/rest/v1/capri_secrets?sync_id=eq.${encodeURIComponent(syncId)}&select=ciphertext,salt,iv`;
+      const res = await fetch(url, { headers: this.supabaseHeaders() });
+      if (!res.ok) return { ok: false, message: `클라우드 조회 실패(HTTP ${res.status}).` };
+      const rows = (await res.json()) as Array<{ ciphertext: string; salt: string; iv: string }>;
+      if (!rows || rows.length === 0) {
+        return { ok: false, message: "이 마스터 비밀번호로 저장된 키가 없습니다. 다른 기기에서 먼저 [클라우드에 저장]했는지, 비밀번호가 맞는지 확인하세요." };
+      }
+      const payload = await decryptSecret(rows[0], passphrase); // 틀린 비번이면 여기서 실패
+      // 복호화된 키를 이 기기에 적용·저장(로컬 .env). 토큰 캐시도 자동 갱신됨.
+      await this.saveSettings({ mode: "live", clientId: payload.clientId, clientSecret: payload.clientSecret, account: payload.account });
+      this.addJournal({ kind: "info", symbol: "-", summary: "🔓 클라우드에서 토스 키를 복호화해 이 기기에 적용(재입력 불필요)" });
+      return { ok: true, message: "클라우드에서 키를 불러와 적용했습니다. 이제 이 기기에서 바로 조회·주문이 됩니다." };
+    } catch (e) {
+      // decryptSecret 실패(비번 오류) 등은 여기로
+      return { ok: false, message: String(e).replace(/^Error:\s*/, "") };
+    }
   }
 
   // 실서버(실제 토스) 기본 주소 — 읽기전용 검증에서 실제로 200이 확인된 도메인.

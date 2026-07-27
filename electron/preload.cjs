@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld("kyletool", {
   getSettings: () => ipcRenderer.invoke("tool:settings:get"),
   saveSettings: (input) => ipcRenderer.invoke("tool:settings:save", input),
   saveSeedSettings: (input) => ipcRenderer.invoke("tool:settings:seed", input), // [v0.3.0]
+  syncPushKeys: (passphrase) => ipcRenderer.invoke("tool:sync:push", passphrase), // [v0.8.0]
+  syncPullKeys: (passphrase) => ipcRenderer.invoke("tool:sync:pull", passphrase), // [v0.8.0]
   setKillSwitch: (on) => ipcRenderer.invoke("tool:killSwitch", on),
   setLiveOrders: (on) => ipcRenderer.invoke("tool:liveOrders", on),
   setPriceGuard: (on, pct) => ipcRenderer.invoke("tool:priceGuard", on, pct),

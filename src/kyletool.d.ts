@@ -351,6 +351,8 @@ interface KyletoolBridge {
     seedBasis?: "auto" | "fixed";
     seedFixedUsd?: number | null;
   }): Promise<ToolSettings>;
+  syncPushKeys(passphrase: string): Promise<{ ok: boolean; message: string }>;
+  syncPullKeys(passphrase: string): Promise<{ ok: boolean; message: string }>;
   setKillSwitch(on: boolean): Promise<void>;
   setLiveOrders(on: boolean): Promise<void>;
   setPriceGuard(on: boolean, pct?: number): Promise<void>;

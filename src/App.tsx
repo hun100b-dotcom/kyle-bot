@@ -325,6 +325,10 @@ function App() {
   const [formAccount, setFormAccount] = useState("");
   const [savedMsg, setSavedMsg] = useState("");
   const [guardPct, setGuardPct] = useState("15"); // 오입력 방지 한도(사용자 지정)
+  // [v0.8.0] 키 클라우드 동기화: 마스터 비밀번호(저장 안 함, 세션 중에만 메모리) + 상태 메시지
+  const [syncPass, setSyncPass] = useState("");
+  const [syncMsg, setSyncMsg] = useState("");
+  const [syncBusy, setSyncBusy] = useState(false);
   // [v0.3.0] 세션별 시드 비율 설정 입력칸(설정 탭). 문자열 보관(입력 중 뭉개짐 방지).
   const [seedForm, setSeedForm] = useState<{ day: string; pre: string; regular: string; basis: "auto" | "fixed"; fixed: string }>({
     day: "90",
@@ -1107,6 +1111,29 @@ ${msg}
     setTimeout(() => setSavedMsg(""), 4000);
     // 시드가 바뀌었으니 제안 수량도 즉시 갱신
     if (curPrice != null) void refreshCapacity(curPrice);
+  }
+
+  /** [v0.8.0] 이 기기 키를 마스터 비밀번호로 암호화해 클라우드에 저장. */
+  async function doSyncPush() {
+    if (syncPass.length < 6) { setSyncMsg("⚠️ 마스터 비밀번호를 6자 이상 입력하세요."); return; }
+    setSyncBusy(true); setSyncMsg("암호화해서 저장 중…");
+    try {
+      const r = await window.kyletool.syncPushKeys(syncPass);
+      setSyncMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+    } finally { setSyncBusy(false); }
+  }
+  /** [v0.8.0] 클라우드에서 키를 받아 복호화해 이 기기에 적용(재입력 불필요). */
+  async function doSyncPull() {
+    if (syncPass.length < 6) { setSyncMsg("⚠️ 마스터 비밀번호를 6자 이상 입력하세요."); return; }
+    setSyncBusy(true); setSyncMsg("클라우드에서 불러와 복호화 중…");
+    try {
+      const r = await window.kyletool.syncPullKeys(syncPass);
+      setSyncMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      if (r.ok) {
+        const s = await window.kyletool.getSettings(); setSettings(s); setFormMode(s.mode); setFormAccount(s.account);
+        await refreshStatus();
+      }
+    } finally { setSyncBusy(false); }
   }
 
   async function saveSettings() {
@@ -2218,6 +2245,32 @@ ${msg}
                 설정 저장
               </button>
               {savedMsg && <span className="ok">{savedMsg}</span>}
+            </div>
+
+            {/* [v0.8.0] 키 클라우드 동기화 — 한 번만 넣으면 맥·윈도우 둘 다 사용 */}
+            <div className="settings-block">
+              <h3>🔐 키 클라우드 동기화 (맥 ↔ 윈도우)</h3>
+              <p className="hint">
+                토스 키를 <b>한 곳에 안전하게 저장</b>해 두 기기가 함께 씁니다. 오너만 아는 <b>마스터 비밀번호</b>로
+                <b> 암호화</b>해 올리므로, 클라우드에는 <b>암호문만</b> 저장됩니다(평문 키는 절대 안 올라감). 비밀번호는
+                <b> 저장하지 않고</b> 매번 입력합니다.
+              </p>
+              <div className="form-row">
+                <label style={{ flex: 1 }}>
+                  마스터 비밀번호(6자 이상)
+                  <input type="password" value={syncPass} onChange={(e) => setSyncPass(e.target.value)} placeholder="오너만 아는 비밀번호" />
+                </label>
+              </div>
+              <div className="form-row">
+                <button className="btn" disabled={syncBusy} onClick={doSyncPush}>① 이 기기 키를 클라우드에 저장(암호화)</button>
+                <button className="btn btn-start" disabled={syncBusy} onClick={doSyncPull}>② 클라우드에서 불러오기(다른 기기)</button>
+              </div>
+              {syncMsg && <p className={syncMsg.startsWith("✅") ? "ok" : "hint"} style={{ whiteSpace: "pre-wrap" }}>{syncMsg}</p>}
+              <p className="hint small">
+                💡 처음 한 번: 키가 있는 기기에서 위 ①로 저장 → 다른 기기에서 같은 비밀번호로 ②만 누르면 끝. 이후 키를
+                재발급하면 그 기기에서 ①만 다시 누르면 다른 기기는 다음에 ②로 최신 키를 받습니다. (동기화를 안 쓰면
+                기존처럼 설정 저장으로 이 기기에만 저장됩니다.)
+              </p>
             </div>
           </section>
         </main>
