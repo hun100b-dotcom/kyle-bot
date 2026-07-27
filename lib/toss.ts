@@ -390,7 +390,20 @@ export async function getAccessToken(): Promise<string> {
         getTimeoutMs(),
         "POST /oauth2/token",
       );
-      if (!res.ok) throw new Error(`토큰 발급 실패: HTTP ${res.status} ${await safeText(res)}`);
+      if (!res.ok) {
+        const bodyText = await safeText(res);
+        // [v0.7.1] 401 invalid_client = 키 인증 실패. raw 응답 대신 사람이 조치할 수 있는 한국어로.
+        //   [원인] client_id/secret 이 비었거나, 토스에서 키가 만료·재발급·폐기되어 무효가 된 경우.
+        //   [주의] 앱이 키를 "잃어버린" 게 아니라, 저장된 키를 토스가 거부하는 상황이다.
+        if (res.status === 401 && /invalid_client/i.test(bodyText)) {
+          throw new Error(
+            "토스 API 키 인증에 실패했습니다(invalid_client).\n\n" +
+              "저장된 키는 있지만 토스가 거부했습니다. 보통 키가 만료됐거나 토스 개발자센터에서 키를 새로 발급해 이전 키가 무효가 된 경우입니다.\n\n" +
+              "조치: 토스 개발자센터에서 API 키(Client ID/Secret)를 확인·재발급한 뒤, [설정] 탭에서 다시 입력하고 저장하세요.",
+          );
+        }
+        throw new Error(`토큰 발급 실패: HTTP ${res.status} ${bodyText}`);
+      }
 
       const data = (await res.json()) as TokenResponse;
       tokenCache = { accessToken: data.access_token, expiresAtMs: Date.now() + data.expires_in * 1000 };
