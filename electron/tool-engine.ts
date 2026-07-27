@@ -830,16 +830,16 @@ export class ToolEngine extends EventEmitter {
         const msg = String(data.msg ?? data.error_description ?? data.error ?? `가입 실패(HTTP ${res.status})`);
         return { ok: false, needsConfirm: false, message: msg };
       }
-      // access_token 이 바로 오면 확인 불필요(자동확인), 아니면 이메일 확인 필요.
+      // [v0.8.2] 서버에 자동확인이 걸려 있어 가입하면 보통 바로 세션이 온다 → 즉시 로그인 상태.
       if (data.access_token) {
         this.applySession(data);
+        this.persistEnv(); // 세션 저장(재시작해도 로그인 유지)
         return { ok: true, needsConfirm: false, message: "가입·로그인 완료되었습니다." };
       }
-      return {
-        ok: true,
-        needsConfirm: true,
-        message: `가입 요청됨. ${email} 로 보낸 확인 메일의 링크를 클릭한 뒤 [로그인] 하세요.`,
-      };
+      // 혹시 세션이 안 오면(설정 변경 등) 같은 자격증명으로 바로 로그인 시도.
+      const signin = await this.authSignIn(email, password);
+      if (signin.ok) return { ok: true, needsConfirm: false, message: "가입·로그인 완료되었습니다." };
+      return { ok: true, needsConfirm: false, message: "가입되었습니다. [로그인]을 눌러 주세요." };
     } catch (e) {
       return { ok: false, needsConfirm: false, message: String(e).replace(/^Error:\s*/, "") };
     }

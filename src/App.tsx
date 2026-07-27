@@ -2315,7 +2315,7 @@ ${msg}
                     <div className="form-row">
                       <button className="btn btn-start" disabled={syncBusy} onClick={doSignIn}>로그인</button>
                       <button className="btn" disabled={syncBusy} onClick={doSignUp}>가입(처음이면)</button>
-                      <span className="hint small">가입하면 확인 메일이 옵니다. 링크 클릭 후 로그인하세요.</span>
+                      <span className="hint small">가입하면 바로 로그인됩니다(확인 메일 클릭 불필요).</span>
                     </div>
                   </>
                 )}
