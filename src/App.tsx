@@ -335,6 +335,8 @@ function App() {
   const [authState, setAuthState] = useState<{ email: string | null; loggedIn: boolean }>({ email: null, loggedIn: false });
   const [authMsg, setAuthMsg] = useState("");
   // [v0.3.0] 세션별 시드 비율 설정 입력칸(설정 탭). 문자열 보관(입력 중 뭉개짐 방지).
+  // [v0.8.3] 기본 손익비 설정 입력칸(설정 탭). 공장값 2/10, 저장하면 계산기 초기값이 됨.
+  const [defForm, setDefForm] = useState<{ tp: string; sl: string }>({ tp: "2", sl: "10" });
   const [seedForm, setSeedForm] = useState<{ day: string; pre: string; regular: string; basis: "auto" | "fixed"; fixed: string }>({
     day: "90",
     pre: "50",
@@ -380,6 +382,10 @@ function App() {
         basis: s.seedBasis,
         fixed: s.seedFixedUsd != null ? String(s.seedFixedUsd) : "",
       });
+      // [v0.8.3] 저장된 기본 손익비를 계산기 익절/손절칸 초기값으로 로드(재시작해도 유지).
+      if (s.defaultTpPct) setTpPct(String(s.defaultTpPct));
+      if (s.defaultSlPct) setSlPct(String(s.defaultSlPct));
+      setDefForm({ tp: String(s.defaultTpPct ?? 2), sl: String(s.defaultSlPct ?? 10) });
       // [v0.3.0] 실서버면 켜자마자 상단 바(예수금·손익)와 기본 종목 시세를 자동 로드한다.
       if (s.mode === "live") {
         void loadAccount();
@@ -1117,6 +1123,24 @@ ${msg}
     setTimeout(() => setSavedMsg(""), 4000);
     // 시드가 바뀌었으니 제안 수량도 즉시 갱신
     if (curPrice != null) void refreshCapacity(curPrice);
+  }
+
+  /** [v0.8.3] 기본 손익비 저장 + 계산기 익절/손절칸에 즉시 반영. */
+  async function saveDefaults() {
+    const tp = toNum(defForm.tp);
+    const sl = toNum(defForm.sl);
+    if (tp === null || tp <= 0 || sl === null || sl <= 0) {
+      setSavedMsg("⚠️ 기본 익절/손절 %를 0보다 큰 숫자로 입력하세요.");
+      setTimeout(() => setSavedMsg(""), 4000);
+      return;
+    }
+    const s = await window.kyletool.saveDefaultRatio({ tpPct: tp, slPct: sl });
+    setSettings(s);
+    // 지금 계산기 입력칸에도 바로 반영(그때그때 수정은 여전히 가능)
+    setTpPct(String(s.defaultTpPct));
+    setSlPct(String(s.defaultSlPct));
+    setSavedMsg(`기본 손익비 저장됨 — 익절 ${s.defaultTpPct}% / 손절 ${s.defaultSlPct}%`);
+    setTimeout(() => setSavedMsg(""), 4000);
   }
 
   /** [v0.8.1] 로그인 상태 새로고침. */
@@ -2208,6 +2232,25 @@ ${msg}
                 />
                 <b>주문 확인 팝업 건너뛰기</b> — 버튼을 누르면 바로 전송(오발주 위험 ↑)
               </label>
+            </div>
+
+            {/* [v0.8.3] 기본 손익비 설정 */}
+            <div className="settings-block">
+              <h3>기본 손익비 (익절% / 손절%)</h3>
+              <p className="hint">
+                계산기 <b>익절%·손절% 칸의 시작값</b>을 정해 둡니다. 앱을 껐다 켜거나 종목을 바꿔도 이 값이 유지됩니다
+                (계산할 때 그때그때 수정은 여전히 가능). 현재 기본값: <b>익절 {settings.defaultTpPct ?? 2}% / 손절 {settings.defaultSlPct ?? 10}%</b>
+              </p>
+              <div className="form-row">
+                <label>기본 익절 %
+                  <input type="text" inputMode="decimal" value={defForm.tp} onChange={(e) => isNumericDraft(e.target.value) && setDefForm({ ...defForm, tp: e.target.value })} placeholder="예: 2" />
+                </label>
+                <label>기본 손절 %
+                  <input type="text" inputMode="decimal" value={defForm.sl} onChange={(e) => isNumericDraft(e.target.value) && setDefForm({ ...defForm, sl: e.target.value })} placeholder="예: 10" />
+                </label>
+                <button className="btn btn-start" onClick={saveDefaults}>기본 손익비 저장</button>
+              </div>
+              <p className="hint small">공장 초기값은 익절 2% / 손절 10%입니다. 소수점(예: 2.5) 입력 가능, 0 이하는 저장되지 않습니다.</p>
             </div>
 
             {/* [v0.3.0] 세션별 시드 비율 설정 */}

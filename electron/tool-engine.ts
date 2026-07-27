@@ -587,6 +587,10 @@ export class ToolEngine extends EventEmitter {
   private seedBasis: "auto" | "fixed" = "auto";
   private seedFixedUsd: number | null = null;
 
+  // [v0.8.3] 기본 손익비(익절%/손절%). 공장 초기값 2/10. 사용자가 저장하면 그 값을 계산기 초기값으로 쓴다.
+  private defaultTpPct = 2;
+  private defaultSlPct = 10;
+
   // [v0.8.1] 로그인 세션(Supabase Auth). refresh 토큰만 로컬 저장, access 는 메모리+필요시 갱신.
   private authAccessToken: string | null = null;
   private authRefreshToken: string | null = null;
@@ -655,6 +659,11 @@ export class ToolEngine extends EventEmitter {
     if (process.env.SEED_BASIS === "fixed") this.seedBasis = "fixed";
     const sf = Number(process.env.SEED_FIXED_USD);
     if (Number.isFinite(sf) && sf > 0) this.seedFixedUsd = sf;
+    // [v0.8.3] 저장된 기본 손익비 복원(있으면 공장값 2/10 대신 사용).
+    const dtp = Number(process.env.DEFAULT_TP_PCT);
+    if (Number.isFinite(dtp) && dtp > 0) this.defaultTpPct = dtp;
+    const dsl = Number(process.env.DEFAULT_SL_PCT);
+    if (Number.isFinite(dsl) && dsl > 0) this.defaultSlPct = dsl;
     // [v0.8.1] 저장된 로그인 세션 복원(리프레시 토큰만). access token 은 필요 시 갱신한다.
     if (process.env.CAPRI_AUTH_REFRESH) this.authRefreshToken = process.env.CAPRI_AUTH_REFRESH;
     if (process.env.CAPRI_AUTH_EMAIL) this.authEmail = process.env.CAPRI_AUTH_EMAIL;
@@ -676,7 +685,22 @@ export class ToolEngine extends EventEmitter {
       seedRegularPct: this.seedRegularPct,
       seedBasis: this.seedBasis,
       seedFixedUsd: this.seedFixedUsd,
+      // [v0.8.3] 기본 손익비
+      defaultTpPct: this.defaultTpPct,
+      defaultSlPct: this.defaultSlPct,
     };
+  }
+
+  /**
+   * [v0.8.3] 기본 손익비(익절%/손절%) 저장. 계산기 초기값으로 쓰인다.
+   *   0 이하·비정상 값은 무시(공장값/이전값 유지). 저장 후 최신 설정을 돌려준다.
+   */
+  saveDefaultRatio(input: { tpPct?: number; slPct?: number }) {
+    if (typeof input.tpPct === "number" && Number.isFinite(input.tpPct) && input.tpPct > 0) this.defaultTpPct = input.tpPct;
+    if (typeof input.slPct === "number" && Number.isFinite(input.slPct) && input.slPct > 0) this.defaultSlPct = input.slPct;
+    this.persistEnv();
+    this.addJournal({ kind: "info", symbol: "-", summary: `기본 손익비 저장 — 익절 ${this.defaultTpPct}% / 손절 ${this.defaultSlPct}%` });
+    return this.getSettings();
   }
 
   /**
@@ -706,6 +730,9 @@ export class ToolEngine extends EventEmitter {
       `SEED_REGULAR_PCT=${this.seedRegularPct}`,
       `SEED_BASIS=${this.seedBasis}`,
       `SEED_FIXED_USD=${this.seedFixedUsd ?? ""}`,
+      // --- [v0.8.3] 기본 손익비 ---
+      `DEFAULT_TP_PCT=${this.defaultTpPct}`,
+      `DEFAULT_SL_PCT=${this.defaultSlPct}`,
       // --- [v0.8.1] 로그인 세션(리프레시 토큰만 로컬 저장 → 재시작해도 로그인 유지). 비밀번호·마스터 비번은 저장 안 함. ---
       `CAPRI_AUTH_REFRESH=${this.authRefreshToken ?? ""}`,
       `CAPRI_AUTH_EMAIL=${this.authEmail ?? ""}`,

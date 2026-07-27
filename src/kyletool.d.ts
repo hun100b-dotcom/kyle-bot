@@ -54,6 +54,9 @@ interface ToolSettings {
   seedRegularPct: number;
   seedBasis: "auto" | "fixed";
   seedFixedUsd: number | null;
+  // [v0.8.3] 기본 손익비
+  defaultTpPct: number;
+  defaultSlPct: number;
 }
 
 /** [v0.3.0] orderCapacity(capacity) 응답 — 주문가능/보유 + 세션 시드 제안 */
@@ -344,6 +347,7 @@ interface KyletoolBridge {
   journal(): Promise<JournalEntry[]>;
   getSettings(): Promise<ToolSettings>;
   saveSettings(input: { mode: "mock" | "live"; clientId?: string; clientSecret?: string; account?: string }): Promise<ToolSettings>;
+  saveDefaultRatio(input: { tpPct?: number; slPct?: number }): Promise<ToolSettings>;
   saveSeedSettings(input: {
     seedDayPct?: number;
     seedPrePct?: number;

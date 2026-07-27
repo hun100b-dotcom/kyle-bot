@@ -151,6 +151,7 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:settings:get", () => e.getSettings());
   ipcMain.handle("tool:settings:save", (_ev, input) => e.saveSettings(input));
   ipcMain.handle("tool:settings:seed", (_ev, input) => e.saveSeedSettings(input)); // [v0.3.0] 세션 시드 설정
+  ipcMain.handle("tool:settings:defaults", (_ev, input) => e.saveDefaultRatio(input)); // [v0.8.3] 기본 손익비
   ipcMain.handle("tool:sync:push", (_ev, passphrase) => e.syncPushKeys(passphrase)); // [v0.8.0] 키 클라우드 저장(암호문)
   ipcMain.handle("tool:sync:pull", (_ev, passphrase) => e.syncPullKeys(passphrase)); // [v0.8.0] 키 클라우드 불러오기
   ipcMain.handle("tool:auth:signup", (_ev, email, pw) => e.authSignUp(email, pw)); // [v0.8.1] 회원가입
