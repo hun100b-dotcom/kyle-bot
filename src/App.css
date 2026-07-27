@@ -459,3 +459,8 @@ ul.hint { padding-left: 18px; }
 .mode-mock { background: #23324a; color: #cfe0ff; }
 .mode-dryrun { background: #3a2e12; color: #ffcf7a; }
 .mode-real { background: #3a2020; color: #ff9d9d; }
+
+/* ===== [v0.8.1] 로그인/동기화 단계 박스 ===== */
+.step-box { border: 1px solid #2a2f3a; border-radius: 8px; padding: 10px 12px; margin: 8px 0; background: #141821; }
+.step-title { font-weight: 700; font-size: 13px; color: #cfd6e2; margin-bottom: 6px; }
+.step-disabled { opacity: 0.5; }

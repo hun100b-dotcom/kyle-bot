@@ -353,6 +353,10 @@ interface KyletoolBridge {
   }): Promise<ToolSettings>;
   syncPushKeys(passphrase: string): Promise<{ ok: boolean; message: string }>;
   syncPullKeys(passphrase: string): Promise<{ ok: boolean; message: string }>;
+  authSignUp(email: string, password: string): Promise<{ ok: boolean; needsConfirm: boolean; message: string }>;
+  authSignIn(email: string, password: string): Promise<{ ok: boolean; message: string }>;
+  authSignOut(): Promise<{ ok: boolean }>;
+  authStatus(): Promise<{ email: string | null; loggedIn: boolean }>;
   setKillSwitch(on: boolean): Promise<void>;
   setLiveOrders(on: boolean): Promise<void>;
   setPriceGuard(on: boolean, pct?: number): Promise<void>;

@@ -18,6 +18,10 @@ contextBridge.exposeInMainWorld("kyletool", {
   saveSeedSettings: (input) => ipcRenderer.invoke("tool:settings:seed", input), // [v0.3.0]
   syncPushKeys: (passphrase) => ipcRenderer.invoke("tool:sync:push", passphrase), // [v0.8.0]
   syncPullKeys: (passphrase) => ipcRenderer.invoke("tool:sync:pull", passphrase), // [v0.8.0]
+  authSignUp: (email, pw) => ipcRenderer.invoke("tool:auth:signup", email, pw), // [v0.8.1]
+  authSignIn: (email, pw) => ipcRenderer.invoke("tool:auth:signin", email, pw),
+  authSignOut: () => ipcRenderer.invoke("tool:auth:signout"),
+  authStatus: () => ipcRenderer.invoke("tool:auth:status"),
   setKillSwitch: (on) => ipcRenderer.invoke("tool:killSwitch", on),
   setLiveOrders: (on) => ipcRenderer.invoke("tool:liveOrders", on),
   setPriceGuard: (on, pct) => ipcRenderer.invoke("tool:priceGuard", on, pct),

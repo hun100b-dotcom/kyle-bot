@@ -22,7 +22,7 @@ import { join } from "node:path";
 import { DateTime } from "luxon";
 import { getSession, getSessionStart, isOrderFrozen, type Session } from "../lib/session";
 import { calcSplit3, calcOrderbook, calcCandle, roundPrice, getTick, type SplitOrder } from "../lib/calc";
-import { encryptSecret, decryptSecret, deriveSyncId } from "../lib/keysync"; // [v0.8.0] 키 기기 간 동기화(클라이언트 암호화)
+import { encryptSecret, decryptSecret } from "../lib/keysync"; // [v0.8.0] 키 기기 간 동기화(클라이언트 암호화)
 import { strengthFromTicks, type Side } from "../lib/strength";
 import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, type Candle, type SessionPattern } from "../lib/indicators";
 import {
@@ -587,6 +587,13 @@ export class ToolEngine extends EventEmitter {
   private seedBasis: "auto" | "fixed" = "auto";
   private seedFixedUsd: number | null = null;
 
+  // [v0.8.1] 로그인 세션(Supabase Auth). refresh 토큰만 로컬 저장, access 는 메모리+필요시 갱신.
+  private authAccessToken: string | null = null;
+  private authRefreshToken: string | null = null;
+  private authEmail: string | null = null;
+  private authUserId: string | null = null;
+  private authExpiresAtMs = 0;
+
   private mock: ReturnType<typeof createMockTossServer> | null = null;
   private mockPort = 0;
 
@@ -648,6 +655,9 @@ export class ToolEngine extends EventEmitter {
     if (process.env.SEED_BASIS === "fixed") this.seedBasis = "fixed";
     const sf = Number(process.env.SEED_FIXED_USD);
     if (Number.isFinite(sf) && sf > 0) this.seedFixedUsd = sf;
+    // [v0.8.1] 저장된 로그인 세션 복원(리프레시 토큰만). access token 은 필요 시 갱신한다.
+    if (process.env.CAPRI_AUTH_REFRESH) this.authRefreshToken = process.env.CAPRI_AUTH_REFRESH;
+    if (process.env.CAPRI_AUTH_EMAIL) this.authEmail = process.env.CAPRI_AUTH_EMAIL;
   }
 
   getSettings() {
@@ -696,6 +706,9 @@ export class ToolEngine extends EventEmitter {
       `SEED_REGULAR_PCT=${this.seedRegularPct}`,
       `SEED_BASIS=${this.seedBasis}`,
       `SEED_FIXED_USD=${this.seedFixedUsd ?? ""}`,
+      // --- [v0.8.1] 로그인 세션(리프레시 토큰만 로컬 저장 → 재시작해도 로그인 유지). 비밀번호·마스터 비번은 저장 안 함. ---
+      `CAPRI_AUTH_REFRESH=${this.authRefreshToken ?? ""}`,
+      `CAPRI_AUTH_EMAIL=${this.authEmail ?? ""}`,
       "",
     ].join("\n");
     // 환경변수에도 반영(다음 loadEnv 없이도 일관되게)
@@ -797,66 +810,164 @@ export class ToolEngine extends EventEmitter {
   // --------------------------------------------------------------------------
   //  아래 두 값은 "공개용(publishable) anon 키/URL"이라 앱에 넣어도 안전하다.
   //  (실제 보호는 RLS + 클라이언트 암호화가 한다. 토스 실키와는 무관하다.)
-  private static readonly SUPABASE_URL = "https://hmjxrqhcwjyfkvlcejfc.supabase.co";
+  //  [v0.8.1] 카프리 '전용' Supabase 프로젝트(CATCH·워크머니와 분리 — auth·데이터 완전 격리).
+  private static readonly SUPABASE_URL = "https://fauieykjxdfkngwvfoky.supabase.co";
   private static readonly SUPABASE_ANON =
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhtanhycWhjd2p5Zmt2bGNlamZjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMwNTEwNTMsImV4cCI6MjA4ODYyNzA1M30.gr9poC-5808qHRoYc-5WH3dTqXupEEJpDdztv2fddog";
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZhdWlleWtqeGRma25nd3Zmb2t5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUxNDY0NDIsImV4cCI6MjEwMDcyMjQ0Mn0.Wq9jnoKGO5CbRbDfzYKrZCaV3RD4zjZCdBgQJLQrqRI";
 
-  private supabaseHeaders(): Record<string, string> {
-    return {
-      apikey: ToolEngine.SUPABASE_ANON,
-      Authorization: `Bearer ${ToolEngine.SUPABASE_ANON}`,
-      "Content-Type": "application/json",
-    };
+  // ---- 로그인(Supabase Auth) — 사람마다 자기 계정, 키는 계정별로 격리 ----
+
+  /** [v0.8.1] 회원가입. 이 프로젝트는 이메일 확인이 켜져 있어, 가입 후 메일 링크 클릭이 필요하다. */
+  async authSignUp(email: string, password: string): Promise<{ ok: boolean; needsConfirm: boolean; message: string }> {
+    try {
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/auth/v1/signup`, {
+        method: "POST",
+        headers: { apikey: ToolEngine.SUPABASE_ANON, "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim(), password }),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok) {
+        const msg = String(data.msg ?? data.error_description ?? data.error ?? `가입 실패(HTTP ${res.status})`);
+        return { ok: false, needsConfirm: false, message: msg };
+      }
+      // access_token 이 바로 오면 확인 불필요(자동확인), 아니면 이메일 확인 필요.
+      if (data.access_token) {
+        this.applySession(data);
+        return { ok: true, needsConfirm: false, message: "가입·로그인 완료되었습니다." };
+      }
+      return {
+        ok: true,
+        needsConfirm: true,
+        message: `가입 요청됨. ${email} 로 보낸 확인 메일의 링크를 클릭한 뒤 [로그인] 하세요.`,
+      };
+    } catch (e) {
+      return { ok: false, needsConfirm: false, message: String(e).replace(/^Error:\s*/, "") };
+    }
+  }
+
+  /** [v0.8.1] 로그인(이메일+비밀번호). 성공 시 세션 저장(재시작해도 유지). */
+  async authSignIn(email: string, password: string): Promise<{ ok: boolean; message: string }> {
+    try {
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+        method: "POST",
+        headers: { apikey: ToolEngine.SUPABASE_ANON, "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim(), password }),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok || !data.access_token) {
+        let msg = String(data.error_description ?? data.msg ?? `로그인 실패(HTTP ${res.status})`);
+        if (/email not confirmed/i.test(msg)) msg = "이메일 확인이 아직 안 됐습니다. 가입 시 받은 메일의 링크를 클릭한 뒤 다시 로그인하세요.";
+        return { ok: false, message: msg };
+      }
+      this.applySession(data);
+      this.persistEnv(); // refresh 토큰·이메일 저장(재시작 후에도 로그인 유지)
+      return { ok: true, message: `로그인되었습니다(${this.authEmail}).` };
+    } catch (e) {
+      return { ok: false, message: String(e).replace(/^Error:\s*/, "") };
+    }
+  }
+
+  /** 로그아웃 — 세션 지우고 저장에서도 제거(토스 키/설정은 그대로 남는다). */
+  authSignOut(): { ok: boolean } {
+    this.authAccessToken = null;
+    this.authRefreshToken = null;
+    this.authEmail = null;
+    this.authUserId = null;
+    this.authExpiresAtMs = 0;
+    this.persistEnv();
+    return { ok: true };
+  }
+
+  /** 로그인 상태(화면 표시용). */
+  authStatus(): { email: string | null; loggedIn: boolean } {
+    return { email: this.authEmail, loggedIn: !!(this.authAccessToken || this.authRefreshToken) };
+  }
+
+  /** 토큰 응답을 세션 상태로 반영. */
+  private applySession(data: Record<string, unknown>): void {
+    this.authAccessToken = String(data.access_token);
+    if (data.refresh_token) this.authRefreshToken = String(data.refresh_token);
+    const expiresIn = Number(data.expires_in ?? 3600);
+    this.authExpiresAtMs = Date.now() + expiresIn * 1000;
+    const user = data.user as Record<string, unknown> | undefined;
+    if (user?.id) this.authUserId = String(user.id);
+    if (user?.email) this.authEmail = String(user.email);
+  }
+
+  /** 유효한 access token 확보(만료 임박이면 refresh 로 갱신). 없으면 null(로그인 필요). */
+  private async ensureAccessToken(): Promise<string | null> {
+    if (this.authAccessToken && Date.now() < this.authExpiresAtMs - 60_000) return this.authAccessToken;
+    if (!this.authRefreshToken) return null;
+    try {
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+        method: "POST",
+        headers: { apikey: ToolEngine.SUPABASE_ANON, "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: this.authRefreshToken }),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok || !data.access_token) return null;
+      this.applySession(data);
+      this.persistEnv(); // 새 refresh 토큰 저장
+      return this.authAccessToken;
+    } catch {
+      return null;
+    }
+  }
+
+  /** RLS 보호 REST 호출용 헤더(로그인 유저의 JWT). auth.uid()=이 유저 → 본인 행만 접근. */
+  private authRestHeaders(token: string): Record<string, string> {
+    return { apikey: ToolEngine.SUPABASE_ANON, Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
   }
 
   /**
-   * [v0.8.0] 지금 이 기기의 토스 키를 마스터 비밀번호로 암호화해 클라우드에 올린다(다른 기기가 받도록).
-   *   ❌ 주문과 무관한 저장 작업이다. 평문은 올라가지 않는다.
+   * [v0.8.1] 지금 이 기기의 토스 키를 마스터 비밀번호로 암호화해 '내 계정' 행에 저장.
+   *   RLS가 user_id=본인만 허용하므로 다른 사람은 절대 못 본다. 평문은 올라가지 않는다.
    */
   async syncPushKeys(passphrase: string): Promise<{ ok: boolean; message: string }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요(설정 탭 상단). 로그인해야 내 계정에 키를 저장할 수 있어요." };
     const clientId = process.env.TOSS_CLIENT_ID ?? "";
     const clientSecret = process.env.TOSS_CLIENT_SECRET ?? "";
     const account = process.env.TOSS_ACCOUNT ?? "";
-    if (!clientId || !clientSecret) {
-      return { ok: false, message: "먼저 [설정]에서 Client ID/Secret을 입력·저장한 뒤 동기화하세요." };
-    }
+    if (!clientId || !clientSecret) return { ok: false, message: "먼저 [설정]에서 Client ID/Secret을 입력·저장한 뒤 동기화하세요." };
     try {
       const rec = await encryptSecret({ clientId, clientSecret, account }, passphrase);
-      // upsert: 같은 sync_id면 갱신, 없으면 삽입 (PostgREST merge-duplicates)
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_secrets?on_conflict=sync_id`, {
+      // upsert: 내 user_id 행이 있으면 갱신, 없으면 삽입. user_id 는 JWT의 것으로 명시(RLS with_check 통과).
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_secrets?on_conflict=user_id`, {
         method: "POST",
-        headers: { ...this.supabaseHeaders(), Prefer: "resolution=merge-duplicates,return=minimal" },
-        body: JSON.stringify({ sync_id: rec.syncId, ciphertext: rec.ciphertext, salt: rec.salt, iv: rec.iv, updated_at: new Date().toISOString() }),
+        headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({ user_id: this.authUserId, ciphertext: rec.ciphertext, salt: rec.salt, iv: rec.iv, updated_at: new Date().toISOString() }),
       });
-      if (!res.ok) return { ok: false, message: `클라우드 저장 실패(HTTP ${res.status}). 잠시 후 다시 시도하세요.` };
-      this.addJournal({ kind: "info", symbol: "-", summary: "🔐 토스 키를 암호화해 클라우드에 저장(다른 기기에서 같은 비밀번호로 불러올 수 있음)" });
-      return { ok: true, message: "클라우드에 암호화 저장했습니다. 다른 기기에서 같은 마스터 비밀번호로 [불러오기] 하세요." };
+      if (!res.ok) return { ok: false, message: `클라우드 저장 실패(HTTP ${res.status}). ${await res.text().catch(() => "")}`.slice(0, 160) };
+      this.addJournal({ kind: "info", symbol: "-", summary: "🔐 내 토스 키를 암호화해 클라우드(내 계정)에 저장" });
+      return { ok: true, message: "내 계정에 암호화 저장했습니다. 다른 기기에서 같은 계정 로그인 + 같은 마스터 비밀번호로 [불러오기] 하세요." };
     } catch (e) {
       return { ok: false, message: String(e).replace(/^Error:\s*/, "") };
     }
   }
 
   /**
-   * [v0.8.0] 클라우드에서 암호문을 받아 마스터 비밀번호로 복호화해 이 기기에 적용한다.
-   *   복호화 성공 시 saveSettings로 로컬 .env에도 저장하고 토큰을 재발급한다(즉시 사용 가능).
+   * [v0.8.1] 내 계정의 암호문을 받아 마스터 비밀번호로 복호화해 이 기기에 적용.
+   *   복호화 성공 시 로컬 .env에도 저장하고 토큰을 재발급한다(즉시 사용 가능).
    */
   async syncPullKeys(passphrase: string): Promise<{ ok: boolean; message: string }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요(설정 탭 상단)." };
     try {
-      const syncId = await deriveSyncId(passphrase);
-      const url = `${ToolEngine.SUPABASE_URL}/rest/v1/capri_secrets?sync_id=eq.${encodeURIComponent(syncId)}&select=ciphertext,salt,iv`;
-      const res = await fetch(url, { headers: this.supabaseHeaders() });
+      // RLS 덕분에 select 는 자동으로 '내 행'만 돌려준다(user_id 조건 불필요).
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_secrets?select=ciphertext,salt,iv`, {
+        headers: this.authRestHeaders(token),
+      });
       if (!res.ok) return { ok: false, message: `클라우드 조회 실패(HTTP ${res.status}).` };
       const rows = (await res.json()) as Array<{ ciphertext: string; salt: string; iv: string }>;
       if (!rows || rows.length === 0) {
-        return { ok: false, message: "이 마스터 비밀번호로 저장된 키가 없습니다. 다른 기기에서 먼저 [클라우드에 저장]했는지, 비밀번호가 맞는지 확인하세요." };
+        return { ok: false, message: "내 계정에 저장된 키가 없습니다. 키가 있는 기기에서 먼저 [클라우드에 저장]하세요." };
       }
       const payload = await decryptSecret(rows[0], passphrase); // 틀린 비번이면 여기서 실패
-      // 복호화된 키를 이 기기에 적용·저장(로컬 .env). 토큰 캐시도 자동 갱신됨.
       await this.saveSettings({ mode: "live", clientId: payload.clientId, clientSecret: payload.clientSecret, account: payload.account });
-      this.addJournal({ kind: "info", symbol: "-", summary: "🔓 클라우드에서 토스 키를 복호화해 이 기기에 적용(재입력 불필요)" });
-      return { ok: true, message: "클라우드에서 키를 불러와 적용했습니다. 이제 이 기기에서 바로 조회·주문이 됩니다." };
+      this.addJournal({ kind: "info", symbol: "-", summary: "🔓 클라우드(내 계정)에서 토스 키를 복호화해 이 기기에 적용" });
+      return { ok: true, message: "내 계정에서 키를 불러와 적용했습니다. 이제 이 기기에서 바로 조회·주문이 됩니다." };
     } catch (e) {
-      // decryptSecret 실패(비번 오류) 등은 여기로
       return { ok: false, message: String(e).replace(/^Error:\s*/, "") };
     }
   }

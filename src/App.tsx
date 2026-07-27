@@ -329,6 +329,11 @@ function App() {
   const [syncPass, setSyncPass] = useState("");
   const [syncMsg, setSyncMsg] = useState("");
   const [syncBusy, setSyncBusy] = useState(false);
+  // [v0.8.1] 로그인(멀티유저). 이메일/비번은 화면에서만, 서버 인증 후 세션은 엔진이 보관.
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPw, setAuthPw] = useState("");
+  const [authState, setAuthState] = useState<{ email: string | null; loggedIn: boolean }>({ email: null, loggedIn: false });
+  const [authMsg, setAuthMsg] = useState("");
   // [v0.3.0] 세션별 시드 비율 설정 입력칸(설정 탭). 문자열 보관(입력 중 뭉개짐 방지).
   const [seedForm, setSeedForm] = useState<{ day: string; pre: string; regular: string; basis: "auto" | "fixed"; fixed: string }>({
     day: "90",
@@ -382,6 +387,7 @@ function App() {
       }
     });
     window.kyletool.appVersion?.().then(setAppVer).catch(() => {});
+    window.kyletool.authStatus?.().then(setAuthState).catch(() => {}); // [v0.8.1] 로그인 상태 복원
     const off = window.kyletool.onJournal((e) => setJournal((prev) => [...prev.slice(-99), e]));
     // [v0.5.0] 체결강도 실시간 갱신: 지금 화면에서 보고 있는 종목의 이벤트만 반영.
     const offStr = window.kyletool.onStrength?.((state) => {
@@ -1111,6 +1117,38 @@ ${msg}
     setTimeout(() => setSavedMsg(""), 4000);
     // 시드가 바뀌었으니 제안 수량도 즉시 갱신
     if (curPrice != null) void refreshCapacity(curPrice);
+  }
+
+  /** [v0.8.1] 로그인 상태 새로고침. */
+  async function refreshAuth() {
+    try {
+      setAuthState(await window.kyletool.authStatus());
+    } catch {
+      /* 무시 */
+    }
+  }
+  async function doSignIn() {
+    if (!authEmail || !authPw) { setAuthMsg("⚠️ 이메일과 비밀번호를 입력하세요."); return; }
+    setSyncBusy(true); setAuthMsg("로그인 중…");
+    try {
+      const r = await window.kyletool.authSignIn(authEmail, authPw);
+      setAuthMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      if (r.ok) { setAuthPw(""); await refreshAuth(); }
+    } finally { setSyncBusy(false); }
+  }
+  async function doSignUp() {
+    if (!authEmail || authPw.length < 6) { setAuthMsg("⚠️ 이메일과 6자 이상 비밀번호를 입력하세요."); return; }
+    setSyncBusy(true); setAuthMsg("가입 요청 중…");
+    try {
+      const r = await window.kyletool.authSignUp(authEmail, authPw);
+      setAuthMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      if (r.ok && !r.needsConfirm) { setAuthPw(""); await refreshAuth(); }
+    } finally { setSyncBusy(false); }
+  }
+  async function doSignOut() {
+    await window.kyletool.authSignOut();
+    setAuthMsg(""); setSyncMsg("");
+    await refreshAuth();
   }
 
   /** [v0.8.0] 이 기기 키를 마스터 비밀번호로 암호화해 클라우드에 저장. */
@@ -2247,29 +2285,66 @@ ${msg}
               {savedMsg && <span className="ok">{savedMsg}</span>}
             </div>
 
-            {/* [v0.8.0] 키 클라우드 동기화 — 한 번만 넣으면 맥·윈도우 둘 다 사용 */}
+            {/* [v0.8.1] 키 클라우드 동기화 (멀티유저) — 로그인 → 키+마스터비번 → 완료 */}
             <div className="settings-block">
-              <h3>🔐 키 클라우드 동기화 (맥 ↔ 윈도우)</h3>
+              <h3>🔐 키 클라우드 동기화 (여러 기기 · 사용자별 격리)</h3>
               <p className="hint">
-                토스 키를 <b>한 곳에 안전하게 저장</b>해 두 기기가 함께 씁니다. 오너만 아는 <b>마스터 비밀번호</b>로
-                <b> 암호화</b>해 올리므로, 클라우드에는 <b>암호문만</b> 저장됩니다(평문 키는 절대 안 올라감). 비밀번호는
-                <b> 저장하지 않고</b> 매번 입력합니다.
+                <b>사람마다 자기 계정</b>에 <b>자기 토스 키</b>를 두고, 자기 기기들끼리만 공유합니다. 다른 사람의 키는
+                서로 <b>절대 볼 수 없습니다</b>. 키는 <b>마스터 비밀번호로 암호화</b>돼 <b>암호문만</b> 올라가므로,
+                운영자조차 남의 평문 키를 못 봅니다.
               </p>
-              <div className="form-row">
-                <label style={{ flex: 1 }}>
-                  마스터 비밀번호(6자 이상)
-                  <input type="password" value={syncPass} onChange={(e) => setSyncPass(e.target.value)} placeholder="오너만 아는 비밀번호" />
-                </label>
+
+              {/* STEP 1: 로그인 */}
+              <div className="step-box">
+                <div className="step-title">1단계 · 로그인</div>
+                {authState.loggedIn ? (
+                  <div className="form-row">
+                    <span className="ok">✅ 로그인됨: <b>{authState.email}</b></span>
+                    <button className="mini" disabled={syncBusy} onClick={doSignOut}>로그아웃</button>
+                  </div>
+                ) : (
+                  <>
+                    <div className="form-row">
+                      <label style={{ flex: 1 }}>이메일
+                        <input type="email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="you@example.com" />
+                      </label>
+                      <label style={{ flex: 1 }}>비밀번호(6자+)
+                        <input type="password" value={authPw} onChange={(e) => setAuthPw(e.target.value)} placeholder="계정 비밀번호" />
+                      </label>
+                    </div>
+                    <div className="form-row">
+                      <button className="btn btn-start" disabled={syncBusy} onClick={doSignIn}>로그인</button>
+                      <button className="btn" disabled={syncBusy} onClick={doSignUp}>가입(처음이면)</button>
+                      <span className="hint small">가입하면 확인 메일이 옵니다. 링크 클릭 후 로그인하세요.</span>
+                    </div>
+                  </>
+                )}
+                {authMsg && <p className={authMsg.startsWith("✅") ? "ok" : "hint"} style={{ whiteSpace: "pre-wrap" }}>{authMsg}</p>}
               </div>
-              <div className="form-row">
-                <button className="btn" disabled={syncBusy} onClick={doSyncPush}>① 이 기기 키를 클라우드에 저장(암호화)</button>
-                <button className="btn btn-start" disabled={syncBusy} onClick={doSyncPull}>② 클라우드에서 불러오기(다른 기기)</button>
+
+              {/* STEP 2: 키 + 마스터 비밀번호 (로그인 후에만) */}
+              <div className={`step-box ${authState.loggedIn ? "" : "step-disabled"}`}>
+                <div className="step-title">2단계 · 마스터 비밀번호로 키 저장/불러오기</div>
+                <p className="hint small">
+                  위 [토스 API 키]에 내 키를 저장해 둔 뒤, 마스터 비밀번호(암호화용, 로그인 비번과 별개)를 정해
+                  <b> ①로 클라우드에 저장</b>하세요. 다른 기기에선 같은 계정 로그인 + 같은 마스터 비밀번호로 <b>②만</b> 누르면 끝.
+                </p>
+                <div className="form-row">
+                  <label style={{ flex: 1 }}>마스터 비밀번호(암호화용, 6자+)
+                    <input type="password" value={syncPass} onChange={(e) => setSyncPass(e.target.value)} placeholder="나만 아는 암호화 비밀번호" disabled={!authState.loggedIn} />
+                  </label>
+                </div>
+                <div className="form-row">
+                  <button className="btn" disabled={syncBusy || !authState.loggedIn} onClick={doSyncPush}>① 내 키를 클라우드에 저장(암호화)</button>
+                  <button className="btn btn-start" disabled={syncBusy || !authState.loggedIn} onClick={doSyncPull}>② 클라우드에서 불러오기</button>
+                </div>
+                {syncMsg && <p className={syncMsg.startsWith("✅") ? "ok" : "hint"} style={{ whiteSpace: "pre-wrap" }}>{syncMsg}</p>}
               </div>
-              {syncMsg && <p className={syncMsg.startsWith("✅") ? "ok" : "hint"} style={{ whiteSpace: "pre-wrap" }}>{syncMsg}</p>}
+
               <p className="hint small">
-                💡 처음 한 번: 키가 있는 기기에서 위 ①로 저장 → 다른 기기에서 같은 비밀번호로 ②만 누르면 끝. 이후 키를
-                재발급하면 그 기기에서 ①만 다시 누르면 다른 기기는 다음에 ②로 최신 키를 받습니다. (동기화를 안 쓰면
-                기존처럼 설정 저장으로 이 기기에만 저장됩니다.)
+                💡 <b>종훈(2기기)</b>: 맥에서 로그인+키+마스터비번 저장(①) → 윈도우에선 같은 계정 로그인 + 마스터비번으로 ②. 재발급 시 한 기기서 ①만.
+                <br />💡 <b>카일(신규)</b>: 설치 → 가입/로그인 → [토스 API 키]에 <b>자기 키</b> 입력·저장 → 마스터비번 정해 ① → 끝. 자기 다른 기기선 로그인+②.
+                <br />동기화를 안 쓰면 기존처럼 이 기기 로컬(.env)에만 저장됩니다.
               </p>
             </div>
           </section>
