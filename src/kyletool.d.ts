@@ -25,6 +25,9 @@ interface ToolStatus {
   skipOrderConfirm: boolean;
   killSwitch: boolean;
   session: "day" | "pre" | "regular" | "after" | "closed";
+  closedReason: string | null; // [v0.8.4] 휴장 사유(주말/공휴일 이름). 열려 있으면 null
+  earlyClose: string | null; //   [v0.8.4] 조기폐장일 이름(정규장 뉴욕 13:00 마감)
+  nextOpenNote: string | null; // [v0.8.4] 다음 개장 안내 문자열
   orderFrozen: boolean;
   clockNote: string;
   fxRate: number | null;

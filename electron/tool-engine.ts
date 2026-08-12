@@ -20,7 +20,7 @@ import { EventEmitter } from "node:events";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { DateTime } from "luxon";
-import { getSession, getSessionStart, isOrderFrozen, type Session } from "../lib/session";
+import { getSession, getSessionStart, getMarketStatus, isOrderFrozen, type Session } from "../lib/session";
 import { calcSplit3, calcOrderbook, calcCandle, roundPrice, getTick, type SplitOrder } from "../lib/calc";
 import { encryptSecret, decryptSecret } from "../lib/keysync"; // [v0.8.0] 키 기기 간 동기화(클라이언트 암호화)
 import { strengthFromTicks, type Side } from "../lib/strength";
@@ -94,6 +94,10 @@ export interface ToolStatus {
   skipOrderConfirm: boolean; // 주문 확인 팝업 건너뛰기
   killSwitch: boolean;
   session: Session; //       지금 장 세션(정보 표시용 — 주문을 막지는 않음)
+  // [v0.8.4] 휴장(주말·미국 공휴일) 안내 — 표시용이며 주문을 막지는 않는다.
+  closedReason: string | null; // 닫혀 있는 이유("주말(일요일)", "추수감사절", "장 시간 아님")
+  earlyClose: string | null; //   오늘이 조기폐장일이면 그 이름(정규장이 뉴욕 13:00 마감)
+  nextOpenNote: string | null; // 다음 개장 안내(예: "다음 개장 08-17(월) 09:00")
   orderFrozen: boolean; //   마감 1분 전 정정·취소 불가 구간 경고
   clockNote: string;
   fxRate: number | null; //  1 USD = ? KRW (토스 API, 1분 캐시)
@@ -1760,13 +1764,18 @@ export class ToolEngine extends EventEmitter {
   // --------------------------------------------------------------------------
   getStatus(): ToolStatus {
     const now = DateTime.now().setZone("Asia/Seoul");
+    const market = getMarketStatus(now); // [v0.8.4] 세션 + 휴장 사유 + 다음 개장
     return {
       mode: this.mode,
       dryRun: this.isDryRun(),
       liveOrdersEnabled: this.liveOrdersEnabled,
       skipOrderConfirm: this.skipOrderConfirm,
       killSwitch: this.killSwitch,
-      session: getSession(now),
+      session: market.session,
+      closedReason: market.closedReason,
+      earlyClose: market.earlyClose,
+      // 다음 개장은 "08-17(월) 09:00" 처럼 요일까지 붙여 사람이 바로 읽게 한다.
+      nextOpenNote: market.nextOpen ? `${market.nextOpen.setLocale("ko").toFormat("MM-dd(ccc) HH:mm")}` : null,
       orderFrozen: isOrderFrozen(now),
       clockNote: `${now.toFormat("MM-dd HH:mm")} KST`,
       fxRate: this.fxCache?.rate ?? null,

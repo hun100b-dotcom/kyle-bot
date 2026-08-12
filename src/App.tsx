@@ -1235,7 +1235,19 @@ ${msg}
               🔴 실주문 활성 — 실제 체결됩니다
             </span>
           )}
-          <span className="badge">{SESSION_LABEL[status.session]} · 3개 장 모두 주문 가능</span>
+          {/* [v0.8.4] 장 상태 배지 — 휴장(주말·미국 공휴일)이면 이유와 다음 개장까지 알려 준다.
+              (예전에는 시각만 보고 판정해서 일요일 새벽에도 "데이마켓"이라고 떴다) */}
+          {status.closedReason ? (
+            <span className="badge badge-dry">
+              휴장 — {status.closedReason}
+              {status.nextOpenNote && ` · 다음 개장 ${status.nextOpenNote}`}
+            </span>
+          ) : (
+            <span className="badge">
+              {SESSION_LABEL[status.session]} · 3개 장 모두 주문 가능
+              {status.earlyClose && ` · ⚠ 조기폐장(${status.earlyClose})`}
+            </span>
+          )}
           {status.orderFrozen && <span className="badge badge-dry">⚠ 마감 1분 전: 정정·취소 불가 구간</span>}
         </div>
         <div className="controls">
@@ -1313,8 +1325,11 @@ ${msg}
             </div>
             <div className="sb-item">
               <span className="sb-k">세션</span>
-              <b>{SESSION_LABEL[status.session]}</b>
-              {cap && <span className="hint"> · 시드 {cap.sessionPct}%</span>}
+              {/* [v0.8.4] 휴장일에는 세션 이름 대신 "휴장(사유)"를 보여 준다 */}
+              <b>{status.closedReason ? `휴장 · ${status.closedReason}` : SESSION_LABEL[status.session]}</b>
+              {status.closedReason
+                ? status.nextOpenNote && <span className="hint"> · 다음 개장 {status.nextOpenNote}</span>
+                : cap && <span className="hint"> · 시드 {cap.sessionPct}%</span>}
             </div>
             <button className="mini" disabled={busy} onClick={() => autoLoad(committedSymbol)} title="예수금·시세·수량 다시 불러오기">
               ↻ 새로고침

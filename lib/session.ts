@@ -20,6 +20,7 @@
 // =============================================================================
 
 import { DateTime } from "luxon";
+import { getHolidayInfo, isUsTradingDay } from "./holidays";
 
 /** 세션 종류 */
 export type Session = "day" | "pre" | "regular" | "after" | "closed";
@@ -43,6 +44,11 @@ const DAY_OPEN_HOURS = 8; // 데이마켓은 개장 후 8시간 동안 열림
 const PRE_END_HOURS = 13.5; // 프리마켓 종료(개장 +13.5h)
 const REGULAR_END_HOURS = 20; // 정규장 종료(개장 +20h = 다음날 05:00 서머)
 const AFTER_END_HOURS = 23 + 50 / 60; // 애프터 종료(개장 +23h50m = 08:50 서머)
+
+// [v0.8.4] 조기폐장일(추수감사절 다음날·크리스마스 이브 등)은 정규장이 뉴욕 13:00에 끝난다.
+//   개장 앵커(뉴욕 전날 20:00) 기준으로 13:00은 +17h, 애프터 마감 17:00은 +21h이다.
+const EARLY_REGULAR_END_HOURS = 17; // 조기폐장일 정규장 종료(뉴욕 13:00)
+const EARLY_AFTER_END_HOURS = 21; //  조기폐장일 애프터 종료(뉴욕 17:00)
 
 /**
  * getDayMarketOpen — 주어진 시각(d)이 속한 날짜의 "데이마켓 개장 시각"을 KST로 반환.
@@ -69,9 +75,9 @@ export function getDayMarketOpen(d: DateTime): DateTime {
   // 이 뉴욕 20:00을 KST로 변환 → 서머면 09:00, 겨울이면 10:00이 자동으로 나온다.
   return nyPrevEvening.setZone("Asia/Seoul");
 
-  // TODO(S2): 주말/미국 휴장일(공휴일)에는 장이 열리지 않는다.
-  //           이 함수는 "그날 장이 열린다면 몇 시인가"만 계산한다.
-  //           실제 개장 여부는 별도의 휴장일 캘린더로 판정해야 한다.
+  // [참고] 이 함수는 "그날 장이 열린다면 몇 시인가"만 계산한다.
+  //        실제 개장 여부(주말·공휴일)는 lib/holidays.ts 가 판정하고,
+  //        getSession/getMarketStatus 가 그 결과를 반영한다. [v0.8.4]
 }
 
 /** getScanTime — 종목 탐색(스캔) 시각 = 개장 +30분 */
@@ -125,19 +131,37 @@ export function isOrderFrozen(now: DateTime): boolean {
 }
 
 /**
+ * tradingDateOf — 개장 앵커(open)가 속한 "미국 거래일 날짜"를 돌려준다(내부용).
+ *
+ * [왜 필요한가?] 휴장일 판정은 반드시 '미국 날짜'로 해야 한다.
+ *   데이마켓 개장(뉴욕 전날 20:00)부터 애프터 마감까지 한 덩어리(한 사이클)는
+ *   **정규장이 열리는 그 미국 날짜** 하나에 속한다. 그리고 그 날짜는 계산해 보면
+ *   개장 앵커를 KST로 봤을 때의 날짜와 같다(개장 = KST 그날 아침 9시/10시).
+ *   예) KST 8/13 09:00 개장 → 뉴욕 8/12 20:00 → 정규장은 뉴욕 8/13 09:30 → 거래일 = 8/13.
+ */
+function tradingDateOf(open: DateTime): DateTime {
+  const kst = open.setZone("Asia/Seoul");
+  return DateTime.fromObject({ year: kst.year, month: kst.month, day: kst.day }, { zone: "America/New_York" });
+}
+
+/**
  * classifyByOffset — 특정 개장 앵커(open)를 기준으로 now가 어느 세션인지 판정(내부용).
  *   open으로부터 now까지 몇 시간 흘렀는지(offset)를 계산해 세션 표에 대입합니다.
  *   now가 open보다 이르거나(offset<0) 하루를 넘겼으면 이 앵커로는 'closed'.
+ *
+ * @param early 조기폐장일(오후 1시 마감)이면 true → 정규장·애프터 끝이 앞당겨진다.
  */
-function classifyByOffset(now: DateTime, open: DateTime): Session {
+function classifyByOffset(now: DateTime, open: DateTime, early = false): Session {
   const offset = now.diff(open, "hours").hours; // 개장 이후 흐른 시간(시간 단위, 소수 가능)
+  const regularEnd = early ? EARLY_REGULAR_END_HOURS : REGULAR_END_HOURS;
+  const afterEnd = early ? EARLY_AFTER_END_HOURS : AFTER_END_HOURS;
 
   if (offset < 0) return "closed"; // 아직 개장 전(이 앵커 기준)
   if (offset < DAY_OPEN_HOURS) return "day"; //     +0h ~ +8h
   if (offset < PRE_END_HOURS) return "pre"; //      +8h ~ +13.5h
-  if (offset < REGULAR_END_HOURS) return "regular"; // +13.5h ~ +20h
-  if (offset < AFTER_END_HOURS) return "after"; //  +20h ~ +23h50m
-  return "closed"; //                               +23h50m 이후(다음 개장 전)
+  if (offset < regularEnd) return "regular"; //     +13.5h ~ +20h(조기폐장 +17h)
+  if (offset < afterEnd) return "after"; //         ~ +23h50m(조기폐장 +21h)
+  return "closed"; //                               그 이후(다음 개장 전)
 }
 
 /**
@@ -148,22 +172,12 @@ function classifyByOffset(now: DateTime, open: DateTime): Session {
  *   예) KST 새벽 3시는 "어제 개장한 데이마켓의 정규장"입니다.
  *   그래서 오늘 개장과 어제 개장을 모두 후보로 놓고, now가 실제로 걸리는
  *   세션을 찾습니다. 어느 앵커에서도 'closed'면 최종 'closed'입니다.
+ *
+ * [v0.8.4] 주말·미국 공휴일이면 시각과 무관하게 'closed'.
+ *   그 앵커가 속한 미국 거래일이 휴장이면 아예 후보에서 제외합니다.
  */
 export function getSession(now: DateTime): Session {
-  const kst = now.setZone("Asia/Seoul");
-
-  const todayOpen = getDayMarketOpen(kst);
-  const yesterdayOpen = getDayMarketOpen(kst.minus({ days: 1 }));
-
-  for (const open of [todayOpen, yesterdayOpen]) {
-    const s = classifyByOffset(kst, open);
-    if (s !== "closed") return s;
-  }
-  return "closed";
-
-  // TODO(S2): 주말·미국 휴장일에는 실제로 장이 안 열린다. 이 함수는 시각만으로
-  //           세션 구간을 판정하므로, 휴장일이면 'closed'로 덮어쓰는 캘린더 검사를
-  //           앞단에 추가해야 한다. (겨울 상대시각/애프터 매매 여부도 S2에서 확정)
+  return getMarketStatus(now).session;
 }
 
 /**
@@ -172,19 +186,96 @@ export function getSession(now: DateTime): Session {
  *
  *   세션 시작 오프셋(개장 기준): 데이 +0h · 프리 +8h · 정규장 +13.5h · 애프터 +20h.
  *   getSession과 같은 앵커(오늘/어제 개장)를 보고, now가 걸린 세션의 '시작점'을 돌려준다.
+ *   [v0.8.4] 휴장일(주말·공휴일) 앵커는 건너뛴다.
  */
 export function getSessionStart(now: DateTime): DateTime | null {
   const kst = now.setZone("Asia/Seoul");
-  const todayOpen = getDayMarketOpen(kst);
-  const yesterdayOpen = getDayMarketOpen(kst.minus({ days: 1 }));
 
-  for (const open of [todayOpen, yesterdayOpen]) {
-    const offset = kst.diff(open, "hours").hours; // 개장 이후 흐른 시간(시간)
-    if (offset < 0) continue; //                     아직 개장 전(이 앵커는 미래)
-    if (offset < DAY_OPEN_HOURS) return open; //                                  데이 시작 = 개장
-    if (offset < PRE_END_HOURS) return open.plus({ hours: DAY_OPEN_HOURS }); //    프리 시작 = 개장+8h
-    if (offset < REGULAR_END_HOURS) return open.plus({ hours: PRE_END_HOURS }); // 정규장 시작 = 개장+13.5h
-    if (offset < AFTER_END_HOURS) return open.plus({ hours: REGULAR_END_HOURS }); // 애프터 시작 = 개장+20h
+  for (const open of [getDayMarketOpen(kst), getDayMarketOpen(kst.minus({ days: 1 }))]) {
+    const info = getHolidayInfo(tradingDateOf(open));
+    if (info.closed) continue; // 휴장일 사이클은 통째로 제외
+    const early = info.earlyClose !== null;
+    const s = classifyByOffset(kst, open, early);
+    if (s === "closed") continue;
+    if (s === "day") return open; //                                    데이 시작 = 개장
+    if (s === "pre") return open.plus({ hours: DAY_OPEN_HOURS }); //     프리 시작 = 개장+8h
+    if (s === "regular") return open.plus({ hours: PRE_END_HOURS }); //  정규장 시작 = 개장+13.5h
+    return open.plus({ hours: early ? EARLY_REGULAR_END_HOURS : REGULAR_END_HOURS }); // 애프터 시작
   }
   return null; // 어느 앵커에서도 세션에 안 걸림 = 장 닫힘
+}
+
+/** [v0.8.4] 지금 장 상태 한 묶음 — 화면 배지·안내 문구에 쓴다. */
+export interface MarketStatus {
+  /** 지금 세션(휴장이면 "closed") */
+  session: Session;
+  /** 이 사이클이 속한 미국 거래일(yyyy-MM-dd, 뉴욕 기준). 휴장이면 가장 가까운 후보 날짜 */
+  tradingDate: string;
+  /** 닫혀 있는 이유(예: "주말(일요일)", "추수감사절", "장 시간 아님"). 열려 있으면 null */
+  closedReason: string | null;
+  /** 오늘이 조기폐장일이면 그 이름(예: "크리스마스 이브"), 아니면 null */
+  earlyClose: string | null;
+  /** 다음 데이마켓 개장 시각(KST). 못 찾으면 null(정상적으로는 항상 찾음) */
+  nextOpen: DateTime | null;
+}
+
+/**
+ * getMarketStatus — "지금 장이 열렸나? 아니면 왜 닫혔나? 다음엔 언제 열리나?"를 한 번에.
+ *
+ * [왜 만들었나?]
+ *   예전에는 getSession이 시각만 보고 판정해서 **일요일 새벽에도 "데이마켓"**이라고 떴습니다.
+ *   사람이 그걸 믿고 종목을 준비하거나(헛수고), 세션별 시드 비율이 엉뚱하게 적용됐습니다.
+ *   이제는 휴장이면 그 이유(주말/공휴일 이름)와 다음 개장 시각까지 알려 줍니다.
+ */
+export function getMarketStatus(now: DateTime): MarketStatus {
+  const kst = now.setZone("Asia/Seoul");
+  const anchors = [getDayMarketOpen(kst), getDayMarketOpen(kst.minus({ days: 1 }))];
+
+  // 1) 열려 있는 사이클이 있는지 먼저 찾는다(오늘 개장 → 어제 개장 순).
+  for (const open of anchors) {
+    const info = getHolidayInfo(tradingDateOf(open));
+    if (info.closed) continue;
+    const s = classifyByOffset(kst, open, info.earlyClose !== null);
+    if (s !== "closed") {
+      return {
+        session: s,
+        tradingDate: tradingDateOf(open).toFormat("yyyy-MM-dd"),
+        closedReason: null,
+        earlyClose: info.earlyClose,
+        nextOpen: findNextOpen(kst),
+      };
+    }
+  }
+
+  // 2) 닫혀 있다 → 이유를 설명한다.
+  //    "지금 시각이 어느 사이클에 걸리기는 하는데 그 날이 휴장"이면 그 이름을,
+  //    아니면 단순히 장 시간이 아닌 것(예: KST 오후 = 미국 새벽)이다.
+  let reason = "장 시간 아님";
+  let tradingDate = tradingDateOf(anchors[0]).toFormat("yyyy-MM-dd");
+  for (const open of anchors) {
+    const info = getHolidayInfo(tradingDateOf(open));
+    // 이 앵커가 '열렸다면' 지금이 세션 구간이었을 경우에만 휴장 사유로 채택한다.
+    if (info.closed && classifyByOffset(kst, open, false) !== "closed") {
+      reason = info.closed;
+      tradingDate = tradingDateOf(open).toFormat("yyyy-MM-dd");
+      break;
+    }
+  }
+
+  return { session: "closed", tradingDate, closedReason: reason, earlyClose: null, nextOpen: findNextOpen(kst) };
+}
+
+/**
+ * findNextOpen — 지금 이후 가장 가까운 "데이마켓 개장 시각"(KST). 휴장일은 건너뛴다.
+ *   최대 10일까지만 앞을 본다(연휴가 아무리 길어도 그 안에는 열린다).
+ */
+export function findNextOpen(now: DateTime): DateTime | null {
+  const kst = now.setZone("Asia/Seoul");
+  for (let i = 0; i <= 10; i++) {
+    const open = getDayMarketOpen(kst.plus({ days: i }));
+    if (open <= kst) continue; //                       이미 지난 개장은 건너뛴다
+    if (!isUsTradingDay(tradingDateOf(open))) continue; // 휴장일은 건너뛴다
+    return open;
+  }
+  return null;
 }
