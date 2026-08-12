@@ -235,13 +235,24 @@ async function main() {
 
   // ③ 검증: 공개된 latest*.yml 을 다시 내려받아 로컬과 같은지 확인
   //    (이게 어긋나면 자동 업데이트가 조용히 안 뜬다 — 과거에 실제로 겪은 사고)
+  //
+  //    [주의] 방금 올린 직후에는 GitHub CDN이 **이전 파일을 잠깐 더 내려준다**(캐시).
+  //    그래서 한 번 다르다고 바로 실패로 보면 안 된다. 캐시 무력화 쿼리를 붙여 몇 번 다시 본다.
   for (const yml of ["latest.yml", "latest-mac.yml"]) {
     const local = join(RELEASE_DIR, yml);
     if (!existsSync(local)) continue;
-    const res = await fetch(`https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${yml}`, { redirect: "follow" });
-    const remote = await res.text();
-    const same = remote.trim() === readFileSync(local, "utf8").trim();
-    console.log(`검증 ${yml}: ${same ? "로컬과 동일 ✅" : "❌ 내용이 다름 — 확인 필요"}`);
+    const want = readFileSync(local, "utf8").trim();
+
+    let same = false;
+    for (let attempt = 1; attempt <= 6 && !same; attempt++) {
+      const res = await fetch(
+        `https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${yml}?cb=${attempt}-${process.pid}`,
+        { redirect: "follow", headers: { "Cache-Control": "no-cache" } },
+      );
+      same = (await res.text()).trim() === want;
+      if (!same && attempt < 6) await new Promise((r) => setTimeout(r, 3000)); // CDN 반영 대기
+    }
+    console.log(`검증 ${yml}: ${same ? "로컬과 동일 ✅" : "❌ 내용이 다름 — 릴리스 페이지에서 직접 확인 필요"}`);
     if (!same) process.exitCode = 1;
   }
 
