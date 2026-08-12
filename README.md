@@ -49,21 +49,48 @@ Capri매매기법 **계산기 + 토스 조건주문(OCO/OTO) 제출 도구**. �
 배포는 **바이너리 전용 공개 레포**([kyle-bot-releases](https://github.com/hun100b-dotcom/kyle-bot-releases))로 나갑니다.
 소스 레포(kyle-bot)는 private로 유지합니다.
 
-1. `package.json` 의 `version` 을 올린다 (예: `0.2.0` → `0.2.1`).
-2. GitHub 토큰을 환경변수로 설정한다 (이 PC는 자격증명 관리자에 저장돼 있음).
+1. `package.json` 의 `version` 을 올린다 (예: `0.8.3` → `0.8.4`).
+2. 빌드 + 배포 (**한 줄**):
    ```bash
-   export GH_TOKEN=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill | grep '^password=' | cut -d= -f2-)
+   npm run release:win     # 윈도우: .exe 빌드 → 릴리스 업로드
+   npm run release:mac     # 맥:   .dmg + .zip 빌드 → 릴리스 업로드 (맥에서만 가능)
    ```
-3. 빌드 + 배포:
-   ```bash
-   npm run release:win     # 윈도우 .exe 빌드 후 릴리스 업로드 (이 PC=윈도우)
-   npm run release:mac     # 맥 .dmg 빌드 후 릴리스 업로드 (맥에서 실행)
-   ```
-   → `kyle-bot-releases` 에 `vX.Y.Z` 릴리스 + `latest.yml`(자동 업데이트 피드)이 올라간다.
-4. 사용자 앱이 다음 실행 때 새 버전을 감지해 업데이트 팝업을 띄운다.
+3. 사용자 앱이 다음 실행 때 새 버전을 감지해 업데이트 팝업을 띄운다.
 
-- **로컬 빌드만**(배포 없이 설치파일만 확인): `npm run dist:win` / `npm run dist:mac` → `release/` 폴더.
-- ⚠️ 릴리스에 `latest.yml` 이 반드시 포함돼야 자동 업데이트가 작동한다(빠지면 수동 업로드).
+**토큰은 따로 설정하지 않아도 됩니다.** 배포 스크립트(`scripts/publish-release.mjs`)가
+`GH_TOKEN` → `gh auth token` → 저장된 git 자격증명 순서로 알아서 찾습니다.
+(어느 것도 없으면 `gh auth login` 한 번만 하면 됩니다.)
+
+- **빌드만**(배포 없이 설치파일만): `npm run dist:win` / `npm run dist:mac` → `release/` 폴더.
+- **이미 빌드된 걸 올리기만**: `npm run publish:release` (`--dry-run` 붙이면 올릴 목록만 확인).
+- **아이콘 다시 만들기**: `npm run icon` → `build/icon.png`(1024×1024). electron-builder가
+  윈도우 `.ico`·맥 `.icns` 로 자동 변환합니다. 외부 라이브러리 없이 순수 Node로 그립니다.
+
+### ⚠️ 자동 업데이트가 깨지는 3가지 함정 (실제로 겪은 사고)
+1. **`latest.yml` 이 릴리스에 없으면 업데이트 팝업이 아예 안 뜬다.** electron-builder의
+   `--publish always` 가 이 파일 업로드에서 422 오류를 내는 일이 4번 반복됐다.
+   → 그래서 배포를 `scripts/publish-release.mjs` 로 옮겼다. 이 스크립트는 `latest.yml` 을
+   **기준**으로 올릴 목록을 정하고, 업로드 후 **다시 내려받아 로컬과 같은지 검증**한다.
+2. **파일 이름의 공백.** 빌드 결과는 `Capri Setup 0.8.4.exe`(공백)인데 GitHub 자산 이름은
+   `Capri-Setup-0.8.4.exe`(하이픈)여야 `latest.yml` 과 짝이 맞는다. 스크립트가 자동 변환한다.
+3. **맥은 dmg만으론 자동 업데이트가 안 된다.** 맥의 electron-updater는 `.zip` 을 내려받는다.
+   그래서 `electron-builder.yml` 의 mac 타깃에 `dmg` 와 `zip` 을 **둘 다** 넣어 두었다
+   (`latest-mac.yml` 도 함께 업로드된다).
+
+### 🍎 맥에서 처음 빌드할 때 (맥북 세션 체크리스트)
+```bash
+git pull                 # 윈도우에서 올린 최신 코드 받기
+npm install              # 기기가 바뀌면 최초 1회
+npx vitest run           # 테스트 전부 통과하는지 확인
+npm run release:mac      # dmg + zip 빌드 → 릴리스 업로드까지 한 줄
+```
+- **맥에서만 가능**합니다(애플의 dmg/코드서명 도구가 맥에만 있음). 윈도우에서는 만들 수 없습니다.
+- 애플 개발자 인증서가 없어 **미서명**으로 나갑니다(설정에 `identity: null` 로 고정 —
+  서명하려다 빌드가 멈추는 것을 막기 위함). 첫 실행은 **우클릭 → 열기**로 통과합니다.
+- ⚠️ **실행파일 이름에 한글을 넣지 말 것.** 예전에 `productName` 을 한글("카일봇")로 했더니
+  애플 실리콘 맥에서 앱 부팅 자체가 SIGTRAP 크래시했습니다. 실행파일은 영문 `Capri`,
+  화면 표시명만 `CFBundleDisplayName` 으로 지정합니다.
+- 릴리스에 dmg가 올라가면 README 설치 안내(위 macOS 절)가 그대로 유효해집니다.
 
 ---
 
@@ -80,7 +107,7 @@ Capri매매기법 **계산기 + 토스 조건주문(OCO/OTO) 제출 도구**. �
 
 ```bash
 npm install
-npm test        # vitest 71개
+npm test        # vitest 150개
 npm run app     # 개발 모드로 앱 실행
 ```
 자세한 진행 상황·아키텍처는 `docs/progress.md` 참고.

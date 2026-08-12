@@ -23,6 +23,11 @@ appId: com.hun100b.kylebot
 productName: Capri
 directories:
   output: release
+  buildResources: build   # 아이콘 등 빌드 재료(build/icon.png) 위치
+
+# 앱 아이콘 — 1024×1024 PNG 하나만 두면 electron-builder가 윈도우(.ico)·맥(.icns)로
+# 알아서 변환한다. 이 PNG는 `npm run icon`(scripts/make-icon.mjs)으로 다시 만들 수 있다.
+icon: build/icon.png
 
 # ★★ 보안 핵심: 앱 안에 포함할 파일 화이트리스트(필요한 빌드 결과물만).
 #   .env(실제 API 키)·소스는 절대 포함하지 않는다. 아래 제외 규칙으로 이중 차단.
@@ -72,8 +77,21 @@ mac:
   category: public.app-category.finance
   target:
     - target: dmg
-      arch: [arm64, x64]         # 애플 실리콘 + 인텔 맥 모두
+      arch: [arm64, x64]         # 사람이 내려받아 설치하는 파일(애플 실리콘 + 인텔)
+    - target: zip
+      arch: [arm64, x64]         # ★ 자동 업데이트용(맥의 electron-updater는 dmg가 아니라 zip을 받는다)
   # 애플 개발자 인증서 없음 → 기본(ad-hoc) 서명. 첫 실행은 우클릭→열기(README 안내).
+  # [주의] 공증(notarize)도 안 한다(유료 계정 필요). 개인 사용에는 우클릭→열기로 충분.
+  identity: null                 # 서명 시도하다 실패해 빌드가 멈추는 것을 방지(미서명 고정)
 
 dmg:
   title: Capri 설치
+  # 설치 창 배치: 왼쪽 앱 아이콘을 오른쪽 Applications 폴더로 끌어다 놓는 표준 형태
+  contents:
+    - x: 140
+      y: 200
+      type: file
+    - x: 400
+      y: 200
+      type: link
+      path: /Applications
