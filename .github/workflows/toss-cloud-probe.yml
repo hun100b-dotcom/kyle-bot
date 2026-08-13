@@ -1,0 +1,55 @@
+# =============================================================================
+# 토스 OpenAPI "클라우드에서 호출 가능한가?" 진단 (읽기 전용, 실제 키 사용 안 함)
+# -----------------------------------------------------------------------------
+# [왜 필요한가?]
+#   카프리를 아이폰 웹앱(PWA)으로 만들려면, 토스 API를 브라우저가 아니라
+#   **클라우드 서버**가 대신 불러야 한다(브라우저 직접 호출은 CORS·키 노출로 불가).
+#   그런데 증권사 API는 "등록된 IP에서만 호출 허용" 같은 제한을 두는 경우가 있다.
+#   그러면 IP가 매번 바뀌는 서버리스(Vercel)에서는 아예 못 쓴다 → 그게 진짜 블로커다.
+#
+# [키를 쓰지 않고 판별하는 방법]
+#   일부러 **가짜 client_id**로 토큰 발급을 요청한다.
+#     · 401 invalid_client  → 요청이 인증 단계까지 도달했다 = IP 차단 없음 (통과)
+#     · 403 / 차단 페이지 / 타임아웃 → 게이트웨이가 IP·지역으로 막았다 = 블로커
+#   실제 키가 전혀 등장하지 않으므로 안전하다.
+# =============================================================================
+name: toss-cloud-probe
+
+on:
+  workflow_dispatch: # 손으로 실행할 때만 동작(정기 실행 없음)
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 러너의 위치(참고용)
+        run: |
+          echo "--- 이 서버가 어디서 나가는지(국가만 참고) ---"
+          curl -s --max-time 10 https://ipinfo.io/country || echo "(조회 실패)"
+
+      - name: 토큰 엔드포인트 도달 여부 (가짜 키)
+        run: |
+          echo "--- POST /oauth2/token (가짜 client_id) ---"
+          code=$(curl -s -o /tmp/body.txt -w "%{http_code}" --max-time 20 \
+            -X POST https://openapi.tossinvest.com/oauth2/token \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "grant_type=client_credentials&client_id=DUMMY_NOT_A_REAL_KEY&client_secret=DUMMY&scope=")
+          echo "HTTP: $code"
+          echo "응답: $(head -c 300 /tmp/body.txt)"
+          echo
+          if [ "$code" = "401" ]; then
+            echo "판정: ✅ 인증 단계까지 도달 — 클라우드 IP 차단 없음"
+          elif [ "$code" = "403" ]; then
+            echo "판정: ❌ 403 — IP/지역 차단 가능성 높음"
+          else
+            echo "판정: ⚠ 예상 밖 응답($code) — 사람이 확인 필요"
+          fi
+
+      - name: 응답 헤더(CORS 여부 확인)
+        run: |
+          curl -s -D - -o /dev/null --max-time 20 \
+            -X POST https://openapi.tossinvest.com/oauth2/token \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -H "Origin: https://capri.example.com" \
+            -d "grant_type=client_credentials&client_id=DUMMY&client_secret=DUMMY&scope=" \
+            | grep -i "^HTTP/\|access-control\|server:" || true
