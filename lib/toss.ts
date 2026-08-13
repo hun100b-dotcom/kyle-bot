@@ -405,6 +405,18 @@ export async function getAccessToken(): Promise<string> {
               "조치: 토스 개발자센터에서 API 키(Client ID/Secret)를 확인·재발급한 뒤, [설정] 탭에서 다시 입력하고 저장하세요.",
           );
         }
+        // [2026-08-13] 403 "IP address not allowed" = 토스가 **이 서버/기기의 IP를 허용하지 않음**.
+        //   토스는 키를 먼저 확인한 뒤 그 키의 IP 허용목록을 본다. 그래서 집 PC에서는 되는 키가
+        //   클라우드(서버리스)에서는 이 오류로 막힌다. 원시 응답 대신 조치 방법을 알려 준다.
+        if (res.status === 403 && /IP address not allowed/i.test(bodyText)) {
+          throw new Error(
+            "토스가 이 인터넷 주소(IP)에서의 접속을 허용하지 않습니다." +
+              "\n\n토스 API 키에는 '허용된 IP' 설정이 있어, 등록되지 않은 곳에서 부르면 막힙니다." +
+              "\n휴대폰 웹앱은 중계 서버를 거치는데, 그 서버의 IP가 등록돼 있지 않으면 이 오류가 납니다." +
+              "\n\n조치: 토스 개발자센터에서 그 키의 IP 허용 설정을 확인하세요. " +
+              "허용 범위를 넓힐 수 없다면, 고정 IP 서버를 쓰거나 집 PC의 Capri를 이용해야 합니다.",
+          );
+        }
         throw new Error(`토큰 발급 실패: HTTP ${res.status} ${bodyText}`);
       }
 

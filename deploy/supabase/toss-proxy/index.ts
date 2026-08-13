@@ -158,7 +158,10 @@ async function readCreds(req: Request): Promise<{ creds: Creds; body: Record<str
 // 라우팅
 // -----------------------------------------------------------------------------
 async function handleHealth(origin: string | null): Promise<Response> {
-  // 가짜 키로 토큰 발급을 시도한다. 401 invalid_client 면 "이 서버에서 토스까지 도달 가능".
+  // 가짜 키로 토큰 발급을 시도한다.
+  //   401 invalid_client = 네트워크로 토스까지 '닿기는 한다'는 뜻일 뿐이다.
+  //   ⚠️ 실제 키가 이 서버 IP에서 허용되는지는 이걸로 알 수 없다(토스는 키를 먼저 확인한 뒤
+  //      그 키의 IP 허용목록을 본다). 실측 결과 진짜 키로는 403 "IP address not allowed" 가 났다.
   let tossReach = "확인 실패";
   try {
     const r = await fetch(`${TOSS_BASE}/oauth2/token`, {
@@ -176,6 +179,7 @@ async function handleHealth(origin: string | null): Promise<Response> {
       service: "capri-toss-proxy",
       runtime: "supabase-edge",
       toss: tossReach,
+      note: "이 값은 네트워크 도달 여부만 뜻한다. 실제 키의 IP 허용 여부는 별개(403 가능).",
       time: new Date().toISOString(),
     },
     200,
