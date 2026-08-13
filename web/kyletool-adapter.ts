@@ -23,17 +23,26 @@
 import env, { setProxyBase } from "./env-shim";
 import { ToolEngine } from "../electron/tool-engine";
 
-/** 프록시 주소를 정한다: ?api= → 저장값 → (없으면) 빈 값 */
+/**
+ * ★ 프록시(토스 중계) 서버 기본 주소 ★
+ *   Vercel 에 배포한 뒤 이 한 줄에 주소를 넣으면, 사장님이 주소창에 ?api=... 를 붙이지 않아도
+ *   웹앱이 알아서 그 서버를 씁니다. (예: "https://capri-api.vercel.app")
+ *   끝에 슬래시(/)는 붙이지 마세요. 비워 두면 자동조회가 꺼진 상태로 뜹니다.
+ */
+const DEFAULT_API_BASE = "";
+
+/** 프록시 주소를 정한다: ?api=(주소창) → 저장값 → 기본값(위 상수) */
 export function resolveApiBase(): string {
   const KEY = "capri-api-base";
   try {
     const q = new URLSearchParams(location.search).get("api");
     if (q) {
+      // 주소창으로 지정하면 그 값을 저장해 다음부터는 자동으로 쓴다.
       localStorage.setItem(KEY, q.trim().replace(/\/$/, ""));
     }
-    return localStorage.getItem(KEY) ?? "";
+    return localStorage.getItem(KEY) ?? DEFAULT_API_BASE;
   } catch {
-    return "";
+    return DEFAULT_API_BASE;
   }
 }
 
