@@ -20,7 +20,14 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const SIZE = 1024; // 아이콘 한 변(px). 맥 icns 변환에 1024가 원본으로 쓰인다.
+// 아이콘을 여러 크기로 뽑는다.
+//   · build/icon.png(1024) — electron-builder 가 윈도우 .ico / 맥 .icns 로 변환
+//   · web/public/icons/*.png — 아이폰 홈 화면(PWA) 아이콘(그대로 복사되는 폴더)
+const OUTPUTS = [
+  { size: 1024, path: ["build", "icon.png"] },
+  { size: 512, path: ["web", "public", "icons", "icon-512.png"] },
+  { size: 192, path: ["web", "public", "icons", "icon-192.png"] },
+];
 const SS = 3; //     한 픽셀을 3×3으로 잘게 찍어 평균 내면 가장자리가 매끄럽다(안티에일리어싱)
 
 // ---- 색 (카프리 화면과 같은 계열: 남색 배경 + 초록 강조) -------------------
@@ -41,10 +48,10 @@ function inRoundedRect(x, y, w, h, r) {
   return (x - cx) ** 2 + (y - cy) ** 2 <= r * r;
 }
 
-/** 링(C자) 안쪽인가? 오른쪽에 입을 벌린 'C' 모양을 만든다 */
+/** 링(C자) 안쪽인가? 오른쪽에 입을 벌린 'C' 모양을 만든다 (좌표는 1024 기준) */
 function inCArc(x, y) {
-  const dx = x - SIZE / 2;
-  const dy = y - SIZE / 2;
+  const dx = x - 512;
+  const dy = y - 512;
   const dist = Math.hypot(dx, dy);
   if (dist < 232 || dist > 330) return false; // 링 두께(안쪽 232 ~ 바깥 330)
   const deg = (Math.atan2(dy, dx) * 180) / Math.PI; // -180 ~ 180 (0 = 오른쪽)
@@ -68,6 +75,9 @@ function inBars(x, y) {
 
 // ---- 픽셀 채우기 -----------------------------------------------------------
 // RGBA 순서로 한 줄씩 만든다. PNG는 각 줄 앞에 '필터 바이트'(0=필터 없음)가 붙는다.
+// 그림은 1024 기준 좌표로 그리고, 원하는 크기(SIZE)로 축소해 샘플링한다.
+function renderRaw(SIZE) {
+const scale = 1024 / SIZE; // 화면 픽셀 → 1024 기준 좌표 변환 배율
 const raw = Buffer.alloc(SIZE * (SIZE * 4 + 1));
 let p = 0;
 for (let y = 0; y < SIZE; y++) {
@@ -81,13 +91,13 @@ for (let y = 0; y < SIZE; y++) {
     // 한 픽셀을 SS×SS로 잘게 나눠 평균 → 곡선 가장자리가 부드러워진다.
     for (let sy = 0; sy < SS; sy++) {
       for (let sx = 0; sx < SS; sx++) {
-        const px = x + (sx + 0.5) / SS;
-        const py = y + (sy + 0.5) / SS;
+        const px = (x + (sx + 0.5) / SS) * scale; // 1024 기준 좌표로 환산
+        const py = (y + (sy + 0.5) / SS) * scale;
 
-        if (!inRoundedRect(px, py, SIZE, SIZE, 190)) continue; // 아이콘 바깥(투명)
+        if (!inRoundedRect(px, py, 1024, 1024, 190)) continue; // 아이콘 바깥(투명)
 
         // 배경: 위→아래 그라데이션
-        let color = mix(BG_TOP, BG_BOTTOM, py / SIZE);
+        let color = mix(BG_TOP, BG_BOTTOM, py / 1024);
         if (inCArc(px, py)) color = GREEN; //  'C' 링
         else if (inBars(px, py)) color = LIGHT; // 상승 막대
 
@@ -107,6 +117,8 @@ for (let y = 0; y < SIZE; y++) {
     raw[p++] = Math.round(bSum / filled);
     raw[p++] = Math.round(a);
   }
+}
+return raw;
 }
 
 // ---- PNG 파일 조립 ---------------------------------------------------------
@@ -136,6 +148,8 @@ function chunk(type, data) {
   return Buffer.concat([len, body, crc]);
 }
 
+function buildPng(SIZE) {
+const raw = renderRaw(SIZE);
 const ihdr = Buffer.alloc(13);
 ihdr.writeUInt32BE(SIZE, 0); //  가로
 ihdr.writeUInt32BE(SIZE, 4); //  세로
@@ -143,14 +157,19 @@ ihdr[8] = 8; //                  비트 깊이 8
 ihdr[9] = 6; //                  색 타입 6 = RGBA
 // 10,11,12 = 압축/필터/인터레이스 방식 기본값(0)
 
-const png = Buffer.concat([
+return Buffer.concat([
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), // PNG 시그니처
   chunk("IHDR", ihdr),
   chunk("IDAT", deflateSync(raw, { level: 9 })),
   chunk("IEND", Buffer.alloc(0)),
 ]);
+}
 
-const out = resolve(dirname(fileURLToPath(import.meta.url)), "..", "build", "icon.png");
-mkdirSync(dirname(out), { recursive: true });
-writeFileSync(out, png);
-console.log(`아이콘 생성 완료: ${out} (${SIZE}×${SIZE}, ${(png.length / 1024).toFixed(1)}KB)`);
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+for (const { size, path } of OUTPUTS) {
+  const png = buildPng(size);
+  const out = resolve(ROOT, ...path);
+  mkdirSync(dirname(out), { recursive: true });
+  writeFileSync(out, png);
+  console.log(`아이콘 생성: ${path.join("/")} (${size}×${size}, ${(png.length / 1024).toFixed(1)}KB)`);
+}

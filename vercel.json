@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run web:build",
+  "outputDirectory": "dist-web",
+  "framework": null,
+  "regions": ["icn1"],
+  "functions": {
+    "api/*.ts": { "memory": 128, "maxDuration": 10 }
+  }
+}
