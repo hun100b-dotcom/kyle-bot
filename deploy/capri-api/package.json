@@ -1,0 +1,7 @@
+{
+  "name": "capri-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Capri 웹앱(PWA)이 토스 OpenAPI를 안전하게 부르기 위한 읽기 전용 프록시. 서버에 저장하는 비밀값이 없음.",
+  "type": "module"
+}

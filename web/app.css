@@ -173,3 +173,22 @@ input:focus { outline: none; border-color: var(--green); }
 .err { color: var(--amber); font-size: 13px; line-height: 1.5; }
 .note { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 14px 0 0; }
 .foot { text-align: center; color: var(--muted); font-size: 11px; margin-top: 16px; }
+
+/* 자동조회(현재가·환율) 영역 — API 주소가 설정돼 있을 때만 보인다 */
+.live {
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+.ghost {
+  width: 100%;
+  background: transparent;
+  color: var(--green);
+  border: 1px solid var(--green);
+  border-radius: 10px;
+  padding: 11px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.ghost:disabled { opacity: 0.5; }

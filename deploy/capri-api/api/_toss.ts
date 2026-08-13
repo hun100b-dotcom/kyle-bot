@@ -23,11 +23,23 @@
 
 const TOSS_BASE = "https://openapi.tossinvest.com";
 
+/**
+ * 이 프록시를 쓸 수 있는 웹앱 주소 목록(허용 목록).
+ *   아무 웹사이트나 이 주소로 남의 키를 실어 보내는 걸 막기 위한 최소 방어선이다.
+ *   (물론 서버-서버 호출은 CORS로 못 막지만, 브라우저發 오남용은 줄어든다)
+ */
+const ALLOWED_ORIGINS = [
+  "https://hun100b-dotcom.github.io", // 실제 웹앱(GitHub Pages)
+  "http://localhost:5174", //            개발 미리보기
+  "http://localhost:5175", //            빌드 미리보기
+];
+
 /** 브라우저(PWA)가 이 서버를 부를 수 있게 하는 CORS 헤더 */
 export function corsHeaders(origin: string | null): Record<string, string> {
+  const allowed = origin && ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
   return {
-    // 배포 후 실제 웹앱 주소만 허용하도록 좁히는 게 좋다(지금은 어디서든 호출 가능).
-    "Access-Control-Allow-Origin": origin ?? "*",
+    "Access-Control-Allow-Origin": allowed,
+    Vary: "Origin",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
     "Cache-Control": "no-store", // 시세·환율은 절대 캐시하지 않는다

@@ -17,7 +17,12 @@ export default async function handler(req: Request): Promise<Response> {
 
   try {
     const { creds } = await readCreds(req);
-    const r = (await tossGet("/api/v1/exchange-rate", creds)) as Record<string, unknown>;
+    // [필수 파라미터] baseCurrency·quoteCurrency 를 빼면 토스가 400(invalid-request)을 준다.
+    //   (v0.2.4 때 조건주문 status 를 빠뜨려 똑같이 400 을 맞은 적이 있다 — 같은 실수 반복 금지)
+    const r = (await tossGet("/api/v1/exchange-rate?baseCurrency=USD&quoteCurrency=KRW", creds)) as Record<
+      string,
+      unknown
+    >;
     const mid = Number(r.midRate ?? r.rate);
     if (!Number.isFinite(mid)) throw new HttpError(502, "환율 응답을 해석하지 못했습니다.");
     return json({ rate: mid, basis: r.midRate != null ? "midRate(매매기준율)" : "rate", raw: r }, 200, origin);

@@ -19,12 +19,14 @@ export default async function handler(req: Request): Promise<Response> {
     const symbol = typeof body.symbol === "string" ? body.symbol.toUpperCase().trim() : "";
     if (!symbol) throw new HttpError(400, "종목코드(symbol)가 없습니다.");
 
-    const result = (await tossGet(`/api/v1/stock-prices?symbols=${encodeURIComponent(symbol)}`, creds)) as
-      | { stockPrices?: Array<Record<string, unknown>> }
-      | Array<Record<string, unknown>>;
+    // [경로 주의] 검증된 실제 경로는 /api/v1/prices 다(데스크톱 앱 lib/toss.ts 와 동일).
+    //   추측으로 stock-prices 를 썼다가 404 를 받았다 — 스펙은 반드시 기존 구현을 따른다.
+    const result = (await tossGet(`/api/v1/prices?symbols=${encodeURIComponent(symbol)}`, creds)) as
+      | Array<Record<string, unknown>>
+      | { prices?: Array<Record<string, unknown>> };
 
-    // 응답 모양이 배열/객체 어느 쪽이든 첫 종목을 꺼낸다(스펙 변화에 덜 민감하게).
-    const first = Array.isArray(result) ? result[0] : result?.stockPrices?.[0];
+    // 응답은 배열이 정상이지만, 객체로 감싸 오는 경우도 방어한다.
+    const first = Array.isArray(result) ? result[0] : result?.prices?.[0];
     if (!first) throw new HttpError(404, `${symbol} 시세를 찾지 못했습니다. 종목코드를 확인해 주세요.`);
 
     return json({ symbol, price: Number(first.lastPrice ?? first.price), raw: first }, 200, origin);

@@ -75,17 +75,36 @@ npm run web:build    # 빌드 → dist-web/  (서비스 워커에 빌드 식별�
 npm run web:deploy   # 빌드 + GitHub Pages(capri-web 저장소)로 배포
 ```
 
-### 4.5 2단계(시세·환율 자동) 배포 방법
+### 4.5 2단계(시세·환율 자동) — 배포 준비 완료, 올리기만 하면 됨
 
-`api/` 의 서버리스 함수는 **Vercel** 에 올려야 동작한다. 지금 이 PC는 Vercel 로그인이 안 돼 있다.
+배포용 파일 트리는 **`deploy/capri-api/`** 에 그대로 들어 있다(그 폴더가 곧 Vercel 프로젝트다).
 
-```bash
-npx vercel login     # ← 사람이 한 번만(브라우저 인증)
-npx vercel --prod    # vercel.json 설정대로 dist-web + api/ 배포
+```
+deploy/capri-api/
+  package.json      # 최소 설정(빌드 없음)
+  vercel.json       # region: icn1(서울)
+  api/_toss.ts      # 공용: 토큰 발급·CORS 허용목록·토스 GET
+  api/quote.ts      # POST /api/quote  { clientId, clientSecret, symbol }
+  api/fx.ts         # POST /api/fx     { clientId, clientSecret }
+  api/health.ts     # GET  /api/health (키 불필요 — 배포 확인용)
 ```
 
-배포되면 웹앱의 시세·환율 호출 주소를 그 도메인으로 바꾸고, 웹앱을 Vercel 쪽으로 옮기면
-주소 하나로 화면 + API가 함께 돌아간다. (그 전까지는 GitHub Pages 의 계산 전용 버전이 살아 있다)
+- **필요한 환경변수(env) 없음.** 키는 요청 본문으로 받아 그 순간에만 쓰고 버린다.
+  Supabase service role 키 같은 서버 시크릿도 필요 없다.
+- 올린 뒤 웹앱에 주소를 꽂는 법: `https://hun100b-dotcom.github.io/capri-web/?api=https://<배포주소>`
+  로 한 번 열면 저장된다(설정 탭에서도 바꿀 수 있다). 앱을 다시 빌드할 필요가 없다.
+- CORS 허용 목록(`_toss.ts`의 `ALLOWED_ORIGINS`)에 웹앱 주소가 이미 들어 있다.
+
+**로컬에서 먼저 확인하는 법** (배포 없이 진짜 토스와 통신):
+
+```bash
+npx tsx scripts/dev-api.mjs     # http://localhost:8787 로 같은 핸들러를 띄운다
+# 다른 창에서
+curl -X POST http://localhost:8787/api/fx -H "Content-Type: application/json"   -d '{"clientId":"...","clientSecret":"..."}'
+```
+
+실측(2026-08-13): 환율 `1418.2`(midRate), `AAPL 302.62`, `NVDA 224.51` 정상 응답.
+웹앱 화면에서 버튼을 눌러 화면 → 프록시 → 토스 → 렌더까지 전 구간도 확인했다.
 
 ### 4.6 하마터면 조용히 망가질 뻔한 것 (기록)
 

@@ -49,21 +49,46 @@ interface Settings {
   regularPct: number; //  본장 비율(%)
   tpPct: number; //       기본 익절 %
   slPct: number; //       기본 손절 %
-  fxRate: number; //      환율(1달러 = ? 원) — 2단계에서 자동 조회로 대체
+  fxRate: number; //      환율(1달러 = ? 원) — API 주소가 있으면 자동 조회로 갱신
+  apiBase: string; //     [2단계] 토스 프록시 서버 주소(비어 있으면 자동조회 끔)
 }
 
-const DEFAULTS: Settings = { seedUsd: 1000, dayPct: 90, prePct: 50, regularPct: 50, tpPct: 2, slPct: 10, fxRate: 1390 };
+const DEFAULTS: Settings = {
+  seedUsd: 1000,
+  dayPct: 90,
+  prePct: 50,
+  regularPct: 50,
+  tpPct: 2,
+  slPct: 10,
+  fxRate: 1390,
+  // 배포된 프록시 주소가 정해지면 여기에 기본값으로 넣는다.
+  // 그 전에도 주소창에 ?api=https://... 를 붙이거나 설정 탭에서 직접 넣을 수 있다.
+  apiBase: "",
+};
 const STORE_KEY = "capri-web-settings";
 
 function loadSettings(): Settings {
+  let saved: Settings = DEFAULTS;
   try {
     const raw = localStorage.getItem(STORE_KEY);
-    if (!raw) return DEFAULTS;
     // 저장된 값에 빠진 항목이 있어도(옛 버전) 기본값으로 메워 안전하게 읽는다.
-    return { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Settings>) };
+    if (raw) saved = { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Settings>) };
   } catch {
-    return DEFAULTS;
+    saved = DEFAULTS;
   }
+  // 주소창에 ?api=https://... 를 붙이면 자동조회 서버를 바로 지정할 수 있다.
+  //   (앱을 새로 배포하지 않고도 서버 주소를 꽂을 수 있게 하는 통로)
+  try {
+    const q = new URLSearchParams(location.search).get("api");
+    if (q) {
+      const next = { ...saved, apiBase: q.trim() };
+      localStorage.setItem(STORE_KEY, JSON.stringify(next));
+      return next;
+    }
+  } catch {
+    /* 무시 */
+  }
+  return saved;
 }
 
 /** 숫자 입력칸의 문자열을 숫자로 (빈칸·오타는 null) */
@@ -84,6 +109,16 @@ function krw(v: number, fx: number): string {
 
 export default function App() {
   const update = useUpdate();
+
+  // [토스 키 취급 원칙]
+  //   키는 **화면이 열려 있는 동안 메모리에만** 둔다. localStorage 등에 저장하지 않는다.
+  //   → 폰을 잃어버려도 웹앱에 키가 남지 않는다. 앱을 껐다 켜면 다시 입력해야 한다(의도된 불편).
+  //   시세·환율 조회는 이 키를 프록시 서버에 실어 보내고, 서버는 저장 없이 토스로 전달만 한다.
+  const [keyId, setKeyId] = useState("");
+  const [keySecret, setKeySecret] = useState("");
+  const [quote, setQuote] = useState<{ symbol: string; price: number } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [apiMsg, setApiMsg] = useState<string | null>(null);
   const [tab, setTab] = useState<"calc" | "settings">("calc");
   const [settings, setSettings] = useState<Settings>(loadSettings);
 
@@ -160,6 +195,55 @@ export default function App() {
     }
   }
 
+  /** 프록시 서버를 통해 시세·환율을 불러온다(키는 요청에만 실려 가고 서버에 저장되지 않음) */
+  async function loadLive() {
+    const base = settings.apiBase.replace(/\/$/, "");
+    if (!base) {
+      setApiMsg("설정 탭에 API 주소를 먼저 넣어 주세요(자동조회 서버).");
+      return;
+    }
+    if (!keyId || !keySecret) {
+      setApiMsg("토스 키를 입력해 주세요(이 화면에서만 쓰이고 저장되지 않습니다).");
+      return;
+    }
+    setBusy(true);
+    setApiMsg(null);
+    try {
+      const body = { clientId: keyId, clientSecret: keySecret };
+
+      // 환율은 종목과 무관하게 항상 갱신한다.
+      const fxRes = await fetch(`${base}/api/fx`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const fx = (await fxRes.json()) as { rate?: number; error?: string };
+      if (!fxRes.ok) throw new Error(fx.error ?? `환율 조회 실패(${fxRes.status})`);
+      if (fx.rate) saveSettings({ ...settings, fxRate: Math.round(fx.rate * 100) / 100 });
+
+      // 종목을 적었으면 현재가도 불러온다.
+      if (symbol.trim()) {
+        const qRes = await fetch(`${base}/api/quote`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...body, symbol }),
+        });
+        const q = (await qRes.json()) as { symbol?: string; price?: number; error?: string };
+        if (!qRes.ok) throw new Error(q.error ?? `시세 조회 실패(${qRes.status})`);
+        if (q.price) {
+          setQuote({ symbol: q.symbol ?? symbol, price: q.price });
+          setApiMsg(`${q.symbol} 현재가 ${usd(q.price)} · 환율 ${fx.rate?.toFixed(2)}원 불러옴`);
+          return;
+        }
+      }
+      setApiMsg(`환율 ${fx.rate?.toFixed(2)}원 불러옴 (종목을 적으면 현재가도 가져옵니다)`);
+    } catch (e) {
+      setApiMsg(`⚠ ${e instanceof Error ? e.message : "조회 실패"}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function saveSettings(next: Settings) {
     setSettings(next);
     localStorage.setItem(STORE_KEY, JSON.stringify(next));
@@ -208,6 +292,36 @@ export default function App() {
             <label>종목(메모용)</label>
             <input value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} placeholder="AAPL" />
           </div>
+
+          {settings.apiBase && (
+            <div className="live">
+              <div className="row2">
+                <div className="row">
+                  <label>토스 Client ID (저장 안 함)</label>
+                  <input value={keyId} onChange={(e) => setKeyId(e.target.value)} placeholder="키 입력" autoComplete="off" />
+                </div>
+                <div className="row">
+                  <label>Client Secret (저장 안 함)</label>
+                  <input
+                    type="password"
+                    value={keySecret}
+                    onChange={(e) => setKeySecret(e.target.value)}
+                    placeholder="키 입력"
+                    autoComplete="off"
+                  />
+                </div>
+              </div>
+              <button className="ghost" disabled={busy} onClick={loadLive}>
+                {busy ? "불러오는 중…" : "현재가·환율 불러오기"}
+              </button>
+              {apiMsg && <p className="hint">{apiMsg}</p>}
+              {quote && (
+                <p className="hint">
+                  참고: {quote.symbol} 현재가 <b>{usd(quote.price)}</b> {krw(quote.price, settings.fxRate)}
+                </p>
+              )}
+            </div>
+          )}
 
           <div className="seg">
             {(Object.keys(TECH_LABEL) as Technique[]).map((t) => (
@@ -372,6 +486,19 @@ export default function App() {
               />
             </div>
           </div>
+          <div className="row">
+            <label>자동조회 서버 주소 (비우면 계산 전용)</label>
+            <input
+              value={settings.apiBase}
+              onChange={(e) => saveSettings({ ...settings, apiBase: e.target.value.trim() })}
+              placeholder="https://capri-api.vercel.app"
+              autoComplete="off"
+            />
+          </div>
+          <p className="note">
+            토스 키는 <b>어디에도 저장하지 않습니다</b>. 자동조회를 쓸 때 그 순간에만 입력해 쓰고,
+            앱을 닫으면 사라집니다. 서버도 키를 저장하지 않고 토스로 전달만 합니다.
+          </p>
           <p className="note">
             설정은 <b>이 폰 안에만</b> 저장됩니다(서버로 전송하지 않음). 토스 키는 이 웹앱에 넣지 않습니다.
           </p>
