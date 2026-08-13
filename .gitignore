@@ -34,3 +34,6 @@ report.html
 # 빌드 산출물(용량 큼) — 코드가 아니라 결과물이므로 커밋 금지
 release
 dist-electron
+
+# 웹앱(PWA) 빌드 결과 — 소스가 아니라 산출물이므로 추적하지 않는다
+dist-web/
