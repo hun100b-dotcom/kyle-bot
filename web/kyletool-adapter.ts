@@ -75,7 +75,15 @@ export function installKyleTool(): ToolEngine {
 
   const api = {
     // ── 상태·설정 ──────────────────────────────────────────────
-    status: () => Promise.resolve(e.getStatus()),
+    //   [웹 보정] 키가 없으면 엔진은 '연습(mock) 모드'가 된다. 데스크톱에선 가짜 서버로
+    //   주문이 실제로 체결되지만, 웹에는 가짜 서버가 없어 아무 주문도 나갈 수 없다.
+    //   그런데 화면은 "실주문 활성 — 실제 체결됩니다" 빨간 경고를 띄운다(연습 모드 기준).
+    //   웹에서는 사실과 다르고 겁만 주므로, 이 경우 드라이런으로 표시를 바로잡는다.
+    //   ※ 실제 주문 가능 여부를 바꾸는 게 아니라 '표시'만 정확하게 만드는 것이다.
+    status: () => {
+      const st = e.getStatus();
+      return Promise.resolve(st.mode === "mock" ? { ...st, dryRun: true } : st);
+    },
     journal: () => Promise.resolve(e.getJournal()),
     getSettings: () => Promise.resolve(e.getSettings()),
     saveSettings: (input: Parameters<ToolEngine["saveSettings"]>[0]) => e.saveSettings(input),
