@@ -35,6 +35,13 @@ interface ToolStatus {
   buyingPowerUsd: number | null;
 }
 
+interface PhoneState {
+  status: string;
+  url: string | null;
+  qr: string | null;
+  error: string | null;
+}
+
 interface JournalEntry {
   ts: string;
   kind: "entry" | "oco" | "oto" | "cancel" | "dryrun" | "info";
@@ -454,6 +461,12 @@ interface KyletoolBridge {
   cancelConditional(id: string): Promise<JournalEntry>;
 
   mockSetPrice(symbol: string, price: number): Promise<boolean>;
+
+  // [폰에서 쓰기] 집 PC 릴레이 + 인터넷 터널 (웹앱에서는 없을 수 있어 선택 항목)
+  phoneStart?(): Promise<PhoneState>;
+  phoneStop?(): Promise<PhoneState>;
+  phoneStatus?(): Promise<PhoneState>;
+  onPhoneState?(cb: (v: PhoneState) => void): () => void;
   onJournal(cb: (entry: JournalEntry) => void): () => void;
 
   // 자동 업데이트

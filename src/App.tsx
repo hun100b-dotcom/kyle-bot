@@ -244,6 +244,14 @@ interface PendingOrder {
 function App() {
   const [status, setStatus] = useState<ToolStatus | null>(null);
   const [tab, setTab] = useState<"calc" | "screener" | "splits" | "strength" | "trades" | "orders" | "journal" | "settings">("calc");
+  // [폰에서 쓰기] 집 PC 릴레이 + 터널 상태(데스크톱 앱에서만 동작 — 웹앱에는 이 기능이 없다)
+  const [phone, setPhone] = useState<PhoneState | null>(null);
+  const [phoneBusy, setPhoneBusy] = useState(false);
+  useEffect(() => {
+    if (!window.kyletool.phoneStatus) return; // 웹앱에서는 이 기능이 없다
+    void window.kyletool.phoneStatus().then(setPhone);
+    return window.kyletool.onPhoneState?.(setPhone);
+  }, []);
   // [v0.7.0] 체결강도 자동 기록(매매 연동) — 트레이드 목록 + 요약.
   const [trades, setTrades] = useState<StrengthTrade[]>([]);
   const [tradeStats, setTradeStats] = useState<TradeStats | null>(null);
@@ -2148,6 +2156,57 @@ ${msg}
       {/* ===== ④ 설정 ===== */}
       {tab === "settings" && settings && (
         <main className="grid">
+          {/* [폰에서 쓰기] 데스크톱 앱에서만 보인다(웹앱에는 이 기능이 없음) */}
+          {window.kyletool.phoneStart && (
+            <section className="card wide">
+              <h2>📱 폰에서 쓰기</h2>
+              <p className="hint">
+                토스 키는 <b>등록된 인터넷 주소(IP)에서만</b> 쓸 수 있어, 클라우드 서버로는 막힙니다.
+                이 PC의 주소는 이미 허용돼 있으므로, <b>이 앱이 켜져 있는 동안 이 PC가 폰의 중계소</b>가 됩니다.
+                아래 [폰 연결 켜기]를 누르고 폰 카메라로 QR을 찍으면 폰에서도 전 기능을 쓸 수 있습니다.
+              </p>
+              <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <button
+                  className="btn"
+                  disabled={phoneBusy}
+                  onClick={async () => {
+                    setPhoneBusy(true);
+                    try {
+                      setPhone(phone?.url ? await window.kyletool.phoneStop!() : await window.kyletool.phoneStart!());
+                    } finally {
+                      setPhoneBusy(false);
+                    }
+                  }}
+                >
+                  {phoneBusy ? "준비 중…" : phone?.url ? "폰 연결 끄기" : "폰 연결 켜기"}
+                </button>
+                <span className="hint">상태: {phone?.status ?? "꺼짐"}</span>
+              </div>
+              {phone?.error && <p className="err">⚠ {phone.error}</p>}
+              {phone?.qr && (
+                <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap", marginTop: 12 }}>
+                  <img src={phone.qr} alt="폰 접속 QR" width={200} height={200} style={{ borderRadius: 8 }} />
+                  <div style={{ minWidth: 0 }}>
+                    <p className="hint" style={{ margin: "0 0 6px" }}>
+                      폰 카메라로 QR을 찍으세요. (또는 아래 주소를 폰 사파리에 붙여넣기)
+                    </p>
+                    <input readOnly value={phone.url ?? ""} onFocus={(e) => e.currentTarget.select()} style={{ width: "100%" }} />
+                    <button
+                      className="mini"
+                      style={{ marginTop: 6 }}
+                      onClick={() => navigator.clipboard.writeText(phone.url ?? "")}
+                    >
+                      주소 복사
+                    </button>
+                    <p className="hint" style={{ marginTop: 8 }}>
+                      ⚠️ <b>이 앱을 끄거나 PC가 꺼지면</b> 폰에서 조회·주문이 멈춥니다. 주소는 켤 때마다 새로 만들어집니다.
+                    </p>
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
+
           <section className="card wide">
             <h2>설정</h2>
             <div className="settings-block">

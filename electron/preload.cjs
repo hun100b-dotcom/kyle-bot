@@ -95,6 +95,15 @@ contextBridge.exposeInMainWorld("kyletool", {
   cancelConditional: (id) => ipcRenderer.invoke("tool:orders:cancelConditional", id),
 
   // 연습 모드 전용
+  // [폰에서 쓰기] 집 PC 릴레이 + 인터넷 터널 제어
+  phoneStart: () => ipcRenderer.invoke("phone:start"),
+  phoneStop: () => ipcRenderer.invoke("phone:stop"),
+  phoneStatus: () => ipcRenderer.invoke("phone:status"),
+  onPhoneState: (cb) => {
+    const h = (_e, v) => cb(v);
+    ipcRenderer.on("phone:state", h);
+    return () => ipcRenderer.removeListener("phone:state", h);
+  },
   mockSetPrice: (symbol, price) => ipcRenderer.invoke("tool:mockSetPrice", symbol, price),
 
   // 실시간 저널 구독

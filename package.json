@@ -18,6 +18,7 @@
     "app": "npm run build && npm run app:compile && electron .",
     "app:dist": "npm run dist:mac",
     "icon": "node scripts/make-icon.mjs",
+    "relay": "tsx scripts/relay.mjs",
     "web:dev": "vite --config vite.web.config.ts",
     "web:check": "tsc -p tsconfig.web.json --noEmit",
     "web:build": "npm run web:check && vite build --config vite.web.config.ts && node scripts/stamp-sw.mjs",
@@ -32,6 +33,7 @@
     "@supabase/supabase-js": "^2.110.6",
     "electron-updater": "^6.8.9",
     "luxon": "^3.7.2",
+    "qrcode": "^1.5.4",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },
