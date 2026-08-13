@@ -313,7 +313,10 @@ function getConfig(): TossConfig {
   if (!baseUrl) missing.push("TOSS_BASE_URL");
   if (!clientId) missing.push("TOSS_CLIENT_ID");
   if (!clientSecret) missing.push("TOSS_CLIENT_SECRET");
-  if (!account) missing.push("TOSS_ACCOUNT");
+  // [주의] 계좌(TOSS_ACCOUNT)는 여기서 요구하지 않는다.
+  //   계좌를 '알아내는' 호출(GET /accounts)까지 계좌를 요구하면 닭-달걀이 되어
+  //   자동 조회가 영원히 실패한다(실제로 그랬다. 자동조회 실패가 조용히 묻혀 있었음).
+  //   계좌가 꼭 필요한 호출(withAccount)에서만 아래 tossFetch 가 검사한다.
 
   if (missing.length > 0) {
     throw new Error(
@@ -325,7 +328,7 @@ function getConfig(): TossConfig {
     baseUrl: baseUrl as string,
     clientId: clientId as string,
     clientSecret: clientSecret as string,
-    account: account as string,
+    account: account ?? "", // 비어 있을 수 있다(계좌가 필요한 호출에서 따로 검사)
   };
 }
 
@@ -467,7 +470,16 @@ async function tossFetch<T>(path: string, opts: RequestOptions = {}, isRetry = f
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
   };
-  if (opts.withAccount) headers["X-Tossinvest-Account"] = cfg.account; // accountSeq
+  if (opts.withAccount) {
+    // 계좌가 필요한 호출인데 아직 계좌가 없으면, 원시 400 대신 사람이 읽을 안내를 준다.
+    if (!cfg.account) {
+      throw new Error(
+        "계좌(accountSeq)가 설정되지 않았습니다. [설정] 탭에서 키를 저장하면 자동으로 조회되며, " +
+          "자동 조회가 안 되면 계좌 번호를 직접 입력해 주세요.",
+      );
+    }
+    headers["X-Tossinvest-Account"] = cfg.account; // accountSeq
+  }
 
   const res = await fetchWithTimeout(
     url.toString(),

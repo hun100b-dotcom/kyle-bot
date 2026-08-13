@@ -20,6 +20,8 @@ for (const name of ["quote", "fx", "health"]) {
   const mod = await import(pathToFileURL(join(API_DIR, `${name}.ts`)).href);
   handlers.set(`/api/${name}`, mod.default);
 }
+// 통째로 전달(pass-through) 프록시 — /api/toss/... 로 오는 모든 요청을 토스로 넘긴다.
+const passthrough = (await import(pathToFileURL(join(API_DIR, "toss", "[...path].ts")).href)).default;
 
 /** 설치된 카프리(.env)에서 키를 읽는다 — 로컬 시험 전용 */
 function localKeys() {
@@ -35,7 +37,7 @@ function localKeys() {
 
 createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
-  const handler = handlers.get(url.pathname);
+  const handler = url.pathname.startsWith("/api/toss") ? passthrough : handlers.get(url.pathname);
   if (!handler) {
     res.writeHead(404).end("no such endpoint");
     return;
@@ -51,10 +53,20 @@ createServer(async (req, res) => {
   //   이 편의 기능은 배포되는 deploy/capri-api/ 안에는 없다(로컬 도우미 전용).
   if (body && body.includes("USE_LOCAL_ENV")) {
     const env = localKeys();
-    const parsed = JSON.parse(body.toString("utf8"));
-    parsed.clientId = env.TOSS_CLIENT_ID;
-    parsed.clientSecret = env.TOSS_CLIENT_SECRET;
-    body = Buffer.from(JSON.stringify(parsed));
+    const raw = body.toString("utf8");
+    if (raw.trim().startsWith("{")) {
+      // JSON 본문(간이 엔드포인트 /api/fx, /api/quote)
+      const parsed = JSON.parse(raw);
+      parsed.clientId = env.TOSS_CLIENT_ID;
+      parsed.clientSecret = env.TOSS_CLIENT_SECRET;
+      body = Buffer.from(JSON.stringify(parsed));
+    } else {
+      // 폼 본문(토스 토큰 발급 /oauth2/token) — 엔진이 그대로 보내는 형식
+      const form = new URLSearchParams(raw);
+      form.set("client_id", env.TOSS_CLIENT_ID);
+      form.set("client_secret", env.TOSS_CLIENT_SECRET);
+      body = Buffer.from(form.toString());
+    }
     console.log("[로컬 전용] 설치본 키로 치환해 토스 호출");
   }
 

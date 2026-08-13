@@ -38,12 +38,28 @@ function writeBuildId() {
 
 export default defineConfig({
   root: resolve(__dirname, "web"),
+  // [핵심] 데스크톱 엔진(electron/tool-engine.ts)을 **고치지 않고 그대로** 브라우저에서 돌리기 위해,
+  //   그 엔진이 쓰는 Node 전용 모듈을 브라우저용 껍데기로 바꿔치기한다.
+  //   이렇게 해야 PC와 웹의 계산·주문 규칙·안전장치가 100% 같은 코드로 유지된다.
+  resolve: {
+    alias: {
+      "node:fs": resolve(__dirname, "web/shims/fs.ts"),
+      "node:path": resolve(__dirname, "web/shims/path.ts"),
+      "node:events": resolve(__dirname, "web/shims/events.ts"),
+      "node:crypto": resolve(__dirname, "web/shims/crypto.ts"),
+      // 연습(목) 서버는 브라우저에서 띄울 수 없다 → 안내만 하는 껍데기로 대체
+      [resolve(__dirname, "mocks/toss-mock.ts")]: resolve(__dirname, "web/shims/toss-mock.ts"),
+    },
+  },
   // base "./" : 어떤 주소(도메인 루트든 /하위폴더/든)에 올려도 자원 경로가 맞도록 상대 경로 사용.
   //   GitHub Pages 처럼 https://아이디.github.io/저장소이름/ 형태에 올릴 때 특히 중요하다.
   base: "./",
   plugins: [react(), writeBuildId()],
   define: {
     __BUILD_ID__: JSON.stringify(BUILD_ID),
+    // [중요] 번들러 기본 동작은 `process.env` 를 빈 객체로 바꿔 버린다(설정이 저장 안 되는 버그).
+    //   우리가 만든 진짜 객체로 연결해 읽기·쓰기가 모두 살아 있게 한다. (web/env-shim.ts)
+    "process.env": "globalThis.__capriEnv",
   },
   build: {
     outDir: resolve(__dirname, "dist-web"),

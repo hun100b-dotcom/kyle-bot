@@ -38,18 +38,33 @@ export interface EncryptedRecord {
   iv: string; //         base64 (AES-GCM)
 }
 
-// --- base64 유틸(Node Buffer 사용; 이 모듈은 main/테스트=Node 환경에서만 쓴다) ---
+// --- base64 유틸 ---
+//   [왜 Buffer 를 안 쓰나?] 예전에는 Node 의 Buffer 를 썼는데, 이 모듈이 **브라우저(웹앱)에서도**
+//   쓰이게 되면서 Buffer 가 없는 환경을 만나면 그대로 깨진다.
+//   atob/btoa 는 브라우저와 Node(18+) 양쪽에 모두 있는 표준이라 어디서든 같은 결과를 낸다.
 function toB64(buf: ArrayBuffer | Uint8Array): string {
-  return Buffer.from(buf instanceof Uint8Array ? buf : new Uint8Array(buf)).toString("base64");
+  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  let bin = "";
+  // 한 번에 넘기면 인자 수 제한에 걸릴 수 있어 조각내어 문자로 바꾼다.
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
 }
 function fromB64(s: string): Uint8Array {
-  return new Uint8Array(Buffer.from(s, "base64"));
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
 /** passphrase + salt → AES-GCM 256bit 키 (PBKDF2-SHA256). */
-async function deriveKey(passphrase: string, salt: Uint8Array): Promise<CryptoKey> {
+// [타입 주의] 반환형을 CryptoKey 로 못 박지 않는다. Node 의 webcrypto 타입과 브라우저의
+//   CryptoKey 타입이 미세하게 달라(키 용도 목록) 웹 빌드에서 충돌하기 때문이다. 추론에 맡긴다.
+async function deriveKey(passphrase: string, salt: Uint8Array) {
   const baseKey = await subtle.importKey("raw", enc.encode(passphrase), "PBKDF2", false, ["deriveKey"]);
   return subtle.deriveKey(
     { name: "PBKDF2", salt, iterations: PBKDF2_ITERATIONS, hash: "SHA-256" },

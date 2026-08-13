@@ -4,15 +4,27 @@
     "lib": ["ES2023", "DOM", "DOM.Iterable", "WebWorker"],
     "module": "esnext",
     "moduleResolution": "bundler",
-    "types": ["vite/client"],
+    /* [주의] 여기서 "node" 타입을 넣는 이유:
+       웹앱은 데스크톱 엔진(electron/tool-engine.ts)을 그대로 가져다 쓴다. 그 코드는
+       node:fs / process 같은 이름을 쓰므로 '타입'이 있어야 검사에 통과한다.
+       실제 실행 때는 vite.web.config.ts 의 alias 가 브라우저용 껍데기(web/shims/*)로 바꾼다. */
+    "types": ["vite/client", "node"],
+    /* 실행 때 바꿔치기하는 것과 '같은 껍데기'를 타입 검사에도 알려 준다.
+       (node 의 webcrypto 타입과 브라우저의 CryptoKey 타입이 미세하게 달라 충돌하기 때문) */
+    "paths": {
+      "node:crypto": ["./web/shims/crypto.ts"]
+    },
     "jsx": "react-jsx",
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true
+    /* 남의 파일(데스크톱 코드)까지 함께 검사하므로 '안 쓴 변수' 규칙은 끈다
+       (데스크톱 빌드는 원래 설정 그대로 유지된다). */
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
   },
-  "include": ["web", "lib/calc.ts", "lib/session.ts", "lib/holidays.ts"]
+  "include": ["web", "src", "lib", "electron/tool-engine.ts"],
+  "exclude": ["web/App.simple.tsx.bak"]
 }
