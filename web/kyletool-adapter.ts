@@ -24,12 +24,18 @@ import env, { setProxyBase } from "./env-shim";
 import { ToolEngine } from "../electron/tool-engine";
 
 /**
- * ★ 프록시(토스 중계) 서버 기본 주소 ★
- *   Vercel 에 배포한 뒤 이 한 줄에 주소를 넣으면, 사장님이 주소창에 ?api=... 를 붙이지 않아도
- *   웹앱이 알아서 그 서버를 씁니다. (예: "https://capri-api.vercel.app")
- *   끝에 슬래시(/)는 붙이지 마세요. 비워 두면 자동조회가 꺼진 상태로 뜹니다.
+ * ★ 중계 서버 기본 주소 ★
+ *
+ * [왜 비어 있나 — 중요한 교훈]
+ *   한때 여기에 클라우드(Supabase) 프록시 주소를 넣어 뒀는데, **토스가 그 주소를 막습니다**
+ *   (키에 IP 허용목록이 걸려 있고 클라우드 IP는 매 요청 바뀜 → 403 "IP address not allowed").
+ *   그 결과 웹앱은 열리지만 시세·현황이 전부 실패했습니다. "작동 안 된다"의 원인이었습니다.
+ *
+ *   지금은 **집 PC 릴레이**만 씁니다. 집 PC 주소는 토스가 허용하기 때문입니다.
+ *   릴레이 주소는 켤 때마다 바뀌므로 여기 고정할 수 없고, PC 앱이 만들어 주는
+ *   QR(?api=...)로 전달됩니다. 그래서 기본값은 비어 있는 것이 정상입니다.
  */
-const DEFAULT_API_BASE = "https://hmjxrqhcwjyfkvlcejfc.supabase.co/functions/v1/toss-proxy";
+const DEFAULT_API_BASE = "";
 
 /** 프록시 주소를 정한다: ?api=(주소창) → 저장값 → 기본값(위 상수) */
 export function resolveApiBase(): string {
@@ -55,8 +61,36 @@ export function resolveApiBase(): string {
 function installProcessShim(apiBase: string): void {
   // 토스 주소를 프록시로 고정한다(엔진이 공식 주소로 되돌리려 해도 유지된다 — env-shim 참고).
   if (apiBase) setProxyBase(`${apiBase}/api/toss`);
+  else installNoRelayGuard(); // 중계 주소가 없으면 '왜 안 되는지' 알려 주는 안내를 깐다
   env.DRY_RUN = env.DRY_RUN ?? "true"; // 실주문은 [실주문] 토글을 켜야만 나간다
   env.TOSS_MOCK = "false"; //            연습(목) 서버는 브라우저에서 띄울 수 없다
+}
+
+/**
+ * installNoRelayGuard — 중계 주소가 없을 때 '무슨 일을 해야 하는지' 알려 준다.
+ *
+ *   중계 주소가 없으면 엔진은 토스 공식 주소로 직접 요청하고, 브라우저는 그걸 CORS로 막습니다.
+ *   그때 화면에 뜨는 메시지("Failed to fetch")로는 사장님이 무엇을 해야 할지 알 수 없습니다.
+ *   그래서 토스로 향하는 요청을 가로채, 해야 할 일을 한국어로 알려 줍니다.
+ *   (계산기·장 상태 등 인터넷이 필요 없는 기능은 그대로 동작합니다)
+ */
+function installNoRelayGuard(): void {
+  const orig = globalThis.fetch.bind(globalThis);
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url.startsWith("https://openapi.tossinvest.com")) {
+      return Promise.reject(
+        new Error(
+          "폰 연결이 아직 안 돼 있습니다." +
+            "\n\n집 PC에서 Capri 앱을 켜고 [설정] → 📱 폰에서 쓰기 → [폰 연결 켜기] 를 누른 뒤," +
+            "\n화면에 나오는 QR을 폰 카메라로 찍어 주세요." +
+            "\n\n(토스는 등록된 인터넷 주소에서만 조회를 허용하므로 집 PC를 거쳐야 합니다. " +
+            "계산기와 장 상태는 연결 없이도 쓸 수 있습니다.)",
+        ),
+      );
+    }
+    return orig(input as RequestInfo, init);
+  }) as typeof fetch;
 }
 
 let engine: ToolEngine | null = null;
