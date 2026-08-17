@@ -41,19 +41,29 @@ export default defineConfig({
   // [핵심] 데스크톱 엔진(electron/tool-engine.ts)을 **고치지 않고 그대로** 브라우저에서 돌리기 위해,
   //   그 엔진이 쓰는 Node 전용 모듈을 브라우저용 껍데기로 바꿔치기한다.
   //   이렇게 해야 PC와 웹의 계산·주문 규칙·안전장치가 100% 같은 코드로 유지된다.
-  resolve: {
-    alias: {
-      "node:fs": resolve(__dirname, "web/shims/fs.ts"),
-      "node:path": resolve(__dirname, "web/shims/path.ts"),
-      "node:events": resolve(__dirname, "web/shims/events.ts"),
-      "node:crypto": resolve(__dirname, "web/shims/crypto.ts"),
-      // 연습(목) 서버는 브라우저에서 띄울 수 없다 → 안내만 하는 껍데기로 대체
-      [resolve(__dirname, "mocks/toss-mock.ts")]: resolve(__dirname, "web/shims/toss-mock.ts"),
-    },
-  },
   // base "./" : 어떤 주소(도메인 루트든 /하위폴더/든)에 올려도 자원 경로가 맞도록 상대 경로 사용.
-  //   GitHub Pages 처럼 https://아이디.github.io/저장소이름/ 형태에 올릴 때 특히 중요하다.
+  //   [주의] 이 줄을 빼면 GitHub Pages 하위폴더(/capri-web/)에서 /assets/... 를 찾다가 404 가 나고
+  //   화면이 아예 뜨지 않는다(실제로 겪음 — 편집 중 이 줄이 함께 지워졌다).
   base: "./",
+  resolve: {
+    // [중요] alias 키는 '코드에 적힌 import 문자열'과 맞아야 한다.
+    //   예전에 절대경로를 키로 썼다가 **하나도 적용되지 않아**, 브라우저에서 가짜 서버를 띄우려다
+    //   "createServer is not a function" 같은 알 수 없는 오류가 났다(원인 파악 불가한 증상).
+    //   그래서 find/replacement 형태로 '실제 import 경로'를 정확히 잡는다.
+    alias: [
+      { find: /^node:fs$/, replacement: resolve(__dirname, "web/shims/fs.ts") },
+      { find: /^node:path$/, replacement: resolve(__dirname, "web/shims/path.ts") },
+      { find: /^node:events$/, replacement: resolve(__dirname, "web/shims/events.ts") },
+      { find: /^node:crypto$/, replacement: resolve(__dirname, "web/shims/crypto.ts") },
+      // 브라우저에서는 서버를 못 띄운다 → 부르면 한국어로 이유를 알려 주는 껍데기
+      { find: /^node:http$/, replacement: resolve(__dirname, "web/shims/http.ts") },
+      { find: /^node:net$/, replacement: resolve(__dirname, "web/shims/http.ts") },
+      // 연습(목) 토스 서버: tool-engine 이 "../mocks/toss-mock" 으로 불러온다
+      // [주의] 정규식은 **경로 전체**를 잡아야 한다. 일부만 잡으면 남은 앞부분("../")이
+      //   결과에 붙어 "../C:\...\toss-mock.ts" 같은 잘못된 경로가 되어 빌드가 깨진다(실제로 겪음).
+      { find: /^\.\.\/mocks\/toss-mock$/, replacement: resolve(__dirname, "web/shims/toss-mock.ts") },
+    ],
+  },
   plugins: [react(), writeBuildId()],
   define: {
     __BUILD_ID__: JSON.stringify(BUILD_ID),
