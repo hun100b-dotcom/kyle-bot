@@ -17,6 +17,7 @@ import { Fragment, useCallback, useEffect, useState } from "react";
 import "./App.css";
 import TodayReport from "./TodayReport"; // [v0.9.1] 오늘의 매매 리포트 화면
 import { useTabOrder } from "./useTabOrder"; // [v0.9.2] 탭 순서 드래그로 변경
+import { restoreInputsFromSaved } from "../lib/split-restore"; // [v0.9.3] 옛 기록도 계산기로 불러오기
 
 /** 앱이 가진 모든 탭(기본 순서). 순서는 사장님이 드래그로 바꿀 수 있다. */
 const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "trades", "orders", "journal", "settings"] as const;
@@ -929,8 +930,14 @@ ${msg}
    *   옛 기록(입력값이 없는 것)은 버튼이 비활성이라 여기로 들어오지 않는다.
    */
   function loadSplitIntoCalc(s: SavedSplit): void {
-    const i = s.inputs;
-    if (!i) return; // 방어: 옛 기록
+    // 저장된 입력값이 있으면 그대로, 없으면(옛 기록) **결과에서 거꾸로 되살려서** 쓴다.
+    //   예전에는 여기서 그냥 return 해 버려 "버튼이 안 눌린다"는 인상을 줬다.
+    const restored = s.inputs ? null : restoreInputsFromSaved(s);
+    const i = s.inputs ?? restored;
+    if (!i) {
+      alert("이 기록은 계산기로 불러올 수 없습니다(저장된 값이 부족합니다).");
+      return;
+    }
     setTech(i.technique);
     setSymbol(i.symbol);
     setCommittedSymbol(i.symbol); // 종목 확정 상태로 둬야 시세·수량 조회가 바로 붙는다
@@ -944,7 +951,11 @@ ${msg}
     setManualEntry(i.manualEntry);
     setCandleYang(i.candleYang);
     setTab("calc"); //             계산기 화면으로 이동
-    setSplitSaved(`${s.symbol} 입력값을 계산기에 불러왔습니다 — 수량만 바꿔 2·3차 진행하세요`);
+    setSplitSaved(
+      restored
+        ? `${s.symbol} 불러옴 — 옛 기록이라 진입가에서 되살린 값입니다(1틱 정도 차이 가능). 수량만 바꿔 진행하세요`
+        : `${s.symbol} 입력값을 계산기에 불러왔습니다 — 수량만 바꿔 2·3차 진행하세요`,
+    );
     setTimeout(() => setSplitSaved(""), 4000);
   }
 
@@ -1815,15 +1826,16 @@ ${msg}
                       {/* [v0.9.0] 저장해 둔 입력값(전봉종가·EMA200 등)을 계산기에 그대로 복원 */}
                       <button
                         className="mini"
-                        disabled={!s.inputs}
+                        disabled={!s.inputs && !restoreInputsFromSaved(s)}
                         onClick={() => loadSplitIntoCalc(s)}
                         title={
                           s.inputs
                             ? "이 기록을 만들 때 쓴 입력값(전봉종가·EMA200 등)을 계산기에 그대로 불러옵니다"
-                            : "이 기록은 입력값 저장 기능이 생기기 전에 만들어져 불러올 수 없습니다. 새로 계산해 저장하면 다음부터 됩니다."
+                            : "옛 기록이라 진입가에서 되살린 값으로 불러옵니다(1틱 정도 차이 가능)"
                         }
                       >
-                        ↩ 계산기로 불러오기
+                        {/* 폰에는 '마우스 올리기'가 없어 설명이 안 보이므로, 복원인 경우 버튼에 바로 표시한다 */}
+                        ↩ 계산기로 불러오기{!s.inputs && " (복원)"}
                       </button>
                       <button className="mini btn-del" onClick={() => void deleteSplit(s.id)} title="이 기록 삭제">🗑 삭제</button>
                     </div>
