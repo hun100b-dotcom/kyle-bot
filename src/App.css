@@ -464,3 +464,103 @@ ul.hint { padding-left: 18px; }
 .step-box { border: 1px solid #2a2f3a; border-radius: 8px; padding: 10px 12px; margin: 8px 0; background: #141821; }
 .step-title { font-weight: 700; font-size: 13px; color: #cfd6e2; margin-bottom: 6px; }
 .step-disabled { opacity: 0.5; }
+
+/* =============================================================================
+   [v0.9.1] 오늘의 매매 리포트 — 토스 스타일(큰 숫자·카드·부드러운 애니메이션)
+   ============================================================================= */
+
+/* 등장 효과: 아래에서 살짝 올라오며 나타난다 */
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+/* 막대가 왼쪽에서 자라난다 */
+@keyframes grow-bar {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
+}
+
+.report section { animation: rise-in 420ms ease-out both; }
+.report section:nth-child(2) { animation-delay: 60ms; }
+.report section:nth-child(3) { animation-delay: 120ms; }
+.report section:nth-child(4) { animation-delay: 180ms; }
+
+/* ① 오늘 번 돈 — 가장 큰 숫자 */
+.report-hero { position: relative; text-align: center; padding: 26px 18px 22px; }
+.report-hero-label { font-size: 14px; color: var(--muted, #94a3b8); margin-bottom: 6px; }
+.report-hero-num {
+  font-size: clamp(38px, 9vw, 60px);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums; /* 숫자가 바뀔 때 폭이 흔들리지 않게 */
+}
+.report-hero-num.up { color: var(--green, #22c55e); }
+.report-hero-num.down { color: var(--red, #ef4444); }
+.report-hero-sub { margin-top: 8px; font-size: 13px; color: var(--muted, #94a3b8); }
+.report-hero-sub .up { color: var(--green, #22c55e); }
+.report-hero-sub .down { color: var(--red, #ef4444); }
+.report-refresh { position: absolute; top: 12px; right: 12px; }
+
+/* ② 배지 4개 */
+.report-badges { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+@media (max-width: 560px) { .report-badges { grid-template-columns: repeat(2, 1fr); } }
+.report-badge {
+  text-align: center;
+  padding: 14px 8px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--line, #24334d);
+}
+.report-badge .rb-num { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.report-badge .rb-label { font-size: 12px; color: var(--muted, #94a3b8); margin-top: 2px; }
+.report-badge.win .rb-num { color: var(--green, #22c55e); }
+.report-badge.loss .rb-num { color: var(--red, #ef4444); }
+
+/* ③ 오늘의 1등 */
+.report-best {
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.12), rgba(34, 197, 94, 0.02));
+  border-color: rgba(34, 197, 94, 0.35);
+}
+.report-best-crown { font-size: 13px; color: var(--muted, #94a3b8); margin-bottom: 6px; }
+.report-best-row { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.report-best-sym { font-size: 28px; font-weight: 800; }
+.report-best-pct { font-size: 28px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.report-best-pct.up { color: var(--green, #22c55e); }
+.report-best-pct.down { color: var(--red, #ef4444); }
+
+/* ④ 종목별 성적 */
+.report-rows { display: flex; flex-direction: column; gap: 12px; }
+.report-row { animation: rise-in 380ms ease-out both; min-width: 0; }
+.rr-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.rr-head b { font-size: 16px; }
+.rr-pct { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.rr-pct.up { color: var(--green, #22c55e); }
+.rr-pct.down { color: var(--red, #ef4444); }
+.rr-bar-wrap {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+  margin: 6px 0 4px;
+}
+.rr-bar {
+  height: 100%;
+  border-radius: 999px;
+  transform-origin: left center;
+  animation: grow-bar 620ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.rr-bar.up { background: var(--green, #22c55e); }
+.rr-bar.down { background: var(--red, #ef4444); }
+.rr-meta { font-size: 12px; }
+.report-note { margin-top: 14px; }
+
+/* 빈 상태 */
+.report-empty { text-align: center; padding: 40px 20px; }
+.report-empty-emoji { font-size: 46px; margin-bottom: 8px; }
+.report-empty h2 { margin: 0 0 8px; }
+
+/* 움직임을 불편해하는 분들을 위해: 시스템 설정이 '모션 줄이기'면 애니메이션을 끈다 */
+@media (prefers-reduced-motion: reduce) {
+  .report section, .report-row, .rr-bar { animation: none !important; }
+}

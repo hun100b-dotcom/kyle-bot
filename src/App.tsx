@@ -13,8 +13,9 @@
 //   ④ 설정: 연습/실서버 모드, 토스 API 키(값은 화면에 재표시 안 됨)
 // =============================================================================
 
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import "./App.css";
+import TodayReport from "./TodayReport"; // [v0.9.1] 오늘의 매매 리포트 화면
 
 const SESSION_LABEL: Record<string, string> = {
   day: "데이마켓",
@@ -243,7 +244,13 @@ interface PendingOrder {
 
 function App() {
   const [status, setStatus] = useState<ToolStatus | null>(null);
-  const [tab, setTab] = useState<"calc" | "screener" | "splits" | "strength" | "trades" | "orders" | "journal" | "settings">("calc");
+  const [tab, setTab] = useState<
+    "calc" | "report" | "screener" | "splits" | "strength" | "trades" | "orders" | "journal" | "settings"
+  >("calc");
+  // [v0.9.1] 오늘의 매매 리포트
+  const [report, setReport] = useState<DailyReport | null>(null);
+  const [reportBusy, setReportBusy] = useState(false);
+
   // [폰에서 쓰기] 집 PC 릴레이 + 터널 상태(데스크톱 앱에서만 동작 — 웹앱에는 이 기능이 없다)
   const [phone, setPhone] = useState<PhoneState | null>(null);
   const [phoneBusy, setPhoneBusy] = useState(false);
@@ -252,6 +259,21 @@ function App() {
     void window.kyletool.phoneStatus().then(setPhone);
     return window.kyletool.onPhoneState?.(setPhone);
   }, []);
+
+  /** [v0.9.1] 오늘의 리포트 불러오기(탭을 열 때마다 새로 계산 — 늘 최신) */
+  const loadReport = useCallback(async () => {
+    setReportBusy(true);
+    try {
+      setReport(await window.kyletool.todayReport());
+    } catch (e) {
+      console.error("리포트 조회 실패", e);
+    } finally {
+      setReportBusy(false);
+    }
+  }, []);
+  useEffect(() => {
+    if (tab === "report") void loadReport();
+  }, [tab, loadReport]);
   // [v0.7.0] 체결강도 자동 기록(매매 연동) — 트레이드 목록 + 요약.
   const [trades, setTrades] = useState<StrengthTrade[]>([]);
   const [tradeStats, setTradeStats] = useState<TradeStats | null>(null);
@@ -1333,7 +1355,7 @@ ${msg}
 
       {/* ===== 탭 ===== */}
       <nav className="tabs">
-        {(["calc", "screener", "splits", "strength", "trades", "orders", "journal", "settings"] as const).map((t) => (
+        {(["calc", "report", "screener", "splits", "strength", "trades", "orders", "journal", "settings"] as const).map((t) => (
           <button
             key={t}
             className={tab === t ? "tab active" : "tab"}
@@ -1345,7 +1367,7 @@ ${msg}
               if (t === "trades") void refreshTrades(); // 자동 기록 트레이드 불러오기
             }}
           >
-            {{ calc: "계산기", screener: "탐색", splits: "내 삼분할 기록", strength: "체결강도", trades: "매매분석", orders: "주문 현황", journal: "기록", settings: "설정" }[t]}
+            {{ calc: "계산기", report: "📊 오늘의 리포트", screener: "탐색", splits: "내 삼분할 기록", strength: "체결강도", trades: "매매분석", orders: "주문 현황", journal: "기록", settings: "설정" }[t]}
           </button>
         ))}
       </nav>
@@ -1606,6 +1628,9 @@ ${msg}
       )}
 
       {/* ===== ①-1) 탐색(스크리너) (v0.6.0) ===== */}
+      {/* [v0.9.1] 오늘의 매매 리포트 — 큰 숫자·배지·막대 애니메이션(토스 스타일) */}
+      {tab === "report" && <TodayReport data={report} busy={reportBusy} fx={fx} onRefresh={() => void loadReport()} />}
+
       {tab === "screener" && (
         <main className="grid">
           <section className="card wide">

@@ -24,6 +24,7 @@ import { getSession, getSessionStart, getMarketStatus, isOrderFrozen, type Sessi
 import { calcSplit3, calcOrderbook, calcCandle, roundPrice, getTick, type SplitOrder } from "../lib/calc";
 import { encryptSecret, decryptSecret } from "../lib/keysync"; // [v0.8.0] 키 기기 간 동기화(클라이언트 암호화)
 import { strengthFromTicks, type Side } from "../lib/strength";
+import { buildDailyReport, type DailyReport } from "../lib/report"; // [v0.9.1] 오늘의 매매 리포트
 import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, type Candle, type SessionPattern } from "../lib/indicators";
 import {
   getPrice,
@@ -527,6 +528,11 @@ export interface StrengthTrade {
   exitKind: "tp" | "sl" | "manual" | null; // 익절/손절/수동
   resultPct: number | null; // (청산가-진입가)/진입가×100
   outcome: "win" | "loss" | null; // 수익/손실
+  /**
+   * [v0.9.1] 주문 수량 — "오늘 얼마 벌었나"를 금액으로 계산하려면 필요하다.
+   *   이 값이 생기기 전 기록에는 없다(그때는 리포트가 금액 대신 수익률만 보여 준다).
+   */
+  quantity?: number;
 }
 
 /** 트레이드 분석 요약(수익 vs 손실의 진입 시 평균 체결강도 등). */
@@ -1559,7 +1565,7 @@ export class ToolEngine extends EventEmitter {
         priceAtOrder: cur,
         dryRun: true,
       });
-      void this.recordEntry(symbol, spec.price, this.currentMode()); // [v0.7.0] 진입 체결강도 자동 스냅샷(주문과 무관)
+      void this.recordEntry(symbol, spec.price, this.currentMode(), spec.quantity); // [v0.7.0] 진입 체결강도 자동 스냅샷(주문과 무관)
       return this.addJournal({
         kind: "dryrun",
         symbol,
@@ -1585,7 +1591,7 @@ export class ToolEngine extends EventEmitter {
       dryRun: false,
       tossOrderId: o.tossOrderId,
     });
-    void this.recordEntry(symbol, spec.price, this.currentMode()); // [v0.7.0] 진입 체결강도 자동 스냅샷(주문과 무관)
+    void this.recordEntry(symbol, spec.price, this.currentMode(), spec.quantity); // [v0.7.0] 진입 체결강도 자동 스냅샷(주문과 무관)
     return this.addJournal({
       kind: "entry",
       symbol,
@@ -1718,7 +1724,7 @@ export class ToolEngine extends EventEmitter {
         priceAtOrder: cur,
         dryRun: true,
       });
-      void this.recordEntry(symbol, spec.entryPrice, this.currentMode()); // [v0.7.0] 진입(OTO) 체결강도 자동 스냅샷
+      void this.recordEntry(symbol, spec.entryPrice, this.currentMode(), spec.quantity); // [v0.7.0] 진입(OTO) 체결강도 자동 스냅샷
       return this.addJournal({
         kind: "dryrun",
         symbol,
@@ -1745,7 +1751,7 @@ export class ToolEngine extends EventEmitter {
       dryRun: false,
       tossOrderId: c.conditionalOrderId,
     });
-    void this.recordEntry(symbol, spec.entryPrice, this.currentMode()); // [v0.7.0] 진입(OTO) 체결강도 자동 스냅샷
+    void this.recordEntry(symbol, spec.entryPrice, this.currentMode(), spec.quantity); // [v0.7.0] 진입(OTO) 체결강도 자동 스냅샷
     return this.addJournal({
       kind: "oto",
       symbol,
@@ -2139,7 +2145,7 @@ export class ToolEngine extends EventEmitter {
    * recordEntry — 진입 주문 순간, 트레이드를 '열고' 진입 시 체결강도를 스냅샷한다.
    *   ⚠️ 주문 메서드에서 `void this.recordEntry(...)`로 부른다(대기하지 않음 → 주문 응답 지연·오류 무관).
    */
-  private async recordEntry(symbol: string, price: number, mode: "mock" | "dryrun" | "real"): Promise<void> {
+  private async recordEntry(symbol: string, price: number, mode: "mock" | "dryrun" | "real", quantity?: number): Promise<void> {
     try {
       const now = DateTime.now().setZone("Asia/Seoul");
       const snap = await this.snapshotStrength(symbol);
@@ -2156,6 +2162,8 @@ export class ToolEngine extends EventEmitter {
         exitKind: null,
         resultPct: null,
         outcome: null,
+        // 수량은 알 때만 담는다(모르면 옛 기록과 같은 모양 — 리포트가 금액을 생략한다).
+        ...(Number.isFinite(quantity as number) ? { quantity } : {}),
       };
       this.trades.push(trade);
       if (this.trades.length > 1000) this.trades.shift();
@@ -2207,6 +2215,16 @@ export class ToolEngine extends EventEmitter {
   /** 트레이드 분석 요약. */
   getTradeStats(): TradeStats {
     return summarizeTrades(this.trades);
+  }
+
+  /**
+   * [v0.9.1] 오늘의 매매 리포트 — 오늘 청산된 '실제 체결'만 모아 요약한다.
+   *   집계 규칙은 lib/report.ts(순수 함수)에 있어 PC·폰이 똑같이 계산한다.
+   */
+  todayReport(): DailyReport {
+    // 기록의 시각이 "MM-dd HH:mm:ss"(연도 없음) 형식이라 같은 형식으로 오늘 날짜를 만든다.
+    const dateKey = DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd");
+    return buildDailyReport(this.trades, dateKey);
   }
 
   /**

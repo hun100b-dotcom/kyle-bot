@@ -42,6 +42,34 @@ interface PhoneState {
   error: string | null;
 }
 
+/** [v0.9.1] 오늘의 매매 리포트 */
+interface ReportRow {
+  symbol: string;
+  trades: number;
+  wins: number;
+  losses: number;
+  pnlUsd: number | null;
+  pctAvg: number;
+  pctBest: number;
+  hasAmount: boolean;
+}
+
+interface DailyReport {
+  dateKey: string;
+  closed: number;
+  openNow: number;
+  tpCount: number;
+  slCount: number;
+  manualCount: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+  totalPnlUsd: number | null;
+  avgPct: number | null;
+  best: ReportRow | null;
+  rows: ReportRow[];
+}
+
 interface JournalEntry {
   ts: string;
   kind: "entry" | "oco" | "oto" | "cancel" | "dryrun" | "info";
@@ -466,6 +494,7 @@ interface KyletoolBridge {
   onScreenerProgress(cb: (p: ScreenProgress) => void): () => void;
   // [v0.7.0] 체결강도 자동 기록(매매 연동)
   tradesList(): Promise<StrengthTrade[]>;
+  todayReport(): Promise<DailyReport>;
   tradesStats(): Promise<TradeStats>;
   tradesClose(id: string, exitPrice: number, kind: "tp" | "sl" | "manual"): Promise<StrengthTrade[]>;
   tradesDelete(id: string): Promise<StrengthTrade[]>;

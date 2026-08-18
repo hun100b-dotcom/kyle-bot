@@ -199,6 +199,7 @@ export function installKyleTool(): ToolEngine {
 
     // ── 트레이드 기록 ──────────────────────────────────────────
     tradesList: () => Promise.resolve(e.getTradeLog()),
+    todayReport: () => Promise.resolve(e.todayReport()), // [v0.9.1] 오늘의 매매 리포트
     tradesStats: () => Promise.resolve(e.getTradeStats()),
     tradesClose: (id: string, exitPrice: number, kind: "tp" | "sl" | "manual") => e.closeTradeManual(id, exitPrice, kind),
     tradesDelete: (id: string) => Promise.resolve(e.deleteTrade(id)),
