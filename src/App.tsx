@@ -841,6 +841,25 @@ ${msg}
         slPct: toNum(slPct),
         qty: toNum(qty),
         memo: splitMemo,
+        // [v0.9.0] 계산에 쓴 '재료'를 통째로 함께 저장한다.
+        //   나중에 2·3차 매수할 때 전봉종가·EMA200 을 다시 치지 않고
+        //   [계산기로 불러오기] 한 번으로 그대로 복원하기 위함이다.
+        inputs: {
+          technique: result.technique,
+          symbol: committedSymbol || symbol,
+          tpPct,
+          slPct,
+          qty,
+          baseClose,
+          ema200,
+          wallPrice,
+          barOpen,
+          manualEntry,
+          candleYang,
+          // 참고값: 저장 당시 벌어짐(gap)과 현재가. 나중에 "그때와 지금" 비교에 쓸 수 있다.
+          gap: toNum(baseClose) != null && toNum(ema200) != null ? toNum(baseClose)! - toNum(ema200)! : null,
+          curPrice,
+        },
       });
       setSplits(updated);
       setSplitMemo(""); // 메모칸 비우기
@@ -849,6 +868,32 @@ ${msg}
     } catch (e) {
       alert("기록 저장 실패: " + String(e));
     }
+  }
+
+  /**
+   * [v0.9.0] 저장된 기록의 입력값을 계산기에 그대로 채워 넣고 계산기 탭으로 이동한다.
+   *
+   *   2차·3차 매수를 할 때 전봉 종가·EMA200 같은 재료를 다시 입력하지 않아도 되게 하는 기능.
+   *   옛 기록(입력값이 없는 것)은 버튼이 비활성이라 여기로 들어오지 않는다.
+   */
+  function loadSplitIntoCalc(s: SavedSplit): void {
+    const i = s.inputs;
+    if (!i) return; // 방어: 옛 기록
+    setTech(i.technique);
+    setSymbol(i.symbol);
+    setCommittedSymbol(i.symbol); // 종목 확정 상태로 둬야 시세·수량 조회가 바로 붙는다
+    setTpPct(i.tpPct);
+    setSlPct(i.slPct);
+    setQty(i.qty);
+    setBaseClose(i.baseClose);
+    setEma200(i.ema200);
+    setWallPrice(i.wallPrice);
+    setBarOpen(i.barOpen);
+    setManualEntry(i.manualEntry);
+    setCandleYang(i.candleYang);
+    setTab("calc"); //             계산기 화면으로 이동
+    setSplitSaved(`${s.symbol} 입력값을 계산기에 불러왔습니다 — 수량만 바꿔 2·3차 진행하세요`);
+    setTimeout(() => setSplitSaved(""), 4000);
   }
 
   /** 기록 한 건 삭제(휴지통). */
@@ -1698,6 +1743,19 @@ ${msg}
                     </div>
                     <div className="split-card-meta">
                       <span className="hint">{s.ts} 저장</span>
+                      {/* [v0.9.0] 저장해 둔 입력값(전봉종가·EMA200 등)을 계산기에 그대로 복원 */}
+                      <button
+                        className="mini"
+                        disabled={!s.inputs}
+                        onClick={() => loadSplitIntoCalc(s)}
+                        title={
+                          s.inputs
+                            ? "이 기록을 만들 때 쓴 입력값(전봉종가·EMA200 등)을 계산기에 그대로 불러옵니다"
+                            : "이 기록은 입력값 저장 기능이 생기기 전에 만들어져 불러올 수 없습니다. 새로 계산해 저장하면 다음부터 됩니다."
+                        }
+                      >
+                        ↩ 계산기로 불러오기
+                      </button>
                       <button className="mini btn-del" onClick={() => void deleteSplit(s.id)} title="이 기록 삭제">🗑 삭제</button>
                     </div>
                   </div>

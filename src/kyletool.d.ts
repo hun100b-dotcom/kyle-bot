@@ -140,6 +140,23 @@ interface SavedSplitLevel {
   entered: boolean;
 }
 /** [v0.4.0] 저장된 삼분할 기록 한 건(종목 하나의 3개 타점 묶음) */
+/** [v0.9.0] 계산기에 다시 채워 넣기 위한 원본 입력값(옛 기록에는 없을 수 있음) */
+interface SplitInputs {
+  technique: Technique;
+  symbol: string;
+  tpPct: string;
+  slPct: string;
+  qty: string;
+  baseClose: string;
+  ema200: string;
+  wallPrice: string;
+  barOpen: string;
+  manualEntry: string;
+  candleYang: boolean;
+  gap: number | null;
+  curPrice: number | null;
+}
+
 interface SavedSplit {
   id: string;
   ts: string;
@@ -150,6 +167,8 @@ interface SavedSplit {
   slPct: number | null;
   qty: number | null;
   memo: string;
+  /** [v0.9.0] 계산기 원본 입력값 — 이 기능 이전 기록에는 없다(그때는 불러오기 비활성) */
+  inputs?: SplitInputs;
 }
 
 /** [v0.5.0] 체결강도 시계열 한 점 */
@@ -432,6 +451,7 @@ interface KyletoolBridge {
     slPct: number | null;
     qty: number | null;
     memo?: string;
+    inputs?: SplitInputs;
   }): Promise<SavedSplit[]>;
   splitsDelete(id: string): Promise<SavedSplit[]>;
   splitsToggle(id: string, level: number): Promise<SavedSplit[]>;

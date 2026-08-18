@@ -315,6 +315,34 @@ export interface SavedSplitLevel {
   entered: boolean; // 오너가 [진입완료]를 체크했는지(실제 주문과 무관한 '내 메모용' 표시)
 }
 
+/**
+ * [v0.9.0] 계산기에 다시 채워 넣기 위한 '원본 입력값' 묶음.
+ *
+ * [왜 저장하나?]
+ *   기록에는 계산 '결과'(진입가·익절·손절)만 남아 있어서, 나중에 2차·3차 매수를 하려면
+ *   전봉 종가·EMA200 같은 재료를 처음부터 다시 입력해야 했습니다. 그 번거로움을 없애려고
+ *   계산에 쓴 재료를 그대로 함께 저장해 둡니다. → [계산기로 불러오기] 한 번이면 끝.
+ *
+ * [왜 숫자가 아니라 문자열인가?]
+ *   계산기 입력칸은 사람이 친 글자를 그대로 들고 있습니다(입력 중 값이 뭉개지지 않게).
+ *   저장도 같은 형태로 해야 불러왔을 때 **한 글자도 다르지 않게** 복원됩니다.
+ */
+export interface SplitInputs {
+  technique: Technique; //  어떤 기법으로 계산했는지
+  symbol: string; //        종목 코드
+  tpPct: string; //         익절 %
+  slPct: string; //         손절 %
+  qty: string; //           수량
+  baseClose: string; //     전봉 종가(삼분할)
+  ema200: string; //        EMA200(삼분할)
+  wallPrice: string; //     매수벽 가격(호가창)
+  barOpen: string; //       현재봉 시가(캔들)
+  manualEntry: string; //   직접 입력 진입가(수동)
+  candleYang: boolean; //   캔들: 전봉 양봉 확인 체크
+  gap: number | null; //    (참고) 전봉종가 − EMA200. 저장 당시 얼마나 벌어져 있었는지
+  curPrice: number | null; // (참고) 저장 당시 현재가
+}
+
 /** 저장된 삼분할 기록 한 건(종목 하나에 대한 3개 타점 묶음). */
 export interface SavedSplit {
   id: string; //          고유 번호(저장 시각 밀리초 기반 — 삭제·체크의 열쇠)
@@ -326,6 +354,12 @@ export interface SavedSplit {
   slPct: number | null; //     손절 %(참고 표시용)
   qty: number | null; //       저장 당시 계획 수량(참고 — 강제 아님)
   memo: string; //             오너 자유 메모
+  /**
+   * [v0.9.0] 계산기 원본 입력값(없을 수 있음).
+   *   이 기능이 생기기 전에 저장된 기록에는 없습니다 → 그때는 [계산기로 불러오기]가 비활성화됩니다.
+   *   (옛 기록을 잃지 않기 위해 필수가 아닌 '선택' 항목으로 둡니다)
+   */
+  inputs?: SplitInputs;
 }
 
 /**
@@ -1877,6 +1911,8 @@ export class ToolEngine extends EventEmitter {
     slPct: number | null;
     qty: number | null;
     memo?: string;
+    /** [v0.9.0] 계산기 입력값(있으면 그대로 저장 → 나중에 계산기로 다시 불러올 수 있다) */
+    inputs?: SplitInputs;
   }): SavedSplit[] {
     const now = DateTime.now().setZone("Asia/Seoul");
     const rec: SavedSplit = {
@@ -1890,6 +1926,8 @@ export class ToolEngine extends EventEmitter {
       slPct: input.slPct,
       qty: input.qty,
       memo: (input.memo ?? "").trim(),
+      // 입력값은 준 경우에만 담는다(안 주면 예전과 똑같은 모양으로 저장 — 하위호환).
+      ...(input.inputs ? { inputs: input.inputs } : {}),
     };
     this.splits.unshift(rec); // 최신이 맨 위
     if (this.splits.length > 500) this.splits.pop(); // 너무 쌓이면 오래된 것부터 정리
