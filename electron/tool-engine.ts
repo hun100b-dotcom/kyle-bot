@@ -2308,8 +2308,13 @@ export class ToolEngine extends EventEmitter {
       for (const rk of rankings) {
         this.emit("screener:progress", { phase: "scanning", done, total, symbol: rk.symbol } as ScreenProgress);
         try {
-          // 1분봉을 과거로 당겨 ~1000개 이상 확보(EMA200엔 5분봉 200개=1분봉 1000개 필요)
-          const oneMin = await getCandles1mPaged(rk.symbol, 1000);
+          // 1분봉을 과거로 당겨 확보한다.
+          //   EMA200 에는 **완성된** 5분봉 200개(=1분봉 1000개)가 필요하다.
+          //   그런데 바로 아래에서 '형성 중인 마지막 봉'을 하나 버리므로, 딱 1000개만 받으면
+          //   199개가 되어 **멀쩡한 종목이 '데이터 부족'으로 튕기는** 일이 생긴다.
+          //   (지금 시각이 5분 경계인지에 따라 됐다 안 됐다 해서 발견하기 어려웠다)
+          //   그래서 여유분을 더 받는다.
+          const oneMin = await getCandles1mPaged(rk.symbol, 1100);
           // [v0.6.2] 형성 중(미완성)인 마지막 5분봉은 판정에서 제외한다(완성된 봉만 사용).
           //   진행 중 봉으로 판정하면 봉 마감 후 음↔양이 뒤집혀 오판정이 난다(특히 HA).
           const raw5m: Candle[] = dropIncompleteBucket(aggregate1mTo5m(oneMin), now.toMillis());
