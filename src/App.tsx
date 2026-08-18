@@ -16,6 +16,24 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
 import "./App.css";
 import TodayReport from "./TodayReport"; // [v0.9.1] 오늘의 매매 리포트 화면
+import { useTabOrder } from "./useTabOrder"; // [v0.9.2] 탭 순서 드래그로 변경
+
+/** 앱이 가진 모든 탭(기본 순서). 순서는 사장님이 드래그로 바꿀 수 있다. */
+const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "trades", "orders", "journal", "settings"] as const;
+type TabId = (typeof ALL_TABS)[number];
+
+/** 탭에 보여 줄 이름 */
+const TAB_LABEL: Record<TabId, string> = {
+  calc: "계산기",
+  report: "📊 매매 리포트",
+  screener: "탐색",
+  splits: "내 삼분할 기록",
+  strength: "체결강도",
+  trades: "매매분석",
+  orders: "주문 현황",
+  journal: "기록",
+  settings: "설정",
+};
 
 const SESSION_LABEL: Record<string, string> = {
   day: "데이마켓",
@@ -244,12 +262,14 @@ interface PendingOrder {
 
 function App() {
   const [status, setStatus] = useState<ToolStatus | null>(null);
-  const [tab, setTab] = useState<
-    "calc" | "report" | "screener" | "splits" | "strength" | "trades" | "orders" | "journal" | "settings"
-  >("calc");
-  // [v0.9.1] 오늘의 매매 리포트
+  const [tab, setTab] = useState<TabId>("calc");
+  // [v0.9.2] 탭 순서(드래그로 변경, 이 기기에 저장)
+  const { order: tabOrder, dragProps, isDragging } = useTabOrder(ALL_TABS);
+  // [v0.9.1] 매매 리포트 + [v0.9.2] 기간 선택(오늘/1주일/1개월/날짜)
   const [report, setReport] = useState<DailyReport | null>(null);
   const [reportBusy, setReportBusy] = useState(false);
+  const [reportPeriod, setReportPeriod] = useState<PeriodKind>("today");
+  const [reportDate, setReportDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
 
   // [폰에서 쓰기] 집 PC 릴레이 + 터널 상태(데스크톱 앱에서만 동작 — 웹앱에는 이 기능이 없다)
   const [phone, setPhone] = useState<PhoneState | null>(null);
@@ -261,19 +281,29 @@ function App() {
   }, []);
 
   /** [v0.9.1] 오늘의 리포트 불러오기(탭을 열 때마다 새로 계산 — 늘 최신) */
-  const loadReport = useCallback(async () => {
-    setReportBusy(true);
-    try {
-      setReport(await window.kyletool.todayReport());
-    } catch (e) {
-      console.error("리포트 조회 실패", e);
-    } finally {
-      setReportBusy(false);
-    }
-  }, []);
+  const loadReport = useCallback(
+    async (kind: PeriodKind = reportPeriod, picked: string = reportDate) => {
+      setReportBusy(true);
+      try {
+        setReport(await window.kyletool.report(kind, picked));
+      } catch (e) {
+        console.error("리포트 조회 실패", e);
+      } finally {
+        setReportBusy(false);
+      }
+    },
+    [reportPeriod, reportDate],
+  );
   useEffect(() => {
     if (tab === "report") void loadReport();
   }, [tab, loadReport]);
+
+  /** 기간 버튼/달력을 눌렀을 때 — 상태를 바꾸고 즉시 다시 집계한다 */
+  function changeReportPeriod(kind: PeriodKind, picked?: string): void {
+    setReportPeriod(kind);
+    if (picked) setReportDate(picked);
+    void loadReport(kind, picked ?? reportDate);
+  }
   // [v0.7.0] 체결강도 자동 기록(매매 연동) — 트레이드 목록 + 요약.
   const [trades, setTrades] = useState<StrengthTrade[]>([]);
   const [tradeStats, setTradeStats] = useState<TradeStats | null>(null);
@@ -1355,11 +1385,15 @@ ${msg}
 
       {/* ===== 탭 ===== */}
       <nav className="tabs">
-        {(["calc", "report", "screener", "splits", "strength", "trades", "orders", "journal", "settings"] as const).map((t) => (
+        {tabOrder.map((t) => (
           <button
             key={t}
             className={tab === t ? "tab active" : "tab"}
+            title="좌우로 끌면 탭 순서를 바꿀 수 있어요"
+            {...dragProps(t)}
             onClick={() => {
+              // 끌어서 순서를 바꾼 직후에는 탭 이동이 되지 않게 한다(의도치 않은 화면 전환 방지).
+              if (isDragging()) return;
               setTab(t);
               if (t === "orders") refreshStatusTab();
               if (t === "splits") refreshSplits(); // 탭 열 때 최신 목록 다시 읽기
@@ -1367,7 +1401,7 @@ ${msg}
               if (t === "trades") void refreshTrades(); // 자동 기록 트레이드 불러오기
             }}
           >
-            {{ calc: "계산기", report: "📊 오늘의 리포트", screener: "탐색", splits: "내 삼분할 기록", strength: "체결강도", trades: "매매분석", orders: "주문 현황", journal: "기록", settings: "설정" }[t]}
+            {TAB_LABEL[t]}
           </button>
         ))}
       </nav>
@@ -1629,7 +1663,17 @@ ${msg}
 
       {/* ===== ①-1) 탐색(스크리너) (v0.6.0) ===== */}
       {/* [v0.9.1] 오늘의 매매 리포트 — 큰 숫자·배지·막대 애니메이션(토스 스타일) */}
-      {tab === "report" && <TodayReport data={report} busy={reportBusy} fx={fx} onRefresh={() => void loadReport()} />}
+      {tab === "report" && (
+        <TodayReport
+          data={report}
+          busy={reportBusy}
+          fx={fx}
+          onRefresh={() => void loadReport()}
+          period={reportPeriod}
+          pickedDate={reportDate}
+          onPeriod={changeReportPeriod}
+        />
+      )}
 
       {tab === "screener" && (
         <main className="grid">

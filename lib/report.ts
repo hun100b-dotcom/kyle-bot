@@ -28,6 +28,12 @@ export interface ReportTrade {
   resultPct: number | null;
   outcome: "win" | "loss" | null;
   quantity?: number; //          수량(없을 수 있음 — 옛 기록은 금액 계산 불가)
+  /**
+   * [v0.9.2] 청산 시각(밀리초). 기간 조회를 정확히 하기 위해 새로 남긴다.
+   *   기존 exitTs 는 "MM-dd HH:mm:ss"(연도 없음)이라 1년 전 같은 날짜와 헷갈릴 수 있다.
+   *   옛 기록에는 없으므로, 없으면 날짜 문자열로 비교한다(아래 inPeriod 참고).
+   */
+  exitAtMs?: number;
 }
 
 /** 종목 한 줄 요약(오늘 그 종목으로 얼마를 어떻게 먹었나) */
@@ -42,9 +48,27 @@ export interface ReportRow {
   hasAmount: boolean; //      금액을 계산할 수 있었는지(수량이 있었는지)
 }
 
+/** 조회 기간 종류 */
+export type PeriodKind = "today" | "week" | "month" | "date";
+
+/**
+ * 조회 기간.
+ *   keys  : 이 기간에 포함되는 날짜들("MM-dd") — 옛 기록(연도 없는 시각) 비교용
+ *   fromMs/toMs : 정확한 시작·끝(밀리초) — 새 기록(exitAtMs) 비교용
+ */
+export interface Period {
+  kind: PeriodKind;
+  label: string; //   화면에 보여 줄 이름("2026-08-19", "최근 7일" 등)
+  keys: string[];
+  fromMs: number;
+  toMs: number;
+}
+
 /** 오늘의 리포트 전체 */
 export interface DailyReport {
-  dateKey: string; //          기준 날짜("MM-dd")
+  dateKey: string; //          기준 날짜("MM-dd") — 하위호환용(기간 조회면 시작일)
+  periodLabel: string; //      [v0.9.2] 화면에 표시할 기간 이름
+  periodKind: PeriodKind; //   [v0.9.2] 어떤 기간을 봤는지
   closed: number; //           오늘 청산한 거래 수
   openNow: number; //          아직 들고 있는(미청산) 거래 수 — 참고용
   tpCount: number; //          익절 횟수
@@ -67,32 +91,95 @@ export function tradePnlUsd(t: ReportTrade): number | null {
 }
 
 /**
- * buildDailyReport — 오늘 청산된 실제 거래만 모아 리포트를 만든다.
+ * makePeriod — 기간 하나를 만든다(오늘 / 최근 7일 / 최근 30일 / 특정 날짜).
  *
- * @param trades  전체 거래 기록
- * @param dateKey 오늘 날짜 "MM-dd" (한국 시각 기준. 기록의 시각 형식과 맞춘다)
+ * [기간 정의 — 화면 설명과 반드시 일치해야 한다]
+ *   · today : 오늘 하루(한국 시각 00:00 ~ 23:59:59)
+ *   · week  : **오늘 포함 최근 7일**
+ *   · month : **오늘 포함 최근 30일**(달력상 '이번 달'이 아니라 최근 30일 — 매일 같은 길이라 비교가 쉽다)
+ *   · date  : 고른 날짜 하루
  *
- * [왜 "MM-dd" 로 비교하나?] 기록의 시각이 "08-18 22:10:03" 형식(연도 없음)이라
- *   같은 형식으로 앞부분만 비교하는 것이 가장 확실합니다.
+ * @param nowMs  지금 시각(밀리초)
+ * @param tzOffsetMin 화면을 보는 사람의 시간대 보정(분). 한국이면 540(=UTC+9).
+ * @param picked "yyyy-MM-dd" (kind가 date 일 때만)
  */
-export function buildDailyReport(trades: ReportTrade[], dateKey: string): DailyReport {
-  // ① 실제 체결(real) + 오늘 청산된 것만
-  const todays = trades.filter(
-    (t) => t.mode === "real" && t.exitTs != null && t.exitTs.startsWith(dateKey) && t.resultPct != null,
-  );
+export function makePeriod(kind: PeriodKind, nowMs: number, tzOffsetMin = 540, picked?: string): Period {
+  const DAY = 86_400_000;
+  const MIN = 60_000;
 
-  // 참고: 지금 들고 있는(미청산) 실거래 수 — 오늘 것이 아니어도 '진행 중'으로 보여 준다.
+  /** 그 시간대 기준으로 '그 날 00:00'의 밀리초 */
+  const startOfLocalDay = (ms: number): number => {
+    const shifted = ms + tzOffsetMin * MIN; // 그 시간대의 벽시계로 옮긴 뒤
+    return Math.floor(shifted / DAY) * DAY - tzOffsetMin * MIN; // 날짜 경계로 자르고 되돌린다
+  };
+  /** 밀리초 → "MM-dd"(그 시간대 기준) */
+  const keyOf = (ms: number): string => {
+    const d = new Date(ms + tzOffsetMin * MIN);
+    return `${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+  };
+
+  let fromMs: number;
+  let toMs: number;
+  let label: string;
+
+  if (kind === "date" && picked) {
+    // "2026-08-15" → 그 날 00:00 ~ 23:59:59.999 (그 시간대 기준)
+    const [y, m, d] = picked.split("-").map(Number);
+    fromMs = Date.UTC(y, m - 1, d) - tzOffsetMin * MIN;
+    toMs = fromMs + DAY - 1;
+    label = picked;
+  } else if (kind === "week") {
+    toMs = startOfLocalDay(nowMs) + DAY - 1;
+    fromMs = startOfLocalDay(nowMs) - 6 * DAY; // 오늘 포함 7일
+    label = "최근 7일";
+  } else if (kind === "month") {
+    toMs = startOfLocalDay(nowMs) + DAY - 1;
+    fromMs = startOfLocalDay(nowMs) - 29 * DAY; // 오늘 포함 30일
+    label = "최근 30일";
+  } else {
+    fromMs = startOfLocalDay(nowMs);
+    toMs = fromMs + DAY - 1;
+    label = "오늘";
+  }
+
+  // 이 기간에 들어가는 날짜 목록("MM-dd") — 연도가 없는 옛 기록을 걸러내는 데 쓴다.
+  const keys: string[] = [];
+  for (let t = startOfLocalDay(fromMs); t <= toMs; t += DAY) keys.push(keyOf(t));
+
+  return { kind, label, keys, fromMs, toMs };
+}
+
+/** 거래 한 건이 그 기간에 들어가나? */
+function inPeriod(t: ReportTrade, p: Period): boolean {
+  // 새 기록은 정확한 시각(밀리초)이 있으므로 그것으로 판단한다(연도까지 정확).
+  if (typeof t.exitAtMs === "number") return t.exitAtMs >= p.fromMs && t.exitAtMs <= p.toMs;
+  // 옛 기록은 "MM-dd" 만 있으므로 날짜 목록으로 비교한다.
+  //   (1년 전 같은 날짜가 섞일 수 있지만, 기록은 최근 1000건만 보관하므로 실사용에선 사실상 없다)
+  return t.exitTs != null && p.keys.includes(t.exitTs.slice(0, 5));
+}
+
+/**
+ * buildReport — 고른 기간의 '실제 체결'만 모아 요약한다.
+ *
+ * [변하지 않는 규칙]
+ *   ① 연습(mock)·드라이런은 절대 넣지 않는다(번 적 없는 돈이 보이면 안 된다).
+ *   ② 청산(판 것)만 넣는다. 아직 들고 있는 건 '진행 중' 개수로만 보여 준다.
+ */
+export function buildReport(trades: ReportTrade[], period: Period): DailyReport {
+  const picked = trades.filter((t) => t.mode === "real" && t.resultPct != null && inPeriod(t, period));
+
+  // 지금 들고 있는(미청산) 실거래 수 — 기간과 무관하게 '진행 중'으로 보여 준다.
   const openNow = trades.filter((t) => t.mode === "real" && t.outcome == null).length;
 
-  const tpCount = todays.filter((t) => t.exitKind === "tp").length;
-  const slCount = todays.filter((t) => t.exitKind === "sl").length;
-  const manualCount = todays.filter((t) => t.exitKind === "manual").length;
-  const wins = todays.filter((t) => t.outcome === "win").length;
-  const losses = todays.filter((t) => t.outcome === "loss").length;
+  const tpCount = picked.filter((t) => t.exitKind === "tp").length;
+  const slCount = picked.filter((t) => t.exitKind === "sl").length;
+  const manualCount = picked.filter((t) => t.exitKind === "manual").length;
+  const wins = picked.filter((t) => t.outcome === "win").length;
+  const losses = picked.filter((t) => t.outcome === "loss").length;
 
-  // ② 종목별로 묶기
+  // 종목별로 묶기
   const bySymbol = new Map<string, ReportTrade[]>();
-  for (const t of todays) {
+  for (const t of picked) {
     const arr = bySymbol.get(t.symbol) ?? [];
     arr.push(t);
     bySymbol.set(t.symbol, arr);
@@ -113,26 +200,45 @@ export function buildDailyReport(trades: ReportTrade[], dateKey: string): DailyR
     };
   });
 
-  // ③ 잘 번 순서로 정렬(수익률 기준 — 금액은 수량을 모를 수 있어 기준으로 삼지 않는다)
+  // 잘 번 순서(수익률 기준 — 금액은 수량을 모를 수 있어 기준으로 삼지 않는다)
   rows.sort((a, b) => b.pctAvg - a.pctAvg);
 
-  const allAmounts = todays.map(tradePnlUsd).filter((v): v is number => v != null);
-  const allPcts = todays.map((t) => t.resultPct as number);
+  const allAmounts = picked.map(tradePnlUsd).filter((v): v is number => v != null);
+  const allPcts = picked.map((t) => t.resultPct as number);
 
   return {
-    dateKey,
-    closed: todays.length,
+    dateKey: period.keys[0] ?? "",
+    periodLabel: period.label,
+    periodKind: period.kind,
+    closed: picked.length,
     openNow,
     tpCount,
     slCount,
     manualCount,
     wins,
     losses,
-    winRate: todays.length ? Math.round((wins / todays.length) * 1000) / 10 : null,
+    winRate: picked.length ? Math.round((wins / picked.length) * 1000) / 10 : null,
     totalPnlUsd: allAmounts.length ? Math.round(allAmounts.reduce((a, b) => a + b, 0) * 100) / 100 : null,
     avgPct: allPcts.length ? Math.round((allPcts.reduce((a, b) => a + b, 0) / allPcts.length) * 100) / 100 : null,
-    // 1등은 '가장 잘 먹은 한 방'이 큰 종목(사장님이 보고 싶어 하는 건 최고 성적)
+    // 1등 = '가장 잘 먹은 한 방'이 큰 종목
     best: rows.length ? [...rows].sort((a, b) => b.pctBest - a.pctBest)[0] : null,
     rows,
   };
+}
+
+/**
+ * buildDailyReport — (하위호환) 하루치 리포트. 내부적으로 buildReport 를 쓴다.
+ *   기존 호출부·테스트가 그대로 동작하도록 남겨 둔다.
+ */
+export function buildDailyReport(trades: ReportTrade[], dateKey: string): DailyReport {
+  const period: Period = {
+    kind: "today",
+    label: dateKey,
+    keys: [dateKey],
+    fromMs: -Infinity, // 옛 방식 그대로 "MM-dd" 문자열로만 비교하도록
+    toMs: Infinity,
+  };
+  // 정확한 시각(exitAtMs)이 있는 기록도 날짜 문자열로 비교되게 keys 만 쓰는 경로를 태운다.
+  const onlyKeys = trades.map((t) => ({ ...t, exitAtMs: undefined }));
+  return buildReport(onlyKeys, period);
 }

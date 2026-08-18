@@ -271,6 +271,7 @@ function registerIpc(e: ToolEngine): void {
   // [v0.7.0] 체결강도 자동 기록(매매 연동) — 목록/요약/수동청산/삭제 + 실시간 이벤트
   ipcMain.handle("tool:trades:list", () => e.getTradeLog());
   ipcMain.handle("tool:report:today", () => e.todayReport()); // [v0.9.1] 오늘의 매매 리포트
+  ipcMain.handle("tool:report", (_ev, kind, picked) => e.report(kind, picked)); // [v0.9.2] 기간별 리포트
   ipcMain.handle("tool:trades:stats", () => e.getTradeStats());
   ipcMain.handle("tool:trades:close", (_ev, id: string, exitPrice: number, kind: "tp" | "sl" | "manual") => e.closeTradeManual(id, exitPrice, kind));
   ipcMain.handle("tool:trades:delete", (_ev, id: string) => e.deleteTrade(id));

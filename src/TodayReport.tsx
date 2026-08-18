@@ -74,24 +74,63 @@ export default function TodayReport({
   busy,
   fx,
   onRefresh,
+  period,
+  pickedDate,
+  onPeriod,
 }: {
   data: DailyReport | null;
   busy: boolean;
   fx: number | null;
   onRefresh: () => void;
+  period: PeriodKind; //     지금 보고 있는 기간
+  pickedDate: string; //     날짜 선택일 때의 날짜(yyyy-MM-dd)
+  onPeriod: (kind: PeriodKind, picked?: string) => void; // 기간 바꾸기
 }) {
   const pnl = data?.totalPnlUsd ?? null;
   const shownPnl = useCountUp(pnl);
   const shownPct = useCountUp(data?.avgPct ?? null);
   const positive = (pnl ?? data?.avgPct ?? 0) >= 0;
 
-  // ── 빈 상태: 오늘 판 거래가 아직 없음 ──────────────────────────
+  /** 기간 고르는 줄(오늘 / 1주일 / 1개월 / 날짜) — 빈 상태에서도 보여야 하므로 함수로 뺀다 */
+  const periodBar = (
+    <section className="card wide report-period">
+      <div className="rp-tabs">
+        {([
+          ["today", "오늘"],
+          ["week", "1주일"],
+          ["month", "1개월"],
+        ] as const).map(([k, label]) => (
+          <button key={k} className={period === k ? "on" : ""} onClick={() => onPeriod(k)} disabled={busy}>
+            {label}
+          </button>
+        ))}
+        <button className={period === "date" ? "on" : ""} onClick={() => onPeriod("date", pickedDate)} disabled={busy}>
+          날짜 선택
+        </button>
+      </div>
+      {period === "date" && (
+        <input
+          className="rp-date"
+          type="date"
+          value={pickedDate}
+          max={new Date().toISOString().slice(0, 10)} // 미래 날짜는 고를 수 없다(아직 없는 기록)
+          onChange={(e) => onPeriod("date", e.target.value)}
+        />
+      )}
+      <div className="rp-label">
+        조회 기간: <b>{data?.periodLabel ?? "오늘"}</b>
+      </div>
+    </section>
+  );
+
+  // ── 빈 상태: 고른 기간에 판 거래가 없음 ────────────────────────
   if (!busy && (!data || data.closed === 0)) {
     return (
-      <main className="grid">
+      <main className="grid report">
+        {periodBar}
         <section className="card wide report-empty">
           <div className="report-empty-emoji">🌤️</div>
-          <h2>오늘 정리된 거래가 아직 없어요</h2>
+          <h2>{data?.periodLabel ?? "오늘"} 정리된 거래가 없어요</h2>
           <p className="hint">
             익절·손절이나 매도가 이루어지면, 여기에 <b>오늘 얼마를 어떻게 벌었는지</b> 한눈에 정리해 드립니다.
             {data && data.openNow > 0 && (
@@ -124,9 +163,11 @@ export default function TodayReport({
 
   return (
     <main className="grid report">
-      {/* ① 오늘 번 돈 — 가장 크게 */}
+      {periodBar}
+
+      {/* ① 번 돈 — 가장 크게 */}
       <section className="card wide report-hero">
-        <div className="report-hero-label">오늘 실현 손익</div>
+        <div className="report-hero-label">{data.periodLabel} 실현 손익</div>
         <div className={`report-hero-num ${positive ? "up" : "down"}`}>
           {pnl != null
             ? `${pnl >= 0 ? "+" : "−"}${money(shownPnl)}`
@@ -219,7 +260,10 @@ export default function TodayReport({
           ))}
         </div>
         <p className="hint report-note">
-          오늘 <b>실제로 판 거래</b>만 셉니다(연습·모의 기록 제외). 아직 들고 있는 {data.openNow}건은 판 뒤에 반영됩니다.
+          <b>{data.periodLabel}</b> 동안 <b>실제로 판 거래</b>만 셉니다(연습·모의 기록 제외).
+          아직 들고 있는 {data.openNow}건은 판 뒤에 반영됩니다.
+          {data.periodKind === "week" && " · 1주일 = 오늘 포함 최근 7일"}
+          {data.periodKind === "month" && " · 1개월 = 오늘 포함 최근 30일"}
         </p>
       </section>
     </main>

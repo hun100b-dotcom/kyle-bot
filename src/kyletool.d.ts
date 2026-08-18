@@ -54,8 +54,12 @@ interface ReportRow {
   hasAmount: boolean;
 }
 
+type PeriodKind = "today" | "week" | "month" | "date";
+
 interface DailyReport {
   dateKey: string;
+  periodLabel: string;
+  periodKind: PeriodKind;
   closed: number;
   openNow: number;
   tpCount: number;
@@ -495,6 +499,7 @@ interface KyletoolBridge {
   // [v0.7.0] 체결강도 자동 기록(매매 연동)
   tradesList(): Promise<StrengthTrade[]>;
   todayReport(): Promise<DailyReport>;
+  report(kind: PeriodKind, picked?: string): Promise<DailyReport>;
   tradesStats(): Promise<TradeStats>;
   tradesClose(id: string, exitPrice: number, kind: "tp" | "sl" | "manual"): Promise<StrengthTrade[]>;
   tradesDelete(id: string): Promise<StrengthTrade[]>;

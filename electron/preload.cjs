@@ -77,6 +77,7 @@ contextBridge.exposeInMainWorld("kyletool", {
   // [v0.7.0] 체결강도 자동 기록(매매 연동)
   tradesList: () => ipcRenderer.invoke("tool:trades:list"),
   todayReport: () => ipcRenderer.invoke("tool:report:today"),
+  report: (kind, picked) => ipcRenderer.invoke("tool:report", kind, picked),
   tradesStats: () => ipcRenderer.invoke("tool:trades:stats"),
   tradesClose: (id, exitPrice, kind) => ipcRenderer.invoke("tool:trades:close", id, exitPrice, kind),
   tradesDelete: (id) => ipcRenderer.invoke("tool:trades:delete", id),

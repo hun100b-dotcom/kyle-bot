@@ -24,7 +24,7 @@ import { getSession, getSessionStart, getMarketStatus, isOrderFrozen, type Sessi
 import { calcSplit3, calcOrderbook, calcCandle, roundPrice, getTick, type SplitOrder } from "../lib/calc";
 import { encryptSecret, decryptSecret } from "../lib/keysync"; // [v0.8.0] 키 기기 간 동기화(클라이언트 암호화)
 import { strengthFromTicks, type Side } from "../lib/strength";
-import { buildDailyReport, type DailyReport } from "../lib/report"; // [v0.9.1] 오늘의 매매 리포트
+import { buildReport, makePeriod, type DailyReport, type PeriodKind } from "../lib/report"; // [v0.9.1] 매매 리포트
 import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, type Candle, type SessionPattern } from "../lib/indicators";
 import {
   getPrice,
@@ -528,6 +528,11 @@ export interface StrengthTrade {
   exitKind: "tp" | "sl" | "manual" | null; // 익절/손절/수동
   resultPct: number | null; // (청산가-진입가)/진입가×100
   outcome: "win" | "loss" | null; // 수익/손실
+  /**
+   * [v0.9.2] 청산 시각(밀리초). 기간 조회(1주일·1개월)를 연도까지 정확히 하기 위해 남긴다.
+   *   기존 exitTs("MM-dd HH:mm:ss")에는 연도가 없어서 1년 전 같은 날짜와 구분되지 않는다.
+   */
+  exitAtMs?: number;
   /**
    * [v0.9.1] 주문 수량 — "오늘 얼마 벌었나"를 금액으로 계산하려면 필요하다.
    *   이 값이 생기기 전 기록에는 없다(그때는 리포트가 금액 대신 수익률만 보여 준다).
@@ -2195,6 +2200,7 @@ export class ToolEngine extends EventEmitter {
       const t = this.trades[idx];
       const now = DateTime.now().setZone("Asia/Seoul");
       t.exitTs = now.toFormat("MM-dd HH:mm:ss");
+      t.exitAtMs = now.toMillis(); // [v0.9.2] 기간 조회용 정확한 시각
       t.exitPrice = px;
       t.exit = snap;
       t.exitKind = kind;
@@ -2222,9 +2228,18 @@ export class ToolEngine extends EventEmitter {
    *   집계 규칙은 lib/report.ts(순수 함수)에 있어 PC·폰이 똑같이 계산한다.
    */
   todayReport(): DailyReport {
-    // 기록의 시각이 "MM-dd HH:mm:ss"(연도 없음) 형식이라 같은 형식으로 오늘 날짜를 만든다.
-    const dateKey = DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd");
-    return buildDailyReport(this.trades, dateKey);
+    return this.report("today");
+  }
+
+  /**
+   * [v0.9.2] 기간별 매매 리포트 — 오늘 / 최근 7일 / 최근 30일 / 고른 날짜.
+   *   @param kind   기간 종류
+   *   @param picked "yyyy-MM-dd" (kind가 "date" 일 때)
+   */
+  report(kind: PeriodKind = "today", picked?: string): DailyReport {
+    // 한국 시각 기준으로 기간을 만든다(기록도 한국 시각으로 남긴다).
+    const period = makePeriod(kind, Date.now(), 540, picked);
+    return buildReport(this.trades, period);
   }
 
   /**
@@ -2237,6 +2252,7 @@ export class ToolEngine extends EventEmitter {
       const snap = await this.snapshotStrength(t.symbol);
       const now = DateTime.now().setZone("Asia/Seoul");
       t.exitTs = now.toFormat("MM-dd HH:mm:ss");
+      t.exitAtMs = now.toMillis(); // [v0.9.2] 기간 조회용 정확한 시각
       t.exitPrice = exitPrice;
       t.exit = snap;
       t.exitKind = kind;
