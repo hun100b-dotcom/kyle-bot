@@ -1340,15 +1340,17 @@ ${msg}
           <span className="logo">🧮</span>
           <h1>Capri 매매도구</h1>
           <span className={`badge ${isMock ? "badge-mock" : "badge-live"}`}>
-            {isMock ? "연습 모드 (가짜 서버)" : "실서버"}
+            {isMock ? "연습" : "실서버"}
+            {/* 긴 설명은 넓은 화면에서만 — 폰에서는 칩이 좁아 글자가 세로로 깨진다 */}
+            {isMock && <span className="wide-only"> 모드 (가짜 서버)</span>}
           </span>
           {status.dryRun ? (
             <span className="badge badge-dry" title="실주문 잠금 상태입니다. 주문 버튼을 눌러도 모의 기록만 남습니다">
-              🔒 주문 잠금 (드라이런)
+              🔒 주문 잠금<span className="wide-only"> (드라이런)</span>
             </span>
           ) : (
             <span className="badge badge-liveorder" title="실제 돈으로 주문이 전송되는 상태입니다">
-              🔴 실주문 활성 — 실제 체결됩니다
+              🔴 실주문<span className="wide-only"> 활성 — 실제 체결됩니다</span>
             </span>
           )}
           {/* [v0.8.4] 장 상태 배지 — 휴장(주말·미국 공휴일)이면 이유와 다음 개장까지 알려 준다.
@@ -1356,15 +1358,20 @@ ${msg}
           {status.closedReason ? (
             <span className="badge badge-dry">
               휴장 — {status.closedReason}
-              {status.nextOpenNote && ` · 다음 개장 ${status.nextOpenNote}`}
+              {status.nextOpenNote && <span className="wide-only"> · 다음 개장 {status.nextOpenNote}</span>}
             </span>
           ) : (
             <span className="badge">
-              {SESSION_LABEL[status.session]} · 3개 장 모두 주문 가능
+              {SESSION_LABEL[status.session]}
+              <span className="wide-only"> · 3개 장 모두 주문 가능</span>
               {status.earlyClose && ` · ⚠ 조기폐장(${status.earlyClose})`}
             </span>
           )}
-          {status.orderFrozen && <span className="badge badge-dry">⚠ 마감 1분 전: 정정·취소 불가 구간</span>}
+          {status.orderFrozen && (
+            <span className="badge badge-dry">
+              ⚠ 마감 1분 전<span className="wide-only">: 정정·취소 불가 구간</span>
+            </span>
+          )}
         </div>
         <div className="controls">
           <button
