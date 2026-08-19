@@ -13,7 +13,10 @@
 
     <!-- 아이폰 전용: 홈 화면에서 열 때 주소창 없이 전체화면으로 뜨게 한다 -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <!-- [v0.9.4] black-translucent 는 화면을 '상태바 밑까지' 끌어올려서, 안전영역 처리를
+         조금이라도 놓치면 상단 배너·탭이 노치에 가려 눌리지 않는다(실제로 그 사고가 났다).
+         default 로 두면 iOS 가 상태바 자리를 알아서 비워 준다 — 안전한 쪽을 택한다. -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="Capri" />
     <link rel="apple-touch-icon" href="./icons/icon-192.png" />
     <link rel="icon" href="./icons/icon-192.png" />

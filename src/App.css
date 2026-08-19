@@ -595,3 +595,130 @@ ul.hint { padding-left: 18px; }
   font-size: 16px; /* 폰에서 입력 시 화면이 확대되지 않게 16px 이상 */
 }
 .rp-label { margin-left: auto; font-size: 13px; color: var(--muted, #94a3b8); }
+
+/* =============================================================================
+   [v0.9.4] 📱 모바일(폰) 전면 개편
+   -----------------------------------------------------------------------------
+   [무엇이 문제였나 — 사장님 신고 "이따위로 보여서 쓸 수가 없다"]
+     · 폰에는 위에 노치(카메라 홈)·상태바, 아래에 홈 바가 있는데 그 영역을 피하지 않아서
+       상단 업데이트 배너와 탭이 **가려지고 눌리지 않았다.**
+     · 화면 높이를 100vh 로 잡아 주소창이 나타났다 사라질 때 아래가 잘렸다.
+     · 탭이 한 줄에 다 안 들어가 베젤에 눌리고, 버튼이 작아 손가락으로 누르기 어려웠다.
+
+   [해법]
+     · 안전영역(env safe-area-inset-*)을 변수로 만들고 위·아래 고정 요소에 적용
+     · 화면 높이를 100dvh(주소창 변화까지 반영되는 높이)로
+     · 탭은 가로로 스크롤되게 + 터치 목표 44px 이상
+     · 데스크톱은 건드리지 않는다(모두 @media 안 또는 env는 PC에서 0)
+   ============================================================================= */
+
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+}
+
+/* 가로 방향으로 절대 넘치지 않게(폰에서 좌우로 밀리는 현상 방지) */
+html, body { overflow-x: hidden; }
+.app { max-width: 100%; }
+
+/* 업데이트 배너: 노치 아래로 내리고 손가락으로 누르기 쉬운 크기로 (데스크톱에도 안전) */
+.update-banner {
+  padding-top: calc(10px + var(--safe-top));
+  padding-left: calc(14px + var(--safe-left));
+  padding-right: calc(14px + var(--safe-right));
+}
+.update-banner button { min-height: 44px; padding: 10px 18px; font-size: 15px; }
+
+@media (max-width: 820px) {
+  /* 화면 높이: 100vh 는 주소창 때문에 아래가 잘린다 → dvh(실제 보이는 높이) */
+  .app { height: 100dvh; }
+
+  /* ── 상단바: 안전영역만큼 아래로 ── */
+  .topbar {
+    position: sticky; top: 0; z-index: 20;
+    flex: 0 0 auto;
+    padding: calc(10px + var(--safe-top)) calc(12px + var(--safe-right)) 10px calc(12px + var(--safe-left));
+    flex-wrap: wrap; gap: 8px;
+  }
+  .brand h1 { font-size: 16px; flex: 0 0 auto; }
+
+  /* [핵심] 상태 배지들이 줄줄이 내려가 상단바가 190px 까지 두꺼워졌다(화면의 1/4).
+     한 줄에 담고 옆으로 밀어 보게 만들어 상단바를 얇게 유지한다. */
+  .topbar .brand {
+    /* 배지 줄과 [킬 스위치] 를 **같은 줄**에 둔다(줄이 나뉘면 상단바가 그만큼 두꺼워진다). */
+    flex: 1 1 0;
+    min-width: 0;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    gap: 6px;
+    align-items: center;
+  }
+  .topbar .brand::-webkit-scrollbar { display: none; }
+  .topbar .badge { font-size: 10px; flex: 0 0 auto; white-space: nowrap; }
+  .controls { flex: 0 0 auto; margin-left: auto; }
+  .controls { gap: 6px; }
+  .controls .btn { min-height: 40px; }
+
+  /* ── 탭: 가로로 밀어서 보기 + 큰 터치 목표 ── */
+  .tabs {
+    position: sticky; top: 0; z-index: 15;
+    /* [중요] 이 줄이 없으면 상단바가 클 때 탭 줄이 세로로 찌그러진다(높이 7px 로 눌려 안 보였다).
+       .app 이 세로 플렉스라서 자리가 모자라면 이 줄부터 줄어들기 때문 — 줄어들지 않게 고정한다. */
+    flex: 0 0 auto;
+    align-items: stretch;
+    overflow-x: auto;               /* 좁아도 잘리지 않고 옆으로 밀린다 */
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;          /* 스크롤 막대는 숨긴다(깔끔하게) */
+    padding: 6px calc(12px + var(--safe-right)) 0 calc(12px + var(--safe-left));
+    gap: 6px;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab {
+    flex: 0 0 auto;                 /* 줄바꿈 없이 옆으로 */
+    white-space: nowrap;
+    min-height: 44px;               /* 손가락 터치 최소 크기 */
+    padding: 10px 14px;
+    font-size: 14px;
+    border-radius: 10px 10px 0 0;
+  }
+  .tab.active { background: var(--panel2); border-bottom-width: 3px; }
+
+  /* ── 본문: 한 줄로, 좌우 안전영역 확보, 아래 홈바 여백 ── */
+  .grid {
+    grid-template-columns: 1fr;
+    padding: 12px calc(12px + var(--safe-right)) calc(24px + var(--safe-bottom)) calc(12px + var(--safe-left));
+    gap: 12px;
+  }
+  .card { padding: 12px; }
+  .card h2 { font-size: 15px; }
+
+  /* 입력칸: 16px 미만이면 아이폰이 화면을 확대해 버린다 */
+  input, select, textarea { font-size: 16px !important; min-height: 44px; }
+
+  /* 버튼 터치 목표 확대(작은 보조 버튼도 최소 36px) */
+  .btn { min-height: 44px; padding: 10px 14px; font-size: 14px; }
+  .mini { min-height: 36px; padding: 6px 10px; font-size: 12px; }
+
+  /* 표는 넘치면 그 안에서만 좌우 스크롤(페이지 전체가 밀리지 않게) */
+  .result-table, table { display: block; overflow-x: auto; white-space: nowrap; max-width: 100%; }
+
+  /* 리포트: 폰에서 숫자가 시원하게 보이도록 */
+  .report-hero-num { font-size: clamp(34px, 11vw, 52px); }
+  .report-badges { grid-template-columns: repeat(2, 1fr); }
+  .rp-tabs button { min-height: 44px; }
+  .rp-label { margin-left: 0; width: 100%; }
+
+  /* 긴 값이 카드 밖으로 삐져나오지 않게 */
+  .split-card, .report-row, .card { min-width: 0; }
+  .split-card-head, .split-card-meta { flex-wrap: wrap; gap: 6px; }
+}
+
+/* 아주 좁은 폰(≤400px)에서 한 번 더 조인다 */
+@media (max-width: 400px) {
+  .topbar { padding-left: calc(10px + var(--safe-left)); padding-right: calc(10px + var(--safe-right)); }
+  .grid { padding-left: calc(10px + var(--safe-left)); padding-right: calc(10px + var(--safe-right)); }
+  .tab { padding: 10px 12px; font-size: 13px; }
+}
