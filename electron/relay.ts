@@ -10,8 +10,12 @@
 //        폰(웹앱) → 인터넷 터널 → 집 PC(이 릴레이) → 토스
 //   토스 입장에서는 늘 '집 PC'가 부르는 것이라 IP 등록을 새로 할 필요가 없습니다.
 //
-// [키는 어디에?]
-//   여기서도 **저장하지 않습니다.** 폰이 보낸 요청을 그대로 토스에 전달만 합니다.
+// [키는 어디에? — v0.9.7 중요]
+//   **폰에는 키를 넣지 않아도 됩니다.** 집 PC(이 앱)에 이미 키가 있으니, 폰이 "키 대신"
+//   요청을 보내면 릴레이가 **PC의 키로 토큰을 발급해** 토스에 전달합니다.
+//   · 폰에 실제 키를 저장하지 않으므로 더 안전합니다.
+//   · 사장님은 QR만 찍으면 되고, 폰에서 로그인·키 입력이 전혀 필요 없습니다.
+//   (원래는 키 동기화용 클라우드에서 키를 받아야 했는데, 그 서버가 멈춰 있어 폰이 통째로 막혔습니다)
 //
 // [아무나 못 쓰게 — 통행증(토큰)]
 //   터널 주소는 인터넷에 열려 있으므로, 주소를 우연히 아는 사람이 우리 집 IP로
@@ -24,6 +28,9 @@ import { createServer, type IncomingMessage, type ServerResponse, type Server } 
 import { randomBytes } from "node:crypto";
 
 const TOSS_BASE = "https://openapi.tossinvest.com";
+
+/** 폰이 "키 대신" 보내는 표식. 이 값이 오면 릴레이가 이 PC의 실제 키로 바꿔 준다. */
+export const RELAY_KEY_PLACEHOLDER = "RELAY";
 
 /** 브라우저(웹앱)가 이 릴레이를 부를 수 있게 하는 CORS 허용 주소 */
 const ALLOWED_ORIGINS = [
@@ -132,7 +139,29 @@ export function startRelay(port = 8790, token?: string): Promise<RelayHandle> {
           if (typeof v === "string") headers[h] = v;
         }
 
-        const body = req.method === "GET" || req.method === "HEAD" ? undefined : await readBody(req);
+        let body = req.method === "GET" || req.method === "HEAD" ? undefined : await readBody(req);
+
+        // ── [v0.9.7] 폰에 키가 없을 때: 이 PC의 키로 대신 인증한다 ──
+        //   폰은 client_id 자리에 "RELAY" 라는 표식만 보낸다. 실제 키는 이 PC에만 있다.
+        if (tossPath.startsWith("/oauth2/token") && body) {
+          const form = new URLSearchParams(body.toString("utf8"));
+          if ((form.get("client_id") ?? "") === RELAY_KEY_PLACEHOLDER) {
+            const id = process.env.TOSS_CLIENT_ID ?? "";
+            const secret = process.env.TOSS_CLIENT_SECRET ?? "";
+            if (!id || !secret) {
+              sendJson(res, 400, { error: "이 PC에 토스 키가 없습니다. PC의 Capri 설정에서 키를 먼저 저장해 주세요." }, origin);
+              return;
+            }
+            form.set("client_id", id);
+            form.set("client_secret", secret);
+            body = Buffer.from(form.toString());
+          }
+        }
+        // 계좌 번호도 폰이 모르므로, 표식이면 이 PC의 계좌로 바꿔 준다.
+        if (headers["x-tossinvest-account"] === RELAY_KEY_PLACEHOLDER) {
+          const acct = process.env.TOSS_ACCOUNT ?? "";
+          if (acct) headers["x-tossinvest-account"] = acct;
+        }
         const upstream = await fetch(`${TOSS_BASE}${tossPath}${url.search}`, {
           method: req.method,
           headers,

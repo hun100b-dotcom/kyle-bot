@@ -60,8 +60,21 @@ export function resolveApiBase(): string {
  */
 function installProcessShim(apiBase: string): void {
   // 토스 주소를 프록시로 고정한다(엔진이 공식 주소로 되돌리려 해도 유지된다 — env-shim 참고).
-  if (apiBase) setProxyBase(`${apiBase}/api/toss`);
-  else installNoRelayGuard(); // 중계 주소가 없으면 '왜 안 되는지' 알려 주는 안내를 깐다
+  if (apiBase) {
+    setProxyBase(`${apiBase}/api/toss`);
+
+    // [v0.9.7] **폰에는 키를 넣지 않아도 되게** 한다.
+    //   집 PC 릴레이에 이미 키가 있으므로, 폰은 "RELAY" 라는 표식만 보내고
+    //   실제 인증은 릴레이가 PC의 키로 처리한다.
+    //   · 폰에 실제 키가 저장되지 않아 더 안전하다.
+    //   · 사장님이 직접 키를 넣었다면 그 값을 그대로 존중한다(덮어쓰지 않는다).
+    //   (키 동기화용 클라우드가 멈춰 있어 폰이 통째로 막혔던 문제의 해결책이기도 하다)
+    if (!env.TOSS_CLIENT_ID) env.TOSS_CLIENT_ID = "RELAY";
+    if (!env.TOSS_CLIENT_SECRET) env.TOSS_CLIENT_SECRET = "RELAY";
+    if (!env.TOSS_ACCOUNT) env.TOSS_ACCOUNT = "RELAY";
+  } else {
+    installNoRelayGuard(); // 중계 주소가 없으면 '왜 안 되는지' 알려 주는 안내를 깐다
+  }
   env.DRY_RUN = env.DRY_RUN ?? "true"; // 실주문은 [실주문] 토글을 켜야만 나간다
   env.TOSS_MOCK = "false"; //            연습(목) 서버는 브라우저에서 띄울 수 없다
 }

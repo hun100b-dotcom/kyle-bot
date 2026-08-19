@@ -264,6 +264,8 @@ interface PendingOrder {
 function App() {
   const [status, setStatus] = useState<ToolStatus | null>(null);
   const [tab, setTab] = useState<TabId>("calc");
+  /** 웹앱(폰)인가? — 데스크톱에만 있는 '폰 연결' 기능 유무로 구분한다 */
+  const isWebApp = !window.kyletool.phoneStart;
   // [v0.9.2] 탭 순서(드래그로 변경, 이 기기에 저장)
   const { order: tabOrder, dragProps, isDragging } = useTabOrder(ALL_TABS);
   // [v0.9.1] 매매 리포트 + [v0.9.2] 기간 선택(오늘/1주일/1개월/날짜)
@@ -1339,10 +1341,12 @@ ${msg}
         <div className="brand">
           <span className="logo">🧮</span>
           <h1>Capri 매매도구</h1>
-          <span className={`badge ${isMock ? "badge-mock" : "badge-live"}`}>
-            {isMock ? "연습" : "실서버"}
-            {/* 긴 설명은 넓은 화면에서만 — 폰에서는 칩이 좁아 글자가 세로로 깨진다 */}
-            {isMock && <span className="wide-only"> 모드 (가짜 서버)</span>}
+          {/* [v0.9.7] 웹앱(폰)에는 연습 서버가 없다 → '연습 모드'는 사실상 "키 없음"이다.
+              그대로 두면 기능이 막힌 것처럼 보여서, 웹에서는 할 일을 알려 주는 표기로 바꾼다. */}
+          <span className={`badge ${isMock ? "badge-dry" : "badge-live"}`}>
+            {isMock ? (isWebApp ? "키 설정 필요" : "연습") : "실서버"}
+            {isMock && !isWebApp && <span className="wide-only"> 모드 (가짜 서버)</span>}
+            {isMock && isWebApp && <span className="wide-only"> — 설정 탭에서 키 불러오기</span>}
           </span>
           {status.dryRun ? (
             <span className="badge badge-dry" title="실주문 잠금 상태입니다. 주문 버튼을 눌러도 모의 기록만 남습니다">
