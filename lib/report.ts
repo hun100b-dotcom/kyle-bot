@@ -227,6 +227,64 @@ export function buildReport(trades: ReportTrade[], period: Period): DailyReport 
 }
 
 /**
+ * buildReportFromRealized — [v0.9.6] **토스 실제 체결내역**으로 만든 리포트.
+ *
+ *   기존 buildReport 는 앱이 남긴 기록(직접 [매도]를 눌렀을 때만 생김)을 봤다.
+ *   조건주문 자동체결·토스앱 매도는 앱이 알 수 없어 **리포트가 늘 비어 있었다.**
+ *   이제는 토스에 남은 체결 내역으로 만들기 때문에 **어디서 팔았든 전부 잡힌다.**
+ *
+ *   익절/손절 구분: 토스 주문내역만으로는 '익절 주문이었는지'를 알 수 없다.
+ *   그래서 **이익이 난 매도 = 익절, 손실이 난 매도 = 손절**로 센다(사장님이 보고 싶어 하는 의미와 같다).
+ */
+export function buildReportFromRealized(
+  trades: { symbol: string; sellAtMs: number; qty: number; pnl: number; pct: number }[],
+  period: Period,
+  openNow = 0,
+): DailyReport {
+  const picked = trades.filter((t) => t.sellAtMs >= period.fromMs && t.sellAtMs <= period.toMs);
+
+  const wins = picked.filter((t) => t.pnl >= 0).length;
+  const losses = picked.length - wins;
+
+  const bySymbol = new Map<string, typeof picked>();
+  for (const t of picked) {
+    const arr = bySymbol.get(t.symbol) ?? [];
+    arr.push(t);
+    bySymbol.set(t.symbol, arr);
+  }
+
+  const rows: ReportRow[] = [...bySymbol.entries()].map(([symbol, list]) => ({
+    symbol,
+    trades: list.length,
+    wins: list.filter((t) => t.pnl >= 0).length,
+    losses: list.filter((t) => t.pnl < 0).length,
+    pnlUsd: Math.round(list.reduce((a, b) => a + b.pnl, 0) * 100) / 100,
+    pctAvg: Math.round((list.reduce((a, b) => a + b.pct, 0) / list.length) * 100) / 100,
+    pctBest: Math.round(Math.max(...list.map((t) => t.pct)) * 100) / 100,
+    hasAmount: true,
+  }));
+  rows.sort((a, b) => b.pctAvg - a.pctAvg);
+
+  return {
+    dateKey: period.keys[0] ?? "",
+    periodLabel: period.label,
+    periodKind: period.kind,
+    closed: picked.length,
+    openNow,
+    tpCount: wins, //     이익 매도 = 익절
+    slCount: losses, //   손실 매도 = 손절
+    manualCount: 0, //    토스 내역만으로는 구분 불가(그래서 0으로 두고 화면에서도 숨긴다)
+    wins,
+    losses,
+    winRate: picked.length ? Math.round((wins / picked.length) * 1000) / 10 : null,
+    totalPnlUsd: picked.length ? Math.round(picked.reduce((a, b) => a + b.pnl, 0) * 100) / 100 : null,
+    avgPct: picked.length ? Math.round((picked.reduce((a, b) => a + b.pct, 0) / picked.length) * 100) / 100 : null,
+    best: rows.length ? [...rows].sort((a, b) => b.pctBest - a.pctBest)[0] : null,
+    rows,
+  };
+}
+
+/**
  * buildDailyReport — (하위호환) 하루치 리포트. 내부적으로 buildReport 를 쓴다.
  *   기존 호출부·테스트가 그대로 동작하도록 남겨 둔다.
  */

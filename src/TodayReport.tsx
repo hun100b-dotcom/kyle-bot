@@ -194,16 +194,18 @@ export default function TodayReport({
       <section className="card wide report-badges">
         <div className="report-badge win">
           <div className="rb-num">{data.tpCount}</div>
-          <div className="rb-label">익절</div>
+          <div className="rb-label">이익 매도</div>
         </div>
         <div className="report-badge loss">
           <div className="rb-num">{data.slCount}</div>
-          <div className="rb-label">손절</div>
+          <div className="rb-label">손실 매도</div>
         </div>
-        <div className="report-badge">
-          <div className="rb-num">{data.manualCount}</div>
-          <div className="rb-label">수동 정리</div>
-        </div>
+        {data.manualCount > 0 && (
+          <div className="report-badge">
+            <div className="rb-num">{data.manualCount}</div>
+            <div className="rb-label">수동 정리</div>
+          </div>
+        )}
         <div className="report-badge">
           <div className="rb-num">{data.winRate != null ? `${data.winRate}%` : "—"}</div>
           <div className="rb-label">
@@ -260,8 +262,10 @@ export default function TodayReport({
           ))}
         </div>
         <p className="hint report-note">
-          <b>{data.periodLabel}</b> 동안 <b>실제로 판 거래</b>만 셉니다(연습·모의 기록 제외).
-          아직 들고 있는 {data.openNow}건은 판 뒤에 반영됩니다.
+          <b>{data.periodLabel}</b> 동안 <b>실제로 판 거래</b>를 토스 체결 내역에서 그대로 가져옵니다
+          — 카프리로 판 것, 토스 앱에서 판 것, <b>조건주문이 자동으로 체결된 것까지</b> 모두 포함됩니다.
+          손익은 먼저 산 것부터 팔린 것으로 보고(선입선출) 수수료·세금까지 뺀 값입니다.
+          아직 들고 있는 종목은 판 뒤에 반영됩니다.
           {data.periodKind === "week" && " · 1주일 = 오늘 포함 최근 7일"}
           {data.periodKind === "month" && " · 1개월 = 오늘 포함 최근 30일"}
         </p>

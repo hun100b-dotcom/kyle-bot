@@ -24,7 +24,8 @@ import { getSession, getSessionStart, getMarketStatus, isOrderFrozen, type Sessi
 import { calcSplit3, calcOrderbook, calcCandle, roundPrice, getTick, type SplitOrder } from "../lib/calc";
 import { encryptSecret, decryptSecret } from "../lib/keysync"; // [v0.8.0] 키 기기 간 동기화(클라이언트 암호화)
 import { strengthFromTicks, type Side } from "../lib/strength";
-import { buildReport, makePeriod, type DailyReport, type PeriodKind } from "../lib/report"; // [v0.9.1] 매매 리포트
+import { buildReport, buildReportFromRealized, makePeriod, type DailyReport, type PeriodKind } from "../lib/report"; // [v0.9.1] 매매 리포트
+import { matchFifo, type Fill } from "../lib/fills"; // [v0.9.6] 토스 실제 체결내역으로 손익 계산
 import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, type Candle, type SessionPattern } from "../lib/indicators";
 import {
   getPrice,
@@ -649,6 +650,9 @@ export class ToolEngine extends EventEmitter {
 
   private mock: ReturnType<typeof createMockTossServer> | null = null;
   private mockPort = 0;
+
+  // [v0.9.6] 체결내역 캐시 — 기간 버튼을 오갈 때마다 토스를 다시 부르면 요청 한도(429)에 걸린다.
+  private fillsCache: { fills: Fill[]; atMs: number; partial: boolean } | null = null;
 
   // 환율 캐시(토스 스펙: 1분 갱신이므로 60초 캐시)
   private fxCache: { rate: number; atMs: number; source: "toss" | "manual" } | null = null;
@@ -2227,7 +2231,7 @@ export class ToolEngine extends EventEmitter {
    * [v0.9.1] 오늘의 매매 리포트 — 오늘 청산된 '실제 체결'만 모아 요약한다.
    *   집계 규칙은 lib/report.ts(순수 함수)에 있어 PC·폰이 똑같이 계산한다.
    */
-  todayReport(): DailyReport {
+  todayReport(): Promise<DailyReport> {
     return this.report("today");
   }
 
@@ -2236,11 +2240,108 @@ export class ToolEngine extends EventEmitter {
    *   @param kind   기간 종류
    *   @param picked "yyyy-MM-dd" (kind가 "date" 일 때)
    */
-  report(kind: PeriodKind = "today", picked?: string): DailyReport {
-    // 한국 시각 기준으로 기간을 만든다(기록도 한국 시각으로 남긴다).
+  async report(kind: PeriodKind = "today", picked?: string): Promise<DailyReport> {
+    // 한국 시각 기준으로 기간을 만든다.
     const period = makePeriod(kind, Date.now(), 540, picked);
-    return buildReport(this.trades, period);
+
+    // 연습 모드거나 키가 없으면 토스에서 가져올 수 없다 → 앱이 남긴 기록으로 대체(예전 방식).
+    if (this.mode !== "live") return buildReport(this.trades, period);
+
+    try {
+      // ① 토스의 '종료된 주문'을 페이지를 넘겨 가며 모은다.
+      //    기간보다 넉넉히(앞쪽으로 더) 모아야 한다 — 예전에 산 걸 오늘 팔 수 있기 때문이다.
+      const { fills } = await this.collectFills(period.fromMs - 45 * 86_400_000);
+
+      // ② 계좌의 평균매입가(그보다 더 전에 산 물량의 원가로 사용)
+      const avgCost: Record<string, number> = {};
+      try {
+        const h = (await getHoldings()) as { items?: Record<string, unknown>[] };
+        for (const it of h.items ?? []) {
+          const sym = String((it as Record<string, unknown>).symbol ?? "");
+          const avg = Number((it as Record<string, unknown>).averagePurchasePrice);
+          if (sym && Number.isFinite(avg)) avgCost[sym] = avg;
+        }
+      } catch {
+        /* 보유 조회 실패는 치명적이지 않다(그 경우 매칭 안 되는 매도만 빠진다) */
+      }
+
+      // ③ 선입선출로 '매도 건별 실현손익'을 만들고, 기간으로 걸러 리포트를 만든다.
+      const realized = matchFifo(fills, avgCost);
+      const openNow = Object.keys(avgCost).length;
+      return buildReportFromRealized(realized, period, openNow);
+    } catch (e) {
+      // 조회 실패 시에도 화면이 깨지지 않게, 앱 기록 기반으로라도 돌려준다.
+      this.addJournal({ kind: "info", symbol: "-", summary: `리포트 체결내역 조회 실패: ${String(e).slice(0, 80)}` });
+      return buildReport(this.trades, period);
+    }
   }
+
+  /**
+   * [v0.9.6] collectFills — 토스 '종료된 주문'을 페이지 넘겨 모아 체결 목록으로 바꾼다.
+   *   @param sinceMs 이 시각보다 오래된 체결이 나오면 그만 가져온다(무한정 안 부르게).
+   */
+  private async collectFills(sinceMs: number): Promise<{ fills: Fill[]; partial: boolean }> {
+    // ① 최근에 모아 둔 게 있으면 그대로 쓴다(60초).
+    //   [왜?] 기간 버튼(오늘/1주일/1개월)을 누를 때마다 수십 번 호출하면
+    //   토스가 "요청 한도 초과(429)"로 막아 **리포트가 통째로 비어 버린다**(실제로 그랬다).
+    if (this.fillsCache && Date.now() - this.fillsCache.atMs < 60_000) {
+      return { fills: this.fillsCache.fills, partial: this.fillsCache.partial };
+    }
+
+    const fills: Fill[] = [];
+    let cursor: string | null | undefined = undefined;
+    let partial = false; // 중간에 막혀서 일부만 가져왔는가
+
+    for (let page = 0; page < 8; page++) {
+      // 8페이지(약 160건)면 최근 몇 주치로 충분하다. 더 옛날 물량은 계좌 평균매입가로 메운다.
+      let res: Awaited<ReturnType<typeof listOrdersRaw>>;
+      try {
+        res = await listOrdersRaw({ status: "CLOSED", ...(cursor ? { cursor } : {}) } as { status: string });
+      } catch (e) {
+        // ② 한도 초과 등으로 막히면 **지금까지 모은 것으로 계속 간다**(전체를 버리지 않는다).
+        partial = true;
+        this.addJournal({
+          kind: "info",
+          symbol: "-",
+          summary: `체결내역 ${page}페이지까지만 조회됨(${String(e).includes("429") ? "토스 요청 한도" : "조회 오류"})`,
+        });
+        break;
+      }
+
+      let oldest = Number.POSITIVE_INFINITY;
+      for (const o of res.orders) {
+        const ex = (o.execution ?? {}) as Record<string, unknown>;
+        const qty = Number(ex.filledQuantity);
+        const price = Number(ex.averageFilledPrice);
+        const at = Date.parse(String(ex.filledAt ?? o.orderedAt ?? ""));
+        if (!(qty > 0) || !Number.isFinite(price) || !Number.isFinite(at)) continue; // 취소·미체결 제외
+        const side = String(o.side ?? o.orderSide ?? "").toUpperCase() === "SELL" ? "SELL" : "BUY";
+        fills.push({
+          symbol: String(o.symbol ?? ""),
+          side,
+          qty,
+          price,
+          atMs: at,
+          commission: Number(ex.commission) || 0,
+          tax: Number(ex.tax) || 0,
+          currency: String(o.currency ?? "USD"),
+        });
+        oldest = Math.min(oldest, at);
+      }
+
+      cursor = res.nextCursor;
+      if (!res.hasNext || !cursor) break;
+      if (Number.isFinite(oldest) && oldest < sinceMs) break; // 필요한 기간까지 다 왔다
+
+      // ③ 다음 페이지 전에 잠깐 쉰다(연속 호출로 한도에 걸리지 않게).
+      await new Promise((r) => setTimeout(r, 250));
+    }
+
+    this.fillsCache = { fills, atMs: Date.now(), partial };
+    return { fills, partial };
+  }
+
+
 
   /**
    * closeTradeManual — 토스 서버가 처리한 OCO/OTO 익절·손절은 앱이 관측 못 하므로,
