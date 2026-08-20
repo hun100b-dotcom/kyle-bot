@@ -72,6 +72,10 @@ interface DailyReport {
   avgPct: number | null;
   best: ReportRow | null;
   rows: ReportRow[];
+  /** [v0.9.8] 숫자의 출처: live=방금 받아옴 / cache=저장된 기록 / none=저장된 기록 없음 */
+  source?: "live" | "cache" | "none";
+  lastSyncMs?: number | null;
+  savedTotal?: number;
 }
 
 interface JournalEntry {

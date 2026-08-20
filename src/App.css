@@ -770,3 +770,14 @@ body:has(.update-banner) .topbar {
 @media (max-width: 820px) {
   .wide-only { display: none; } /* 폰: "연습", "🔒 주문 잠금" 처럼 짧게 */
 }
+
+/* [v0.9.8] 리포트: 숫자의 출처(저장된 기록/최신) 안내 줄 */
+.rp-source {
+  width: 100%;
+  font-size: 12px;
+  color: var(--amber, #f59e0b);
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 8px;
+  padding: 6px 10px;
+}

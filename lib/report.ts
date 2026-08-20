@@ -81,6 +81,17 @@ export interface DailyReport {
   avgPct: number | null; //    평균 수익률 %
   best: ReportRow | null; //   오늘의 1등 종목(수익률 기준)
   rows: ReportRow[]; //        종목별 요약(잘 번 순서)
+  /**
+   * [v0.9.8] 이 숫자가 어디서 왔는가.
+   *   "live"  = 방금 토스에서 최신까지 받아 왔다
+   *   "cache" = 연결이 없어 **기기에 저장된 기록**으로 보여 준다(과거 이력은 그대로 보인다)
+   *   "none"  = 저장된 기록조차 없다
+   */
+  source?: "live" | "cache" | "none";
+  /** 마지막으로 토스에서 받아 온 시각(밀리초). 저장된 기록으로 보여 줄 때 화면에 표시한다. */
+  lastSyncMs?: number | null;
+  /** 기기에 저장된 전체 매매(매도) 건수 — 기간 밖까지 포함. 빈 상태 문구를 정확히 쓰기 위함 */
+  savedTotal?: number;
 }
 
 /** 거래 한 건의 실현 금액($). 수량을 모르면 null(추측하지 않는다). */

@@ -25,7 +25,7 @@ import { calcSplit3, calcOrderbook, calcCandle, roundPrice, getTick, type SplitO
 import { encryptSecret, decryptSecret } from "../lib/keysync"; // [v0.8.0] 키 기기 간 동기화(클라이언트 암호화)
 import { strengthFromTicks, type Side } from "../lib/strength";
 import { buildReport, buildReportFromRealized, makePeriod, type DailyReport, type PeriodKind } from "../lib/report"; // [v0.9.1] 매매 리포트
-import { matchFifo, type Fill } from "../lib/fills"; // [v0.9.6] 토스 실제 체결내역으로 손익 계산
+import { matchFifo, mergeFills, type Fill } from "../lib/fills"; // [v0.9.6] 토스 실제 체결내역으로 손익 계산
 import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, type Candle, type SessionPattern } from "../lib/indicators";
 import {
   getPrice,
@@ -652,7 +652,14 @@ export class ToolEngine extends EventEmitter {
   private mockPort = 0;
 
   // [v0.9.6] 체결내역 캐시 — 기간 버튼을 오갈 때마다 토스를 다시 부르면 요청 한도(429)에 걸린다.
-  private fillsCache: { fills: Fill[]; atMs: number; partial: boolean } | null = null;
+  private fillsCache: { fills: Fill[]; atMs: number; partial: boolean; fetched: boolean } | null = null;
+
+  /** [v0.9.8] 기기에 저장해 둔 매매(체결) 이력 — 홈 PC 연결이 없어도 리포트를 그릴 수 있게 한다. */
+  private savedFills: Fill[] = [];
+  private fillsPath = "";
+  private fillsSyncedAtMs: number | null = null;
+  /** 마지막으로 확인한 보유 평균매입가 — 연결이 없을 때도 손익 계산에 쓰려고 기억해 둔다. */
+  private lastAvgCost: Record<string, number> = {};
 
   // 환율 캐시(토스 스펙: 1분 갱신이므로 60초 캐시)
   private fxCache: { rate: number; atMs: number; source: "toss" | "manual" } | null = null;
@@ -670,6 +677,7 @@ export class ToolEngine extends EventEmitter {
     this.splitsPath = join(userDataDir, "kylebot-splits.json"); // [v0.4.0] 삼분할 기록 파일
     this.strengthPath = join(userDataDir, "kylebot-strength.json"); // [v0.5.0] 체결강도 시계열
     this.tradesPath = join(userDataDir, "kylebot-trades.json"); // [v0.7.0] 자동 기록 트레이드
+    this.fillsPath = join(userDataDir, "kylebot-fills.json"); // [v0.9.8] 매매(체결) 이력 — 연결 없이도 리포트를 그리기 위해 보관
     this.loadEnv();
     // [개발 검증용] E2E 등 자동 검증은 절대 실서버를 건드리면 안 되므로 연습 모드 강제.
     if (opts?.forceMock) this.mode = "mock";
@@ -678,6 +686,7 @@ export class ToolEngine extends EventEmitter {
     this.loadSplits();
     this.loadStrength();
     this.loadTrades();
+    this.loadFills(); // [v0.9.8] 저장해 둔 매매 이력
   }
 
   // --------------------------------------------------------------------------
@@ -2130,6 +2139,47 @@ export class ToolEngine extends EventEmitter {
     renameSync(tmp, this.tradesPath);
   }
 
+  // ── [v0.9.8] 매매(체결) 이력 보관 ─────────────────────────────
+  //   [왜 저장하나?] 리포트를 매번 토스에서 실시간으로 불러오게 했더니, 홈 PC에 연결되지 않은 곳
+  //   (회사·이동 중)에서는 조회가 안 돼 **리포트가 통째로 비어** 보였다.
+  //   한 번 받아 온 체결은 기기에 쌓아 두고, 연결이 없으면 그 기록으로 그린다.
+  private loadFills(): void {
+    try {
+      const raw = existsSync(this.fillsPath) ? JSON.parse(readFileSync(this.fillsPath, "utf8")) : null;
+      if (raw && Array.isArray(raw.fills)) {
+        this.savedFills = raw.fills as Fill[];
+        this.fillsSyncedAtMs = typeof raw.syncedAtMs === "number" ? raw.syncedAtMs : null;
+      } else if (Array.isArray(raw)) {
+        this.savedFills = raw as Fill[]; // 옛 형식(배열만) 호환
+      }
+    } catch {
+      this.savedFills = [];
+    }
+  }
+
+  private persistFills(): void {
+    try {
+      const body = JSON.stringify({ syncedAtMs: this.fillsSyncedAtMs, fills: this.savedFills }, null, 2);
+      const tmp = this.fillsPath + ".tmp";
+      writeFileSync(tmp, body, "utf8");
+      renameSync(tmp, this.fillsPath);
+    } catch {
+      /* 저장 실패해도 이번 화면은 그대로 보여 준다 */
+    }
+  }
+
+  /** 새로 받은 체결을 저장본에 합친다(중복 제거). 다른 화면(주문 현황 등)에서도 부를 수 있다. */
+  private absorbFills(incoming: Fill[]): void {
+    if (incoming.length === 0) return;
+    const before = this.savedFills.length;
+    this.savedFills = mergeFills(this.savedFills, incoming);
+    // 너무 오래된 것은 정리(2년치면 충분 — 저장 공간이 무한하지 않다)
+    const cutoff = Date.now() - 730 * 86_400_000;
+    this.savedFills = this.savedFills.filter((f) => f.atMs >= cutoff);
+    this.fillsSyncedAtMs = Date.now();
+    if (this.savedFills.length !== before || true) this.persistFills();
+  }
+
   /** 지금 모드가 페이퍼(mock/dryrun)인지 실거래(real)인지 태그. */
   private currentMode(): "mock" | "dryrun" | "real" {
     if (this.mode === "mock") return "mock";
@@ -2244,53 +2294,70 @@ export class ToolEngine extends EventEmitter {
     // 한국 시각 기준으로 기간을 만든다.
     const period = makePeriod(kind, Date.now(), 540, picked);
 
-    // 연습 모드거나 키가 없으면 토스에서 가져올 수 없다 → 앱이 남긴 기록으로 대체(예전 방식).
-    if (this.mode !== "live") return buildReport(this.trades, period);
+    // ① 연결돼 있으면 최신 체결을 받아와 저장본에 합친다(실패해도 그냥 넘어간다).
+    let source: "live" | "cache" | "none" = "cache";
+    if (this.mode === "live") {
+      try {
+        const { fills, fetched } = await this.collectFills(period.fromMs - 45 * 86_400_000);
+        this.absorbFills(fills);
+        // 한 번도 못 받아왔으면(회사·이동 중 등 연결 없음) '저장된 기록'으로 표시해야 한다.
+        source = fetched ? "live" : "cache";
+      } catch (e) {
+        // 홈 PC 연결이 없거나(회사·이동 중) 조회가 막힌 경우 — **저장해 둔 기록으로 계속 간다.**
+        this.addJournal({ kind: "info", symbol: "-", summary: `최신 체결 조회 실패(저장된 기록으로 표시): ${String(e).slice(0, 60)}` });
+      }
+    }
 
-    try {
-      // ① 토스의 '종료된 주문'을 페이지를 넘겨 가며 모은다.
-      //    기간보다 넉넉히(앞쪽으로 더) 모아야 한다 — 예전에 산 걸 오늘 팔 수 있기 때문이다.
-      const { fills } = await this.collectFills(period.fromMs - 45 * 86_400_000);
-
-      // ② 계좌의 평균매입가(그보다 더 전에 산 물량의 원가로 사용)
-      const avgCost: Record<string, number> = {};
+    // ② 계좌 평균매입가(있으면 매칭 보정에 쓴다. 연결 없으면 생략)
+    const avgCost: Record<string, number> = {};
+    if (source === "live") {
       try {
         const h = (await getHoldings()) as { items?: Record<string, unknown>[] };
         for (const it of h.items ?? []) {
-          const sym = String((it as Record<string, unknown>).symbol ?? "");
-          const avg = Number((it as Record<string, unknown>).averagePurchasePrice);
+          const sym = String(it.symbol ?? "");
+          const avg = Number(it.averagePurchasePrice);
           if (sym && Number.isFinite(avg)) avgCost[sym] = avg;
         }
+        this.lastAvgCost = avgCost; // 다음에 연결이 없을 때도 쓰도록 기억해 둔다
+        this.persistFills();
       } catch {
-        /* 보유 조회 실패는 치명적이지 않다(그 경우 매칭 안 되는 매도만 빠진다) */
+        /* 보유 조회 실패는 치명적이지 않다 */
       }
-
-      // ③ 선입선출로 '매도 건별 실현손익'을 만들고, 기간으로 걸러 리포트를 만든다.
-      const realized = matchFifo(fills, avgCost);
-      const openNow = Object.keys(avgCost).length;
-      return buildReportFromRealized(realized, period, openNow);
-    } catch (e) {
-      // 조회 실패 시에도 화면이 깨지지 않게, 앱 기록 기반으로라도 돌려준다.
-      this.addJournal({ kind: "info", symbol: "-", summary: `리포트 체결내역 조회 실패: ${String(e).slice(0, 80)}` });
-      return buildReport(this.trades, period);
     }
+    const costs = source === "live" ? avgCost : this.lastAvgCost;
+
+    // ③ **저장된 매매 이력**으로 계산한다(연결 여부와 무관하게 항상 있다).
+    const realized = matchFifo(this.savedFills, costs);
+    if (this.savedFills.length === 0) source = "none";
+
+    const openNow = Object.keys(costs).length;
+    const rep = buildReportFromRealized(realized, period, openNow);
+    return {
+      ...rep,
+      source,
+      lastSyncMs: this.fillsSyncedAtMs,
+      savedTotal: realized.length, // 기간과 무관하게 저장된 '매도' 총 건수
+    };
   }
 
   /**
    * [v0.9.6] collectFills — 토스 '종료된 주문'을 페이지 넘겨 모아 체결 목록으로 바꾼다.
    *   @param sinceMs 이 시각보다 오래된 체결이 나오면 그만 가져온다(무한정 안 부르게).
    */
-  private async collectFills(sinceMs: number): Promise<{ fills: Fill[]; partial: boolean }> {
+  private async collectFills(sinceMs: number): Promise<{ fills: Fill[]; partial: boolean; fetched: boolean }> {
     // ① 최근에 모아 둔 게 있으면 그대로 쓴다(60초).
     //   [왜?] 기간 버튼(오늘/1주일/1개월)을 누를 때마다 수십 번 호출하면
     //   토스가 "요청 한도 초과(429)"로 막아 **리포트가 통째로 비어 버린다**(실제로 그랬다).
     if (this.fillsCache && Date.now() - this.fillsCache.atMs < 60_000) {
-      return { fills: this.fillsCache.fills, partial: this.fillsCache.partial };
+      // [주의] 실패했던 결과를 '성공'으로 돌려주면 안 된다.
+      //   그러면 연결이 끊긴 상태인데도 화면에 "최신"이라고 표시된다(실제로 그랬다).
+      return { fills: this.fillsCache.fills, partial: this.fillsCache.partial, fetched: this.fillsCache.fetched };
     }
 
     const fills: Fill[] = [];
     let cursor: string | null | undefined = undefined;
-    let partial = false; // 중간에 막혀서 일부만 가져왔는가
+    let partial = false; //  중간에 막혀서 일부만 가져왔는가
+    let fetched = false; //  한 페이지라도 실제로 받아왔는가(연결 여부 판단용)
 
     for (let page = 0; page < 8; page++) {
       // 8페이지(약 160건)면 최근 몇 주치로 충분하다. 더 옛날 물량은 계좌 평균매입가로 메운다.
@@ -2308,6 +2375,7 @@ export class ToolEngine extends EventEmitter {
         break;
       }
 
+      fetched = true; // 여기까지 왔으면 토스와 실제로 통신됐다
       let oldest = Number.POSITIVE_INFINITY;
       for (const o of res.orders) {
         const ex = (o.execution ?? {}) as Record<string, unknown>;
@@ -2337,8 +2405,9 @@ export class ToolEngine extends EventEmitter {
       await new Promise((r) => setTimeout(r, 250));
     }
 
-    this.fillsCache = { fills, atMs: Date.now(), partial };
-    return { fills, partial };
+    // 실패(한 페이지도 못 받음)한 경우에는 짧게만 기억한다 — 연결이 돌아오면 곧 다시 시도하도록.
+    this.fillsCache = { fills, atMs: fetched ? Date.now() : Date.now() - 50_000, partial, fetched };
+    return { fills, partial, fetched };
   }
 
 
@@ -2709,6 +2778,15 @@ export class ToolEngine extends EventEmitter {
    *   기존 openOrders는 몇 필드만 남겼는데, 이건 주문시각·수수료·평균체결가까지 다 담는다.
    */
   async ordersView(status: "OPEN" | "CLOSED"): Promise<OrderRow[]> {
+    // [v0.9.8] 체결 목록을 보는 김에 **매매 이력도 저장**해 둔다.
+    //   그래야 나중에 홈 PC 연결이 없는 곳(회사)에서도 리포트가 보인다.
+    if (status === "CLOSED" && this.mode === "live") {
+      void this.collectFills(Date.now() - 45 * 86_400_000)
+        .then(({ fills }) => this.absorbFills(fills))
+        .catch(() => {
+          /* 실패해도 주문 현황 표시에는 지장 없다 */
+        });
+    }
     await this.prepareBackend();
     this.assertAccountReady();
     const raw = await listOrdersRaw({ status });

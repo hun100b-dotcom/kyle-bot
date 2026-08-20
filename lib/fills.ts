@@ -124,3 +124,26 @@ export function matchFifo(fills: Fill[], avgCostFallback: Record<string, number>
 
   return out;
 }
+
+/**
+ * fillKey — 체결 한 건을 구분하는 열쇠(중복 저장 방지용).
+ *   토스가 같은 체결을 여러 번 돌려줘도 한 번만 쌓이게 한다.
+ */
+export function fillKey(f: Fill): string {
+  return [f.symbol, f.side, f.atMs, f.qty, f.price].join("|");
+}
+
+/**
+ * mergeFills — 저장해 둔 체결과 새로 받은 체결을 합친다(중복 제거, 시간순).
+ *
+ * [왜 필요한가 — 사장님이 회사에서 겪은 문제]
+ *   리포트가 매번 토스에서 '실시간으로' 불러오게 만들었더니, 집 PC에 연결되지 않은 곳
+ *   (회사·이동 중)에서는 조회 자체가 안 돼 **리포트가 통째로 비어** 보였습니다.
+ *   그래서 한 번 받은 체결은 기기에 쌓아 두고, 연결이 없을 때는 그 기록으로 보여 줍니다.
+ */
+export function mergeFills(saved: Fill[], incoming: Fill[]): Fill[] {
+  const map = new Map<string, Fill>();
+  for (const f of saved) map.set(fillKey(f), f);
+  for (const f of incoming) map.set(fillKey(f), f);
+  return [...map.values()].sort((a, b) => a.atMs - b.atMs);
+}

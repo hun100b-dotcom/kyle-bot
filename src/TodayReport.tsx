@@ -120,6 +120,14 @@ export default function TodayReport({
       <div className="rp-label">
         조회 기간: <b>{data?.periodLabel ?? "오늘"}</b>
       </div>
+      {/* [v0.9.8] 숫자가 어디서 왔는지 — 홈 PC 연결이 없을 때 사장님이 헷갈리지 않게 */}
+      {data?.source === "cache" && (
+        <div className="rp-source">
+          💾 저장된 기록으로 표시 중
+          {data.lastSyncMs ? ` · 마지막 갱신 ${new Date(data.lastSyncMs).toLocaleString("ko-KR", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}` : ""}
+          <span className="wide-only"> · 최신 매매 반영은 홈 PC 연결 시</span>
+        </div>
+      )}
     </section>
   );
 
@@ -129,17 +137,33 @@ export default function TodayReport({
       <main className="grid report">
         {periodBar}
         <section className="card wide report-empty">
-          <div className="report-empty-emoji">🌤️</div>
-          <h2>{data?.periodLabel ?? "오늘"} 정리된 거래가 없어요</h2>
-          <p className="hint">
-            익절·손절이나 매도가 이루어지면, 여기에 <b>오늘 얼마를 어떻게 벌었는지</b> 한눈에 정리해 드립니다.
-            {data && data.openNow > 0 && (
-              <>
+          <div className="report-empty-emoji">{data?.source === "none" ? "📭" : "🌤️"}</div>
+          {data?.source === "none" ? (
+            <>
+              {/* 저장된 이력이 진짜 하나도 없는 경우 */}
+              <h2>아직 저장된 매매 기록이 없어요</h2>
+              <p className="hint">
+                <b>홈 PC에 연결된 상태에서 이 화면을 한 번만 열면</b> 그동안의 매매가 이 기기에 저장되고,
+                그 뒤로는 <b>회사에서도·이동 중에도</b> 연결 없이 볼 수 있습니다.
                 <br />
-                지금 <b>{data.openNow}건</b>을 들고 계세요 — 파는 순간 이 화면에 기록됩니다.
-              </>
-            )}
-          </p>
+                (PC의 Capri → 설정 → 📱 폰에서 쓰기 → QR 찍기)
+              </p>
+            </>
+          ) : (
+            <>
+              {/* 저장된 이력은 있는데 '이 기간'에만 매매가 없는 경우 */}
+              <h2>{data?.periodLabel ?? "오늘"} 정리된 거래가 없어요</h2>
+              <p className="hint">
+                다른 기간을 눌러 보세요 — 저장된 매매 {data?.savedTotal ?? 0}건 중 이 기간에 해당하는 것이 없습니다.
+                {data && data.openNow > 0 && (
+                  <>
+                    <br />
+                    지금 <b>{data.openNow}건</b>을 들고 계세요 — 파는 순간 이 화면에 기록됩니다.
+                  </>
+                )}
+              </p>
+            </>
+          )}
           <button className="mini" onClick={onRefresh} disabled={busy}>
             ↻ 새로고침
           </button>
