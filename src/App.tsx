@@ -386,6 +386,14 @@ function App() {
   const [pnlKr, setPnlKr] = useState<boolean>(() => {
     try { return localStorage.getItem("capri-pnl") === "kr"; } catch { return false; }
   });
+  // [v0.15.0] 데스크톱 2컬럼(두 탭 나란히). 폰/좁은 화면은 기존 단일 컬럼 그대로(회귀 금지).
+  //   twoCol: 사용자 선택(이 기기 저장). isWide: 화면이 넓은가(≥1024). 둘 다 참일 때만 2컬럼 렌더.
+  const [twoCol, setTwoCol] = useState<boolean>(() => { try { return localStorage.getItem("capri-twocol") === "1"; } catch { return false; } });
+  // 넓은 화면 판정은 matchMedia(레이아웃 뷰포트 기준)로 — innerWidth 보다 견고.
+  const [isWide, setIsWide] = useState<boolean>(() => (typeof window !== "undefined" && typeof window.matchMedia === "function" ? window.matchMedia("(min-width: 1024px)").matches : false));
+  const [tabL, setTabL] = useState<TabId>("calc"); //   왼쪽 패널 탭
+  const [tabR, setTabR] = useState<TabId>("strength"); // 오른쪽 패널 탭(기본: 신호 보며 매매)
+  const showTwoCol = twoCol && isWide;
   const [openEvid, setOpenEvid] = useState<Set<string>>(new Set()); // 근거 펼친 종목들
   const [journal, setJournal] = useState<JournalEntry[]>([]);
   // [v0.4.0] 내 삼분할 기록(여러 종목 동시 운용). 저장 목록 + 저장 시 메모 입력칸.
@@ -564,23 +572,63 @@ function App() {
     try { localStorage.setItem("capri-pnl", pnlKr ? "kr" : "us"); } catch { /* 저장 실패해도 화면은 동작 */ }
   }, [pnlKr]);
 
-  // [v0.2.10] 30초 자동 갱신. 기본은 꺼짐(자율 동작 최소화 원칙) — 오너가 켤 때만 돈다.
-  //   주문 현황 탭에 있을 때만 돌려서 불필요한 조회를 줄인다.
+  // [v0.15.0] 화면 넓이 감지 — 넓을 때(≥1024)만 2컬럼이 가능. matchMedia 변화에 반응(폰은 항상 단일).
   useEffect(() => {
-    if (!autoRefresh || tab !== "orders") return;
+    if (typeof window.matchMedia !== "function") return;
+    const m = window.matchMedia("(min-width: 1024px)");
+    const on = () => setIsWide(m.matches);
+    on();
+    m.addEventListener?.("change", on);
+    return () => m.removeEventListener?.("change", on);
+  }, []);
+  // [v0.15.0] 2컬럼 on/off 선택을 이 기기에 저장.
+  useEffect(() => { try { localStorage.setItem("capri-twocol", twoCol ? "1" : "0"); } catch { /* 저장 실패 무시 */ } }, [twoCol]);
+
+  // [v0.15.0] 탭을 '열 때' 하던 지연 로딩을 한 곳으로 모은다(1컬럼 탭 클릭·2컬럼 패널 선택 공용).
+  //   호출 시점(이벤트/커밋 후)엔 아래 로더들이 모두 초기화돼 있으므로 참조 안전.
+  const activateTab = (t: TabId) => {
+    if (t === "orders") refreshStatusTab();
+    else if (t === "splits") refreshSplits();
+    else if (t === "strength") { void loadStrength(strSym); void refreshTrades(); }
+    else if (t === "report") void loadReport();
+  };
+  // [v0.15.0] 2컬럼이 켜지거나 좌/우 패널 탭이 바뀌면 그 탭들의 데이터를 로드한다(1컬럼과 동일한 지연 로딩).
+  useEffect(() => {
+    if (!showTwoCol) return;
+    activateTab(tabL);
+    activateTab(tabR);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showTwoCol, tabL, tabR]);
+
+  // [v0.15.0] 콘텐츠 안의 버튼("계산기로 불러오기"·"체결강도 보기" 등)이 두 모드에서 다 동작하게.
+  //   1컬럼: 그 탭으로 이동. 2컬럼: 이미 어느 패널에 떠 있으면 그대로, 아니면 왼쪽 패널에 띄운다(먹통 방지).
+  const goToTab = (t: TabId) => {
+    if (showTwoCol) { if (tabL !== t && tabR !== t) setTabL(t); }
+    else setTab(t);
+  };
+  // [v0.15.0 · B리뷰 H1/H2] "그 탭이 지금 화면에 보이나?" — 1컬럼은 tab, 2컬럼은 좌/우 패널 중 하나.
+  //   렌더 블록은 paneTab로 옮겼지만, 명령형 가드(자동계산·주문 후 새로고침·킬스위치)가 stale tab을 봐서
+  //   2컬럼에서 계산기·주문현황이 갱신 안 되던 치명 버그를 이 헬퍼로 바로잡는다.
+  const isTabVisible = (t: TabId) => (showTwoCol ? tabL === t || tabR === t : tab === t);
+
+  // [v0.2.10] 30초 자동 갱신. 기본은 꺼짐(자율 동작 최소화 원칙) — 오너가 켤 때만 돈다.
+  //   주문 현황이 '보이는 동안'만 돈다. [v0.15.0] 2컬럼이면 좌/우 어느 패널에 있어도 인정.
+  useEffect(() => {
+    const ordersVisible = showTwoCol ? (tabL === "orders" || tabR === "orders") : tab === "orders";
+    if (!autoRefresh || !ordersVisible) return;
     const id = setInterval(() => void refreshStatusTab(), 30_000);
     return () => clearInterval(id);
-  }, [autoRefresh, tab]);
+  }, [autoRefresh, tab, showTwoCol, tabL, tabR]);
 
   // [v0.3.0] 자동 계산 — 재료·익절/손절%·기법이 바뀌면 0.35초 뒤 조용히 다시 계산한다.
   //   [계산하기] 버튼을 없앤 대신 이 효과가 대신한다. 타이핑 중 잠깐 멈추면 결과가 갱신된다.
   //   0.35초 지연(디바운스)을 두는 이유: 한 글자마다 계산하면 낭비이므로 "멈추면 계산"으로.
   useEffect(() => {
-    if (tab !== "calc") return;
+    if (!isTabVisible("calc")) return; // [B리뷰 H1] 2컬럼에서도 계산기 패널이 보이면 자동계산 동작
     const id = setTimeout(() => void runCalc(true), 350);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tech, baseClose, ema200, wallPrice, barOpen, manualEntry, tpPct, slPct, candleYang, committedSymbol]);
+  }, [tech, baseClose, ema200, wallPrice, barOpen, manualEntry, tpPct, slPct, candleYang, committedSymbol, showTwoCol, tabL, tabR, tab]);
 
   async function startDownloadUpdate() {
     setUpdateProgress(0);
@@ -884,7 +932,7 @@ function App() {
       setBusy(true);
       try {
         await po.send();
-        if (tab === "orders") await refreshStatusTab();
+        if (isTabVisible("orders")) await refreshStatusTab();
       } catch (e) {
         const msg = String(e).replace(/^Error:\s*(Error invoking remote method '[^']+':\s*Error:\s*)?/, "");
         alert(`주문이 전송되지 않았습니다.
@@ -906,7 +954,7 @@ ${msg}
     try {
       await pending.send();
       setPending(null);
-      if (tab === "orders") await refreshStatusTab();
+      if (isTabVisible("orders")) await refreshStatusTab();
     } catch (e) {
       const msg = String(e).replace(/^Error:\s*(Error invoking remote method '[^']+':\s*Error:\s*)?/, "");
       alert(`주문이 전송되지 않았습니다.
@@ -1032,7 +1080,7 @@ ${msg}
     setBarOpen(i.barOpen);
     setManualEntry(i.manualEntry);
     setCandleYang(i.candleYang);
-    setTab("calc"); //             계산기 화면으로 이동
+    goToTab("calc"); //             계산기 화면으로 이동(2컬럼이면 왼쪽 패널에)
     setSplitSaved(
       restored
         ? `${s.symbol} 불러옴 — 옛 기록이라 진입가에서 되살린 값입니다(1틱 정도 차이 가능). 수량만 바꿔 진행하세요`
@@ -1226,14 +1274,14 @@ ${msg}
   function pickScreenSymbol(symbol: string) {
     setSymbol(symbol);
     setCommittedSymbol(symbol);
-    setTab("calc");
+    goToTab("calc");
     void autoLoad(symbol); // 예수금·시세·수량 자동 로드
   }
 
   /** [내 삼분할 기록] 카드에서 "체결강도 보기"를 누르면 이 종목으로 체결강도 탭 열기. */
   function openStrengthFor(symbol: string) {
     setStrSym(symbol);
-    setTab("strength");
+    goToTab("strength");
     void loadStrength(symbol);
   }
 
@@ -1489,6 +1537,16 @@ ${msg}
           )}
         </div>
         <div className="controls">
+          {/* [v0.15.0] 2컬럼 토글 — 넓은 화면에서만 보인다. 켜면 좌/우 두 탭을 나란히 본다. */}
+          {isWide && (
+            <button
+              className={`btn ${twoCol ? "twocol-on" : ""}`}
+              title="넓은 화면에서 두 탭을 좌우로 나란히 봅니다(예: 계산기 + 체결강도)"
+              onClick={() => { if (twoCol) setTab(tabL); /* 1컬럼으로 돌아갈 때 왼쪽 패널 탭을 이어서 본다(stale 방지) */ setTwoCol((v) => !v); }}
+            >
+              {twoCol ? "🔲 1컬럼" : "🔳 2컬럼"}
+            </button>
+          )}
           <button
             className={`btn btn-kill ${status.killSwitch ? "kill-on" : ""}`}
             title="켜면 신규 주문이 잠기고, 미체결 주문·조건주문을 전량 취소합니다(계산·조회는 가능)"
@@ -1504,7 +1562,7 @@ ${msg}
               setBusy(true);
               try {
                 await window.kyletool.setKillSwitch(turningOn);
-                if (tab === "orders") await refreshStatusTab();
+                if (isTabVisible("orders")) await refreshStatusTab();
               } finally {
                 setBusy(false);
               }
@@ -1516,7 +1574,8 @@ ${msg}
         </div>
       </header>
 
-      {/* ===== 탭 ===== */}
+      {/* ===== 탭 (2컬럼일 땐 숨김 — 각 패널의 드롭다운으로 탭을 고른다) ===== */}
+      {!showTwoCol && (
       <nav className="tabs">
         {tabOrder.map((t) => (
           <button
@@ -1537,9 +1596,28 @@ ${msg}
           </button>
         ))}
       </nav>
+      )}
+
+      {/* [v0.15.0] 본문: 1컬럼이면 현재 탭 1개, 2컬럼이면 좌/우 탭 2개를 나란히.
+          콘텐츠 블록은 그대로 재사용하되 가드를 paneTab 으로 바꿔 패널마다 다른 탭을 그린다(회귀 0). */}
+      <div className={`panes ${showTwoCol ? "twocol" : ""}`}>
+        {(showTwoCol ? [tabL, tabR] : [tab]).map((paneTab, paneIdx) => (
+          <div className="pane" key={paneIdx}>
+            {showTwoCol && (
+              <div className="pane-head">
+                <span className="pane-tag">{paneIdx === 0 ? "왼쪽" : "오른쪽"}</span>
+                <select
+                  className="pane-select"
+                  value={paneTab}
+                  onChange={(e) => { const nt = e.target.value as TabId; (paneIdx === 0 ? setTabL : setTabR)(nt); /* 데이터 로드는 [tabL,tabR] effect가 처리(중복 호출 방지) */ }}
+                >
+                  {TOP_TABS.map((t) => <option key={t} value={t}>{TAB_LABEL[t]}</option>)}
+                </select>
+              </div>
+            )}
 
       {/* ===== 1) 계산기 (오더 티켓) ===== */}
-      {tab === "calc" && (
+      {paneTab === "calc" && (
         <main className="ticket">
           {/* --- 상단 상시 바: 실주문 토글 · 예수금 · 보유손익 · 세션 --- */}
           <div className="statusbar">
@@ -1795,7 +1873,7 @@ ${msg}
 
       {/* ===== ①-1) 탐색(스크리너) (v0.6.0) ===== */}
       {/* [v0.9.1] 오늘의 매매 리포트 — 큰 숫자·배지·막대 애니메이션(토스 스타일) */}
-      {tab === "report" && (
+      {paneTab === "report" && (
         <TodayReport
           data={report}
           busy={reportBusy}
@@ -1807,7 +1885,7 @@ ${msg}
         />
       )}
 
-      {tab === "screener" && (
+      {paneTab === "screener" && (
         <main className="grid">
           <section className="card wide">
             <div className="split-list-head">
@@ -1970,7 +2048,7 @@ ${msg}
       )}
 
       {/* ===== ①-2) 내 삼분할 기록 (v0.4.0 — 여러 종목 동시 운용) ===== */}
-      {tab === "splits" && (
+      {paneTab === "splits" && (
         <main className="grid">
           <section className="card wide">
             <div className="split-list-head">
@@ -2093,7 +2171,7 @@ ${msg}
       )}
 
       {/* ===== ①-3) 체결강도 기록 (v0.5.0 — 온디맨드 시계열) ===== */}
-      {tab === "strength" && (
+      {paneTab === "strength" && (
         <main className="grid">
           <section className="card wide">
             <h2>체결강도 기록 <span className="hint">(매수체결량 ÷ 매도체결량 × 100)</span></h2>
@@ -2211,7 +2289,7 @@ ${msg}
       )}
 
       {/* ===== ①-4) 매매분석 — [v0.12.0] 체결강도 탭 하위 섹션으로 통합 (main 중복 방지 위해 div) ===== */}
-      {tab === "strength" && (
+      {paneTab === "strength" && (
         <div className="grid">
           <section className="card wide">
             <div className="split-list-head">
@@ -2272,7 +2350,7 @@ ${msg}
       )}
 
       {/* ===== ② 주문 현황 (v0.3.3 토스 스타일) ===== */}
-      {tab === "orders" && (
+      {paneTab === "orders" && (
         <main className="statusmain">
           {/* --- 공통 도구줄: 새로고침 · 자동갱신 · 상태(미체결/체결) --- */}
           <div className="statusbar">
@@ -2476,7 +2554,7 @@ ${msg}
       )}
 
       {/* ===== ④ 설정 (기록 탭은 v0.12.0에서 이 탭 하위 '고급·진단'으로 이동) ===== */}
-      {tab === "settings" && settings && (
+      {paneTab === "settings" && settings && (
         <main className="grid">
           {/* [v0.14.0] 화면 표시 — 손익 색 관습(미국식/한국식) */}
           <section className="card wide">
@@ -2882,6 +2960,9 @@ ${msg}
           </section>
         </main>
       )}
+          </div>
+        ))}
+      </div>
 
       {/* ===== [v0.2.8] 조건주문 편집 창 — 값은 오너가 자유롭게 고친다 ===== */}
       {ocoEdit && (
