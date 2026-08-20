@@ -114,3 +114,34 @@ export async function decryptSecret(rec: { ciphertext: string; salt: string; iv:
   }
   return obj;
 }
+
+// =============================================================================
+// [v0.10.0] 아무 데이터나 암호화하기 — 매매 이력 동기화에 재사용
+// -----------------------------------------------------------------------------
+// 위의 encryptSecret/decryptSecret 은 '토스 키' 전용 모양(clientId 등)이라 그대로 못 쓴다.
+// 같은 자물쇠(PBKDF2 20만회 + AES-GCM 256)를 쓰되, **어떤 JSON이든** 담을 수 있게 한다.
+//   · 매매 이력(체결 결과)을 담아 공개 저장소에 올려도, 비밀번호 없이는 아무 의미 없는 글자다.
+//   · 파일 이름도 비밀번호에서 만들어(deriveSyncId) 어느 파일인지조차 알 수 없다.
+// =============================================================================
+
+/** 아무 JSON 데이터나 passphrase 로 암호화한다. */
+export async function encryptJson(data: unknown, passphrase: string): Promise<EncryptedRecord> {
+  if (!passphrase || passphrase.length < 6) throw new Error("동기화 비밀번호는 6자 이상이어야 합니다.");
+  const salt = webcrypto.getRandomValues(new Uint8Array(SALT_BYTES));
+  const iv = webcrypto.getRandomValues(new Uint8Array(IV_BYTES));
+  const key = await deriveKey(passphrase, salt);
+  const ctBuf = await subtle.encrypt({ name: "AES-GCM", iv }, key, enc.encode(JSON.stringify(data)));
+  return { syncId: await deriveSyncId(passphrase), ciphertext: toB64(ctBuf), salt: toB64(salt), iv: toB64(iv) };
+}
+
+/** 암호문을 passphrase 로 풀어 원래 JSON 으로 되돌린다(틀린 비밀번호면 예외). */
+export async function decryptJson<T>(rec: { ciphertext: string; salt: string; iv: string }, passphrase: string): Promise<T> {
+  const key = await deriveKey(passphrase, fromB64(rec.salt));
+  let plainBuf: ArrayBuffer;
+  try {
+    plainBuf = await subtle.decrypt({ name: "AES-GCM", iv: fromB64(rec.iv) }, key, fromB64(rec.ciphertext));
+  } catch {
+    throw new Error("복호화 실패 — 동기화 비밀번호가 틀렸거나 데이터가 손상됐습니다.");
+  }
+  return JSON.parse(dec.decode(plainBuf)) as T;
+}

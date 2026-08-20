@@ -266,6 +266,15 @@ function App() {
   const [tab, setTab] = useState<TabId>("calc");
   /** 웹앱(폰)인가? — 데스크톱에만 있는 '폰 연결' 기능 유무로 구분한다 */
   const isWebApp = !window.kyletool.phoneStart;
+  // [v0.10.0] 매매 이력 동기화(암호화) — PC가 올리고 폰이 받는다
+  const [syncTradePass, setSyncTradePass] = useState("");
+  const [syncTradeMsg, setSyncTradeMsg] = useState("");
+  const [syncTradeBusy, setSyncTradeBusy] = useState(false);
+  useEffect(() => {
+    void window.kyletool.tradeSyncPass?.().then((v) => {
+      if (typeof v === "string" && v) setSyncTradePass(v);
+    });
+  }, []);
   // [v0.9.2] 탭 순서(드래그로 변경, 이 기기에 저장)
   const { order: tabOrder, dragProps, isDragging } = useTabOrder(ALL_TABS);
   // [v0.9.1] 매매 리포트 + [v0.9.2] 기간 선택(오늘/1주일/1개월/날짜)
@@ -2306,6 +2315,69 @@ ${msg}
       {/* ===== ④ 설정 ===== */}
       {tab === "settings" && settings && (
         <main className="grid">
+          {/* [v0.10.0] 매매 이력 동기화 — PC가 암호화해 올리고, 폰이 받아서 본다 */}
+          <section className="card wide">
+            <h2>☁️ 매매 이력 동기화</h2>
+            <p className="hint">
+              집 PC가 <b>매매 이력을 자물쇠로 잠가</b> 인터넷에 올려 두면, 폰이 같은 비밀번호로 풀어서 봅니다.
+              <br />
+              → <b>집 PC가 꺼져 있어도, 회사에서도</b> 매매 리포트가 보입니다.
+              <br />
+              <b>토스 키·계좌번호·비밀번호는 절대 올라가지 않습니다</b>(매매 결과만, 그것도 암호문으로).
+            </p>
+            <div className="row">
+              <label>동기화 비밀번호 (6자 이상 · PC와 폰에 같은 값을 넣으세요)</label>
+              <input
+                type="password"
+                value={syncTradePass}
+                onChange={(e) => setSyncTradePass(e.target.value)}
+                placeholder="예: 나만 아는 문장"
+                autoComplete="off"
+              />
+            </div>
+            <div className="row" style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+              {!isWebApp && (
+                <button
+                  className="btn"
+                  disabled={syncTradeBusy || syncTradePass.length < 6}
+                  onClick={async () => {
+                    setSyncTradeBusy(true);
+                    try {
+                      await window.kyletool.tradeSyncPass?.(syncTradePass); // 다음부터 자동 업로드
+                      const r = await window.kyletool.tradeSyncPush(syncTradePass);
+                      setSyncTradeMsg(r.message);
+                    } finally {
+                      setSyncTradeBusy(false);
+                    }
+                  }}
+                >
+                  ⬆ 지금 올리기 (이 PC)
+                </button>
+              )}
+              <button
+                className="btn"
+                disabled={syncTradeBusy || syncTradePass.length < 6}
+                onClick={async () => {
+                  setSyncTradeBusy(true);
+                  try {
+                    await window.kyletool.tradeSyncPass?.(syncTradePass); // 다음부터 자동으로 받아온다
+                    const r = await window.kyletool.tradeSyncPull(syncTradePass);
+                    setSyncTradeMsg(r.message);
+                    if (r.ok) void loadReport();
+                  } finally {
+                    setSyncTradeBusy(false);
+                  }
+                }}
+              >
+                ⬇ 지금 받기 {isWebApp ? "(이 폰)" : ""}
+              </button>
+            </div>
+            {syncTradeMsg && <p className="hint">{syncTradeMsg}</p>}
+            <p className="hint">
+              한 번 넣어 두면 다음부터는 <b>자동</b>입니다 — PC는 새 매매가 생길 때 올리고, 폰은 리포트를 열 때 받아옵니다.
+            </p>
+          </section>
+
           {/* [폰에서 쓰기] 데스크톱 앱에서만 보인다(웹앱에는 이 기능이 없음) */}
           {window.kyletool.phoneStart && (
             <section className="card wide">

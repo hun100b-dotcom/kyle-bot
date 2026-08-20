@@ -504,6 +504,10 @@ interface KyletoolBridge {
   tradesList(): Promise<StrengthTrade[]>;
   todayReport(): Promise<DailyReport>;
   report(kind: PeriodKind, picked?: string): Promise<DailyReport>;
+  /** [v0.10.0] 매매 이력 동기화 */
+  tradeSyncPush(pass?: string): Promise<{ ok: boolean; message: string; count?: number }>;
+  tradeSyncPull(pass?: string): Promise<{ ok: boolean; message: string; count?: number }>;
+  tradeSyncPass(pass?: string): Promise<string | void>;
   tradesStats(): Promise<TradeStats>;
   tradesClose(id: string, exitPrice: number, kind: "tp" | "sl" | "manual"): Promise<StrengthTrade[]>;
   tradesDelete(id: string): Promise<StrengthTrade[]>;

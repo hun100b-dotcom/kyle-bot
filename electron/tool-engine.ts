@@ -26,6 +26,8 @@ import { encryptSecret, decryptSecret } from "../lib/keysync"; // [v0.8.0] 키 �
 import { strengthFromTicks, type Side } from "../lib/strength";
 import { buildReport, buildReportFromRealized, makePeriod, type DailyReport, type PeriodKind } from "../lib/report"; // [v0.9.1] 매매 리포트
 import { matchFifo, mergeFills, type Fill } from "../lib/fills"; // [v0.9.6] 토스 실제 체결내역으로 손익 계산
+import { encryptJson, decryptJson, deriveSyncId } from "../lib/keysync"; // [v0.10.0] 매매 이력 암호화 동기화
+import { toSyncPayload, isSyncPayload, syncReadUrl, syncPath, SYNC_REPO, type TradeSyncPayload } from "../lib/trade-sync";
 import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, type Candle, type SessionPattern } from "../lib/indicators";
 import {
   getPrice,
@@ -660,6 +662,8 @@ export class ToolEngine extends EventEmitter {
   private fillsSyncedAtMs: number | null = null;
   /** 마지막으로 확인한 보유 평균매입가 — 연결이 없을 때도 손익 계산에 쓰려고 기억해 둔다. */
   private lastAvgCost: Record<string, number> = {};
+  /** 마지막으로 클라우드에 올린 시각(표시용) */
+  private lastSyncPushAtMs: number | null = null;
 
   // 환율 캐시(토스 스펙: 1분 갱신이므로 60초 캐시)
   private fxCache: { rate: number; atMs: number; source: "toss" | "manual" } | null = null;
@@ -2168,6 +2172,122 @@ export class ToolEngine extends EventEmitter {
     }
   }
 
+  // ── [v0.10.0] 매매 이력 암호화 동기화 (PC가 올리고, 폰이 받는다) ────────────
+  //   회사에서도 리포트를 보려면 이력이 폰에 있어야 한다. 집 PC가 이력을 **암호화해서**
+  //   인터넷 보관함에 올려 두면, 폰은 비밀번호로 풀어서 쓴다.
+  //   ⚠️ 토스 키·토큰·계좌번호는 **절대** 올리지 않는다(매매 결과만).
+
+  /** 동기화 비밀번호를 저장/조회 (PC는 .env, 폰은 브라우저 저장소에 남는다) */
+  getSyncPass(): string {
+    return process.env.TRADE_SYNC_PASS ?? "";
+  }
+
+  setSyncPass(pass: string): void {
+    process.env.TRADE_SYNC_PASS = pass.trim();
+    this.persistEnv();
+  }
+
+  /**
+   * syncPushTrades — [PC] 저장된 매매 이력을 암호화해 공개 저장소에 올린다.
+   *   토큰은 이 PC에 이미 있는 GitHub 자격증명에서 가져온다(새로 저장하지 않는다).
+   */
+  async syncPushTrades(passphrase?: string): Promise<{ ok: boolean; message: string; count?: number }> {
+    const pass = (passphrase ?? this.getSyncPass()).trim();
+    if (!pass) return { ok: false, message: "동기화 비밀번호를 먼저 정해 주세요(6자 이상)." };
+    if (this.savedFills.length === 0) return { ok: false, message: "올릴 매매 이력이 없습니다." };
+
+    try {
+      const rec = await encryptJson(toSyncPayload(this.savedFills, Date.now()), pass);
+      const token = await this.githubToken();
+      if (!token) {
+        return { ok: false, message: "이 PC의 GitHub 자격증명을 찾지 못했습니다(터미널에서 gh auth login 한 번 필요)." };
+      }
+      await this.githubPutFile(token, syncPath(rec.syncId), JSON.stringify(rec));
+      this.lastSyncPushAtMs = Date.now();
+      return { ok: true, message: `매매 이력 ${this.savedFills.length}건을 올렸습니다(암호화됨).`, count: this.savedFills.length };
+    } catch (e) {
+      return { ok: false, message: `올리기 실패: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+
+  /**
+   * syncPullTrades — [폰·PC] 올려 둔 매매 이력을 받아 복호화해 저장본에 합친다.
+   *   홈 PC 연결(터널)이 없어도, 인터넷만 되면 어디서든 된다.
+   */
+  async syncPullTrades(passphrase?: string): Promise<{ ok: boolean; message: string; count?: number }> {
+    const pass = (passphrase ?? this.getSyncPass()).trim();
+    if (!pass) return { ok: false, message: "동기화 비밀번호를 입력해 주세요." };
+
+    try {
+      const syncId = await deriveSyncId(pass);
+      const res = await fetch(syncReadUrl(syncId));
+      if (res.status === 404) {
+        return { ok: false, message: "올려 둔 매매 이력이 없습니다(집 PC에서 먼저 [올리기]를 눌러 주세요)." };
+      }
+      if (!res.ok) return { ok: false, message: `받기 실패(HTTP ${res.status})` };
+
+      const rec = (await res.json()) as { ciphertext: string; salt: string; iv: string };
+      const payload = await decryptJson<TradeSyncPayload>(rec, pass);
+      if (!isSyncPayload(payload)) return { ok: false, message: "받은 파일 형식이 올바르지 않습니다." };
+
+      const before = this.savedFills.length;
+      this.savedFills = mergeFills(this.savedFills, payload.fills);
+      this.fillsSyncedAtMs = Math.max(this.fillsSyncedAtMs ?? 0, payload.pushedAtMs);
+      this.persistFills();
+      const added = this.savedFills.length - before;
+      return {
+        ok: true,
+        message: `매매 이력 ${payload.fills.length}건을 받았습니다(새로 추가 ${added}건).`,
+        count: this.savedFills.length,
+      };
+    } catch (e) {
+      return { ok: false, message: `받기 실패: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+
+  /** 이 PC에 이미 있는 GitHub 자격증명을 찾는다(값은 저장하지 않는다). */
+  private async githubToken(): Promise<string | null> {
+    if (process.env.GH_TOKEN) return process.env.GH_TOKEN;
+    try {
+      const { execFileSync } = await import("node:child_process");
+      const out = execFileSync("git", ["credential", "fill"], {
+        input: ["protocol=https", "host=github.com", "", ""].join(String.fromCharCode(10)),
+        encoding: "utf8",
+        stdio: ["pipe", "pipe", "ignore"],
+      });
+      const m = out.match(/^password=(.*)$/m);
+      return m ? m[1].trim() : null;
+    } catch {
+      return null; // 브라우저(폰)에서는 여기까지 오지 않는다(올리기는 PC 전용)
+    }
+  }
+
+  /** 공개 저장소에 파일 하나를 올린다(있으면 덮어쓴다). */
+  private async githubPutFile(token: string, path: string, body: string): Promise<void> {
+    const api = `https://api.github.com/repos/${SYNC_REPO.owner}/${SYNC_REPO.repo}/contents/${path}`;
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "Content-Type": "application/json",
+    };
+    // 이미 있으면 sha 가 필요하다(덮어쓰기 규칙).
+    let sha: string | undefined;
+    const cur = await fetch(`${api}?ref=${SYNC_REPO.branch}`, { headers });
+    if (cur.ok) sha = ((await cur.json()) as { sha?: string }).sha;
+
+    const put = await fetch(api, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({
+        message: `매매 이력 동기화 ${new Date().toISOString()}`,
+        content: Buffer.from(body, "utf8").toString("base64"),
+        branch: SYNC_REPO.branch,
+        ...(sha ? { sha } : {}),
+      }),
+    });
+    if (!put.ok) throw new Error(`업로드 실패(HTTP ${put.status})`);
+  }
+
   /** 새로 받은 체결을 저장본에 합친다(중복 제거). 다른 화면(주문 현황 등)에서도 부를 수 있다. */
   private absorbFills(incoming: Fill[]): void {
     if (incoming.length === 0) return;
@@ -2177,7 +2297,19 @@ export class ToolEngine extends EventEmitter {
     const cutoff = Date.now() - 730 * 86_400_000;
     this.savedFills = this.savedFills.filter((f) => f.atMs >= cutoff);
     this.fillsSyncedAtMs = Date.now();
-    if (this.savedFills.length !== before || true) this.persistFills();
+    this.persistFills();
+
+    // [v0.10.0] 새 매매가 생겼으면 클라우드에도 올려 둔다(폰이 회사에서 볼 수 있게).
+    //   · 비밀번호를 정해 둔 경우에만 동작한다.
+    //   · 실패해도 무시한다(로컬 저장본은 그대로라 화면은 정상).
+    //   · 5분에 한 번으로 제한 — 너무 잦은 업로드 방지.
+    const changed = this.savedFills.length !== before;
+    const longEnough = Date.now() - (this.lastSyncPushAtMs ?? 0) > 5 * 60_000;
+    if (changed && longEnough && this.getSyncPass()) {
+      void this.syncPushTrades().catch(() => {
+        /* 업로드 실패는 조용히 넘어간다 */
+      });
+    }
   }
 
   /** 지금 모드가 페이퍼(mock/dryrun)인지 실거래(real)인지 태그. */
@@ -2305,6 +2437,16 @@ export class ToolEngine extends EventEmitter {
       } catch (e) {
         // 홈 PC 연결이 없거나(회사·이동 중) 조회가 막힌 경우 — **저장해 둔 기록으로 계속 간다.**
         this.addJournal({ kind: "info", symbol: "-", summary: `최신 체결 조회 실패(저장된 기록으로 표시): ${String(e).slice(0, 60)}` });
+      }
+    }
+
+    // ①-B [v0.10.0] 토스 조회가 안 됐고(회사·PC 꺼짐) 동기화 비밀번호가 있으면,
+    //     클라우드에 올려 둔 매매 이력을 받아 온다 → 홈 연결 없이도 리포트가 채워진다.
+    if (source !== "live" && this.getSyncPass()) {
+      try {
+        await this.syncPullTrades();
+      } catch {
+        /* 받기 실패해도 저장본으로 계속 간다 */
       }
     }
 
