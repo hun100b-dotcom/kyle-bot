@@ -76,6 +76,8 @@ interface DailyReport {
   source?: "live" | "cache" | "none";
   lastSyncMs?: number | null;
   savedTotal?: number;
+  /** [v0.10.1] 매매가 너무 많아 이 기간 일부가 빠졌을 수 있으면 true(화면이 경고 표시). */
+  truncated?: boolean;
 }
 
 interface JournalEntry {

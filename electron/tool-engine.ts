@@ -25,7 +25,7 @@ import { calcSplit3, calcOrderbook, calcCandle, roundPrice, getTick, type SplitO
 import { encryptSecret, decryptSecret } from "../lib/keysync"; // [v0.8.0] 키 기기 간 동기화(클라이언트 암호화)
 import { strengthFromTicks, type Side } from "../lib/strength";
 import { buildReport, buildReportFromRealized, makePeriod, type DailyReport, type PeriodKind } from "../lib/report"; // [v0.9.1] 매매 리포트
-import { matchFifo, mergeFills, type Fill } from "../lib/fills"; // [v0.9.6] 토스 실제 체결내역으로 손익 계산
+import { matchFifo, mergeFills, coveredSince, shouldReuseCache, type Fill } from "../lib/fills"; // [v0.9.6] 토스 실제 체결내역으로 손익 계산 (+v0.10.1 기간 커버리지 헬퍼)
 import { encryptJson, decryptJson, deriveSyncId } from "../lib/keysync"; // [v0.10.0] 매매 이력 암호화 동기화
 import { toSyncPayload, isSyncPayload, syncReadUrl, syncPath, SYNC_REPO, type TradeSyncPayload } from "../lib/trade-sync";
 import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, type Candle, type SessionPattern } from "../lib/indicators";
@@ -654,7 +654,8 @@ export class ToolEngine extends EventEmitter {
   private mockPort = 0;
 
   // [v0.9.6] 체결내역 캐시 — 기간 버튼을 오갈 때마다 토스를 다시 부르면 요청 한도(429)에 걸린다.
-  private fillsCache: { fills: Fill[]; atMs: number; partial: boolean; fetched: boolean } | null = null;
+  // [v0.10.1] coveredSinceMs: 이 캐시가 '어느 시각까지' 확실히 커버하는지. canDeepen: 재조회하면 더 깊이 갈 수 있는지.
+  private fillsCache: { fills: Fill[]; atMs: number; partial: boolean; fetched: boolean; coveredSinceMs: number; canDeepen: boolean } | null = null;
 
   /** [v0.9.8] 기기에 저장해 둔 매매(체결) 이력 — 홈 PC 연결이 없어도 리포트를 그릴 수 있게 한다. */
   private savedFills: Fill[] = [];
@@ -2428,10 +2429,18 @@ export class ToolEngine extends EventEmitter {
 
     // ① 연결돼 있으면 최신 체결을 받아와 저장본에 합친다(실패해도 그냥 넘어간다).
     let source: "live" | "cache" | "none" = "cache";
+    let fetchPartial = false; // 이번 조회가 상한에 걸려 일부만 받아왔는가(정직 표시용)
     if (this.mode === "live") {
       try {
-        const { fills, fetched } = await this.collectFills(period.fromMs - 45 * 86_400_000);
+        // [v0.10.1] 수집 깊이를 '가장 깊은 최근 기간(최근 30일+매칭 버퍼)'으로 통일한다.
+        //   오늘→1주일→1개월 버튼을 오가도 '한 번의 깊은 조회'로 전부 커버돼(60초 캐시 재사용),
+        //   버튼마다 새로 조회해 요청 한도(429)에 걸리던 문제를 막는다. 더 과거의 특정 날짜를
+        //   고른 경우엔 그만큼만 더 깊이 내려간다(min = 더 과거).
+        const need = period.fromMs - 45 * 86_400_000; // 이 기간 매칭에 필요한 최소 깊이
+        const commonFloor = Date.now() - 75 * 86_400_000; // 최근 30일 + 45일 버퍼 = 공통 바닥
+        const { fills, fetched, partial } = await this.collectFills(Math.min(need, commonFloor));
         this.absorbFills(fills);
+        fetchPartial = partial;
         // 한 번도 못 받아왔으면(회사·이동 중 등 연결 없음) '저장된 기록'으로 표시해야 한다.
         source = fetched ? "live" : "cache";
       } catch (e) {
@@ -2474,11 +2483,21 @@ export class ToolEngine extends EventEmitter {
 
     const openNow = Object.keys(costs).length;
     const rep = buildReportFromRealized(realized, period, openNow);
+
+    // [v0.10.1] '이 기간이 실제로 잘렸을 수 있나'를 정직하게 판정(A/B 리뷰 반영).
+    //   리포트는 누적 저장본(savedFills)으로 그리므로, 이번 조회가 상한에 걸렸어도(fetchPartial)
+    //   저장본이 기간 시작보다 더 과거까지 덮고 있으면 빠진 게 없다. 둘 다일 때만 경고한다:
+    //     ① 이번 조회가 상한에 걸렸고(fetchPartial)  ② 저장본의 가장 오래된 체결이 기간 시작보다 나중 =
+    //     그 기간 앞부분을 저장본이 못 덮음 → 일부 매매가 빠졌을 수 있다.
+    const oldestSaved = this.savedFills.length ? Math.min(...this.savedFills.map((f) => f.atMs)) : Number.POSITIVE_INFINITY;
+    const truncated = fetchPartial && oldestSaved > period.fromMs;
+
     return {
       ...rep,
       source,
       lastSyncMs: this.fillsSyncedAtMs,
       savedTotal: realized.length, // 기간과 무관하게 저장된 '매도' 총 건수
+      truncated, // [v0.10.1] 이 기간 일부가 빠졌을 수 있으면 true → 화면이 경고를 띄운다
     };
   }
 
@@ -2490,7 +2509,10 @@ export class ToolEngine extends EventEmitter {
     // ① 최근에 모아 둔 게 있으면 그대로 쓴다(60초).
     //   [왜?] 기간 버튼(오늘/1주일/1개월)을 누를 때마다 수십 번 호출하면
     //   토스가 "요청 한도 초과(429)"로 막아 **리포트가 통째로 비어 버린다**(실제로 그랬다).
-    if (this.fillsCache && Date.now() - this.fillsCache.atMs < 60_000) {
+    //   [v0.10.1] 재사용 판단은 순수함수 shouldReuseCache 에 위임한다(A/B 리뷰가 잡은 회귀 반영):
+    //   더 깊이 필요하고 캐시가 더 깊이 갈 수 있을 때만 재조회하고, 그 밖에는 60초간 재사용해
+    //   잦은 매매자/오프라인에서 요청 한도(429) 난타가 나지 않게 한다.
+    if (this.fillsCache && shouldReuseCache(this.fillsCache, sinceMs, Date.now())) {
       // [주의] 실패했던 결과를 '성공'으로 돌려주면 안 된다.
       //   그러면 연결이 끊긴 상태인데도 화면에 "최신"이라고 표시된다(실제로 그랬다).
       return { fills: this.fillsCache.fills, partial: this.fillsCache.partial, fetched: this.fillsCache.fetched };
@@ -2500,9 +2522,18 @@ export class ToolEngine extends EventEmitter {
     let cursor: string | null | undefined = undefined;
     let partial = false; //  중간에 막혀서 일부만 가져왔는가
     let fetched = false; //  한 페이지라도 실제로 받아왔는가(연결 여부 판단용)
+    let oldestSeen = Number.POSITIVE_INFINITY; // 이번 수집에서 본 가장 오래된 체결 시각
+    let reachedEnd = false; //   더 받을 페이지가 없어 끝까지 다 받았다
+    let reachedTarget = false; // 요청한 sinceMs 깊이에 도달했다
 
-    for (let page = 0; page < 8; page++) {
-      // 8페이지(약 160건)면 최근 몇 주치로 충분하다. 더 옛날 물량은 계좌 평균매입가로 메운다.
+    // [v0.10.1] 페이지 상한을 8 → 40 으로 크게 올린다.
+    //   진짜 멈춤 조건은 "sinceMs 깊이 도달"이고, 이 상한은 폭주 방지용 안전장치일 뿐이다.
+    //   매매가 잦은 사람도 30일치가 160건(8페이지)을 훌쩍 넘길 수 있어, 그 경우 옛 매매가
+    //   조용히 빠지던 것이 정확도 문제의 핵심이었다. 40페이지면 약 800건까지 커버한다.
+    //   페이지 사이 250ms 간격 + 60초 캐시가 있어 요청 한도(429)에 걸릴 위험은 낮다.
+    const MAX_PAGES = 40;
+    let page = 0;
+    for (; page < MAX_PAGES; page++) {
       let res: Awaited<ReturnType<typeof listOrdersRaw>>;
       try {
         res = await listOrdersRaw({ status: "CLOSED", ...(cursor ? { cursor } : {}) } as { status: string });
@@ -2538,17 +2569,35 @@ export class ToolEngine extends EventEmitter {
         });
         oldest = Math.min(oldest, at);
       }
+      oldestSeen = Math.min(oldestSeen, oldest);
 
       cursor = res.nextCursor;
-      if (!res.hasNext || !cursor) break;
-      if (Number.isFinite(oldest) && oldest < sinceMs) break; // 필요한 기간까지 다 왔다
+      if (!res.hasNext || !cursor) { reachedEnd = true; break; } // 끝까지 다 받았다
+      if (Number.isFinite(oldest) && oldest < sinceMs) { reachedTarget = true; break; } // 필요한 기간까지 다 왔다
 
       // ③ 다음 페이지 전에 잠깐 쉰다(연속 호출로 한도에 걸리지 않게).
       await new Promise((r) => setTimeout(r, 250));
     }
 
+    // [v0.10.1] 안전 상한(MAX_PAGES)까지 다 돌았는데도 목표·끝에 못 닿았으면 = 아직 더 옛 매매가 남았다.
+    //   '일부만 가져옴(partial)'으로 표시한다. 단, 리포트는 '저장된 누적 이력(savedFills)'에서 그리므로
+    //   실제로 그 기간이 빠지는지는 report()에서 저장본 커버리지까지 함께 보고 판정한다(여기선 단정하지 않음).
+    if (fetched && !reachedEnd && !reachedTarget && page >= MAX_PAGES) {
+      partial = true;
+      this.addJournal({
+        kind: "info",
+        symbol: "-",
+        summary: `체결내역이 매우 많아 이번엔 최근 ${MAX_PAGES}페이지까지 조회했습니다(저장된 기록은 그대로 유지됩니다)`,
+      });
+    }
+
+    // 이번 수집이 '어느 시각까지' 확실히 커버했는지(순수 계산). 다음 요청이 더 깊으면 재수집을 유도한다.
+    const covered = coveredSince({ reachedEnd, reachedTarget, sinceMs, oldestSeenMs: oldestSeen });
+    // canDeepen: 목표 깊이에 닿아 '일찍 멈춘'(reachedTarget) 경우에만 재조회로 더 얻을 수 있다.
+    //   끝까지 받았거나(reachedEnd)·상한에 걸렸거나(capped)·실패했으면 60초 안엔 더 못 얻으므로 false.
+    const canDeepen = reachedTarget;
     // 실패(한 페이지도 못 받음)한 경우에는 짧게만 기억한다 — 연결이 돌아오면 곧 다시 시도하도록.
-    this.fillsCache = { fills, atMs: fetched ? Date.now() : Date.now() - 50_000, partial, fetched };
+    this.fillsCache = { fills, atMs: fetched ? Date.now() : Date.now() - 50_000, partial, fetched, coveredSinceMs: covered, canDeepen };
     return { fills, partial, fetched };
   }
 

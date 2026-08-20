@@ -128,6 +128,12 @@ export default function TodayReport({
           <span className="wide-only"> · 최신 매매 반영은 홈 PC 연결 시</span>
         </div>
       )}
+      {/* [v0.10.1] 매매가 너무 많아 이 기간 일부가 빠졌을 수 있을 때만(정직 표시). 평소엔 안 뜬다. */}
+      {data?.truncated && (
+        <div className="rp-warn">
+          ⚠️ 매매가 매우 많아 이 기간 <b>일부가 아직 안 불러와졌을 수 있어요</b>. 홈 PC에 연결해 새로고침하면 채워집니다.
+        </div>
+      )}
     </section>
   );
 

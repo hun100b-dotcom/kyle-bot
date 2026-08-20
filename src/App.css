@@ -781,3 +781,15 @@ body:has(.update-banner) .topbar {
   border-radius: 8px;
   padding: 6px 10px;
 }
+
+/* [v0.10.1] 기간 일부가 빠졌을 수 있을 때만 뜨는 경고(빨강 톤 — 정직 표시) */
+.rp-warn {
+  width: 100%;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--loss, #f04452);
+  background: rgba(240, 68, 82, 0.08);
+  border: 1px solid rgba(240, 68, 82, 0.3);
+  border-radius: 8px;
+  padding: 6px 10px;
+}

@@ -133,6 +133,90 @@ export function fillKey(f: Fill): string {
   return [f.symbol, f.side, f.atMs, f.qty, f.price].join("|");
 }
 
+// =============================================================================
+// [v0.10.1] 기간 리포트 정확도 — "얼마나 깊이 가져왔나"를 정확히 다루는 순수 헬퍼
+// -----------------------------------------------------------------------------
+// [무엇이 문제였나 — 실제로 겪은 부정확]
+//   토스 '종료된 주문'을 페이지 넘겨 가져올 때 **8페이지(약 160건)에서 무조건 끊었다.**
+//   매매가 잦으면 "최근 30일"을 눌러도 160건 안에 30일치가 다 안 들어와 **옛 매매가 조용히 빠졌고**,
+//   게다가 '일부만 가져옴(partial)' 표시도 안 됐다(예외가 날 때만 표시). → 기간 리포트가 부정확.
+//
+// [두 번째 문제 — 캐시가 '깊이'를 기억하지 않음]
+//   "오늘"(45일 버퍼)을 먼저 받아 캐시하면, 60초 안에 "1개월"(약 74일 필요)을 눌러도
+//   그 얕은 캐시를 그대로 재사용해 월간 리포트가 잘렸다.
+//
+// 아래 두 함수는 "이번에 어디까지 확실히 커버했나(coveredSinceMs)"와
+// "그 캐시가 이번 요청을 감당하나(cacheCovers)"를 순수 계산으로 못 박아 테스트한다.
+// =============================================================================
+
+/** 페이지 넘김을 멈춘 이유 */
+export interface FetchOutcome {
+  /** 더 받을 페이지가 없어(hasNext=false) 끝까지 다 받았다 = 전 구간 커버 */
+  reachedEnd: boolean;
+  /** 요청한 sinceMs 보다 오래된 체결을 만나 목표 깊이에 도달했다 */
+  reachedTarget: boolean;
+  /** 이번 요청이 바란 최소 깊이(밀리초). 이 시각까지는 있어야 한다 */
+  sinceMs: number;
+  /** 이번에 실제로 본 가장 오래된 체결 시각(하나도 없으면 +Infinity) */
+  oldestSeenMs: number;
+}
+
+/**
+ * coveredSince — 이번 수집이 "어느 시각까지 확실히 커버했는지"를 돌려준다.
+ *   · 끝까지 다 받았으면(reachedEnd) → -Infinity(전부 있다).
+ *   · 목표 깊이에 도달했으면(reachedTarget) → sinceMs(요청한 만큼은 확실히 있다).
+ *   · 둘 다 아니면(= 안전 상한에 걸려 중간에 끊김) → 실제로 본 가장 오래된 시각까지만.
+ *  이 값이 캐시에 저장되어, 다음 요청이 더 깊이 필요할 때 재수집을 유도한다.
+ */
+export function coveredSince(o: FetchOutcome): number {
+  if (o.reachedEnd) return -Infinity;
+  if (o.reachedTarget) return o.sinceMs;
+  return Number.isFinite(o.oldestSeenMs) ? o.oldestSeenMs : Number.POSITIVE_INFINITY;
+}
+
+/**
+ * cacheCovers — 저장된 캐시(coveredSinceMs 까지 커버)가 이번 요청(requestSinceMs 만큼 필요)을 감당하나?
+ *   캐시가 요청이 바라는 시각과 같거나 더 깊이(더 과거까지) 커버할 때만 true.
+ *   (requestSinceMs 가 coveredSinceMs 보다 과거 = 더 깊이 필요 → false → 재수집)
+ */
+export function cacheCovers(coveredSinceMs: number, requestSinceMs: number): boolean {
+  return requestSinceMs >= coveredSinceMs;
+}
+
+/** 60초 캐시의 최소 정보(재사용 판단에 필요한 것만) */
+export interface FillsCacheMeta {
+  atMs: number; //          이 캐시를 만든 시각
+  coveredSinceMs: number; // 어느 시각까지 커버하나
+  /**
+   * canDeepen: "지금 다시 조회하면 '더 과거'를 실제로 더 가져올 수 있나?"
+   *   · true  = 목표 깊이에 닿아 일찍 멈춘 경우(reachedTarget). 더 깊은 요청이 오면 재조회가 이득.
+   *   · false = 끝까지 다 받았거나(reachedEnd) / 안전 상한에 걸렸거나(capped) / 조회 실패한 경우.
+   *             이 경우 60초 안에 다시 불러도 '더'는 못 얻는다 → 재조회는 낭비(+요청 한도 위험)일 뿐.
+   */
+  canDeepen: boolean;
+}
+
+/**
+ * shouldReuseCache — 60초 캐시를 이번 요청에 그대로 써도 되나? (순수 판단)
+ *
+ * [왜 이 함수가 핵심인가 — A/B 리뷰가 잡은 회귀]
+ *   앞서 "캐시가 요청 깊이를 커버할 때만 재사용"으로 바꿨더니, 잦은 매매자는
+ *   ① 매매가 많아 상한(capped)에 걸려 캐시가 얕게 잡히고
+ *   ② 리포트는 항상 45일 이상을 요구하므로 매 버튼마다 '재조회'가 터져
+ *   60초 캐시가 무력화 → 오히려 요청 한도(429) 폭풍이 됐다. 오프라인 실패 캐시도 같은 이유로 난타됐다.
+ *
+ *   해결: **재조회가 실제로 이득일 때만**(캐시가 더 깊이 갈 수 있는데 이번에 더 깊이 필요할 때만) 재조회한다.
+ *   그 밖에는(상한·끝·실패로 더 못 가는 캐시) 60초 동안 그대로 재사용해 두드림을 막는다.
+ *   대신 '얕게 잘렸다'는 사실은 리포트 쪽에서 정직하게 표시한다(partial).
+ */
+export function shouldReuseCache(cache: FillsCacheMeta | null, requestSinceMs: number, nowMs: number, ttlMs = 60_000): boolean {
+  if (!cache) return false;
+  if (nowMs - cache.atMs >= ttlMs) return false; // 오래된 캐시는 재사용 안 함
+  const needDeeper = !cacheCovers(cache.coveredSinceMs, requestSinceMs); // 이번 요청이 캐시보다 더 깊이 필요한가
+  // 더 깊이 필요하고(needDeeper) 캐시가 더 깊이 갈 수 있을 때만(canDeepen) 재조회. 그 외엔 재사용.
+  return !(needDeeper && cache.canDeepen);
+}
+
 /**
  * mergeFills — 저장해 둔 체결과 새로 받은 체결을 합친다(중복 제거, 시간순).
  *
