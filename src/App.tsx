@@ -2129,9 +2129,12 @@ ${msg}
               const v = latest?.strength ?? null;
               const cls = v == null ? "str-oneway" : v >= 100 ? "ok" : "danger";
               const label = v == null ? (latest && latest.buyVol > 0 ? "매수 일방(∞)" : "—") : v.toFixed(1);
+              // [v0.13.0] 틱 플래시: 새 표본(tsMs)이 올 때마다 key가 바뀌어 애니메이션이 다시 재생 →
+              //   값이 '방금 갱신됐다'를 색으로 알린다(업비트식). 매수우세=초록, 매도우세=빨강 플래시.
+              const flashCls = v == null ? "" : v >= 100 ? "flash-up" : "flash-down";
               return (
                 <div className="str-now">
-                  <div className={`str-big ${cls}`}>{label}</div>
+                  <div key={latest?.tsMs ?? "none"} className={`str-big ${cls} ${flashCls}`}>{label}</div>
                   <div className="str-meta">
                     <div>매수량 <b className="ok">{latest ? latest.buyVol.toLocaleString() : "—"}</b> · 매도량 <b className="danger">{latest ? latest.sellVol.toLocaleString() : "—"}</b></div>
                     <div className="hint">
