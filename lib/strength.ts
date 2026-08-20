@@ -121,3 +121,103 @@ export function strengthFromTicks(
 function round1(n: number): number {
   return Math.round(n * 10) / 10;
 }
+
+// =============================================================================
+// [v0.12.0 · 2단계] 체결강도 '신호' 감지 — 원래 기획(정본 3·5장)을 순수함수로
+// -----------------------------------------------------------------------------
+// [정본] docs/체결강도_분석_2026-07-24.html
+//   · 바닥반전(진입)  = 강도가 100 아래(매도 우세)에서 '연속 상승'으로 전환.
+//   · 정점꺾임(익절)  = 강도가 100 위(매수 우세)에서 '연속 하락'으로 전환.
+//   · 강세 다이버전스 = 가격은 신저점인데 강도는 직전 저점보다 높음(파는 힘 약화).
+//   · 국면(phase)    = 하락중/진입/보유/익절/고점경고/중립.
+//
+// [설계 원칙 — 정본 6장]
+//   · 절댓값("150이면 매수")이 아니라 '변화·전환'만 신호로 삼는다.
+//   · 표본이 얇으면(점이 적으면) 값이 튀므로 신호를 내지 않고 thinSample로 표시한다.
+//   · 이 신호는 '보조 렌즈'일 뿐, 단독 매매 규칙이 아니다(화면에서 병행 안내).
+// =============================================================================
+
+/** 신호 계산 입력 한 점(엔진의 StrengthSample 중 쓰는 것만 — 엔진 타입에 의존하지 않으려 최소화). */
+export interface SeriesPoint {
+  price: number | null;
+  strength: number | null; // null = 매수 일방(매도 0). 계산에서 제외한다.
+}
+
+/** 국면 — 정본 3장의 5국면(+중립). */
+export type StrengthPhase = "하락중" | "진입" | "보유" | "익절" | "고점경고" | "중립";
+
+/** 신호 판정 결과. */
+export interface StrengthSignals {
+  bottomReversal: boolean; //    바닥반전(진입 근거)
+  bullishDivergence: boolean; // 강세 다이버전스(진입 근거 강화)
+  peakRollover: boolean; //      정점꺾임(익절 근거)
+  phase: StrengthPhase;
+  thinSample: boolean; //        표본이 얇아 신뢰도 낮음(신호를 억제)
+}
+
+/** 신호를 내기 위한 최소 표본(강도 있는 점) 수. 이보다 적으면 thinSample=true, 신호는 전부 false. */
+const MIN_SAMPLE = 4;
+
+/**
+ * detectBullishDivergence — 가격 신저점 + 강도는 직전 저점보다 높음.
+ *   시계열을 앞/뒤 절반으로 나눠 각 구간의 '가격 최저점'을 찾고,
+ *   뒤 저점이 더 낮은데(가격 신저점) 강도는 더 높으면 강세 다이버전스.
+ */
+function detectBullishDivergence(pts: { price: number; strength: number }[]): boolean {
+  if (pts.length < MIN_SAMPLE) return false;
+  const mid = Math.floor(pts.length / 2);
+  const first = pts.slice(0, mid);
+  const second = pts.slice(mid);
+  if (first.length === 0 || second.length === 0) return false;
+  const lowest = (arr: { price: number; strength: number }[]) => arr.reduce((m, p) => (p.price < m.price ? p : m));
+  const lo1 = lowest(first); //  앞 구간 저점
+  const lo2 = lowest(second); // 뒤 구간 저점
+  return lo2.price < lo1.price && lo2.strength > lo1.strength;
+}
+
+/**
+ * analyzeStrengthSeries — 강도 시계열에서 신호·국면을 한 번에 판정(순수 계산).
+ *   @param points 오래된→최신 순의 시계열(엔진 samples 를 그대로 넣어도 됨).
+ */
+export function analyzeStrengthSeries(points: SeriesPoint[]): StrengthSignals {
+  // 강도가 있는 점만(매수 일방 null 은 방향 비율을 못 내므로 제외).
+  const pts = points.filter((p): p is { price: number | null; strength: number } => p.strength != null && Number.isFinite(p.strength));
+  const s = pts.map((p) => p.strength);
+  const n = s.length;
+  const thinSample = n < MIN_SAMPLE;
+
+  // 최근 3점의 연속 상승/하락(변화의 방향).
+  const rising3 = n >= 3 && s[n - 1] > s[n - 2] && s[n - 2] > s[n - 3];
+  const falling3 = n >= 3 && s[n - 1] < s[n - 2] && s[n - 2] < s[n - 3];
+  // 전환의 시작점(3점 전)이 100 아래/위였는가 = 과매도/과매수에서의 전환인가.
+  const bottomBelow100 = n >= 3 && s[n - 3] < 100;
+  const peakAbove100 = n >= 3 && s[n - 3] > 100;
+  // [B 리뷰 #3] '시작점만' 100 기준으로 보면, 이미 강도 200까지 치솟았는데도 "진입"으로 오신호가 난다.
+  //   전환이 '아직 신선한'(100 근방을 벗어나 폭주하지 않은) 상태일 때만 신호로 인정한다.
+  //   FRESH_BAND=30 → 바닥반전은 latest<130(아직 과매수 폭주 아님), 정점꺾임은 latest>70(아직 과매도 폭주 아님).
+  const FRESH_BAND = 30;
+  const freshUp = n >= 1 && s[n - 1] < 100 + FRESH_BAND; // 바닥반전이 신선한가(아직 안 치솟음)
+  const freshDown = n >= 1 && s[n - 1] > 100 - FRESH_BAND; // 정점꺾임이 신선한가(아직 안 무너짐)
+
+  const bottomReversal = !thinSample && rising3 && bottomBelow100 && freshUp;
+  const peakRollover = !thinSample && falling3 && peakAbove100 && freshDown;
+
+  // 다이버전스는 가격이 필요 → 가격 있는 점만 추려서 판정.
+  const priced = pts.filter((p): p is { price: number; strength: number } => p.price != null && Number.isFinite(p.price));
+  const bullishDivergence = !thinSample && detectBullishDivergence(priced);
+
+  const latest = n ? s[n - 1] : null;
+  const rising = n >= 2 && s[n - 1] > s[n - 2];
+
+  let phase: StrengthPhase;
+  // [A 리뷰 L2] 표본이 얇으면(신뢰 낮음) 국면도 단정하지 않는다 → 중립.
+  //   "표본 얇음" 칩 옆에 '고점경고' 같은 확정 문구가 뜨는 모순을 막는다.
+  if (thinSample || latest == null) phase = "중립";
+  else if (peakRollover) phase = "익절";
+  else if (bottomReversal || bullishDivergence) phase = "진입";
+  else if (latest > 100) phase = rising ? "보유" : "고점경고";
+  else if (latest < 100) phase = "하락중";
+  else phase = "중립";
+
+  return { bottomReversal, bullishDivergence, peakRollover, phase, thinSample };
+}

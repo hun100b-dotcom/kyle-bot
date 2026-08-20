@@ -423,6 +423,13 @@ ul.hint { padding-left: 18px; }
 /* 스파크라인: 부모 색을 기준선에 물려주기 위해 color 지정(다크/라이트 자동) */
 .str-spark { display: block; color: #8a93a4; margin: 6px 0 14px; border: 1px solid #2a2f3a; border-radius: 8px; background: #0f131a; }
 .str-table { margin-top: 6px; }
+/* [v0.12.0] 가격·강도 겹쳐보기 차트 + 신호 배지 */
+.str-chart { display: block; color: #8a93a4; margin: 6px 0 14px; border: 1px solid #2a2f3a; border-radius: 8px; background: #0f131a; }
+.str-signals { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0 10px; }
+.phase-badge { font-size: 14px; font-weight: 700; padding: 4px 10px; border-radius: 10px; border: 1px solid var(--border); }
+.sig-chip { font-size: 12px; padding: 3px 8px; border-radius: 8px; border: 1px solid var(--border); white-space: nowrap; }
+.sig-chip.ok { color: var(--green, #34d399); border-color: rgba(52,211,153,0.4); }
+.sig-chip.danger { color: var(--red, #f87171); border-color: rgba(248,113,113,0.4); }
 
 /* ===== [v0.6.0] 탐색(스크리너) ===== */
 .screen-controls { margin: 10px 0 6px; }

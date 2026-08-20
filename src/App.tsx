@@ -20,8 +20,12 @@ import { useTabOrder } from "./useTabOrder"; // [v0.9.2] 탭 순서 드래그로
 import { restoreInputsFromSaved } from "../lib/split-restore"; // [v0.9.3] 옛 기록도 계산기로 불러오기
 
 /** 앱이 가진 모든 탭(기본 순서). 순서는 사장님이 드래그로 바꿀 수 있다. */
+// [v0.12.0] 탭 통폐합 9→7: '매매분석'은 체결강도 탭 하위로, '기록(journal)'은 설정 탭 하위(고급/진단)로 이동.
+//   두 항목은 여전히 코드로 존재하되(TabId), 상단 탭 버튼에서만 빠진다(TOP_TABS).
 const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "trades", "orders", "journal", "settings"] as const;
 type TabId = (typeof ALL_TABS)[number];
+/** 상단에 실제로 보이는 탭(7개) — trades·journal 은 다른 탭에 흡수돼 상단에서 뺀다. */
+const TOP_TABS: TabId[] = ["calc", "report", "screener", "splits", "strength", "orders", "settings"];
 
 /** 탭에 보여 줄 이름 */
 const TAB_LABEL: Record<TabId, string> = {
@@ -171,35 +175,82 @@ function usdKrw(usd: number, fx: number | null): string {
 }
 
 /**
- * [v0.5.0] Sparkline — 체결강도 시계열을 외부 라이브러리 없이 SVG로 그리는 미니 차트.
- *   가로=시간(오래된→최신), 세로=체결강도. 100 기준선을 회색 점선으로 그려
- *   위(매수우세)/아래(매도우세)를 한눈에 보게 한다. 값이 null(매수 일방)인 점은 이어 그리지 않는다.
+ * [v0.12.0 · 2단계] StrengthChart — 가격과 체결강도를 '겹쳐(위아래로)' 그려 다이버전스를 눈으로 보게 한다.
+ *   정본(체결강도_분석 3장)의 그림을 그대로: 위=가격선, 아래=강도선(100 기준). 외부 라이브러리 0.
+ *   마지막 점에 신호 마커: ▲(초록)=진입(바닥반전/다이버전스), ▼(빨강)=익절(정점꺾임).
  */
-function Sparkline({ samples }: { samples: StrengthSample[] }) {
-  const W = 640, H = 90, PAD = 6;
-  const vals = samples.map((s) => s.strength).filter((v): v is number => v != null);
-  if (vals.length < 2) return null;
-  // 세로 범위: 실제 값 + 100(기준선)을 포함하도록. 너무 납작하지 않게 최소 폭 부여.
-  const lo = Math.min(100, ...vals), hi = Math.max(100, ...vals);
-  const span = Math.max(hi - lo, 10);
-  const x = (i: number) => PAD + (i / (samples.length - 1)) * (W - 2 * PAD);
-  const y = (v: number) => PAD + (1 - (v - lo) / span) * (H - 2 * PAD);
-  // 값이 있는 점만 선으로 잇는다. null(매수 일방) 구간에서는 선을 끊고, 다음 값에서 새로 시작(M).
-  let d = "";
-  let penDown = false; // 직전 점이 유효해서 선을 잇는 중인지
+function StrengthChart({ samples, signals }: { samples: StrengthSample[]; signals?: StrengthSignals }) {
+  const W = 640, H = 170, PAD = 8;
+  const priceH = 62; //   위 패널(가격) 높이
+  const gap = 14; //      두 패널 사이 라벨 공간
+  const strTop = priceH + gap; //  아래 패널(강도) 시작 y
+  const strH = H - strTop - PAD; // 아래 패널 높이
+  const n = samples.length;
+  const strengths = samples.map((s) => s.strength).filter((v): v is number => v != null);
+  if (n < 2 || strengths.length < 2) return null;
+  const x = (i: number) => PAD + (i / (n - 1)) * (W - 2 * PAD);
+
+  // 위 패널: 가격(있는 점만). 자기 범위로 정규화.
+  const prices = samples.map((s) => s.price).filter((v): v is number => v != null);
+  const pLo = prices.length ? Math.min(...prices) : 0;
+  const pHi = prices.length ? Math.max(...prices) : 1;
+  const pSpan = Math.max(pHi - pLo, 1e-9);
+  const py = (v: number) => PAD + (1 - (v - pLo) / pSpan) * (priceH - PAD);
+  let dp = "", penP = false;
   samples.forEach((s, i) => {
-    if (s.strength == null) { penDown = false; return; }
-    d += `${penDown ? "L" : "M"} ${x(i).toFixed(1)} ${y(s.strength).toFixed(1)} `;
-    penDown = true;
+    if (s.price == null) { penP = false; return; }
+    dp += `${penP ? "L" : "M"} ${x(i).toFixed(1)} ${py(s.price).toFixed(1)} `;
+    penP = true;
   });
-  const y100 = y(100);
+
+  // 아래 패널: 강도(100 기준선 포함 범위).
+  const sLo = Math.min(100, ...strengths), sHi = Math.max(100, ...strengths);
+  const sSpan = Math.max(sHi - sLo, 10);
+  const sy = (v: number) => strTop + (1 - (v - sLo) / sSpan) * strH;
+  let ds = "", penS = false;
+  let lastX = 0, lastY = 0, lastV: number | null = null;
+  samples.forEach((s, i) => {
+    if (s.strength == null) { penS = false; return; }
+    ds += `${penS ? "L" : "M"} ${x(i).toFixed(1)} ${sy(s.strength).toFixed(1)} `;
+    penS = true; lastX = x(i); lastY = sy(s.strength); lastV = s.strength;
+  });
+  const y100 = sy(100);
+
+  // 신호 마커(마지막 강도 점 위/아래). [B리뷰 #4] phase 우선순위로 구동 → ▲와 ▼가 동시에 찍히지 않는다.
+  const up = signals?.phase === "진입";
+  const down = signals?.phase === "익절";
+
   return (
-    <svg className="str-spark" viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none" role="img" aria-label="체결강도 추세">
-      {/* 100 기준선 */}
+    <svg className="str-chart" viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none" role="img" aria-label="가격·체결강도 겹쳐보기">
+      {/* 패널 라벨 */}
+      <text x={PAD} y={12} fontSize="10" fill="currentColor" fillOpacity="0.55">가격</text>
+      <text x={PAD} y={strTop - 3} fontSize="10" fill="currentColor" fillOpacity="0.55">체결강도 (100 기준)</text>
+      {/* 가격선 */}
+      <path d={dp.trim()} fill="none" stroke="#a78bfa" strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" />
+      {/* 강도 100 기준선 + 강도선 */}
       <line x1={PAD} y1={y100} x2={W - PAD} y2={y100} stroke="currentColor" strokeOpacity="0.35" strokeDasharray="4 4" />
-      <path d={d.trim()} fill="none" stroke="#3b82f6" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+      <path d={ds.trim()} fill="none" stroke={lastV != null && lastV >= 100 ? "#34d399" : "#f87171"} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+      {/* 신호 마커 */}
+      {up && lastV != null && (
+        <g><circle cx={lastX} cy={lastY} r="4" fill="#34d399" /><text x={lastX} y={lastY - 8} fontSize="12" fill="#34d399" textAnchor="middle">▲</text></g>
+      )}
+      {down && lastV != null && (
+        <g><circle cx={lastX} cy={lastY} r="4" fill="#f87171" /><text x={lastX} y={lastY + 16} fontSize="12" fill="#f87171" textAnchor="middle">▼</text></g>
+      )}
     </svg>
   );
+}
+
+/** [v0.12.0] 국면 배지 색/문구. */
+function phaseBadge(phase: StrengthSignals["phase"]): { txt: string; cls: string } {
+  switch (phase) {
+    case "진입": return { txt: "🟢 진입 신호(바닥반전)", cls: "ok" };
+    case "익절": return { txt: "🔴 익절 신호(정점꺾임)", cls: "danger" };
+    case "보유": return { txt: "🔵 보유(매수 우세)", cls: "" };
+    case "고점경고": return { txt: "🟠 고점 경고(꺾임 주의)", cls: "warn-txt" };
+    case "하락중": return { txt: "⚪ 하락 중(대기)", cls: "" };
+    default: return { txt: "· 중립/표본 부족", cls: "hint" };
+  }
 }
 
 /**
@@ -276,7 +327,7 @@ function App() {
     });
   }, []);
   // [v0.9.2] 탭 순서(드래그로 변경, 이 기기에 저장)
-  const { order: tabOrder, dragProps, isDragging } = useTabOrder(ALL_TABS);
+  const { order: tabOrder, dragProps, isDragging } = useTabOrder(TOP_TABS); // [v0.12.0] 상단은 7개만(trades·journal 흡수)
   // [v0.9.1] 매매 리포트 + [v0.9.2] 기간 선택(오늘/1주일/1개월/날짜)
   const [report, setReport] = useState<DailyReport | null>(null);
   const [reportBusy, setReportBusy] = useState(false);
@@ -329,6 +380,7 @@ function App() {
   const [priceMin, setPriceMin] = useState("1");
   const [priceMax, setPriceMax] = useState("9");
   const [showMiss, setShowMiss] = useState(false); // '아쉽게 탈락(근접)' 펼침 여부
+  const [showJournal, setShowJournal] = useState(false); // [v0.12.0] 설정 하위 '고급·진단' 기록 펼침
   const [openEvid, setOpenEvid] = useState<Set<string>>(new Set()); // 근거 펼친 종목들
   const [journal, setJournal] = useState<JournalEntry[]>([]);
   // [v0.4.0] 내 삼분할 기록(여러 종목 동시 운용). 저장 목록 + 저장 시 메모 입력칸.
@@ -471,6 +523,7 @@ function App() {
     });
     window.kyletool.appVersion?.().then(setAppVer).catch(() => {});
     window.kyletool.authStatus?.().then(setAuthState).catch(() => {}); // [v0.8.1] 로그인 상태 복원
+    void refreshTrades(); // [v0.12.0 · B리뷰 #1] 매매분석이 체결강도 탭 하위로 옮겨져 시작 시 한 번 로드해 둔다
     const off = window.kyletool.onJournal((e) => setJournal((prev) => [...prev.slice(-99), e]));
     // [v0.5.0] 체결강도 실시간 갱신: 지금 화면에서 보고 있는 종목의 이벤트만 반영.
     const offStr = window.kyletool.onStrength?.((state) => {
@@ -1464,8 +1517,7 @@ ${msg}
               setTab(t);
               if (t === "orders") refreshStatusTab();
               if (t === "splits") refreshSplits(); // 탭 열 때 최신 목록 다시 읽기
-              if (t === "strength") void loadStrength(strSym); // 저장된 시계열 불러오기
-              if (t === "trades") void refreshTrades(); // 자동 기록 트레이드 불러오기
+              if (t === "strength") { void loadStrength(strSym); void refreshTrades(); } // [v0.12.0] 매매분석이 체결강도 탭 하위로 통합 → 함께 로드
             }}
           >
             {TAB_LABEL[t]}
@@ -2091,8 +2143,25 @@ ${msg}
               );
             })()}
 
-            {/* --- 스파크라인(100 기준선) --- */}
-            {strState && strState.samples.length >= 2 && <Sparkline samples={strState.samples} />}
+            {/* --- [v0.12.0] 국면 배지 + 신호(정본 3장) --- */}
+            {strState && (() => {
+              // [B리뷰 #2] 구버전 엔진 payload엔 signals가 없을 수 있다 → 안전 기본값으로 방어(크래시 방지).
+              const sig = strState.signals ?? { bottomReversal: false, bullishDivergence: false, peakRollover: false, phase: "중립" as const, thinSample: true };
+              const pb = phaseBadge(sig.phase);
+              return (
+                <div className="str-signals">
+                  <span className={`phase-badge ${pb.cls}`}>{pb.txt}</span>
+                  {/* [B리뷰 #4] 익절 국면이면 진입성 칩(다이버전스)을 함께 띄우지 않는다(모순 방지) */}
+                  {sig.bottomReversal && <span className="sig-chip ok">▲ 바닥반전</span>}
+                  {sig.bullishDivergence && !sig.peakRollover && <span className="sig-chip ok">✦ 강세 다이버전스</span>}
+                  {sig.peakRollover && <span className="sig-chip danger">▼ 정점꺾임</span>}
+                  {sig.thinSample && <span className="sig-chip hint">표본 얇음(신뢰 낮음)</span>}
+                </div>
+              );
+            })()}
+
+            {/* --- [v0.12.0] 가격·강도 겹쳐보기 차트(신호 마커). [B리뷰 #6] 신호와 같은 창(최근 30개)으로 정렬 --- */}
+            {strState && strState.samples.length >= 2 && <StrengthChart samples={strState.samples.slice(-30)} signals={strState.signals} />}
 
             {/* --- 최근 값 표(최신이 위) --- */}
             {strState && strState.samples.length > 0 && (
@@ -2118,18 +2187,19 @@ ${msg}
 
             <p className="hint">
               💡 스캘핑 참고: 하락 중 <b>체결강도 바닥 반전</b>=삼분할 진입 근거, 반등 후 <b>정점 꺾임</b>=익절 근거.
-              단독 판단 금지 — 가격·거래량·캔들과 함께 보세요. (자세한 방법론: docs/체결강도_분석 문서)
+              특히 <b>강세 다이버전스</b>(가격은 신저점인데 강도는 직전보다 높음)는 반등 임박 신호입니다.
+              <br/>⚠️ <b>추정치·보조지표</b>입니다(토스가 방향을 직접 주지 않아 틱룰로 추정). <b>단독 판단 금지</b> — 가격·거래량·캔들과 함께 보세요.
             </p>
           </section>
         </main>
       )}
 
-      {/* ===== ①-4) 매매분석 (v0.7.0 — 체결강도 자동 기록) ===== */}
-      {tab === "trades" && (
-        <main className="grid">
+      {/* ===== ①-4) 매매분석 — [v0.12.0] 체결강도 탭 하위 섹션으로 통합 (main 중복 방지 위해 div) ===== */}
+      {tab === "strength" && (
+        <div className="grid">
           <section className="card wide">
             <div className="split-list-head">
-              <h2>매매분석 <span className="hint">(카프리로 주문할 때 진입·청산 체결강도 자동 기록)</span></h2>
+              <h2>매매분석 <span className="hint">(내가 '강할 때' 샀는지 실제 매매로 검증 — 진입·청산 체결강도 자동 기록)</span></h2>
               <button className="mini" onClick={() => void refreshTrades()}>↻ 새로고침</button>
             </div>
             <p className="hint">
@@ -2182,7 +2252,7 @@ ${msg}
               </table>
             )}
           </section>
-        </main>
+        </div>
       )}
 
       {/* ===== ② 주문 현황 (v0.3.3 토스 스타일) ===== */}
@@ -2389,24 +2459,7 @@ ${msg}
         </main>
       )}
 
-      {/* ===== ③ 기록 ===== */}
-      {tab === "journal" && (
-        <main className="grid">
-          <section className="card wide">
-            <h2>도구 기록 (주문·드라이런·취소)</h2>
-            <div className="logbox tall">
-              {journal.length === 0 && <div className="logline hint">아직 기록이 없습니다.</div>}
-              {[...journal].reverse().map((j, i) => (
-                <div key={i} className="logline">
-                  <span className="log-ts">{j.ts}</span> {j.summary}
-                </div>
-              ))}
-            </div>
-          </section>
-        </main>
-      )}
-
-      {/* ===== ④ 설정 ===== */}
+      {/* ===== ④ 설정 (기록 탭은 v0.12.0에서 이 탭 하위 '고급·진단'으로 이동) ===== */}
       {tab === "settings" && settings && (
         <main className="grid">
           {/* [v0.10.0] 매매 이력 동기화 — PC가 암호화해 올리고, 폰이 받아서 본다 */}
@@ -2780,6 +2833,23 @@ ${msg}
                 <br />동기화를 안 쓰면 기존처럼 이 기기 로컬(.env)에만 저장됩니다.
               </p>
             </div>
+          </section>
+
+          {/* [v0.12.0] 고급 · 도구 기록(진단) — 옛 '기록' 탭을 설정 하위로 이동. 기본 접힘. */}
+          <section className="card wide">
+            <button className="mini ghost" onClick={() => setShowJournal((v) => !v)}>
+              {showJournal ? "▾" : "▸"} 🛠 고급 · 도구 기록(주문·드라이런·취소 진단 로그)
+            </button>
+            {showJournal && (
+              <div className="logbox tall" style={{ marginTop: 8 }}>
+                {journal.length === 0 && <div className="logline hint">아직 기록이 없습니다.</div>}
+                {[...journal].reverse().map((j, i) => (
+                  <div key={i} className="logline">
+                    <span className="log-ts">{j.ts}</span> {j.summary}
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
         </main>
       )}

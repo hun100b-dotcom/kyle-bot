@@ -221,6 +221,14 @@ interface StrengthSample {
   session: string;
 }
 /** [v0.5.0] 체결강도 상태(현재값 + 최근 시계열) */
+interface StrengthSignals {
+  bottomReversal: boolean;
+  bullishDivergence: boolean;
+  peakRollover: boolean;
+  phase: "하락중" | "진입" | "보유" | "익절" | "고점경고" | "중립";
+  thinSample: boolean;
+}
+
 interface StrengthState {
   symbol: string;
   running: boolean;
@@ -228,6 +236,7 @@ interface StrengthState {
   latest: StrengthSample | null;
   samples: StrengthSample[];
   lastError: string | null;
+  signals: StrengthSignals; // [v0.12.0]
 }
 
 /** [v0.6.0] 스크리너 결과 한 종목 */

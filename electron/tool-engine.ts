@@ -23,7 +23,7 @@ import { DateTime } from "luxon";
 import { getSession, getSessionStart, getMarketStatus, isOrderFrozen, type Session } from "../lib/session";
 import { calcSplit3, calcOrderbook, calcCandle, roundPrice, getTick, type SplitOrder } from "../lib/calc";
 import { encryptSecret, decryptSecret } from "../lib/keysync"; // [v0.8.0] 키 기기 간 동기화(클라이언트 암호화)
-import { strengthFromTicks, type Side } from "../lib/strength";
+import { strengthFromTicks, analyzeStrengthSeries, type Side, type StrengthSignals } from "../lib/strength";
 import { buildReport, buildReportFromRealized, makePeriod, type DailyReport, type PeriodKind } from "../lib/report"; // [v0.9.1] 매매 리포트
 import { matchFifo, mergeFills, coveredSince, shouldReuseCache, type Fill } from "../lib/fills"; // [v0.9.6] 토스 실제 체결내역으로 손익 계산 (+v0.10.1 기간 커버리지 헬퍼)
 import { encryptJson, decryptJson, deriveSyncId } from "../lib/keysync"; // [v0.10.0] 매매 이력 암호화 동기화
@@ -428,6 +428,7 @@ export interface StrengthState {
   latest: StrengthSample | null; // 가장 최근 샘플
   samples: StrengthSample[]; //     최근 시계열(오래된→최신)
   lastError: string | null; //      마지막 샘플링 오류(있으면 화면에 안내)
+  signals: StrengthSignals; //      [v0.12.0] 바닥반전·정점꺾임·다이버전스·국면(정본 3장)
 }
 
 // -----------------------------------------------------------------------------
@@ -2077,6 +2078,8 @@ export class ToolEngine extends EventEmitter {
       latest: samples.length ? samples[samples.length - 1] : null,
       samples: samples.slice(-120), // 최근 120개만 화면으로(스파크라인·표에 충분)
       lastError: run?.lastError ?? null,
+      // [v0.12.0] 최근 시계열로 신호·국면을 계산(순수함수 재사용). 가격·강도만 넘긴다.
+      signals: analyzeStrengthSeries(samples.slice(-30).map((s) => ({ price: s.price, strength: s.strength }))),
     };
   }
 
