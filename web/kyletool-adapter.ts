@@ -204,7 +204,7 @@ export function installKyleTool(): ToolEngine {
     },
 
     // ── 스크리너(탐색) ─────────────────────────────────────────
-    screenerScan: (bodyRatio?: number) => e.scanScreener(bodyRatio),
+    screenerScan: (opts?: { bodyRatio?: number; count?: number; priceMin?: number; priceMax?: number }) => e.scanScreener(opts),
     onScreenerProgress: (cb: (v: unknown) => void) => {
       subs.screener.add(cb);
       return () => subs.screener.delete(cb);

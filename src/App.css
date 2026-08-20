@@ -427,6 +427,17 @@ ul.hint { padding-left: 18px; }
 /* ===== [v0.6.0] 탐색(스크리너) ===== */
 .screen-controls { margin: 10px 0 6px; }
 .screen-controls input[type="range"] { width: 100%; accent-color: #2ea043; }
+/* [v0.11.0] 사용자 필터(종목수·가격대) 입력줄 */
+.screen-filters { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.screen-filters .sf-num { flex: 1; min-width: 96px; max-width: 160px; }
+.screen-filters .sf-num input {
+  padding: 8px 10px; font-size: 16px; background: #0f131a; color: #e6e9ef;
+  border: 1px solid #2a2f3a; border-radius: 8px; width: 100%; min-height: 40px;
+}
+/* [v0.11.0] 아쉽게 탈락(근접) 목록 */
+.near-miss { margin-top: 14px; }
+.miss-table { opacity: 0.92; }
+.miss-reasons { color: var(--amber, #fbbf24); font-size: 12px; }
 .screen-prog { margin: 12px 0; }
 .screen-prog-bar { height: 10px; background: #0f131a; border: 1px solid #2a2f3a; border-radius: 6px; overflow: hidden; }
 .screen-prog-fill { height: 100%; background: linear-gradient(90deg, #1f6feb, #2ea043); transition: width 0.3s ease; }

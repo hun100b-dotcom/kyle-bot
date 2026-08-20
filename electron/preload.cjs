@@ -67,7 +67,7 @@ contextBridge.exposeInMainWorld("kyletool", {
   },
 
   // [v0.6.0] 종목 스크리너(탐색) — 스캔 + 진행률 구독
-  screenerScan: (bodyRatio) => ipcRenderer.invoke("tool:screener:scan", bodyRatio),
+  screenerScan: (opts) => ipcRenderer.invoke("tool:screener:scan", opts),
   onScreenerProgress: (cb) => {
     const h = (_ev, p) => cb(p);
     ipcRenderer.on("tool:screenerProgress", h);

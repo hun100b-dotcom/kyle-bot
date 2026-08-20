@@ -28,7 +28,7 @@ import { buildReport, buildReportFromRealized, makePeriod, type DailyReport, typ
 import { matchFifo, mergeFills, coveredSince, shouldReuseCache, type Fill } from "../lib/fills"; // [v0.9.6] 토스 실제 체결내역으로 손익 계산 (+v0.10.1 기간 커버리지 헬퍼)
 import { encryptJson, decryptJson, deriveSyncId } from "../lib/keysync"; // [v0.10.0] 매매 이력 암호화 동기화
 import { toSyncPayload, isSyncPayload, syncReadUrl, syncPath, SYNC_REPO, type TradeSyncPayload } from "../lib/trade-sync";
-import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, type Candle, type SessionPattern } from "../lib/indicators";
+import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, WICK_MIN_RATIO, type Candle, type SessionPattern } from "../lib/indicators";
 import {
   getPrice,
   getTrades,
@@ -494,11 +494,21 @@ export interface ScreenProgress {
   symbol: string; // 지금 처리 중인 종목
 }
 
+/** [v0.11.0] 스크리너 스캔 옵션 — 화면에서 사용자가 조절한다(전부 선택, 없으면 기본값). */
+export interface ScreenOpts {
+  bodyRatio?: number; // 도지 몸통비율 상한(0.1~0.5, 기본 0.3)
+  count?: number; //     스캔할 거래량 상위 종목 수(10~200, 기본 60)
+  priceMin?: number; //  현재가 하한($, 기본 1)
+  priceMax?: number; //  현재가 상한($, 기본 9)
+}
+
 /** 스캔 최종 결과 */
 export interface ScreenRun {
   scannedAt: string; //  스캔 시각(KST)
   total: number; //      실제 스캔한 종목 수(ETF 제외 후)
   bodyRatio: number; //  사용한 도지 몸통비율
+  priceMin: number; //   [v0.11.0] 사용한 가격 하한($)
+  priceMax: number; //   [v0.11.0] 사용한 가격 상한($)
   excludedEtf: number; // [v0.6.3] ETF·레버리지·인버스로 제외한 종목 수
   results: ScreenResult[]; // 후보(confirmed·watch) + 참고 목록
 }
@@ -2641,13 +2651,18 @@ export class ToolEngine extends EventEmitter {
   /**
    * scanScreener — 거래량 상위 종목을 훑어 조건 만족 후보를 찾는다.
    *   진행 상황은 "screener:progress" 이벤트로 화면에 실시간 전달하고, 최종 결과는 반환한다.
-   *   @param bodyRatio 도지 몸통비율 상한(0.1~0.5, 기본 0.3). 화면 슬라이더로 조절.
-   *   @param count 스캔할 상위 종목 수(기본 60).
+   *   [v0.11.0] 옵션 객체로 바뀜 — 몸통비율뿐 아니라 스캔 종목수·가격대(하한/상한)를 사용자가 조절.
+   *   @param opts { bodyRatio(0.1~0.5), count(10~200), priceMin($), priceMax($) } — 전부 선택(기본값 있음).
    */
-  async scanScreener(bodyRatio = 0.3, count = 60): Promise<ScreenRun> {
+  async scanScreener(opts: ScreenOpts = {}): Promise<ScreenRun> {
     if (this.screenBusy) throw new Error("이미 스캔이 진행 중입니다. 끝날 때까지 기다려 주세요.");
     this.screenBusy = true;
-    const br = Math.min(0.5, Math.max(0.1, bodyRatio)); // 0.1~0.5로 안전 보정
+    const br = Math.min(0.5, Math.max(0.1, opts.bodyRatio ?? 0.3)); // 0.1~0.5로 안전 보정
+    const count = Math.min(200, Math.max(10, Math.round(opts.count ?? 60))); // 10~200으로 안전 보정
+    // 가격대: 하한이 상한보다 크면 자동 교정(사용자 실수 방어). 음수는 0으로.
+    let priceMin = Math.max(0, opts.priceMin ?? 1);
+    let priceMax = Math.max(0, opts.priceMax ?? 9);
+    if (priceMin > priceMax) [priceMin, priceMax] = [priceMax, priceMin];
     try {
       await this.prepareBackend();
 
@@ -2708,7 +2723,7 @@ export class ToolEngine extends EventEmitter {
           const closes = candles5m.map((c) => c.close);
 
           const price = Number.isFinite(rk.lastPrice) ? rk.lastPrice : raw5m[raw5m.length - 1].close;
-          const priceInBand = inPriceBand(price, 1, 9); // [v0.6.1] 가격 필터 $1~$9
+          const priceInBand = inPriceBand(price, priceMin, priceMax); // [v0.11.0] 사용자 지정 가격대
           const ema200 = ema(closes, 200);
           const cloud = ichimoku(candles5m);
           const pat = scanSessionPattern(candles5m, sessionStartMs, br); // HA 캔들로 패턴 판정
@@ -2747,7 +2762,7 @@ export class ToolEngine extends EventEmitter {
       // 정렬: 확정(🔴) → 관찰(🟡) → 나머지. 같은 등급이면 랭킹 순.
       const order: Record<ScreenStatus, number> = { confirmed: 0, watch: 1, none: 2, insufficient: 3 };
       results.sort((a, b) => order[a.status] - order[b.status] || a.rank - b.rank);
-      return { scannedAt: now.toFormat("MM-dd HH:mm:ss"), total, bodyRatio: br, excludedEtf, results };
+      return { scannedAt: now.toFormat("MM-dd HH:mm:ss"), total, bodyRatio: br, priceMin, priceMax, excludedEtf, results };
     } finally {
       this.screenBusy = false;
     }
@@ -2803,7 +2818,7 @@ export class ToolEngine extends EventEmitter {
         aboveEma: gates.aboveEma,
         aboveCloud: gates.aboveCloud,
         firstDoji: pat.dojiIndex >= 0,
-        bothWicks: pat.dojiUpperWickPct != null && pat.dojiLowerWickPct != null && pat.dojiUpperWickPct >= 0.1 && pat.dojiLowerWickPct >= 0.1,
+        bothWicks: pat.dojiUpperWickPct != null && pat.dojiLowerWickPct != null && pat.dojiUpperWickPct >= WICK_MIN_RATIO && pat.dojiLowerWickPct >= WICK_MIN_RATIO,
         nextBearish: pat.nextCandle ? pat.nextCandle.close < pat.nextCandle.open : false,
       },
     };

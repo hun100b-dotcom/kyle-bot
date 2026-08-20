@@ -283,6 +283,8 @@ interface ScreenRun {
   scannedAt: string;
   total: number;
   bodyRatio: number;
+  priceMin: number;
+  priceMax: number;
   excludedEtf: number;
   results: ScreenResult[];
 }
@@ -500,7 +502,7 @@ interface KyletoolBridge {
   strengthGet(symbol: string): Promise<StrengthState>;
   onStrength(cb: (state: StrengthState) => void): () => void;
   // [v0.6.0] 종목 스크리너(탐색)
-  screenerScan(bodyRatio?: number): Promise<ScreenRun>;
+  screenerScan(opts?: { bodyRatio?: number; count?: number; priceMin?: number; priceMax?: number }): Promise<ScreenRun>;
   onScreenerProgress(cb: (p: ScreenProgress) => void): () => void;
   // [v0.7.0] 체결강도 자동 기록(매매 연동)
   tradesList(): Promise<StrengthTrade[]>;

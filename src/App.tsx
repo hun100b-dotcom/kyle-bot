@@ -324,6 +324,11 @@ function App() {
   const [screenBusy, setScreenBusy] = useState(false);
   const [screenProg, setScreenProg] = useState<ScreenProgress | null>(null);
   const [bodyRatio, setBodyRatio] = useState(0.3);
+  // [v0.11.0] 스크리너 필터 사용자 조절 — 스캔 종목수·가격대(하한/상한). 문자열로 들고 입력 편의 유지.
+  const [scanCount, setScanCount] = useState("60");
+  const [priceMin, setPriceMin] = useState("1");
+  const [priceMax, setPriceMax] = useState("9");
+  const [showMiss, setShowMiss] = useState(false); // '아쉽게 탈락(근접)' 펼침 여부
   const [openEvid, setOpenEvid] = useState<Set<string>>(new Set()); // 근거 펼친 종목들
   const [journal, setJournal] = useState<JournalEntry[]>([]);
   // [v0.4.0] 내 삼분할 기록(여러 종목 동시 운용). 저장 목록 + 저장 시 메모 입력칸.
@@ -1055,17 +1060,48 @@ ${msg}
   /** [스캔] — 거래량 상위 60종목을 훑어 조건 만족 후보를 찾는다(1~2분 소요). */
   async function runScan() {
     if (screenBusy) return;
+    // [v0.11.0] 사용자 입력을 숫자로 해석(빈칸·이상값이면 기본값). 엔진 쪽에서도 안전 보정한다.
+    const count = Math.min(200, Math.max(10, Math.round(toNum(scanCount) ?? 60)));
+    const pMin = Math.max(0, toNum(priceMin) ?? 1);
+    const pMax = Math.max(0, toNum(priceMax) ?? 9);
     setScreenBusy(true);
-    setScreenProg({ phase: "ranking", done: 0, total: 60, symbol: "" });
+    setScreenProg({ phase: "ranking", done: 0, total: count, symbol: "" });
     try {
-      const run = await window.kyletool.screenerScan(bodyRatio);
+      const run = await window.kyletool.screenerScan({ bodyRatio, count, priceMin: pMin, priceMax: pMax });
       setScreenRun(run);
+      setShowMiss(false); // 새 스캔이면 근접 목록은 접은 채로 시작
     } catch (e) {
       alert("스캔 실패: " + String(e));
     } finally {
       setScreenBusy(false);
       setScreenProg(null);
     }
+  }
+
+  /**
+   * [v0.11.0] 후보에 못 든 '아쉽게 탈락' 종목의 실패 사유를 사람 말로.
+   *   하드 게이트(가격대·EMA·구름) 중 무엇을 놓쳤는지, 다 넘었으면 패턴(도지/다음봉) 중 무엇인지.
+   *   반환: { passed: 넘은 하드게이트 수(0~3), reasons: 실패 사유 문자열 배열 }
+   */
+  function missReasons(r: ScreenResult): { passed: number; reasons: string[] } {
+    const reasons: string[] = [];
+    // ① 하드 게이트(가격대·EMA·구름) 중 놓친 것
+    if (!r.priceInBand) reasons.push(`가격대 벗어남 (현재가 ${r.price != null ? `$${r.price.toFixed(2)}` : "—"})`);
+    if (!r.aboveEma) reasons.push("EMA200 아래");
+    if (!r.aboveCloud) reasons.push("이치모쿠 구름 아래/속");
+    const passed = (r.priceInBand ? 1 : 0) + (r.aboveEma ? 1 : 0) + (r.aboveCloud ? 1 : 0);
+    // ② 패턴(도지/다음봉)도 '항상' 함께 본다. [B 리뷰 반영]
+    //   예전엔 하드게이트를 다 넘었을 때만 패턴을 봤는데, 그러면 "구름만 넘으면 될 것"처럼 오해를 준다.
+    //   실제로는 패턴이 없으면 구름을 넘어도 후보가 안 되므로, 빠진 사유를 빠짐없이 보여 준다.
+    if (r.evidence) {
+      const f = r.evidence.filters;
+      // 참고: 도지 판정(isBearishDoji)이 이미 위·아래 꼬리를 둘 다 강제하므로 firstDoji=true면 bothWicks도 true다
+      //   (= !bothWicks 가지는 현재 도달 안 함). 기준이 나중에 갈릴 경우 대비해 방어적으로 남겨 둔다.
+      if (!f.firstDoji) reasons.push("최고점 이후 음봉 도지 없음");
+      else if (!f.bothWicks) reasons.push("도지에 꼬리가 한쪽만(망치형·유성형)");
+      else if (!f.nextBearish) reasons.push("도지 다음 봉이 음봉 아님(패턴 미완성)");
+    }
+    return { passed, reasons };
   }
 
   // -------------------------------------------------------------------------
@@ -1725,13 +1761,36 @@ ${msg}
               <br/>🔴 <b>확정</b>(도지+다음 음봉) · 🟡 <b>관찰</b>(첫 음봉 도지, 다음 봉 대기). <b>▸ 근거</b>를 펼치면 기준 캔들을 확인할 수 있고, 다른 곳을 누르면 계산기에 종목이 채워집니다.
             </p>
 
-            {/* 도지 몸통비율 슬라이더 */}
+            {/* [v0.11.0] 사용자 조절 필터: 종목수 · 가격대 · 도지 몸통비율 */}
             <div className="screen-controls">
               <label className="str-field" style={{ flex: 1, maxWidth: 360 }}>
                 <span className="sb-k">음봉 도지 몸통비율 상한: <b>{(bodyRatio * 100).toFixed(0)}%</b> (작을수록 엄격)</span>
                 <input type="range" min={0.1} max={0.5} step={0.05} value={bodyRatio} disabled={screenBusy}
                   onChange={(e) => setBodyRatio(Number(e.target.value))} />
               </label>
+              <div className="screen-filters">
+                <label className="str-field sf-num">
+                  <span className="sb-k">스캔 종목수 <span className="hint">(10~200)</span></span>
+                  <input type="text" inputMode="numeric" value={scanCount} disabled={screenBusy}
+                    onChange={(e) => setScanCount(e.target.value)} onBlur={() => setScanCount(String(Math.min(200, Math.max(10, Math.round(toNum(scanCount) ?? 60)))))} />
+                </label>
+                <label className="str-field sf-num">
+                  <span className="sb-k">가격 하한 $</span>
+                  <input type="text" inputMode="decimal" value={priceMin} disabled={screenBusy}
+                    onChange={(e) => setPriceMin(e.target.value)} />
+                </label>
+                <label className="str-field sf-num">
+                  <span className="sb-k">가격 상한 $</span>
+                  <input type="text" inputMode="decimal" value={priceMax} disabled={screenBusy}
+                    onChange={(e) => setPriceMax(e.target.value)} />
+                </label>
+              </div>
+              <p className="hint" style={{ margin: "4px 0 0" }}>
+                거래량 상위 <b>{Math.min(200, Math.max(10, Math.round(toNum(scanCount) ?? 60)))}종목</b> 중
+                {/* 하한>상한·음수로 잘못 넣어도 화면엔 실제 스캔 범위(0 이상·작은 값~큰 값)로 — 엔진과 동일하게 교정 */}
+                현재가 <b>${Math.min(Math.max(0, toNum(priceMin) ?? 1), Math.max(0, toNum(priceMax) ?? 9))}~${Math.max(Math.max(0, toNum(priceMin) ?? 1), Math.max(0, toNum(priceMax) ?? 9))}</b> 범위를 스캔합니다.
+                많이 스캔할수록 오래 걸립니다.
+              </p>
             </div>
 
             {/* 진행률 바 */}
@@ -1752,10 +1811,18 @@ ${msg}
             {screenRun && !screenBusy && (() => {
               const cand = screenRun.results.filter((r) => r.status === "confirmed" || r.status === "watch");
               const insufficient = screenRun.results.filter((r) => r.status === "insufficient").length;
+              // [v0.11.0] '아쉽게 탈락(근접)' = none 중 하드게이트를 2개 이상 넘긴 종목(많이 넘긴 순).
+              const near = screenRun.results
+                .filter((r) => r.status === "none")
+                .map((r) => ({ r, ...missReasons(r) }))
+                .filter((x) => x.passed >= 2)
+                .sort((a, b) => b.passed - a.passed || a.r.rank - b.r.rank)
+                .slice(0, 15);
               return (
                 <>
                   <p className="hint">
-                    {screenRun.scannedAt} 스캔 · {screenRun.total}종목 중 <b className="ok">후보 {cand.length}개</b>
+                    {screenRun.scannedAt} 스캔 · {screenRun.total}종목(${screenRun.priceMin}~${screenRun.priceMax}) 중 <b className="ok">후보 {cand.length}개</b>
+                    {near.length > 0 && <span> · 근접 {near.length}개</span>}
                     {screenRun.excludedEtf > 0 && <span> · ETF/레버리지 {screenRun.excludedEtf}개 제외</span>}
                     {insufficient > 0 && <span> · 데이터 부족 {insufficient}개 제외</span>}
                   </p>
@@ -1799,12 +1866,39 @@ ${msg}
                       </tbody>
                     </table>
                   )}
+
+                  {/* [v0.11.0] 아쉽게 탈락(근접) — 왜 후보가 안 됐는지 사유를 명확히 */}
+                  {near.length > 0 && (
+                    <div className="near-miss">
+                      <button className="mini ghost" onClick={() => setShowMiss((v) => !v)}>
+                        {showMiss ? "▾" : "▸"} 아쉽게 탈락한 종목 {near.length}개 (조건에 근접 — 왜 빠졌는지 보기)
+                      </button>
+                      {showMiss && (
+                        <table className="result-table screen-table miss-table">
+                          <thead>
+                            <tr><th>통과</th><th>순위</th><th>종목</th><th>현재가</th><th>빠진 이유</th></tr>
+                          </thead>
+                          <tbody>
+                            {near.map(({ r, passed, reasons }) => (
+                              <tr key={r.symbol} className="screen-row" onClick={() => pickScreenSymbol(r.symbol)} title="클릭하면 계산기에 이 종목이 채워집니다">
+                                <td title="넘은 하드게이트(가격대·EMA200·구름) 수">{passed}/3</td>
+                                <td>{r.rank}</td>
+                                <td><b>{r.symbol}</b></td>
+                                <td>{r.price != null ? usdKrw(r.price, fx) : "—"}</td>
+                                <td className="miss-reasons">{reasons.join(" · ") || "패턴 미완성"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
+                    </div>
+                  )}
                 </>
               );
             })()}
 
             {!screenRun && !screenBusy && (
-              <div className="result-empty hint">[🔍 스캔]을 누르면 거래량 상위 60종목을 훑어 후보를 찾습니다. (읽기 전용 — 주문과 무관)</div>
+              <div className="result-empty hint">[🔍 스캔]을 누르면 설정한 종목수·가격대로 훑어 후보를 찾습니다. (읽기 전용 — 주문과 무관)</div>
             )}
           </section>
         </main>

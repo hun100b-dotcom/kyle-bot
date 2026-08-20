@@ -216,9 +216,13 @@ describe("엔진 스캔 왕복(연습 모드 + 목 서버)", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-scr-"));
     try {
       const eng = new ToolEngine(dir, { forceMock: true }); // 실계좌 안 건드림
-      const run = await eng.scanScreener(0.3, 5); // 5종목만 빠르게
-      expect(run.total).toBe(5);
-      expect(run.results.length).toBe(5);
+      const run = await eng.scanScreener({ bodyRatio: 0.3, count: 10, priceMin: 1, priceMax: 9 }); // 최소치(10종목)로 빠르게
+      expect(run.total).toBeGreaterThan(0);
+      expect(run.total).toBeLessThanOrEqual(10); // ETF 제외로 10보다 작을 수 있음
+      expect(run.results.length).toBe(run.total);
+      // [v0.11.0] 사용한 가격대가 결과에 담긴다(화면 표시·검증용)
+      expect(run.priceMin).toBe(1);
+      expect(run.priceMax).toBe(9);
       // 목 서버가 1300분치 1분봉을 주므로 5분봉 200개 이상 합성돼야 한다(데이터 부족 아님)
       const anySufficient = run.results.some((r) => r.status !== "insufficient" && r.n5m >= 200);
       expect(anySufficient).toBe(true);
@@ -244,7 +248,7 @@ describe("엔진 스캔 왕복(연습 모드 + 목 서버)", () => {
     try {
       const eng = new ToolEngine(dir, { forceMock: true });
       // 상위 12종목에 BITO(mock에서 ETF) 포함 → 배제되어야 한다
-      const run = await eng.scanScreener(0.3, 12);
+      const run = await eng.scanScreener({ bodyRatio: 0.3, count: 12 });
       expect(run.excludedEtf).toBeGreaterThanOrEqual(1); // 최소 1개(BITO) 제외
       expect(run.results.some((r) => r.symbol === "BITO")).toBe(false); // 결과에 ETF 없음
       expect(run.total).toBe(12 - run.excludedEtf); // 스캔 대상은 제외 후 수
