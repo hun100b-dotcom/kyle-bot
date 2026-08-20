@@ -381,6 +381,11 @@ function App() {
   const [priceMax, setPriceMax] = useState("9");
   const [showMiss, setShowMiss] = useState(false); // '아쉽게 탈락(근접)' 펼침 여부
   const [showJournal, setShowJournal] = useState(false); // [v0.12.0] 설정 하위 '고급·진단' 기록 펼침
+  // [v0.14.0] 손익 색 관습: false=미국식(이익 초록/손실 빨강, 기본), true=한국식(이익 빨강/손실 파랑).
+  //   화면 전용 취향이라 이 기기에만 저장(localStorage). CSS 토큰(data-pnl) 한 곳만 바꾸면 전체가 뒤집힌다.
+  const [pnlKr, setPnlKr] = useState<boolean>(() => {
+    try { return localStorage.getItem("capri-pnl") === "kr"; } catch { return false; }
+  });
   const [openEvid, setOpenEvid] = useState<Set<string>>(new Set()); // 근거 펼친 종목들
   const [journal, setJournal] = useState<JournalEntry[]>([]);
   // [v0.4.0] 내 삼분할 기록(여러 종목 동시 운용). 저장 목록 + 저장 시 메모 입력칸.
@@ -550,6 +555,14 @@ function App() {
       offUpd?.();
     };
   }, []);
+
+  // [v0.14.0] 손익 색 관습을 화면 루트(data-pnl)에 반영 + 이 기기에 저장. 토큰만 바뀌어 전체가 일관되게 뒤집힌다.
+  useEffect(() => {
+    const root = document.documentElement;
+    if (pnlKr) root.setAttribute("data-pnl", "kr");
+    else root.removeAttribute("data-pnl");
+    try { localStorage.setItem("capri-pnl", pnlKr ? "kr" : "us"); } catch { /* 저장 실패해도 화면은 동작 */ }
+  }, [pnlKr]);
 
   // [v0.2.10] 30초 자동 갱신. 기본은 꺼짐(자율 동작 최소화 원칙) — 오너가 켤 때만 돈다.
   //   주문 현황 탭에 있을 때만 돌려서 불필요한 조회를 줄인다.
@@ -2465,6 +2478,19 @@ ${msg}
       {/* ===== ④ 설정 (기록 탭은 v0.12.0에서 이 탭 하위 '고급·진단'으로 이동) ===== */}
       {tab === "settings" && settings && (
         <main className="grid">
+          {/* [v0.14.0] 화면 표시 — 손익 색 관습(미국식/한국식) */}
+          <section className="card wide">
+            <h2>🎨 화면 표시</h2>
+            <label className="radio" style={{ cursor: "pointer" }}>
+              <input type="checkbox" checked={pnlKr} onChange={(e) => setPnlKr(e.target.checked)} />
+              <span>손익 색 <b>한국식</b>으로 (이익 = <b style={{ color: "var(--loss)" }}>빨강</b> · 손실 = <b style={{ color: "var(--profit)" }}>파랑</b>)</span>
+            </label>
+            <p className="hint">
+              끄면 미국식(이익 = 초록 · 손실 = 빨강, 기본). 색과 함께 <b>부호(+/−)</b>도 늘 표시되어 헷갈리지 않습니다.
+              이 설정은 <b>이 기기</b>에만 저장됩니다(폰·PC 각각).
+            </p>
+          </section>
+
           {/* [v0.10.0] 매매 이력 동기화 — PC가 암호화해 올리고, 폰이 받아서 본다 */}
           <section className="card wide">
             <h2>☁️ 매매 이력 동기화</h2>
