@@ -1704,13 +1704,12 @@ ${msg}
                 </div>
               )}
 
-              {/* 기법 선택 */}
-              <div className="form-row tech-row">
+              {/* 기법 선택 — [v0.17.0] 알약형 세그먼트 */}
+              <div className="pill-seg tech-seg">
                 {(["split3", "orderbook", "candle", "manual"] as Technique[]).map((t) => (
-                  <label className="radio" key={t}>
-                    <input type="radio" checked={tech === t} onChange={() => { setTech(t); setCalcErr(""); }} />
+                  <button key={t} type="button" className={tech === t ? "on" : ""} onClick={() => { setTech(t); setCalcErr(""); }}>
                     {TECH_LABEL[t]}
-                  </label>
+                  </button>
                 ))}
               </div>
 

@@ -7,16 +7,27 @@
    ============================================================================= */
 
 :root {
-  --bg: #0f1115;         /* 전체 배경 */
-  --panel: #161a22;      /* 카드 배경 */
-  --panel2: #1d2330;     /* 입력창 등 한 단계 밝은 면 */
-  --border: #2a3140;     /* 경계선 */
-  --text: #e6e9f0;       /* 기본 글자 */
-  --muted: #8b93a7;      /* 보조 글자 */
-  --green: #34d399;      /* 이익/정상 */
-  --red: #f87171;        /* 손실/위험 */
-  --amber: #fbbf24;      /* 경고/드라이런 */
-  --blue: #60a5fa;       /* 포인트 */
+  /* [v0.17.0 리디자인] 토스/로빈후드식 소프트 다크 — 배경을 '층'지게 해서 카드가 떠 보이게. */
+  --bg: #0a0b0f;         /* 앱 최하단 바탕(더 어둡게 → 카드가 위로 떠오름) */
+  --panel: #15181f;      /* 기본 카드(surface-1) */
+  --panel2: #1e222c;     /* 입력·세그먼트 트랙(surface-2) */
+  --surface3: #272c39;   /* 선택/호버/떠오른 요소(surface-3) */
+  --border: rgba(255,255,255,0.07);       /* 경계: 1px 선 대신 은은하게 */
+  --border-strong: rgba(255,255,255,0.13);
+  --text: #f3f5fa;       /* 기본 글자(더 밝게) */
+  --muted: #99a1b3;      /* 보조 글자 */
+  --green: #2fd39a;      /* 이익/정상 */
+  --red: #f6606f;        /* 손실/위험 */
+  --amber: #f7b955;      /* 경고/드라이런 */
+  --blue: #4c82fb;       /* 포인트/브랜드/CTA */
+
+  /* 엘리베이션(그림자+상단 하이라이트 = 유리처럼 떠 있는 느낌) */
+  --sh-card: 0 4px 16px rgba(0,0,0,0.40);
+  --sh-float: 0 8px 28px rgba(0,0,0,0.50);
+  --sh-hero: 0 12px 40px rgba(0,0,0,0.55);
+  --edge-hi: inset 0 1px 0 rgba(255,255,255,0.05);
+  /* 라운드(대폭 키움) */
+  --r-sm: 12px; --r-md: 20px; --r-lg: 24px; --r-pill: 999px;
 
   /* [v0.13.0] 의미 기반 토큰(별칭) — 화면 코드는 색이 아니라 '뜻'을 참조하게 한다.
      기존 --green/--red/--blue 는 그대로 두고 별칭만 얹어 회귀 0. 나중에 손익색 관습 토글이 여기만 바꾼다. */
@@ -25,11 +36,13 @@
   --primary: var(--blue);   /* 강조/링크 */
   --flat: var(--muted);     /* 중립 손익 */
 
-  /* [v0.13.0] 타이포 스케일(문서 5단계 A). 숫자는 tabular(고정폭)로 자릿수 흔들림 제거. */
-  --fs-display: 34px;  /* 큰 숫자(총손익·결과) */
-  --fs-title: 20px;    /* 카드 제목 */
-  --fs-body: 14px;     /* 본문(현행 기본과 동일) */
-  --fs-cap: 12px;      /* 캡션·₩ 병기 */
+  /* [v0.17.0] 타이포 스케일(대폭 키움). 숫자는 tabular(고정폭)로 자릿수 흔들림 제거. */
+  --fs-hero: 52px;     /* 히어로 숫자(총손익) */
+  --fs-display: 40px;  /* 계산 결과 등 큰 숫자 */
+  --fs-title: 22px;    /* 화면/카드 제목(기존 15px → 22px) */
+  --fs-sub: 17px;      /* 섹션 헤더 */
+  --fs-body: 15px;     /* 본문 */
+  --fs-cap: 13px;      /* 캡션·₩ 병기 */
 }
 
 /* [v0.13.0] 손익색 한국식 토글: 설정에서 켜면 이익=빨강/손실=파랑으로 스왑(부호·삼각형은 그대로).
@@ -79,8 +92,8 @@ body {
 
 /* ===== 버튼 ===== */
 .btn {
-  padding: 8px 14px; border-radius: 8px; border: 1px solid var(--border);
-  background: var(--panel2); color: var(--text); cursor: pointer; font-size: 13px;
+  padding: 10px 16px; border-radius: var(--r-sm); border: 1px solid var(--border);
+  background: var(--panel2); color: var(--text); cursor: pointer; font-size: 14px; font-weight: 600;
 }
 .btn:hover { filter: brightness(1.2); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
@@ -90,24 +103,27 @@ body {
 .twocol-on { border-color: var(--primary); color: var(--primary); }
 .kill-on { background: var(--red); color: #fff; font-weight: 700; }
 .mini {
-  padding: 2px 8px; font-size: 11px; border-radius: 6px; border: 1px solid var(--border);
+  padding: 5px 11px; font-size: 12px; border-radius: var(--r-pill); border: 1px solid var(--border);
   background: var(--panel2); color: var(--muted); cursor: pointer;
 }
+.mini:hover { color: var(--text); border-color: var(--border-strong); }
 
-/* ===== 탭 ===== */
-.tabs { display: flex; gap: 4px; padding: 8px 20px 0; background: var(--panel); border-bottom: 1px solid var(--border); }
+/* ===== 탭 ([v0.17.0] 알약형 — 선택 탭이 떠오른다) ===== */
+.tabs { display: flex; gap: 6px; padding: 10px 18px; background: var(--bg); border-bottom: 1px solid var(--border); }
 .tab {
-  padding: 8px 16px; border: none; background: transparent; color: var(--muted);
-  cursor: pointer; border-bottom: 2px solid transparent; font-size: 13px;
+  padding: 9px 15px; border: none; background: transparent; color: var(--muted);
+  cursor: pointer; border-radius: var(--r-pill); font-size: 14px; font-weight: 600; white-space: nowrap; min-width: max-content;
+  transition: background 0.15s, color 0.15s;
 }
-.tab.active { color: var(--text); border-bottom-color: var(--blue); }
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--text); background: var(--surface3); box-shadow: var(--sh-card); }
 
 /* ===== [v0.15.0] 데스크톱 2컬럼(두 탭 나란히) =====
    1컬럼(기본·폰): panes/pane 를 display:contents 로 완전히 투명하게 → 콘텐츠가 .app 에 직접 놓인
    기존 레이아웃과 100% 동일(회귀 0). 2컬럼일 때만 flex 로 좌/우 패널을 나눈다. */
 .panes { display: contents; }
 .pane { display: contents; }
-.panes.twocol { display: flex; flex: 1; min-height: 0; gap: 1px; background: var(--border); }
+.panes.twocol { display: flex; flex: 1; min-height: 0; gap: 1px; background: var(--border-strong); }
 .panes.twocol .pane {
   display: flex; flex-direction: column; flex: 1 1 0; min-width: 0;
   overflow-y: auto; background: var(--bg);
@@ -133,15 +149,45 @@ body {
 
 /* ===== 본문 그리드 ===== */
 .grid {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
-  padding: 16px 20px; overflow-y: auto; flex: 1;
+  display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+  padding: 18px 20px 40px; overflow-y: auto; flex: 1;
 }
 .card {
-  background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 18px;
+  box-shadow: var(--sh-card), var(--edge-hi); /* [v0.17.0] 떠 있는 둥근 카드 */
 }
 .card.wide { grid-column: 1 / -1; }
-.card h2 { margin: 0 0 12px; font-size: 15px; }
-.card h3 { margin: 16px 0 8px; font-size: 13px; color: var(--blue); }
+.card h2 { margin: 0 0 14px; font-size: var(--fs-title); font-weight: 700; letter-spacing: -0.01em; }
+.card h3 { margin: 16px 0 8px; font-size: var(--fs-cap); color: var(--muted); text-transform: none; letter-spacing: 0.02em; }
+
+/* [v0.17.0] 히어로 카드 — 그라디언트 + 큰 그림자. 화면 상단 핵심 숫자를 담는다(토스/로빈후드 무브). */
+.hero {
+  position: relative;
+  border-radius: var(--r-lg);
+  padding: 24px 20px;
+  background:
+    radial-gradient(120% 140% at 100% 0%, rgba(76,130,251,0.16) 0%, transparent 55%),
+    linear-gradient(180deg, #171b26 0%, var(--panel) 100%);
+  box-shadow: var(--sh-hero), var(--edge-hi);
+  border: 1px solid var(--border);
+}
+
+/* [v0.17.0] 알약형 세그먼트 컨트롤 — 라디오/언더라인 탭을 대체. 선택 칸이 떠오른다. */
+.pill-seg { display: inline-flex; gap: 4px; padding: 4px; background: var(--panel2); border-radius: var(--r-pill); }
+.pill-seg button {
+  border: none; background: transparent; color: var(--muted); cursor: pointer;
+  padding: 9px 16px; border-radius: var(--r-pill); font-size: 14px; font-weight: 600; min-height: 40px;
+  transition: background 0.15s, color 0.15s;
+}
+.pill-seg button.on { background: var(--surface3); color: var(--text); box-shadow: var(--sh-card); }
+.pill-seg button:not(.on):hover { color: var(--text); }
+/* 계산기 기법 선택: 라벨이 길어 2×2 그리드 알약으로(모바일 안정) */
+.tech-seg { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px; width: 100%; border-radius: var(--r-md); }
+.tech-seg button { border-radius: var(--r-sm); font-size: 13px; padding: 10px 8px; }
+@media (min-width: 720px) { .tech-seg { grid-template-columns: repeat(4, 1fr); } }
 
 /* ===== 장 상태 카드 ===== */
 .stat-row { display: flex; flex-wrap: wrap; gap: 18px; }
@@ -160,10 +206,10 @@ body {
 label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
 input {
   background: var(--panel2); border: 1px solid var(--border); color: var(--text);
-  border-radius: 8px; padding: 7px 10px; font-size: 13px; width: 130px;
+  border-radius: var(--r-sm); padding: 10px 12px; font-size: 15px; width: 130px;
 }
 .form-col input { width: 100%; }
-input:focus { outline: 1px solid var(--blue); }
+input:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px rgba(76,130,251,0.18); }
 .radio { flex-direction: row; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; color: var(--text); }
 .quote { color: var(--blue); font-weight: 700; padding-bottom: 8px; }
 .mock-box { border-top: 1px dashed var(--border); padding-top: 10px; }
@@ -171,7 +217,7 @@ input:focus { outline: 1px solid var(--blue); }
 
 /* ===== 표 ===== */
 table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); }
+th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border-strong); }
 th { color: var(--muted); font-weight: 500; font-size: 11.5px; }
 
 /* ===== 로그 ===== */
@@ -373,7 +419,7 @@ ul.hint { padding-left: 18px; }
 /* 상단 요약 카드 3개 */
 .sum-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 @media (max-width: 640px) { .sum-cards { grid-template-columns: 1fr; } }
-.sum-card { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: 10px; background: #141821; border: 1px solid #262c38; min-width: 0; }
+.sum-card { display: flex; flex-direction: column; gap: 3px; padding: 16px; border-radius: var(--r-md); background: var(--panel2); border: 1px solid var(--border); box-shadow: var(--edge-hi); min-width: 0; }
 .sum-k { font-size: 12px; color: #8a93a4; }
 .sum-v { font-size: 20px; font-weight: 700; color: #e6ebf3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sum-sub { font-size: 12px; color: #9aa3b2; }
@@ -566,14 +612,21 @@ ul.hint { padding-left: 18px; }
 .report section:nth-child(3) { animation-delay: 120ms; }
 .report section:nth-child(4) { animation-delay: 180ms; }
 
-/* ① 오늘 번 돈 — 가장 큰 숫자 */
-.report-hero { position: relative; text-align: center; padding: 26px 18px 22px; }
-.report-hero-label { font-size: 14px; color: var(--muted, #94a3b8); margin-bottom: 6px; }
+/* ① 오늘 번 돈 — [v0.17.0] 그라디언트 히어로 카드(화면을 지배하는 큰 숫자) */
+.report-hero {
+  position: relative; text-align: center; padding: 30px 20px 26px;
+  border-radius: var(--r-lg);
+  background:
+    radial-gradient(130% 150% at 100% 0%, rgba(76,130,251,0.18) 0%, transparent 55%),
+    linear-gradient(180deg, #171b26 0%, var(--panel) 100%);
+  box-shadow: var(--sh-hero), var(--edge-hi);
+}
+.report-hero-label { font-size: 14px; color: var(--muted); margin-bottom: 8px; letter-spacing: 0.01em; }
 .report-hero-num {
-  font-size: clamp(38px, 9vw, 60px);
+  font-size: clamp(44px, 12vw, 56px);
   font-weight: 800;
-  letter-spacing: -0.02em;
-  line-height: 1.1;
+  letter-spacing: -0.03em;
+  line-height: 1.05;
   font-variant-numeric: tabular-nums; /* 숫자가 바뀔 때 폭이 흔들리지 않게 */
 }
 .report-hero-num.up { color: var(--profit); }
@@ -588,12 +641,13 @@ ul.hint { padding-left: 18px; }
 @media (max-width: 560px) { .report-badges { grid-template-columns: repeat(2, 1fr); } }
 .report-badge {
   text-align: center;
-  padding: 14px 8px;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid var(--line, #24334d);
+  padding: 16px 8px;
+  border-radius: var(--r-md);
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  box-shadow: var(--edge-hi);
 }
-.report-badge .rb-num { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.report-badge .rb-num { font-size: 28px; font-weight: 800; font-variant-numeric: tabular-nums; }
 .report-badge .rb-label { font-size: 12px; color: var(--muted, #94a3b8); margin-top: 2px; }
 .report-badge.win .rb-num { color: var(--profit); }
 .report-badge.loss .rb-num { color: var(--loss); }
@@ -761,11 +815,12 @@ html, body { overflow-x: hidden; }
     flex: 0 0 auto;                 /* 줄바꿈 없이 옆으로 */
     white-space: nowrap;
     min-height: 44px;               /* 손가락 터치 최소 크기 */
-    padding: 10px 14px;
+    padding: 10px 15px;
     font-size: 14px;
-    border-radius: 10px 10px 0 0;
+    border-radius: var(--r-pill);   /* [v0.17.1] 데스크톱과 동일한 알약 형태로 */
   }
-  .tab.active { background: var(--panel2); border-bottom-width: 3px; }
+  /* [v0.17.1 · 리뷰 HIGH] 언더라인 잔재 제거 → 데스크톱과 같은 '떠오른 알약' 선택 표시(폰에서 확실히 보이게) */
+  .tab.active { background: var(--surface3); box-shadow: var(--sh-card); }
 
   /* ── 본문: 한 줄로, 좌우 안전영역 확보, 아래 홈바 여백 ── */
   .grid {
