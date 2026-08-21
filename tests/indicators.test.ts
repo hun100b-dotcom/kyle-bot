@@ -230,6 +230,9 @@ describe("엔진 스캔 왕복(연습 모드 + 목 서버)", () => {
       const ok = run.results.find((r) => r.status !== "insufficient")!;
       expect(ok.ema200).not.toBeNull();
       expect(ok.cloudTop).not.toBeNull();
+      // [v0.16.0] 전봉종가(prevClose)가 채워진다 — 탐색→계산기 자동입력의 원천값(EMA200과 함께 넘긴다)
+      expect(ok.prevClose).not.toBeNull();
+      expect(typeof ok.prevClose).toBe("number");
       // [v0.6.1] 근거(evidence)와 가격밴드 필터가 붙는다
       expect(ok.evidence).not.toBeNull();
       expect(ok.evidence!.mode).toBe("ha"); // 하이킨아시 기준

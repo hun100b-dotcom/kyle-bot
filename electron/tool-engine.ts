@@ -474,6 +474,7 @@ export interface ScreenResult {
   symbol: string;
   price: number | null; //   현재가
   ema200: number | null; //  5분봉 EMA200(하이킨아시 종가 기준)
+  prevClose?: number | null; // [v0.16.0] 마지막 완성 5분봉 종가(전봉종가) — 계산기 자동입력용
   cloudTop: number | null; // 이치모쿠 구름 위 경계 max(스팬A,B) (HA 기준)
   priceInBand: boolean; //   현재가 $1~$9
   aboveEma: boolean; //      현재가 > EMA200
@@ -2742,6 +2743,8 @@ export class ToolEngine extends EventEmitter {
             symbol: rk.symbol,
             price,
             ema200,
+            // [v0.16.0] 전봉종가 = 마지막으로 '완성된' 5분봉의 실제 종가. 탐색→계산기 자동입력에 쓴다.
+            prevClose: raw5m.length ? raw5m[raw5m.length - 1].close : null,
             cloudTop: cloud?.cloudTop ?? null,
             priceInBand,
             aboveEma,

@@ -665,7 +665,7 @@ function App() {
       const cur = await window.kyletool.quote(sym);
       setCurPrice(cur);
       await loadFx();
-      await refreshCapacity(cur);
+      await refreshCapacity(cur, sym); // [v0.16.0] 방금 고른 종목으로 수량 조회(state 반영 전이라 sym 전달)
       await loadAccount();
       await refreshStatus();
     } catch (e) {
@@ -692,9 +692,12 @@ function App() {
   // [v0.3.0] loadQuote(수동 조회 버튼)는 autoLoad(자동 로드)로 대체돼 제거됨.
 
   /** [v0.2.9] 토스에서 주문가능 수량·보유 수량을 받아와 화면에 표시(강제 아님, 참고용). */
-  async function refreshCapacity(priceForCalc?: number) {
+  async function refreshCapacity(priceForCalc?: number, symOverride?: string) {
     try {
-      const c = await window.kyletool.capacity(symbol.trim().toUpperCase(), priceForCalc);
+      // [v0.16.0] 종목을 인자로 받을 수 있게(symOverride). 탐색 행 클릭처럼 setSymbol 직후엔 state가
+      //   아직 안 바뀌어 있어, 넘겨받은 종목으로 조회해야 '방금 고른 종목'의 수량이 정확히 나온다.
+      const sym = (symOverride ?? symbol).trim().toUpperCase();
+      const c = await window.kyletool.capacity(sym, priceForCalc);
       setCap(c);
     } catch {
       setCap(null); // 조회 실패해도 앱은 정상 동작(값만 "조회 불가")
@@ -1270,12 +1273,16 @@ ${msg}
     });
   }
 
-  /** 결과 행 클릭 → 계산기 탭에 그 종목을 자동으로 채운다(삼분할 타점 계산으로 이어지게). */
-  function pickScreenSymbol(symbol: string) {
-    setSymbol(symbol);
-    setCommittedSymbol(symbol);
+  /** 결과 행 클릭 → 계산기 탭에 그 종목 + [v0.16.0] 전봉종가·EMA200까지 자동으로 채운다(재입력 수고 제거).
+   *   스크리너가 이미 계산에 쓴 값을 그대로 넘긴다. 값은 계산기에서 자유롭게 수정 가능. */
+  function pickScreenSymbol(r: ScreenResult) {
+    setSymbol(r.symbol);
+    setCommittedSymbol(r.symbol);
+    setTech("split3"); //             삼분할(전봉종가·EMA200 사용) 방식으로 맞춘다
+    if (r.prevClose != null) setBaseClose(String(Math.round(r.prevClose * 10000) / 10000)); // 전봉종가 자동입력
+    if (r.ema200 != null) setEma200(String(Math.round(r.ema200 * 10000) / 10000)); //          EMA200 자동입력
     goToTab("calc");
-    void autoLoad(symbol); // 예수금·시세·수량 자동 로드
+    void autoLoad(r.symbol); // 예수금·시세·수량 자동 로드
   }
 
   /** [내 삼분할 기록] 카드에서 "체결강도 보기"를 누르면 이 종목으로 체결강도 탭 열기. */
@@ -1981,7 +1988,7 @@ ${msg}
                           const open = openEvid.has(r.symbol);
                           return (
                           <Fragment key={r.symbol}>
-                            <tr className="screen-row" onClick={() => pickScreenSymbol(r.symbol)} title="클릭하면 계산기에 이 종목이 채워집니다">
+                            <tr className="screen-row" onClick={() => pickScreenSymbol(r)} title="클릭하면 계산기로 이동 + 이 종목의 전봉종가·EMA200이 자동 입력됩니다(수정 가능)">
                               <td>
                                 <button className="mini btn-evid" onClick={(e) => { e.stopPropagation(); toggleEvid(r.symbol); }} title="판정 근거 펼치기/접기">
                                   {open ? "▾ 근거" : "▸ 근거"}
@@ -2023,7 +2030,7 @@ ${msg}
                           </thead>
                           <tbody>
                             {near.map(({ r, passed, reasons }) => (
-                              <tr key={r.symbol} className="screen-row" onClick={() => pickScreenSymbol(r.symbol)} title="클릭하면 계산기에 이 종목이 채워집니다">
+                              <tr key={r.symbol} className="screen-row" onClick={() => pickScreenSymbol(r)} title="클릭하면 계산기로 이동 + 이 종목의 전봉종가·EMA200이 자동 입력됩니다(수정 가능)">
                                 <td title="넘은 하드게이트(가격대·EMA200·구름) 수">{passed}/3</td>
                                 <td>{r.rank}</td>
                                 <td><b>{r.symbol}</b></td>
@@ -2335,7 +2342,7 @@ ${msg}
                       <td className={strClass(t.entry?.strength)}>{fmtStr(t.entry?.strength)}</td>
                       <td>{t.exitTs ? <>{t.exitTs}<br/><span className="hint">${t.exitPrice} · { { tp: "익절", sl: "손절", manual: "수동" }[t.exitKind ?? "manual"] }</span></> : <span className="warn-txt">미청산</span>}</td>
                       <td className={strClass(t.exit?.strength)}>{fmtStr(t.exit?.strength)}</td>
-                      <td className={t.resultPct == null ? "" : t.resultPct >= 0 ? "ok" : "danger"}>{t.resultPct != null ? `${t.resultPct >= 0 ? "+" : ""}${t.resultPct}%` : "—"}</td>
+                      <td className={pnlClass(t.resultPct)}>{t.resultPct != null ? `${t.resultPct >= 0 ? "+" : ""}${t.resultPct}%` : "—"}</td>
                       <td className="order-cell">
                         {t.outcome == null && <button className="mini btn-start" onClick={() => void closeTrade(t)}>청산 기록</button>}
                         <button className="mini btn-del" onClick={() => void deleteTrade(t.id)}>🗑</button>
@@ -2561,7 +2568,7 @@ ${msg}
             <h2>🎨 화면 표시</h2>
             <label className="radio" style={{ cursor: "pointer" }}>
               <input type="checkbox" checked={pnlKr} onChange={(e) => setPnlKr(e.target.checked)} />
-              <span>손익 색 <b>한국식</b>으로 (이익 = <b style={{ color: "var(--loss)" }}>빨강</b> · 손실 = <b style={{ color: "var(--profit)" }}>파랑</b>)</span>
+              <span>손익 색 <b>한국식</b>으로 (이익 = <b style={{ color: "#f87171" }}>빨강</b> · 손실 = <b style={{ color: "#5b9dff" }}>파랑</b>)</span>
             </label>
             <p className="hint">
               끄면 미국식(이익 = 초록 · 손실 = 빨강, 기본). 색과 함께 <b>부호(+/−)</b>도 늘 표시되어 헷갈리지 않습니다.

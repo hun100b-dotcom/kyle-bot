@@ -266,6 +266,7 @@ interface ScreenEvidence {
   };
 }
 interface ScreenResult {
+  prevClose?: number | null; // [v0.16.0] 전봉종가(계산기 자동입력용)
   rank: number;
   symbol: string;
   price: number | null;
