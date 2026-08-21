@@ -8,16 +8,18 @@
 
 :root {
   /* [v0.17.0 리디자인] 토스/로빈후드식 소프트 다크 — 배경을 '층'지게 해서 카드가 떠 보이게. */
-  --bg: #0a0b0f;         /* 앱 최하단 바탕(더 어둡게 → 카드가 위로 떠오름) */
-  --panel: #15181f;      /* 기본 카드(surface-1) */
-  --panel2: #1e222c;     /* 입력·세그먼트 트랙(surface-2) */
-  --surface3: #272c39;   /* 선택/호버/떠오른 요소(surface-3) */
-  --border: rgba(255,255,255,0.07);       /* 경계: 1px 선 대신 은은하게 */
-  --border-strong: rgba(255,255,255,0.13);
-  --text: #f3f5fa;       /* 기본 글자(더 밝게) */
-  --muted: #99a1b3;      /* 보조 글자 */
-  --green: #2fd39a;      /* 이익/정상 */
-  --red: #f6606f;        /* 손실/위험 */
+  /* [v0.21.0 네온 다크 v3 — 가독성 최우선] 카드를 페이지보다 확실히 밝게(명도차),
+     보조 글자도 읽히는 밝은 회색으로. 모든 글자/배경 쌍 WCAG AA(≥4.5:1) 충족 확인. */
+  --bg: #0c0e13;         /* 앱 최하단 바탕 */
+  --panel: #1b1f29;      /* 기본 카드(surface-1) — 페이지보다 확실히 밝게 → 글씨가 뜬다 */
+  --panel2: #232836;     /* 입력·세그먼트 트랙·배지(surface-2) */
+  --surface3: #2c3242;   /* 선택/호버/떠오른 요소(surface-3) */
+  --border: rgba(255,255,255,0.10);       /* 경계: 카드가 배경과 구분되게 살짝 또렷 */
+  --border-strong: rgba(255,255,255,0.16);
+  --text: #f1f3f9;       /* 기본 글자(거의 흰색, 카드 대비 ~14:1) */
+  --muted: #aeb4c7;      /* 보조 글자(밝은 회색, 카드 대비 ~8:1 — 묻히지 않게) */
+  --green: #3ddc97;      /* 이익/정상(밝은 민트그린) */
+  --red: #ff6b81;        /* 손실/위험(밝은 로즈레드) */
   --amber: #f7b955;      /* 경고/드라이런 */
   --blue: #4c82fb;       /* 포인트/브랜드/CTA */
 
@@ -49,7 +51,7 @@
    토큰 한 곳만 바꾸므로 화면 전체가 일관되게 뒤집힌다. */
 :root[data-pnl="kr"] {
   --profit: var(--red);
-  --loss: #5b9dff; /* 하락=파랑(한국 관습) */
+  --loss: #6aa8ff; /* 하락=파랑(한국 관습) — 대비 위해 조금 밝게 */
 }
 
 /* [v0.13.0] 숫자가 많은 영역은 고정폭 숫자로 정렬 — 표·손익·리포트·강도. */
@@ -186,10 +188,10 @@ body {
   border-radius: var(--r-lg);
   padding: 24px 20px;
   background:
-    radial-gradient(120% 140% at 100% 0%, rgba(76,130,251,0.16) 0%, transparent 55%),
-    linear-gradient(180deg, #171b26 0%, var(--panel) 100%);
-  box-shadow: var(--sh-hero), var(--edge-hi);
-  border: 1px solid var(--border);
+    radial-gradient(120% 90% at 15% 0%, rgba(139,147,255,0.16) 0%, transparent 48%),
+    linear-gradient(152deg, #1e2542 0%, #241f3d 55%, #271b37 100%);
+  box-shadow: 0 14px 40px rgba(8,6,22,0.5), var(--edge-hi);
+  border: 1px solid rgba(255,255,255,0.12);
 }
 
 /* [v0.17.0] 알약형 세그먼트 컨트롤 — 라디오/언더라인 탭을 대체. 선택 칸이 떠오른다. */
@@ -352,7 +354,7 @@ ul.hint { padding-left: 18px; }
 }
 .posline1 { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .possym { font-size: 16px; }
-.posqty { color: #9aa3b2; }
+.posqty { color: var(--muted); }
 /* 손익 숫자는 크게 — 실전 중 한눈에 들어와야 한다 */
 .posPnl { font-size: 18px; font-weight: 700; }
 .pnl-up { color: var(--profit); }   /* 수익(기본 초록) */
@@ -364,7 +366,7 @@ ul.hint { padding-left: 18px; }
   background: #2b3446; color: #9fb4d8; margin-right: 4px;
 }
 .tag.warn { background: #4a3a1e; color: #ffcf7a; }
-.inline-check { font-size: 12px; font-weight: 400; color: #9aa3b2; }
+.inline-check { font-size: 12px; font-weight: 400; color: var(--muted); }
 
 /* ===== [v0.3.0] 오더 티켓 레이아웃 ===== */
 .ticket { display: flex; flex-direction: column; gap: 12px; padding: 12px; }
@@ -375,7 +377,7 @@ ul.hint { padding-left: 18px; }
   padding: 10px 14px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--border);
 }
 .sb-item { display: flex; align-items: baseline; gap: 6px; }
-.sb-k { color: #8a93a4; font-size: 12px; }
+.sb-k { color: var(--muted); font-size: 12px; }
 .sb-item b { font-size: 15px; }
 /* 실주문 토글 — 상태가 한눈에 */
 .sb-live { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 6px 12px; border-radius: 8px; font-size: 15px; }
@@ -423,9 +425,9 @@ ul.hint { padding-left: 18px; }
 .statusmain { display: flex; flex-direction: column; gap: 12px; padding: 12px; }
 .statusmain .statusbar { flex-wrap: wrap; }
 .sb-sep { width: 1px; height: 20px; background: #333b48; margin: 0 4px; }
-.sb-k { color: #8a93a4; font-size: 12px; }
+.sb-k { color: var(--muted); font-size: 12px; }
 .min0 { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.muted { color: #8a93a4; }
+.muted { color: var(--muted); }
 
 /* 세그먼트 토글 */
 /* [v0.19.0] 매매분석 인사이트 카드 + 강/약 비교 */
@@ -454,9 +456,9 @@ ul.hint { padding-left: 18px; }
 .sum-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 @media (max-width: 640px) { .sum-cards { grid-template-columns: 1fr; } }
 .sum-card { display: flex; flex-direction: column; gap: 3px; padding: 16px; border-radius: var(--r-md); background: var(--panel2); border: 1px solid var(--border); box-shadow: var(--edge-hi); min-width: 0; }
-.sum-k { font-size: 12px; color: #8a93a4; }
+.sum-k { font-size: 12px; color: var(--muted); }
 .sum-v { font-size: 20px; font-weight: 700; color: #e6ebf3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sum-sub { font-size: 12px; color: #9aa3b2; }
+.sum-sub { font-size: 12px; color: var(--muted); }
 .sum-card.pnl-up .sum-v { color: var(--profit); }
 .sum-card.pnl-down .sum-v { color: var(--loss); }
 .pnl-up { color: var(--profit); }
@@ -468,20 +470,20 @@ ul.hint { padding-left: 18px; }
 .hcard-r1 { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-width: 0; }
 .hcard-name { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .hcard-title { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
-.hcard-sub { font-size: 12px; color: #8a93a4; white-space: nowrap; }
+.hcard-sub { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .hcard-pct { font-size: 22px; font-weight: 800; white-space: nowrap; }         /* 제일 큼 */
 .hcard-r2 { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: 4px; }
 .hcard-r2 .muted { font-size: 13px; }
 .hcard-amt { font-size: 14px; font-weight: 600; white-space: nowrap; }          /* 중간 */
 .hcard-actions { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
-.ghost { background: transparent; border: 1px solid var(--border); color: #9aa3b2; }
+.ghost { background: transparent; border: 1px solid var(--border); color: var(--muted); }
 .grow { flex: 1 1 auto; }
 
 /* 펼침 정의목록(2열) */
 .hcard-detail, .ord-detail { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 18px; margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border-strong); }
 @media (max-width: 520px) { .hcard-detail, .ord-detail { grid-template-columns: 1fr; } }
 .hcard-detail > div, .ord-detail > div { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; min-width: 0; }
-.hcard-detail dt, .ord-detail dt { color: #8a93a4; white-space: nowrap; }
+.hcard-detail dt, .ord-detail dt { color: var(--muted); white-space: nowrap; }
 .hcard-detail dd, .ord-detail dd { color: #e6ebf3; text-align: right; overflow: hidden; text-overflow: ellipsis; }
 .dl-wide { grid-column: 1 / -1; }
 .dl-wide dd { text-align: left; white-space: normal; }
@@ -509,7 +511,7 @@ ul.hint { padding-left: 18px; }
 .cc-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .cc-steps { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 13px; color: #cfd6e2; flex-wrap: wrap; }
 .step { display: inline-flex; align-items: center; gap: 6px; }
-.step-arrow { color: #6b7280; }
+.step-arrow { color: var(--muted); }
 
 /* ===== [v0.4.0] 내 삼분할 기록 ===== */
 /* 계산기 결과의 [기록 저장] 줄(메모칸 + 버튼 + 저장됨 안내) */
@@ -556,20 +558,21 @@ ul.hint { padding-left: 18px; }
   display: flex; align-items: center; gap: 20px; margin: 4px 0 16px; flex-wrap: wrap;
   padding: 22px 20px; border-radius: var(--r-lg);
   background:
-    radial-gradient(130% 150% at 0% 0%, rgba(76,130,251,0.14) 0%, transparent 55%),
-    linear-gradient(180deg, #171b26 0%, var(--panel) 100%);
-  box-shadow: var(--sh-hero), var(--edge-hi);
+    radial-gradient(120% 90% at 12% 0%, rgba(139,147,255,0.15) 0%, transparent 48%),
+    linear-gradient(152deg, #1e2542 0%, #241f3d 55%, #271b37 100%);
+  box-shadow: 0 14px 40px rgba(8,6,22,0.5), var(--edge-hi);
+  border: 1px solid rgba(255,255,255,0.12);
 }
 .str-big { font-size: 52px; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1; letter-spacing: -0.02em; }
-.str-oneway { color: #b45309; }        /* 매수 일방(∞) = 주황 */
+.str-oneway { color: var(--amber); }   /* 매수 일방(∞) = 주황(밝게, 대비 확보) */
 .str-meta { font-size: 14px; }
 .str-meta > div { margin: 2px 0; }
 
 /* 스파크라인: 부모 색을 기준선에 물려주기 위해 color 지정(다크/라이트 자동) */
-.str-spark { display: block; color: #8a93a4; margin: 6px 0 14px; border: 1px solid var(--border); border-radius: 8px; background: #0f131a; }
+.str-spark { display: block; color: var(--muted); margin: 6px 0 14px; border: 1px solid var(--border); border-radius: 8px; background: #0f131a; }
 .str-table { margin-top: 6px; }
 /* [v0.12.0] 가격·강도 겹쳐보기 차트 + 신호 배지 */
-.str-chart { display: block; color: #8a93a4; margin: 6px 0 14px; border: 1px solid var(--border); border-radius: 8px; background: #0f131a; }
+.str-chart { display: block; color: var(--muted); margin: 6px 0 14px; border: 1px solid var(--border); border-radius: 8px; background: #0f131a; }
 /* [v0.13.0] 틱 플래시 — 새 표본이 올 때 값이 잠깐 반짝(업비트식). 모션 최소화 설정이면 끈다. */
 @keyframes str-flash-up { from { background: rgba(52,211,153,0.28); } to { background: transparent; } }
 @keyframes str-flash-down { from { background: rgba(248,113,113,0.28); } to { background: transparent; } }
@@ -606,14 +609,14 @@ ul.hint { padding-left: 18px; }
 /* 근거 펼침 영역 */
 .evid-row > td { background: #10141c; padding: 0; }
 .evid-box { padding: 12px 14px; }
-.evid-note { font-size: 12px; color: #8a93a4; margin-bottom: 8px; }
+.evid-note { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
 .evid-filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 .evid-chip { font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border); }
 .evid-chip.pass { background: #14331f; color: #6ee7a0; border-color: #1f5a37; }
 .evid-chip.fail { background: #331b1b; color: #ff9d9d; border-color: #5a2020; }
 .evid-table { width: auto; border: none; }
 .evid-table td { border: none; padding: 3px 10px 3px 0; font-size: 13px; }
-.evid-table td:first-child { color: #8a93a4; white-space: nowrap; }
+.evid-table td:first-child { color: var(--muted); white-space: nowrap; }
 
 /* ===== [v0.7.0] 매매분석(체결강도 자동 기록) ===== */
 .trade-stats { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
@@ -655,15 +658,18 @@ ul.hint { padding-left: 18px; }
 .report section:nth-child(4) { animation-delay: 180ms; }
 
 /* ① 오늘 번 돈 — [v0.17.0] 그라디언트 히어로 카드(화면을 지배하는 큰 숫자) */
+/* [v0.21.0 네온 다크 v3] 히어로: 절제된 네이비→딥퍼플 + 좌상단 미세 글로우.
+   텍스트는 밝게(라벨은 흰빛). 카드 테두리 살짝 또렷하게 해서 배경과 분리. */
 .report-hero {
   position: relative; text-align: center; padding: 30px 20px 26px;
   border-radius: var(--r-lg);
   background:
-    radial-gradient(130% 150% at 100% 0%, rgba(76,130,251,0.18) 0%, transparent 55%),
-    linear-gradient(180deg, #171b26 0%, var(--panel) 100%);
-  box-shadow: var(--sh-hero), var(--edge-hi);
+    radial-gradient(120% 90% at 15% 0%, rgba(139,147,255,0.16) 0%, transparent 48%),
+    linear-gradient(152deg, #1e2542 0%, #241f3d 55%, #271b37 100%);
+  box-shadow: 0 14px 40px rgba(8,6,22,0.5), var(--edge-hi);
+  border: 1px solid rgba(255,255,255,0.12);
 }
-.report-hero-label { font-size: 14px; color: var(--muted); margin-bottom: 8px; letter-spacing: 0.01em; }
+.report-hero-label { font-size: 14px; color: #e4e7f2; font-weight: 600; margin-bottom: 8px; letter-spacing: 0.01em; }
 .report-hero-num {
   font-size: clamp(44px, 12vw, 56px);
   font-weight: 800;
