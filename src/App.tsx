@@ -2170,7 +2170,10 @@ ${msg}
             <p className="hint">
               <b>체결강도</b>는 방금 사고팔린 양을 비교해 <b>지금 어느 쪽 힘이 센지</b> 보는 숫자예요
               (매수 체결량 ÷ 매도 체결량 × 100 → <b>100보다 크면 사는 힘이, 작으면 파는 힘이 우세</b>).
-              <br />종목을 정하고 <b>[기록 시작]</b>을 누르면, 켜져 있는 동안 체결 내역을 조금씩 받아 이 숫자를 계산해 시간 순서로 쌓습니다(앱을 껐다 켜도 유지).
+              <br />✅ <b>이제 카프리로 매매하면 자동으로 기록됩니다.</b> 진입(매수) 주문을 내는 순간 그 종목의 체결강도 기록이
+              저절로 켜지고 보유하는 동안 쌓입니다. 그 기록을 바탕으로 <b>매매분석</b>이 그 매매의 <b>진입·청산 강도</b>를 자동으로 붙여요.
+              <br /><span className="hint small">아래 <b>[기록 시작]</b>은 <b>아직 안 산 종목을 미리 지켜볼 때</b> 쓰는 선택 기능이에요(매매 기록에는 이제 필요 없습니다).
+              실시간 값은 <b>집 PC 연결</b>이 있어야 쌓입니다 — 연결이 없으면 잠시 재시도하다 <b>자동으로 멈추고</b> 화면에 안내가 뜹니다(조용히 실패하지 않아요).</span>
               <br /><span className="hint small">※ 토스가 매수/매도 방향을 직접 알려 주지 않아, 값이 오르며 체결되면 매수·내리며 체결되면 매도로 <b>추정</b>합니다. 참고용이에요.</span>
             </p>
 
@@ -2326,7 +2329,7 @@ ${msg}
                   {/* 사이클 목록(최신순) */}
                   <table className="result-table trade-table" style={{ marginTop: 12 }}>
                     <thead>
-                      <tr><th>종목</th><th>진입→청산</th><th>수량</th><th>보유</th><th>수익률</th><th>손익</th><th>진입강도</th></tr>
+                      <tr><th>종목</th><th>진입→청산</th><th>수량</th><th>보유</th><th>수익률</th><th>손익</th><th>진입→청산 강도</th></tr>
                     </thead>
                     <tbody>
                       {analysis.cycles.slice(0, 100).map((c, i) => (
@@ -2338,7 +2341,12 @@ ${msg}
                           {/* [리뷰 LOW] 수익률·손익 색을 '실제 손익(win)' 기준으로 통일(행 색과 일치) */}
                           <td className={c.win ? "pnl-up" : "pnl-down"}>{c.pct >= 0 ? "+" : ""}{c.pct}%</td>
                           <td className={c.win ? "pnl-up" : "pnl-down"}>{c.pnl >= 0 ? "+" : "−"}${Math.abs(c.pnl).toFixed(2)}</td>
-                          <td className={strClass(c.entryStrength)}>{c.entryStrength != null ? c.entryStrength.toFixed(0) : "—"}</td>
+                          {/* [v0.22.0] 진입강도 → 청산강도(자동 기록 시계열로 확보). 값이 없으면 회색 — */}
+                          <td className="tabular">
+                            <span className={c.entryStrength != null ? strClass(c.entryStrength) : "hint"}>{c.entryStrength != null ? c.entryStrength.toFixed(0) : "—"}</span>
+                            <span className="hint"> → </span>
+                            <span className={c.exitStrength != null ? strClass(c.exitStrength) : "hint"}>{c.exitStrength != null ? c.exitStrength.toFixed(0) : "—"}</span>
+                          </td>
                         </tr>
                       ))}
                     </tbody>

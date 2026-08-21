@@ -619,9 +619,16 @@ export class ToolEngine extends EventEmitter {
   /** [v0.5.0] 현재 '기록 중'인 종목들의 타이머·연속 상태(틱룰 seed·중복제거·간격·오류). */
   private strengthRuns = new Map<
     string,
-    { timer: ReturnType<typeof setInterval>; intervalSec: number; lastPrice?: number; lastSide: Side; seen: Set<string>; lastError: string | null }
+    {
+      timer: ReturnType<typeof setInterval>; intervalSec: number; lastPrice?: number; lastSide: Side; seen: Set<string>; lastError: string | null;
+      // [v0.22.0] 매매로 '자동 시작'된 기록만 수명을 제한한다(사용자가 직접 켠 건 손대지 않음).
+      auto?: boolean; startedAtMs?: number; failCount?: number;
+    }
   >();
   private static readonly STRENGTH_MAX_SAMPLES = 500; // 종목당 보관 상한(오래된 것부터 정리)
+  /** [v0.22.0] 자동 기록 수명 한도: 연속 실패 N회(연결 없음) 또는 최대 시간 초과 시 스스로 끈다(무한 폴링 방지). */
+  private static readonly AUTO_FAIL_STOP = 5;
+  private static readonly AUTO_MAX_MS = 6 * 3_600_000; // 6시간(한 세션 충분히 커버)
   /** [v0.6.0] 스크리너 중복 실행 방지(스캔 중 또 누르면 무시). */
   private screenBusy = false;
   /** [v0.7.0] 체결강도 자동 기록 트레이드 저장 파일 + 메모리 캐시. */
@@ -2036,17 +2043,18 @@ export class ToolEngine extends EventEmitter {
    *   즉시 한 번 샘플링하고, 이후 intervalSec 마다 반복한다. 화면은 이벤트로 갱신을 받는다.
    *   @param intervalSec 폴링 간격(초). 5~15 권장, 기본 10. 범위 밖이면 보정.
    */
-  startStrength(symbol: string, intervalSec = 10): StrengthState {
+  startStrength(symbol: string, intervalSec = 10, auto = false): StrengthState {
     const sym = (symbol || "").toUpperCase().trim();
     if (!sym) throw new Error("종목 코드를 입력하세요.");
     const iv = Math.min(60, Math.max(3, Math.floor(intervalSec) || 10)); // 3~60초로 안전 보정
     if (this.strengthRuns.has(sym)) return this.getStrengthState(sym); // 중복 시작 방지
 
     // 연속 상태 초기화: 틱룰 seed(직전가/방향)와 중복제거 집합.
-    const run = { timer: setInterval(() => void this.sampleStrengthOnce(sym), iv * 1000), intervalSec: iv, lastSide: "buy" as Side, seen: new Set<string>(), lastError: null as string | null };
+    // [v0.22.0] auto=true(매매로 자동 시작)면 수명 제한 필드(startedAtMs/failCount)를 심는다.
+    const run = { timer: setInterval(() => void this.sampleStrengthOnce(sym), iv * 1000), intervalSec: iv, lastSide: "buy" as Side, seen: new Set<string>(), lastError: null as string | null, auto, startedAtMs: Date.now(), failCount: 0 };
     this.strengthRuns.set(sym, run);
     void this.sampleStrengthOnce(sym); // 시작 즉시 1회(기다리지 않게)
-    this.addJournal({ kind: "info", symbol: sym, summary: `체결강도 기록 시작 (${iv}초 간격)` });
+    this.addJournal({ kind: "info", symbol: sym, summary: auto ? `체결강도 자동 기록 시작 (매매 감지 · ${iv}초 간격)` : `체결강도 기록 시작 (${iv}초 간격)` });
     return this.getStrengthState(sym);
   }
 
@@ -2114,6 +2122,7 @@ export class ToolEngine extends EventEmitter {
       run.lastPrice = lastPrice;
       run.lastSide = lastSide;
       run.lastError = null;
+      run.failCount = 0; // [v0.22.0] 성공했으니 연속 실패 카운터 리셋
 
       const now = DateTime.now().setZone("Asia/Seoul");
       const sample: StrengthSample = {
@@ -2133,9 +2142,23 @@ export class ToolEngine extends EventEmitter {
       if (arr.length > ToolEngine.STRENGTH_MAX_SAMPLES) arr.shift();
       this.persistStrength();
       this.emit("strength", this.getStrengthState(sym)); // 화면 실시간 갱신
+      // [v0.22.0] 자동 기록이 너무 오래 돌면(최대 시간 초과) 스스로 끈다(잊힌 포지션의 무한 폴링 방지).
+      if (run.auto && run.startedAtMs != null && Date.now() - run.startedAtMs > ToolEngine.AUTO_MAX_MS) {
+        this.addJournal({ kind: "info", symbol: sym, summary: "체결강도 자동 기록 종료 (최대 기록 시간 도달)" });
+        this.stopStrength(sym);
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (run) run.lastError = msg;
+      if (run) {
+        run.lastError = msg;
+        // [v0.22.0] 자동 기록인데 연속으로 계속 실패하면(연결 없음 등) 무한 재시도 대신 스스로 끈다.
+        //   수동으로 켠 기록은 사용자 판단이므로 건드리지 않는다(계속 재시도).
+        run.failCount = (run.failCount ?? 0) + 1;
+        if (run.auto && run.failCount >= ToolEngine.AUTO_FAIL_STOP) {
+          this.addJournal({ kind: "info", symbol: sym, summary: "체결강도 자동 기록 종료 (연결이 없어 기록을 못 함 — 나중에 다시 매매하면 재시작)" });
+          this.stopStrength(sym);
+        }
+      }
       this.emit("strength", this.getStrengthState(sym)); // 오류도 화면에 알림(다음 주기 재시도)
     }
   }
@@ -2326,12 +2349,35 @@ export class ToolEngine extends EventEmitter {
         /* 업로드 실패는 조용히 넘어간다 */
       });
     }
+    // [v0.22.0] 청산 강도는 여기서 체결을 보고 '기록'하지 않는다.
+    //   대신 tradeAnalysis가 자동 저장된 체결강도 시계열을 '청산 시각(sellAtMs)'으로 조회해 붙인다
+    //   (strengthAt). 체결→매매 매칭의 시간역전·다진입·부분청산 오류를 원천 회피하기 위함.
   }
 
   /** 지금 모드가 페이퍼(mock/dryrun)인지 실거래(real)인지 태그. */
   private currentMode(): "mock" | "dryrun" | "real" {
     if (this.mode === "mock") return "mock";
     return this.isDryRun() ? "dryrun" : "real";
+  }
+
+  /**
+   * [v0.22.0] strengthAt — 자동 저장된 체결강도 시계열에서 특정 시각(atMs)에 '가장 가까운' 값을 찾는다.
+   *   매매분석이 진입/청산 시각으로 그때의 체결강도를 되짚어 붙이는 데 쓴다. 체결↔매매를 시각으로만
+   *   잇기 때문에 다진입·부분청산·조건주문 자동청산에도 안전하다(트레이드를 건드리지 않음, 읽기 전용).
+   *   @param toleranceMs 이 시간 안에 기록이 있어야 인정(기본 30분). 기록이 없으면 null(정직).
+   */
+  private strengthAt(symbol: string, atMs: number | undefined, toleranceMs = 30 * 60_000): number | null {
+    if (atMs == null || !Number.isFinite(atMs)) return null;
+    const arr = this.strengthSeries[(symbol || "").toUpperCase().trim()];
+    if (!arr || arr.length === 0) return null;
+    let best: StrengthSample | null = null;
+    let bestGap = Infinity;
+    for (const s of arr) {
+      if (s.strength == null || s.tsMs == null) continue;
+      const gap = Math.abs(s.tsMs - atMs);
+      if (gap < bestGap) { bestGap = gap; best = s; }
+    }
+    return best != null && bestGap <= toleranceMs ? best.strength : null;
   }
 
   /** 체결강도 스냅샷(읽기 전용). 실패해도 null만 돌려주고 절대 예외를 위로 던지지 않는다. */
@@ -2376,6 +2422,11 @@ export class ToolEngine extends EventEmitter {
       if (this.trades.length > 1000) this.trades.shift();
       this.persistTrades();
       this.emit("trades", this.getTradeLog());
+      // [v0.22.0] 매매하면 자동으로 이 종목의 체결강도 '연속 기록'을 켠다(auto=true).
+      //   → 수동 [기록 시작]을 누르지 않아도 진입~보유 동안 시계열이 자동으로 쌓인다.
+      //   이미 켜져 있으면 startStrength가 중복 시작을 막고(무해), 연결이 없으면 몇 번 재시도 후
+      //   스스로 종료한다(무한 폴링 방지 — sampleStrengthOnce의 수명 제한). 화면엔 오류 안내가 뜬다.
+      try { this.startStrength(symbol, 10, true); } catch { /* 기록 시작 실패는 주문과 무관 */ }
     } catch {
       /* 기록 실패는 주문과 무관 — 삼킨다 */
     }
@@ -2410,6 +2461,10 @@ export class ToolEngine extends EventEmitter {
       t.outcome = t.resultPct == null ? null : t.resultPct > 0 ? "win" : "loss";
       this.persistTrades();
       this.emit("trades", this.getTradeLog());
+      // [v0.22.0] 이 종목에 미청산 매매가 더 없으면 자동 기록을 끈다(보유가 끝났으니 계속 폴링할 이유 없음).
+      //   부분 청산으로 아직 남은 매매가 있으면 계속 기록한다.
+      const stillOpen = this.trades.some((x) => x.symbol === symbol && x.outcome == null);
+      if (!stillOpen) { try { this.stopStrength(symbol); } catch { /* 무해 */ } }
     } catch {
       /* 기록 실패는 주문과 무관 */
     }
@@ -2555,15 +2610,18 @@ export class ToolEngine extends EventEmitter {
     const usedRat = new Set<string>();
     // 최신 청산이 위로 오도록 먼저 정렬한 뒤, 그 순서대로 1:1 매칭한다.
     const realizedSorted = [...realized].sort((a, b) => b.sellAtMs - a.sellAtMs);
-    const enrichMap = new Map<RealizedTrade, { technique?: string; entryStrength: number | null }>();
+    const enrichMap = new Map<RealizedTrade, { technique?: string; entryStrength: number | null; exitStrength: number | null }>();
     for (const r of realizedSorted) {
       const st = realTrades.find((t) => !usedTrade.has(t.id) && t.symbol === r.symbol && Number.isFinite(t.entryPrice) && near(t.entryPrice, r.buyAvg));
       const rat = realRationales.find((x) => !usedRat.has(x.clientOrderId) && x.symbol === r.symbol && x.entry != null && near(x.entry as number, r.buyAvg));
       if (st) usedTrade.add(st.id);
       if (rat) usedRat.add(rat.clientOrderId);
-      const entryStrength = st?.entry?.strength ?? null;
+      // [v0.22.0] 진입/청산 체결강도: ① 주문 순간 스냅샷(있으면 우선) ② 없으면 자동 저장 시계열을
+      //   진입·청산 '시각'으로 조회(strengthAt). ②가 조건주문 자동청산·다진입까지 견고하게 커버한다.
+      const entryStrength = st?.entry?.strength ?? this.strengthAt(r.symbol, r.buyAtMs);
+      const exitStrength = st?.exit?.strength ?? this.strengthAt(r.symbol, r.sellAtMs);
       const technique = rat?.technique;
-      if (entryStrength != null || technique != null) enrichMap.set(r, { technique, entryStrength });
+      if (entryStrength != null || exitStrength != null || technique != null) enrichMap.set(r, { technique, entryStrength, exitStrength });
     }
     const enrich = (r: RealizedTrade) => enrichMap.get(r);
 

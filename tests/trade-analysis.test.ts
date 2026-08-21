@@ -54,6 +54,21 @@ describe("buildCycles — 진입→청산 사이클 + 보유기간", () => {
     expect(cycles[0].technique).toBe("split3");
     expect(cycles[0].entryStrength).toBe(150);
   });
+
+  it("[v0.22.0] 진입강도와 청산강도를 둘 다 붙인다(자동 기록)", () => {
+    const base = Date.UTC(2026, 7, 21, 0, 0, 0);
+    const realized = matchFifo([
+      f({ symbol: "X", side: "BUY", qty: 10, price: 10, atMs: base }),
+      f({ symbol: "X", side: "SELL", qty: 10, price: 11, atMs: base + H }),
+    ]);
+    const cycles = buildCycles(realized, () => ({ entryStrength: 130, exitStrength: 80 }));
+    expect(cycles[0].entryStrength).toBe(130); // 진입 시 사는 힘 우세
+    expect(cycles[0].exitStrength).toBe(80); //  청산 시 파는 힘 우세
+    // enrich가 없으면 둘 다 null(하위호환)
+    const bare = buildCycles(realized);
+    expect(bare[0].entryStrength).toBeNull();
+    expect(bare[0].exitStrength).toBeNull();
+  });
 });
 
 /** 사이클 하나 만들기(분석 테스트용). */

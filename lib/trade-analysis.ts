@@ -15,6 +15,7 @@ import type { RealizedTrade } from "./fills";
 export interface CycleEnrichment {
   technique?: string; //          사용한 기법(삼분할/호가창/캔들/수동)
   entryStrength?: number | null; // 진입 시 체결강도(추정치)
+  exitStrength?: number | null; //  [v0.22.0] 청산 시 체결강도(추정치) — 자동 기록으로 확보
 }
 
 /** 매매 한 사이클(진입→청산). */
@@ -31,6 +32,7 @@ export interface TradeCycle {
   win: boolean; //       이익이면 true
   technique?: string; //       기법(아는 경우)
   entryStrength?: number | null; // 진입 체결강도(아는 경우)
+  exitStrength?: number | null; //  [v0.22.0] 청산 체결강도(아는 경우)
 }
 
 /** '강할 때/약할 때' 같은 묶음 통계. */
@@ -91,6 +93,7 @@ export function buildCycles(realized: RealizedTrade[], enrich?: (r: RealizedTrad
       win: r.pnl >= 0,
       technique: e?.technique,
       entryStrength: e?.entryStrength ?? null,
+      exitStrength: e?.exitStrength ?? null,
     };
   });
 }

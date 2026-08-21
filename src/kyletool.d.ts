@@ -234,6 +234,7 @@ interface TradeCycle {
   win: boolean;
   technique?: string;
   entryStrength?: number | null;
+  exitStrength?: number | null; // [v0.22.0] 청산 시 체결강도
 }
 interface TradeBucket { n: number; winRate: number | null; avgPct: number | null; }
 interface TradeSymbolStat { symbol: string; n: number; wins: number; winRate: number | null; totalPnl: number; avgPct: number; }
