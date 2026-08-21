@@ -1,7 +1,7 @@
 {
   "name": "kyle-bot",
   "private": true,
-  "version": "0.20.0",
+  "version": "0.20.1",
   "description": "Capri 매매도구 — Capri매매기법 계산기 + 토스 조건주문 (v0.2: 주문 잠금/드라이런)",
   "author": "hun100b",
   "type": "module",
