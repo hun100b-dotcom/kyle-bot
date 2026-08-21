@@ -157,6 +157,10 @@ function orderStatusKo(std: string, raw: string | null): string {
 function condStatusKo(st: string | null): string {
   return st === "WATCHING" ? "감시중" : st === "COMPLETED" ? "완료" : (st ?? "—");
 }
+/** 조건주문 종류(OTO/OCO)를 초보용 한국어 라벨로. 영어 약어를 화면에 그대로 노출하지 않기 위함. */
+function condTypeKo(type: string | null): string {
+  return type === "OTO" ? "매수+익절" : type === "OCO" ? "익절+손절" : (type ?? "조건주문");
+}
 /** 조건주문 다리(leg) 상태 한국어 + 배지 색 클래스. */
 function legStatusKo(st: string | null): string {
   return st === "WATCHING" ? "감시중" : st === "HOLDING" ? "대기" : st === "COMPLETED" ? "완료" : (st ?? "—");
@@ -817,11 +821,11 @@ function App() {
     const total = lv.entry * q;
     requestOrder({
       kind: "entry",
-      title: `진입 지정가 매수 — ${symbol.toUpperCase()}`,
+      title: `매수만 (지정가) — ${symbol.toUpperCase()}`,
       lines: [
         `진입가 ${usdKrw(lv.entry, fx)} × ${q}주`,
         `예상 투입액 ${usdKrw(total, fx)}`,
-        `주문 유효기간: 당일(DAY) — 미체결분은 자동 취소`,
+        `주문 유효기간: 당일만 — 오늘 안 체결되면 자동 취소`,
       ],
       send: () =>
         window.kyletool.placeEntry({
@@ -847,9 +851,9 @@ function App() {
     const expire = defaultExpire();
     requestOrder({
       kind: "oto",
-      title: `진입+익절 (OTO) — ${symbol.toUpperCase()} · 손절 미포함`,
+      title: `매수+익절 자동 — ${symbol.toUpperCase()} · 손절은 직접`,
       lines: [
-        `진입(매수) ${usdKrw(lv.entry, fx)} × ${q}주`,
+        `매수 ${usdKrw(lv.entry, fx)} × ${q}주`,
         `→ 체결되면 익절(매도) ${usdKrw(lv.tp, fx)} 자동 등록 (+${tpPct}%)`,
         `⚠️ 손절은 담기지 않습니다. 진입 체결 후 손절은 직접(수동) 걸어주세요.`,
         `만료일 ${expire} · 지정가 · 토스 서버가 감시(앱 꺼도 작동)`,
@@ -913,7 +917,7 @@ function App() {
     const slLimit = roundPrice(lv.sl * 0.99);
     requestOrder({
       kind: "oco",
-      title: `조건주문(익절+손절 동시) 등록 — ${symbol.toUpperCase()} (보유 중일 때)`,
+      title: `익절+손절 걸기 — ${symbol.toUpperCase()} (보유 중일 때)`,
       lines: [
         `수량 ${q}주 / 익절 감시가 ${usdKrw(lv.tp, fx)} / 손절 감시가 ${usdKrw(lv.sl, fx)}`,
         `손절 지정가 ${usdKrw(slLimit, fx)} (감시가 1% 아래 — 급락 시 체결 확보)`,
@@ -1384,7 +1388,7 @@ ${msg}
       seedFixedUsd: seedForm.basis === "fixed" ? (toNum(seedForm.fixed) ?? null) : null,
     });
     setSettings(s);
-    setSavedMsg("시드 설정을 저장했습니다.");
+    setSavedMsg("매수 비율을 저장했습니다.");
     setTimeout(() => setSavedMsg(""), 4000);
     // 시드가 바뀌었으니 제안 수량도 즉시 갱신
     if (curPrice != null) void refreshCapacity(curPrice);
@@ -1496,8 +1500,8 @@ ${msg}
             {isMock && isWebApp && <span className="wide-only"> — 설정 탭에서 키 불러오기</span>}
           </span>
           {status.dryRun ? (
-            <span className="badge badge-dry" title="실주문 잠금 상태입니다. 주문 버튼을 눌러도 모의 기록만 남습니다">
-              🔒 주문 잠금<span className="wide-only"> (드라이런)</span>
+            <span className="badge badge-dry" title="지금은 주문이 잠겨 있어요. 주문 버튼을 눌러도 실제로는 안 나가고 연습 기록만 남습니다.">
+              🔒 주문 잠금<span className="wide-only"> (연습만)</span>
             </span>
           ) : (
             <span className="badge badge-liveorder" title="실제 돈으로 주문이 전송되는 상태입니다">
@@ -1520,7 +1524,7 @@ ${msg}
           )}
           {status.orderFrozen && (
             <span className="badge badge-dry">
-              ⚠ 마감 1분 전<span className="wide-only">: 정정·취소 불가 구간</span>
+              ⚠ 마감 1분 전<span className="wide-only">: 지금은 주문 정정·취소가 안 돼요</span>
             </span>
           )}
         </div>
@@ -1532,18 +1536,18 @@ ${msg}
               title="넓은 화면에서 두 탭을 좌우로 나란히 봅니다(예: 계산기 + 체결강도)"
               onClick={() => { if (twoCol) setTab(tabL); /* 1컬럼으로 돌아갈 때 왼쪽 패널 탭을 이어서 본다(stale 방지) */ setTwoCol((v) => !v); }}
             >
-              {twoCol ? "🔲 1컬럼" : "🔳 2컬럼"}
+              {twoCol ? "🔲 한 화면" : "🔳 두 화면"}
             </button>
           )}
           <button
             className={`btn btn-kill ${status.killSwitch ? "kill-on" : ""}`}
-            title="켜면 신규 주문이 잠기고, 미체결 주문·조건주문을 전량 취소합니다(계산·조회는 가능)"
+            title="비상 정지 버튼이에요. 켜면 새 주문이 막히고, 아직 안 나간 주문·조건주문을 모두 취소합니다(계산·조회는 그대로 됩니다)."
             onClick={async () => {
               const turningOn = !status.killSwitch;
               if (
                 turningOn &&
                 !window.confirm(
-                  ["킬 스위치를 켭니다.", "", "신규 주문이 잠기고, 미체결 주문·조건주문을 전량 취소합니다.", "계속할까요?"].join("\n"),
+                  ["🛑 비상 정지를 켭니다.", "", "지금부터 새 주문이 막히고, 아직 체결 안 된 주문과 조건주문을 모두 취소합니다.", "", "계속할까요?"].join("\n"),
                 )
               )
                 return;
@@ -1557,7 +1561,7 @@ ${msg}
               refreshStatus();
             }}
           >
-            {status.killSwitch ? "🔴 주문 잠금 중" : "⭘ 킬 스위치"}
+            {status.killSwitch ? "🔴 비상 정지 중" : "🛑 비상 정지"}
           </button>
         </div>
       </header>
@@ -1615,7 +1619,7 @@ ${msg}
                 checked={!!settings?.liveOrdersEnabled}
                 onChange={(e) => toggleLiveOrders(e.target.checked)}
               />
-              <b>{settings?.liveOrdersEnabled ? "🔴 실주문 ON" : "🔒 실주문 OFF (모의)"}</b>
+              <b>{settings?.liveOrdersEnabled ? "🔴 실주문 ON" : "🔒 실주문 OFF (연습)"}</b>
             </label>
             <div className="sb-item">
               <span className="sb-k">예수금</span>
@@ -1636,7 +1640,7 @@ ${msg}
               <b>{status.closedReason ? `휴장 · ${status.closedReason}` : SESSION_LABEL[status.session]}</b>
               {status.closedReason
                 ? status.nextOpenNote && <span className="hint"> · 다음 개장 {status.nextOpenNote}</span>
-                : cap && <span className="hint"> · 시드 {cap.sessionPct}%</span>}
+                : cap && <span className="hint"> · 매수비율 {cap.sessionPct}%</span>}
             </div>
             <button className="mini" disabled={busy} onClick={() => autoLoad(committedSymbol)} title="예수금·시세·수량 다시 불러오기">
               ↻ 새로고침
@@ -1669,13 +1673,13 @@ ${msg}
                   )}
                 </div>
               </div>
-              {quoteErr && <p className="danger small">⚠ 시세 조회 실패: {quoteErr} — [설정]에서 키·계좌 확인</p>}
+              {quoteErr && <p className="danger small">⚠ 시세를 못 불러왔어요: {quoteErr} — [설정 → 토스 연결]에서 키·계좌를 확인하세요</p>}
               <div className="hint small">
                 환율{" "}
                 {fx
-                  ? `1 USD = ₩${fx.toLocaleString()} (${fxSource === "toss" ? "매매기준율·참고용" : "수동"})`
-                  : "미조회"}
-                {" · 원화는 참고 환산이며 실제 주문·체결은 달러 기준"}
+                  ? `1달러 = ₩${fx.toLocaleString()} (${fxSource === "toss" ? "참고용" : "직접 입력"})`
+                  : "아직 안 불러옴"}
+                {" · 원화는 참고용이고, 실제 주문·체결은 달러로 합니다"}
               </div>
               {fxFailed && (
                 <div className="form-row">
@@ -1703,7 +1707,7 @@ ${msg}
                   <label>EMA200 $
                     <input type="text" inputMode="decimal" placeholder="예: 11.10" value={ema200} onChange={(e) => isNumericDraft(e.target.value) && setEma200(e.target.value)} />
                   </label>
-                  <span className="hint">전봉종가~EMA200을 3등분해 1·2·3분할 산출 (전봉종가 &gt; EMA200 필수)</span>
+                  <span className="hint">직전에 <b>마감된 봉의 종가</b>와 <b>EMA200</b>(가격 200개의 평균을 이은 선) 사이를 3등분해 <b>1·2·3차 매수가</b>를 냅니다. (전봉 종가가 EMA200보다 위여야 계산돼요.)</span>
                 </div>
               )}
               {tech === "orderbook" && (
@@ -1711,7 +1715,7 @@ ${msg}
                   <label>매수벽 가격 $
                     <input type="text" inputMode="decimal" placeholder="예: 11.33" value={wallPrice} onChange={(e) => isNumericDraft(e.target.value) && setWallPrice(e.target.value)} />
                   </label>
-                  <span className="hint">진입 = 벽 + 1틱. 벽 판단은 사람 몫</span>
+                  <span className="hint"><b>매수벽</b>(사려는 주문이 두껍게 쌓인 가격)보다 <b>한 칸(1틱) 위</b>에서 삽니다. 어디가 벽인지는 호가창을 보고 직접 정하세요.</span>
                 </div>
               )}
               {tech === "candle" && (
@@ -1721,7 +1725,7 @@ ${msg}
                   </label>
                   <label className="radio">
                     <input type="checkbox" checked={candleYang} onChange={(e) => setCandleYang(e.target.checked)} />
-                    전봉이 양봉(종가&gt;시가)임을 확인
+                    직전 봉이 <b>양봉</b>(마감가가 시작가보다 높음)인지 확인
                   </label>
                 </div>
               )}
@@ -1753,10 +1757,10 @@ ${msg}
                     <div className="seed-line">
                       <span>
                         <span className="tag">{SESSION_LABEL[cap.session]}</span>
-                        시드 <b>{cap.sessionPct}%</b> 설정 중 ·{" "}
+                        매수비율 <b>{cap.sessionPct}%</b> 적용 중 ·{" "}
                         {cap.seedQty != null ? <>제안 <b>{cap.seedQty.toLocaleString()}주</b></> : "제안 —"}
                         {cap.seedUsd != null && (
-                          <span className="hint"> (시드 {usdKrw(cap.seedUsd, fx)} × {cap.sessionPct}% {cap.seedBasis === "fixed" ? "· 고정" : "· 예수금"})</span>
+                          <span className="hint"> (기준금액 {usdKrw(cap.seedUsd, fx)} × {cap.sessionPct}% {cap.seedBasis === "fixed" ? "· 고정" : "· 예수금"})</span>
                         )}
                       </span>
                       {cap.seedQty != null && cap.seedQty > 0 && (
@@ -1778,7 +1782,7 @@ ${msg}
                     </div>
                   </>
                 ) : (
-                  <span className="hint">종목을 입력하면 세션 시드·주문가능·보유 수량이 자동 표시됩니다.</span>
+                  <span className="hint">종목을 입력하면 매수비율 제안·주문가능·보유 수량이 자동으로 표시됩니다.</span>
                 )}
               </div>
               {calcErr && <p className="danger">⚠ {calcErr}</p>}
@@ -1803,11 +1807,11 @@ ${msg}
                     <input
                       type="text"
                       className="split-memo-input"
-                      placeholder="메모(선택): 예) 데이마켓 눌림목 후보"
+                      placeholder="메모(안 써도 됨): 예) 데이마켓에서 눌렸다 올라오는 자리"
                       value={splitMemo}
                       onChange={(e) => setSplitMemo(e.target.value)}
                     />
-                    <button className="mini btn-save" onClick={() => void saveCurrentSplit()} title="이 종목의 3개 타점을 기록으로 저장(앱을 껐다 켜도 유지)">
+                    <button className="mini btn-save" onClick={() => void saveCurrentSplit()} title="이 종목의 1·2·3차 매수가를 기록으로 저장(앱을 껐다 켜도 유지)">
                       💾 기록 저장
                     </button>
                     {splitSaved && <span className="ok split-saved-msg">{splitSaved}</span>}
@@ -1816,10 +1820,10 @@ ${msg}
                     <thead>
                       <tr>
                         <th>분할</th>
-                        <th>진입가</th>
+                        <th>진입가<span className="wide-only"> (매수)</span></th>
                         <th>익절 (+{tpPct}%)</th>
                         <th>손절 (−{slPct}%)</th>
-                        <th>투입액 ({qty || "?"}주)</th>
+                        <th>드는 돈 ({qty || "?"}주)</th>
                         <th>주문</th>
                       </tr>
                     </thead>
@@ -1832,25 +1836,25 @@ ${msg}
                           <td className="danger">{usdKrw(lv.sl, fx)}</td>
                           <td>{usdKrw(lv.entry * (toNum(qty) ?? 0), fx)}</td>
                           <td className="order-cell">
-                            <button className="mini btn-buy" disabled={status.killSwitch} onClick={() => confirmEntry(lv)}>진입 지정가</button>
-                            <button className="mini btn-oto" disabled={status.killSwitch} onClick={() => confirmOto(lv)} title="사면서 익절까지 한 번에(손절 미포함)">진입+익절(OTO)</button>
-                            <button className="mini btn-oco" disabled={status.killSwitch} onClick={() => openOcoEditor(lv)} title="이미 보유 중일 때 익절+손절 동시">조건주문(익절+손절)</button>
+                            <button className="mini btn-buy" disabled={status.killSwitch} onClick={() => confirmEntry(lv)} title="이 가격에 사기만 합니다(지정가 = 가격을 정해 두는 주문)">매수만 (지정가)</button>
+                            <button className="mini btn-oto" disabled={status.killSwitch} onClick={() => confirmOto(lv)} title="사자마자 익절 주문까지 자동으로 걸립니다. 손절은 안 걸리니 직접 챙기세요.">매수+익절 자동</button>
+                            <button className="mini btn-oco" disabled={status.killSwitch} onClick={() => openOcoEditor(lv)} title="이미 보유 중일 때, 익절과 손절을 동시에 걸어 둡니다(한쪽 체결되면 다른쪽 자동 취소)">익절+손절 걸기</button>
                           </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                   <p className="hint">
-                    💡 1·2·3분할은 <b>동등한 후보</b>입니다(어느 것도 추천 아님). 주문 3종:
-                    <br />· <b>진입 지정가</b> = 매수만. · <b>진입+익절(OTO)</b> = 사면서 익절까지 한 번에(<b>손절은 수동</b>). · <b>조건주문(익절+손절)</b> = <b>이미 보유 중</b>일 때 익절·손절 동시.
-                    <br />모든 감시는 토스 서버가 하므로 앱을 꺼도 작동합니다.
-                    {status.dryRun && " (현재 주문 잠금 — 전송 대신 모의 기록만)"}
+                    💡 1·2·3차 매수가는 <b>어느 것이 낫다고 정해진 게 아닙니다</b>(취향껏 고르세요). 버튼 3개 뜻:
+                    <br />· <b>매수만 (지정가)</b> = 이 가격에 사기만. · <b>매수+익절 자동</b> = 사자마자 익절까지 자동(<b>손절은 직접</b>). · <b>익절+손절 걸기</b> = <b>이미 갖고 있을 때</b> 익절·손절 동시.
+                    <br />익절·손절 감시는 <b>토스 서버가 대신</b> 해줘서, 앱을 꺼 둬도 작동합니다.
+                    {status.dryRun && " (지금은 주문 잠금 — 실제로 안 나가고 연습 기록만)"}
                   </p>
                 </>
               ) : (
                 <div className="result-empty hint">
-                  왼쪽에 종목·재료·익절/손절%를 입력하면 <b>자동으로 계산</b>되어 여기 표가 나타납니다.
-                  <br />(계산·조회 버튼을 따로 누를 필요가 없습니다.)
+                  왼쪽에 종목·필요한 값·익절/손절%를 넣으면 <b>자동으로 계산</b>돼 여기 표가 나타납니다.
+                  <br />(계산·조회 버튼을 따로 누를 필요가 없어요.)
                 </div>
               )}
             </section>
@@ -1876,25 +1880,26 @@ ${msg}
         <main className="grid">
           <section className="card wide">
             <div className="split-list-head">
-              <h2>탐색 <span className="hint">(거래량 상위 60종목 스캔)</span></h2>
+              <h2>탐색 <span className="hint">(거래량 많은 종목에서 매수 후보 자동 찾기)</span></h2>
               <button className="mini btn-start" disabled={screenBusy} onClick={() => void runScan()}>
                 {screenBusy ? "스캔 중…" : "🔍 스캔"}
               </button>
             </div>
             <p className="hint">
-              거래량 상위 60종목(<b>ETF·레버리지·인버스 제외</b>)을 훑어 <b>①현재가 $1~$9</b>, <b>②현재가&gt;EMA200</b>, <b>③현재가&gt;이치모쿠 구름 위</b>,
-              <b> ④장 시작 이후 최고점 뒤 첫 음봉 도지(위·아래 꼬리 둘 다 있는 것 — 망치형 배제)</b>, <b>⑤그 다음 봉도 음봉</b>이면 후보로 잡습니다.
-              도지 이후 <b>신고가가 다시 나오면 무효</b>(말아올린 종목 제외).
-              판정은 <b>하이킨아시(平均足) 캔들 기준</b>입니다(트레이딩뷰 HA 차트와 일치 — EMA200·이치모쿠·도지·음봉 모두 HA).
-              <b>형성 중인 마지막 5분봉은 제외</b>하고 <b>완성된(마감된) 봉만</b> 판정합니다(봉 마감 후 음↔양 뒤집힘 방지).
-              1분봉을 과거로 당겨 5분봉→HA로 변환해 계산합니다. <b>1~2분</b> 걸립니다.
-              <br/>🔴 <b>확정</b>(도지+다음 음봉) · 🟡 <b>관찰</b>(첫 음봉 도지, 다음 봉 대기). <b>▸ 근거</b>를 펼치면 기준 캔들을 확인할 수 있고, 다른 곳을 누르면 계산기에 종목이 채워집니다.
+              거래량 많은 종목을 훑어 <b>매수 후보</b>를 찾아 줍니다(ETF·레버리지·인버스는 제외). 아래 조건을 <b>모두</b> 만족하면 후보예요:
+              <br />① 현재가가 <b>$1~$9</b>
+              <br />② 현재가가 <b>EMA200</b>(가격 200개를 이은 평균선) <b>위</b>
+              <br />③ 현재가가 <b>이치모쿠 구름</b>(추세를 보는 띠) <b>위</b>
+              <br />④ 장 시작 뒤 최고점을 찍은 다음, <b>첫 '음봉 도지'</b> — 위·아래 꼬리가 <b>둘 다</b> 있고 몸통이 작은 봉(한쪽 꼬리만 있는 망치형은 제외)
+              <br />⑤ 그 다음 봉도 <b>음봉</b>(내린 봉)
+              <br /><span className="hint small">※ 도지 뒤에 다시 신고가가 나오면 무효. 캔들은 <b>하이킨아시</b>(노이즈를 줄여 추세를 매끈하게 보는 방식, 트레이딩뷰 'HA'와 같음)로 보고, <b>다 마감된 봉만</b> 판정합니다. 스캔에 1~2분 걸려요.</span>
+              <br />🔴 <b>확정</b> = 도지 + 다음 음봉까지 나옴 · 🟡 <b>관찰</b> = 도지는 나왔고 다음 봉 대기 중. <b>▸ 근거</b>를 펼치면 기준 캔들을 볼 수 있고, 줄을 누르면 그 종목이 계산기에 채워집니다.
             </p>
 
             {/* [v0.11.0] 사용자 조절 필터: 종목수 · 가격대 · 도지 몸통비율 */}
             <div className="screen-controls">
               <label className="str-field" style={{ flex: 1, maxWidth: 360 }}>
-                <span className="sb-k">음봉 도지 몸통비율 상한: <b>{(bodyRatio * 100).toFixed(0)}%</b> (작을수록 엄격)</span>
+                <span className="sb-k">도지로 인정할 <b>몸통 크기 상한</b>: <b>{(bodyRatio * 100).toFixed(0)}%</b> <span className="hint">(작을수록 깐깐하게)</span></span>
                 <input type="range" min={0.1} max={0.5} step={0.05} value={bodyRatio} disabled={screenBusy}
                   onChange={(e) => setBodyRatio(Number(e.target.value))} />
               </label>
@@ -1957,11 +1962,11 @@ ${msg}
                     {insufficient > 0 && <span> · 데이터 부족 {insufficient}개 제외</span>}
                   </p>
                   {cand.length === 0 ? (
-                    <div className="result-empty hint">조건을 만족하는 후보가 없습니다. (몸통비율을 높이거나 장중에 다시 시도해 보세요.)</div>
+                    <div className="result-empty hint">조건에 맞는 후보가 없어요. (위 '몸통 크기 상한'을 조금 올리거나, 장이 열린 시간에 다시 눌러 보세요.)</div>
                   ) : (
                     <table className="result-table screen-table">
                       <thead>
-                        <tr><th>근거</th><th>상태</th><th>순위</th><th>종목</th><th>현재가</th><th>EMA200</th><th>구름top</th><th>세션고점</th><th>근접도</th></tr>
+                        <tr><th>근거</th><th>상태</th><th>순위</th><th>종목</th><th>현재가</th><th>EMA200</th><th>구름 위</th><th>장중 고점</th><th>근접도</th></tr>
                       </thead>
                       <tbody>
                         {cand.map((r) => {
@@ -2011,7 +2016,7 @@ ${msg}
                           <tbody>
                             {near.map(({ r, passed, reasons }) => (
                               <tr key={r.symbol} className="screen-row" onClick={() => pickScreenSymbol(r)} title="클릭하면 계산기로 이동 + 이 종목의 전봉종가·EMA200이 자동 입력됩니다(수정 가능)">
-                                <td title="넘은 하드게이트(가격대·EMA200·구름) 수">{passed}/3</td>
+                                <td title="꼭 통과해야 하는 3가지(가격대·EMA200 위·구름 위) 중 몇 개를 넘겼는지">{passed}/3</td>
                                 <td>{r.rank}</td>
                                 <td><b>{r.symbol}</b></td>
                                 <td>{r.price != null ? usdKrw(r.price, fx) : "—"}</td>
@@ -2028,7 +2033,7 @@ ${msg}
             })()}
 
             {!screenRun && !screenBusy && (
-              <div className="result-empty hint">[🔍 스캔]을 누르면 설정한 종목수·가격대로 훑어 후보를 찾습니다. (읽기 전용 — 주문과 무관)</div>
+              <div className="result-empty hint">[🔍 스캔]을 누르면 정해 둔 종목 수·가격대로 훑어 매수 후보를 찾아 줍니다. (보기만 하는 기능 — 주문과는 무관해요)</div>
             )}
           </section>
         </main>
@@ -2161,11 +2166,12 @@ ${msg}
       {paneTab === "strength" && (
         <main className="grid">
           <section className="card wide">
-            <h2>체결강도 기록 <span className="hint">(매수체결량 ÷ 매도체결량 × 100)</span></h2>
+            <h2>체결강도 기록 <span className="hint">(사려는 힘 vs 팔려는 힘)</span></h2>
             <p className="hint">
-              종목을 정하고 <b>[기록 시작]</b>을 누르면, 켜져 있는 동안 <b>주기적으로 체결(틱)</b>을 받아
-              <b> 틱룰(업틱=매수·다운틱=매도)</b>로 체결강도를 계산해 시계열로 저장합니다(앱을 껐다 켜도 유지).
-              <b> 100 위=매수 우세, 아래=매도 우세.</b> ※ 방향은 <b>추정치</b>입니다(토스가 매수/매도 방향을 직접 주지 않음).
+              <b>체결강도</b>는 방금 사고팔린 양을 비교해 <b>지금 어느 쪽 힘이 센지</b> 보는 숫자예요
+              (매수 체결량 ÷ 매도 체결량 × 100 → <b>100보다 크면 사는 힘이, 작으면 파는 힘이 우세</b>).
+              <br />종목을 정하고 <b>[기록 시작]</b>을 누르면, 켜져 있는 동안 체결 내역을 조금씩 받아 이 숫자를 계산해 시간 순서로 쌓습니다(앱을 껐다 켜도 유지).
+              <br /><span className="hint small">※ 토스가 매수/매도 방향을 직접 알려 주지 않아, 값이 오르며 체결되면 매수·내리며 체결되면 매도로 <b>추정</b>합니다. 참고용이에요.</span>
             </p>
 
             {/* --- 조작줄: 종목 · 간격 · 시작/중지 --- */}
@@ -2267,9 +2273,10 @@ ${msg}
             )}
 
             <p className="hint">
-              💡 스캘핑 참고: 하락 중 <b>체결강도 바닥 반전</b>=삼분할 진입 근거, 반등 후 <b>정점 꺾임</b>=익절 근거.
-              특히 <b>강세 다이버전스</b>(가격은 신저점인데 강도는 직전보다 높음)는 반등 임박 신호입니다.
-              <br/>⚠️ <b>추정치·보조지표</b>입니다(토스가 방향을 직접 주지 않아 틱룰로 추정). <b>단독 판단 금지</b> — 가격·거래량·캔들과 함께 보세요.
+              💡 짧게 치고 빠질 때 참고: 내리던 중 <b>체결강도가 바닥에서 반등</b>하면 매수 참고,
+              오르던 중 <b>고점에서 꺾이면</b> 익절 참고. 특히 <b>가격은 더 내렸는데 체결강도는 오히려 오르면</b>
+              (＝사는 힘이 살아나는 신호) 반등이 가까울 수 있어요.
+              <br/>⚠️ 이 값은 <b>참고용 보조 신호</b>일 뿐이에요(방향을 추정한 값). <b>이것만 보고 결정하지 말고</b> 가격·거래량·캔들과 함께 보세요.
             </p>
           </section>
         </main>
@@ -2280,17 +2287,17 @@ ${msg}
         <div className="grid">
           <section className="card wide">
             <div className="split-list-head">
-              <h2>매매분석 <span className="hint small">내 매매를 진입→청산 한 사이클로 자동 추적</span></h2>
+              <h2>매매분석 <span className="hint small">산 뒤 판 것까지 한 묶음으로 자동 정리</span></h2>
               <button className="mini" disabled={analysisBusy} onClick={() => void loadAnalysis()}>↻ 새로고침</button>
             </div>
             <p className="hint">
-              토스 <b>실제 체결이력</b>으로, 판 매매를 <b>진입가→청산가·수량·보유기간·수익률·손익금액·승패</b>까지 자동 정리합니다.
-              카프리로 주문해 근거가 남은 매매엔 <b>기법·진입 시 체결강도</b>도 함께 보여줍니다.
+              토스에 남은 <b>실제 체결 내역</b>으로, 이미 판 매매를 <b>산 가격 → 판 가격 · 수량 · 며칠 들고 있었나 · 수익률 · 손익 금액 · 이겼나 졌나</b>까지 자동으로 정리해 줍니다.
+              카프리로 주문해 기록이 남은 매매엔 <b>어떤 기법으로 샀는지·살 때 체결강도</b>도 함께 보여줘요.
             </p>
 
-            {analysis?.source === "cache" && <div className="rp-source">💾 저장된 기록으로 표시 중 · 홈 PC 연결 시 최신 반영</div>}
+            {analysis?.source === "cache" && <div className="rp-source">💾 저장해 둔 기록으로 보는 중 · 집 PC에 연결되면 최신으로 갱신돼요</div>}
             {analysis?.source === "none" && (
-              <div className="result-empty hint">아직 저장된 매매가 없습니다. 홈 PC에 연결된 상태로 <b>주문현황·리포트</b>를 한 번 열면 체결이력이 이 기기에 쌓입니다.</div>
+              <div className="result-empty hint">아직 저장된 매매가 없어요. 집 PC에 연결된 상태(폰이면 [폰에서 쓰기])로 <b>주문현황·리포트</b>를 한 번 열면 체결 내역이 이 기기에 쌓입니다.</div>
             )}
 
             {analysis && analysis.cycles.length > 0 && (() => {
@@ -2471,7 +2478,7 @@ ${msg}
                           <span className="grow" />
                           <span className="muted small">{o.orderType === "MARKET" ? "시장가" : (o.price != null ? money(o.price, cur, null) : "—")} · {o.quantity ?? "—"}주</span>
                           {o.isOpen && (
-                            <button className="mini" disabled={status.killSwitch} onClick={async () => { await window.kyletool.cancelOrder(o.orderId).catch((e) => alert(String(e))); refreshStatusTab(); }}>취소</button>
+                            <button className="mini" disabled={status.killSwitch} onClick={async () => { await window.kyletool.cancelOrder(o.orderId).catch((e) => alert(`취소하지 못했어요: ${String(e)}`)); refreshStatusTab(); }}>취소</button>
                           )}
                           <button className="mini ghost" onClick={() => toggleExpand(o.orderId)}>{open ? "▴" : "상세 ▾"}</button>
                         </div>
@@ -2482,7 +2489,7 @@ ${msg}
                             {(o.commission != null || o.tax != null) && <div><dt>수수료·세금</dt><dd>{o.commission ?? 0}{o.tax != null ? ` · ${o.tax}` : ""}</dd></div>}
                             {o.orderedAt && <div><dt>주문시각</dt><dd>{fmtTime(o.orderedAt)}</dd></div>}
                             {o.filledAt && <div><dt>체결시각</dt><dd>{fmtTime(o.filledAt)}</dd></div>}
-                            <div><dt>유형</dt><dd>{o.orderType === "MARKET" ? "시장가" : "지정가"} · {o.timeInForce ?? "DAY"}</dd></div>
+                            <div><dt>유형</dt><dd>{o.orderType === "MARKET" ? "시장가" : "지정가"} · {o.timeInForce && o.timeInForce !== "DAY" ? o.timeInForce : "당일만"}</dd></div>
                           </dl>
                         )}
                       </div>
@@ -2496,7 +2503,11 @@ ${msg}
           {/* ── 조건 주문 (OTO/OCO) ── */}
           {ordTab !== "normal" && (
             <section className="card wide">
-              <h2>조건 주문 <span className="hint">(OTO 진입+익절 / OCO 익절+손절 · 토스 서버 감시)</span></h2>
+              <h2>조건 주문 <span className="hint">(정해 둔 가격에 닿으면 자동 실행 · 토스 서버가 대신 감시)</span></h2>
+              <p className="hint small">
+                <b>매수+익절</b> = 사면서 익절 주문까지 자동 · <b>익절+손절</b> = 갖고 있을 때 둘을 동시에 걸어 둠.
+                용어: <b>감시가</b>(이 값에 닿으면 발동) · <b>지정가</b>(실제로 낼 가격).
+              </p>
               {condRows.length === 0 ? (
                 <p className="hint">{ordStatus === "OPEN" ? "진행 중인 조건주문이 없습니다." : "종료된 조건주문이 없습니다."}</p>
               ) : (
@@ -2507,14 +2518,14 @@ ${msg}
                       <div key={c.conditionalOrderId} className="cond-card">
                         {/* 기본: 타입·종목·상태 ... 만료 */}
                         <div className="cc-head">
-                          <span className="chip chip-type">{c.type}</span>
+                          <span className="chip chip-type" title={`토스 주문 종류: ${c.type ?? "조건주문"}`}>{condTypeKo(c.type)}</span>
                           <b className="min0">{c.symbol}</b>
                           <span className="muted small">{c.quantity ?? "—"}주</span>
                           <span className={`stbadge ${c.status === "WATCHING" ? "st-submitted" : "st-filled"}`}>{condStatusKo(c.status)}</span>
                           <span className="grow" />
                           {c.expireDate && <span className="muted small">만료 {c.expireDate}</span>}
                           {c.isOpen && (
-                            <button className="mini" disabled={status.killSwitch} onClick={async () => { await window.kyletool.cancelConditional(c.conditionalOrderId).catch((e) => alert(String(e))); refreshStatusTab(); }}>삭제</button>
+                            <button className="mini" disabled={status.killSwitch} onClick={async () => { await window.kyletool.cancelConditional(c.conditionalOrderId).catch((e) => alert(`취소하지 못했어요: ${String(e)}`)); refreshStatusTab(); }}>취소</button>
                           )}
                           <button className="mini ghost" onClick={() => toggleExpand(c.conditionalOrderId)}>{open ? "▴" : "상세 ▾"}</button>
                         </div>
@@ -2534,7 +2545,7 @@ ${msg}
                             {c.first && <div className="dl-wide"><dt>① {c.type === "OTO" ? "진입" : "감시1"}</dt><dd>감시가 {c.first.triggerPrice != null ? money(c.first.triggerPrice, "USD", null) : "—"}{c.first.orderPrice != null ? ` · 지정가 ${money(c.first.orderPrice, "USD", null)}` : ""}</dd></div>}
                             {c.second && <div className="dl-wide"><dt>② {c.type === "OTO" ? "익절" : "감시2"}</dt><dd>감시가 {c.second.triggerPrice != null ? money(c.second.triggerPrice, "USD", null) : "—"}{c.second.orderPrice != null ? ` · 지정가 ${money(c.second.orderPrice, "USD", null)}` : ""}</dd></div>}
                             <div><dt>수량</dt><dd>{c.quantity ?? "—"}주</dd></div>
-                            <div><dt>유형</dt><dd>{c.orderType ?? "LIMIT"}</dd></div>
+                            <div><dt>유형</dt><dd>{c.orderType === "MARKET" ? "시장가" : "지정가"}</dd></div>
                             {c.rationale && <div className="dl-wide"><dt>매매근거</dt><dd>{rationaleLine(c.rationale)}</dd></div>}
                           </dl>
                         )}
@@ -2551,90 +2562,24 @@ ${msg}
       {/* ===== ④ 설정 (기록 탭은 v0.12.0에서 이 탭 하위 '고급·진단'으로 이동) ===== */}
       {paneTab === "settings" && settings && (
         <main className="grid">
-          {/* [v0.14.0] 화면 표시 — 손익 색 관습(미국식/한국식) */}
-          <section className="card wide">
-            <h2>🎨 화면 표시</h2>
-            <label className="radio" style={{ cursor: "pointer" }}>
-              <input type="checkbox" checked={pnlKr} onChange={(e) => setPnlKr(e.target.checked)} />
-              <span>손익 색 <b>한국식</b>으로 (이익 = <b style={{ color: "#f87171" }}>빨강</b> · 손실 = <b style={{ color: "#5b9dff" }}>파랑</b>)</span>
-            </label>
-            <p className="hint">
-              끄면 미국식(이익 = 초록 · 손실 = 빨강, 기본). 색과 함께 <b>부호(+/−)</b>도 늘 표시되어 헷갈리지 않습니다.
-              이 설정은 <b>이 기기</b>에만 저장됩니다(폰·PC 각각).
-            </p>
-          </section>
+          {/* ══════════════════════════════════════════════════════════════
+              [v0.20.0 #4 설정 재정비] 설정 탭을 '자주 쓰는 것 위 / 진단은 아래·접기'
+              6그룹으로 재배치했다. 각 기능의 로직·핸들러·저장 방식은 그대로 두고,
+              카드 순서·그룹 헤더·일부 라벨/안내문(직관화)만 손질했다.
+              순서(위→아래): ① 폰에서 쓰기 → ② 토스 연결 → ③ 동기화 → ④ 화면 표시
+                            → ⑤ 주문 기본값·안전 옵션 → ⑥ 고급·진단(접힘)
+              === '동기화'는 예전엔 두 곳(매매이력·토스키)에 흩어져 '동기화'라는 말이
+                  두 번 나와 헷갈렸다 → ③ 한 카드 안에 ①매매이력 ②토스키 로 나눠 통합. ═══ */}
 
-          {/* [v0.10.0] 매매 이력 동기화 — PC가 암호화해 올리고, 폰이 받아서 본다 */}
-          <section className="card wide">
-            <h2>☁️ 매매 이력 동기화</h2>
-            <p className="hint">
-              집 PC가 <b>매매 이력을 자물쇠로 잠가</b> 인터넷에 올려 두면, 폰이 같은 비밀번호로 풀어서 봅니다.
-              <br />
-              → <b>집 PC가 꺼져 있어도, 회사에서도</b> 매매 리포트가 보입니다.
-              <br />
-              <b>토스 키·계좌번호·비밀번호는 절대 올라가지 않습니다</b>(매매 결과만, 그것도 암호문으로).
-            </p>
-            <div className="row">
-              <label>동기화 비밀번호 (6자 이상 · PC와 폰에 같은 값을 넣으세요)</label>
-              <input
-                type="password"
-                value={syncTradePass}
-                onChange={(e) => setSyncTradePass(e.target.value)}
-                placeholder="예: 나만 아는 문장"
-                autoComplete="off"
-              />
-            </div>
-            <div className="row" style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
-              {!isWebApp && (
-                <button
-                  className="btn"
-                  disabled={syncTradeBusy || syncTradePass.length < 6}
-                  onClick={async () => {
-                    setSyncTradeBusy(true);
-                    try {
-                      await window.kyletool.tradeSyncPass?.(syncTradePass); // 다음부터 자동 업로드
-                      const r = await window.kyletool.tradeSyncPush(syncTradePass);
-                      setSyncTradeMsg(r.message);
-                    } finally {
-                      setSyncTradeBusy(false);
-                    }
-                  }}
-                >
-                  ⬆ 지금 올리기 (이 PC)
-                </button>
-              )}
-              <button
-                className="btn"
-                disabled={syncTradeBusy || syncTradePass.length < 6}
-                onClick={async () => {
-                  setSyncTradeBusy(true);
-                  try {
-                    await window.kyletool.tradeSyncPass?.(syncTradePass); // 다음부터 자동으로 받아온다
-                    const r = await window.kyletool.tradeSyncPull(syncTradePass);
-                    setSyncTradeMsg(r.message);
-                    if (r.ok) void loadReport();
-                  } finally {
-                    setSyncTradeBusy(false);
-                  }
-                }}
-              >
-                ⬇ 지금 받기 {isWebApp ? "(이 폰)" : ""}
-              </button>
-            </div>
-            {syncTradeMsg && <p className="hint">{syncTradeMsg}</p>}
-            <p className="hint">
-              한 번 넣어 두면 다음부터는 <b>자동</b>입니다 — PC는 새 매매가 생길 때 올리고, 폰은 리포트를 열 때 받아옵니다.
-            </p>
-          </section>
-
-          {/* [폰에서 쓰기] 데스크톱 앱에서만 보인다(웹앱에는 이 기능이 없음) */}
+          {/* ── ① 폰에서 쓰기 (데스크톱 앱에서만 보임 — 웹앱엔 이 기능 없음) ── */}
           {window.kyletool.phoneStart && (
             <section className="card wide">
               <h2>📱 폰에서 쓰기</h2>
               <p className="hint">
-                토스 키는 <b>등록된 인터넷 주소(IP)에서만</b> 쓸 수 있어, 클라우드 서버로는 막힙니다.
-                이 PC의 주소는 이미 허용돼 있으므로, <b>이 앱이 켜져 있는 동안 이 PC가 폰의 중계소</b>가 됩니다.
-                아래 [폰 연결 켜기]를 누르고 폰 카메라로 QR을 찍으면 폰에서도 전 기능을 쓸 수 있습니다.
+                이 PC를 <b>중계소</b> 삼아 폰에서도 카프리를 씁니다. 토스는 <b>등록된 인터넷 주소에서만</b> 열려서,
+                이 PC(주소가 이미 허용됨)를 거쳐 가는 방식이에요.
+                <br />
+                아래 [폰 연결 켜기]를 누르고 <b>폰 카메라로 QR을 찍으면</b> 끝 — 폰에서도 시세·주문까지 다 됩니다.
               </p>
               <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 <button
@@ -2659,7 +2604,7 @@ ${msg}
                   <img src={phone.qr} alt="폰 접속 QR" width={200} height={200} style={{ borderRadius: 8 }} />
                   <div style={{ minWidth: 0 }}>
                     <p className="hint" style={{ margin: "0 0 6px" }}>
-                      폰 카메라로 QR을 찍으세요. (또는 아래 주소를 폰 사파리에 붙여넣기)
+                      폰 카메라로 QR을 찍으세요. (또는 아래 주소를 폰 인터넷 창에 붙여넣기)
                     </p>
                     <input readOnly value={phone.url ?? ""} onFocus={(e) => e.currentTarget.select()} style={{ width: "100%" }} />
                     <button
@@ -2678,25 +2623,32 @@ ${msg}
             </section>
           )}
 
+          {/* ── ② 토스 연결 (모드 · 실주문 · 토스 키 · 계좌) ──
+              이 4가지는 '토스에 연결하고, 진짜 주문을 낼지'를 정하는 한 덩어리다.
+              모드·키·계좌는 아래 [연결 정보 저장] 한 버튼으로 함께 저장(saveSettings),
+              실주문 켜기는 즉시 저장(독립)이라 위치만 같이 두고 로직은 그대로. */}
           <section className="card wide">
-            <h2>설정</h2>
+            <h2>🔑 토스 연결</h2>
+            <p className="hint">
+              토스 증권에 연결하는 부분이에요. <b>토스 키를 넣어야</b> 시세·잔고·주문이 됩니다.
+            </p>
             <div className="settings-block">
-              <h3>모드</h3>
+              <h3>모드 (연습 / 실서버)</h3>
               <label className="radio">
                 <input type="radio" checked={formMode === "mock"} onChange={() => setFormMode("mock")} />
-                <b>연습 모드</b> — 앱 안의 가짜 토스 서버. 실제 돈과 무관, 주문 흐름까지 연습 가능.
+                <b>연습 모드</b> — 앱 안의 <b>가짜 서버</b>로 돕니다. 실제 돈과 무관, 주문 넣는 연습까지 마음껏.
               </label>
               <label className="radio">
                 <input type="radio" checked={formMode === "live"} onChange={() => setFormMode("live")} />
-                <b>실서버 모드</b> — 실제 시세·잔고·환율 조회. <b>주문은 잠금(드라이런)</b>: 소액(1주) 테스트를 사람이
-                직접 통과시킨 뒤 별도 버전에서 해금됩니다.
+                <b>실서버 모드</b> — 실제 시세·잔고·환율을 봅니다. 단 <b>주문은 아직 잠금</b>(연습만 되고 실제로는
+                안 나감). 소액(1주) 테스트를 사람이 직접 통과시킨 뒤 다음 버전에서 풀립니다.
               </label>
             </div>
             <div className="settings-block">
-              <h3>실주문 활성화 {settings.liveOrdersEnabled ? "🔴 켜짐" : "🔒 꺼짐(안전)"}</h3>
+              <h3>실주문 켜기 {settings.liveOrdersEnabled ? "🔴 켜짐" : "🔒 꺼짐(안전)"}</h3>
               <p className="hint">
-                꺼져 있으면 주문 버튼을 눌러도 <b>실제 주문이 나가지 않고 모의 기록만</b> 남습니다.
-                켜면 <b>실제 돈으로 주문이 전송</b>됩니다. 연습 모드에서는 이 설정과 무관하게 가짜 서버로만 갑니다.
+                꺼져 있으면 주문 버튼을 눌러도 <b>실제 주문은 안 나가고 연습 기록만</b> 남습니다.
+                켜면 <b>진짜 돈으로 주문이 나갑니다.</b> (연습 모드에서는 이 설정과 상관없이 늘 가짜 서버로만 갑니다.)
               </p>
               <label className="radio">
                 <input
@@ -2721,165 +2673,128 @@ ${msg}
                     await refreshStatus();
                   }}
                 />
-                <b>실제 주문 전송 허용</b> — 켜기 전에 경고 확인을 거칩니다
+                <b>진짜 돈으로 주문 나가게 허용</b> — 켤 때 한 번 더 확인을 거칩니다
               </label>
             </div>
-
             <div className="settings-block">
-              <h3>주문 편의·안전 옵션 (전부 선택)</h3>
+              <h3>토스 키 {settings.hasClientId && settings.hasClientSecret ? "✅ 저장됨" : "❌ 아직 없음"}</h3>
               <p className="hint">
-                기본 상태에서 <b>앱은 주문을 막지 않습니다.</b> 아래는 원할 때만 켜는 보조 기능입니다.
+                토스 개발자센터에서 받은 키를 넣는 곳이에요. 키는 <b>이 컴퓨터 안에만</b> 저장되고(본인만 읽기),
+                한 번 저장하면 <b>화면에 다시 보이지 않습니다</b>(보안). 바꿀 때만 다시 입력하세요.
               </p>
-              <label className="radio">
-                <input
-                  type="checkbox"
-                  checked={settings.priceGuardEnabled}
-                  onChange={async (e) => {
-                    await window.kyletool.setPriceGuard(e.target.checked, toNum(guardPct) ?? undefined);
-                    setSettings(await window.kyletool.getSettings());
-                  }}
-                />
-                <b>오입력 방지</b> — 현재가에서 크게 벗어난 가격이면 경고하고 막기
-              </label>
-              <div className="form-row">
-                <label>
-                  허용 차이 (%)
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    value={guardPct}
-                    onChange={(e) => isNumericDraft(e.target.value) && setGuardPct(e.target.value)}
-                    placeholder="예: 15"
-                  />
-                </label>
-                <button
-                  className="mini"
-                  onClick={async () => {
-                    await window.kyletool.setPriceGuard(settings.priceGuardEnabled, toNum(guardPct) ?? undefined);
-                    setSettings(await window.kyletool.getSettings());
-                    setSavedMsg("오입력 방지 한도를 저장했습니다.");
-                    setTimeout(() => setSavedMsg(""), 3000);
-                  }}
-                >
-                  한도 저장
-                </button>
-                <span className="hint">현재: {settings.priceGuardEnabled ? `켜짐 (±${settings.priceGuardPct}%)` : "꺼짐 (막지 않음)"}</span>
-              </div>
-              <label className="radio">
-                <input
-                  type="checkbox"
-                  checked={settings.skipOrderConfirm}
-                  onChange={async (e) => {
-                    await window.kyletool.setSkipConfirm(e.target.checked);
-                    setSettings(await window.kyletool.getSettings());
-                    await refreshStatus();
-                  }}
-                />
-                <b>주문 확인 팝업 건너뛰기</b> — 버튼을 누르면 바로 전송(오발주 위험 ↑)
-              </label>
-            </div>
-
-            {/* [v0.8.3] 기본 손익비 설정 */}
-            <div className="settings-block">
-              <h3>기본 손익비 (익절% / 손절%)</h3>
-              <p className="hint">
-                계산기 <b>익절%·손절% 칸의 시작값</b>을 정해 둡니다. 앱을 껐다 켜거나 종목을 바꿔도 이 값이 유지됩니다
-                (계산할 때 그때그때 수정은 여전히 가능). 현재 기본값: <b>익절 {settings.defaultTpPct ?? 2}% / 손절 {settings.defaultSlPct ?? 10}%</b>
-              </p>
-              <div className="form-row">
-                <label>기본 익절 %
-                  <input type="text" inputMode="decimal" value={defForm.tp} onChange={(e) => isNumericDraft(e.target.value) && setDefForm({ ...defForm, tp: e.target.value })} placeholder="예: 2" />
-                </label>
-                <label>기본 손절 %
-                  <input type="text" inputMode="decimal" value={defForm.sl} onChange={(e) => isNumericDraft(e.target.value) && setDefForm({ ...defForm, sl: e.target.value })} placeholder="예: 10" />
-                </label>
-                <button className="btn btn-start" onClick={saveDefaults}>기본 손익비 저장</button>
-              </div>
-              <p className="hint small">공장 초기값은 익절 2% / 손절 10%입니다. 소수점(예: 2.5) 입력 가능, 0 이하는 저장되지 않습니다.</p>
-            </div>
-
-            {/* [v0.3.0] 세션별 시드 비율 설정 */}
-            <div className="settings-block">
-              <h3>세션별 시드 비율 (진입 수량 제안)</h3>
-              <p className="hint">
-                장(세션)마다 <b>시드의 몇 %로 진입</b>할지 정합니다. 계산기 화면이 현재 세션을 자동 판정해
-                <b> 제안 수량</b>을 보여줍니다(강제 아님 — 다른 수량을 넣어도 그대로 전송).
-              </p>
-              <div className="form-row">
-                <label>데이마켓 %
-                  <input type="text" inputMode="decimal" value={seedForm.day} onChange={(e) => isNumericDraft(e.target.value) && setSeedForm({ ...seedForm, day: e.target.value })} placeholder="90" />
-                </label>
-                <label>프리마켓 %
-                  <input type="text" inputMode="decimal" value={seedForm.pre} onChange={(e) => isNumericDraft(e.target.value) && setSeedForm({ ...seedForm, pre: e.target.value })} placeholder="50" />
-                </label>
-                <label>정규장(본장) %
-                  <input type="text" inputMode="decimal" value={seedForm.regular} onChange={(e) => isNumericDraft(e.target.value) && setSeedForm({ ...seedForm, regular: e.target.value })} placeholder="50" />
-                </label>
-              </div>
-              <p className="hint">시드 기준(무엇의 몇 %인지):</p>
-              <label className="radio">
-                <input type="radio" checked={seedForm.basis === "auto"} onChange={() => setSeedForm({ ...seedForm, basis: "auto" })} />
-                <b>매수가능금액 자동 사용</b> — 지금 계좌의 예수금(달러)을 시드로 (기본)
-              </label>
-              <label className="radio">
-                <input type="radio" checked={seedForm.basis === "fixed"} onChange={() => setSeedForm({ ...seedForm, basis: "fixed" })} />
-                <b>고정 시드 금액 직접 입력</b> — 아래 달러 금액을 시드로 사용
-              </label>
-              {seedForm.basis === "fixed" && (
-                <div className="form-row">
-                  <label>고정 시드 $
-                    <input type="text" inputMode="decimal" value={seedForm.fixed} onChange={(e) => isNumericDraft(e.target.value) && setSeedForm({ ...seedForm, fixed: e.target.value })} placeholder="예: 1000" />
-                  </label>
-                </div>
-              )}
-              <div className="form-row">
-                <button className="btn btn-start" onClick={saveSeed}>시드 설정 저장</button>
-                <span className="hint">예) 데이 90%, 시드 $1,000, 현재가 $10 → 제안 약 90주</span>
-              </div>
-            </div>
-
-            <div className="settings-block">
-              <h3>토스 API 키 {settings.hasClientId && settings.hasClientSecret ? "✅ 저장됨" : "❌ 미등록"}</h3>
-              <p className="hint">키는 이 컴퓨터의 앱 데이터 폴더(.env, 본인만 읽기)에만 저장되고 화면에 다시 표시되지 않습니다.</p>
               <div className="form-col">
                 <label>
-                  Client ID
+                  Client ID (앱 아이디)
                   <input
                     type="password"
                     value={formId}
                     onChange={(e) => setFormId(e.target.value)}
-                    placeholder={settings.hasClientId ? "(저장됨 — 변경 시에만)" : ""}
+                    placeholder={settings.hasClientId ? "(저장됨 — 바꿀 때만 입력)" : ""}
                   />
                 </label>
                 <label>
-                  Client Secret
+                  Client Secret (앱 비밀키)
                   <input
                     type="password"
                     value={formSecret}
                     onChange={(e) => setFormSecret(e.target.value)}
-                    placeholder={settings.hasClientSecret ? "(저장됨 — 변경 시에만)" : ""}
+                    placeholder={settings.hasClientSecret ? "(저장됨 — 바꿀 때만 입력)" : ""}
                   />
                 </label>
                 <label>
-                  계좌 번호(accountSeq)
+                  계좌 번호 <span className="hint">(보통 1번 — 여러 계좌면 순서 번호)</span>
                   <input value={formAccount} onChange={(e) => setFormAccount(e.target.value)} placeholder="예: 1" />
                 </label>
               </div>
             </div>
             <div className="form-row">
               <button className="btn btn-start" onClick={saveSettings}>
-                설정 저장
+                연결 정보 저장 (모드·키·계좌)
               </button>
               {savedMsg && <span className="ok">{savedMsg}</span>}
             </div>
+          </section>
 
-            {/* [v0.8.1] 키 클라우드 동기화 (멀티유저) — 로그인 → 키+마스터비번 → 완료 */}
+          {/* ── ③ 동기화 (여러 기기에서 같이 쓰기) ──
+              예전엔 '매매 이력 동기화'와 '키 클라우드 동기화'가 서로 떨어져 있어
+              둘 다 '동기화'라 헷갈렸다 → 한 카드에 두 소절로 합쳐 무엇을 옮기는지 명확히. */}
+          <section className="card wide">
+            <h2>☁️ 동기화 (폰·PC에서 같이 쓰기)</h2>
+            <p className="hint">
+              폰과 PC가 같은 정보를 보게 맞춰 줍니다. 옮기는 대상이 다른 <b>두 가지</b>가 있어요 —
+              <b>① 매매 이력</b>(리포트용)과 <b>② 토스 키</b>(연결용).
+            </p>
+
+            {/* ③-① 매매 이력 동기화 (구 '☁️ 매매 이력 동기화' 카드) */}
             <div className="settings-block">
-              <h3>🔐 키 클라우드 동기화 (여러 기기 · 사용자별 격리)</h3>
+              <h3>① 매매 이력 — 리포트를 다른 기기에서도 보기</h3>
               <p className="hint">
-                <b>사람마다 자기 계정</b>에 <b>자기 토스 키</b>를 두고, 자기 기기들끼리만 공유합니다. 다른 사람의 키는
-                서로 <b>절대 볼 수 없습니다</b>. 키는 <b>마스터 비밀번호로 암호화</b>돼 <b>암호문만</b> 올라가므로,
-                운영자조차 남의 평문 키를 못 봅니다.
+                집 PC가 <b>매매 이력을 자물쇠로 잠가</b> 인터넷에 올려 두면, 폰이 같은 비밀번호로 풀어서 봅니다.
+                → <b>집 PC가 꺼져 있어도, 회사에서도</b> 매매 리포트가 보여요.
+                <br />
+                <b>토스 키·계좌번호·비밀번호는 절대 올라가지 않습니다</b>(매매 결과만, 그것도 암호문으로).
+              </p>
+              <div className="row">
+                <label>동기화 비밀번호 (6자 이상 · PC와 폰에 <b>같은 값</b>을 넣으세요)</label>
+                <input
+                  type="password"
+                  value={syncTradePass}
+                  onChange={(e) => setSyncTradePass(e.target.value)}
+                  placeholder="예: 나만 아는 문장"
+                  autoComplete="off"
+                />
+              </div>
+              <div className="row" style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+                {!isWebApp && (
+                  <button
+                    className="btn"
+                    disabled={syncTradeBusy || syncTradePass.length < 6}
+                    onClick={async () => {
+                      setSyncTradeBusy(true);
+                      try {
+                        await window.kyletool.tradeSyncPass?.(syncTradePass); // 다음부터 자동 업로드
+                        const r = await window.kyletool.tradeSyncPush(syncTradePass);
+                        setSyncTradeMsg(r.message);
+                      } finally {
+                        setSyncTradeBusy(false);
+                      }
+                    }}
+                  >
+                    ⬆ 지금 올리기 (이 PC)
+                  </button>
+                )}
+                <button
+                  className="btn"
+                  disabled={syncTradeBusy || syncTradePass.length < 6}
+                  onClick={async () => {
+                    setSyncTradeBusy(true);
+                    try {
+                      await window.kyletool.tradeSyncPass?.(syncTradePass); // 다음부터 자동으로 받아온다
+                      const r = await window.kyletool.tradeSyncPull(syncTradePass);
+                      setSyncTradeMsg(r.message);
+                      if (r.ok) void loadReport();
+                    } finally {
+                      setSyncTradeBusy(false);
+                    }
+                  }}
+                >
+                  ⬇ 지금 받기 {isWebApp ? "(이 폰)" : ""}
+                </button>
+              </div>
+              {syncTradeMsg && <p className="hint">{syncTradeMsg}</p>}
+              <p className="hint">
+                한 번 넣어 두면 다음부터는 <b>자동</b>이에요 — PC는 새 매매가 생길 때 올리고, 폰은 리포트를 열 때 받아옵니다.
+              </p>
+            </div>
+
+            {/* ③-② 토스 키 동기화 (구 '🔐 키 클라우드 동기화' — 멀티유저) */}
+            <div className="settings-block">
+              <h3>② 토스 키 — 키를 다른 기기로 옮기기 (사람마다 따로 보관)</h3>
+              <p className="hint">
+                <b>사람마다 자기 계정</b>에 <b>자기 토스 키</b>를 두고, 자기 기기들끼리만 나눠 씁니다. 다른 사람의 키는
+                서로 <b>절대 볼 수 없어요</b>. 키는 <b>비밀번호로 잠근 채</b> 올라가서, 운영자도 남의 키를 못 봅니다.
+                <br />
+                <span className="hint small">※ 폰은 보통 [폰에서 쓰기]로 PC 키를 빌려 쓰므로 이건 <b>PC가 여러 대일 때</b> 주로 씁니다.</span>
               </p>
 
               {/* STEP 1: 로그인 */}
@@ -2912,35 +2827,171 @@ ${msg}
 
               {/* STEP 2: 키 + 마스터 비밀번호 (로그인 후에만) */}
               <div className={`step-box ${authState.loggedIn ? "" : "step-disabled"}`}>
-                <div className="step-title">2단계 · 마스터 비밀번호로 키 저장/불러오기</div>
+                <div className="step-title">2단계 · 비밀번호로 키 저장 / 불러오기</div>
                 <p className="hint small">
-                  위 [토스 API 키]에 내 키를 저장해 둔 뒤, 마스터 비밀번호(암호화용, 로그인 비번과 별개)를 정해
-                  <b> ①로 클라우드에 저장</b>하세요. 다른 기기에선 같은 계정 로그인 + 같은 마스터 비밀번호로 <b>②만</b> 누르면 끝.
+                  위 [토스 키]에 내 키를 저장한 뒤, <b>키 잠금 비밀번호</b>(로그인 비번과 다른 것)를 정해
+                  <b> ①로 클라우드에 올리세요.</b> 다른 기기에선 같은 계정 로그인 + 같은 비밀번호로 <b>②만</b> 누르면 끝.
                 </p>
                 <div className="form-row">
-                  <label style={{ flex: 1 }}>마스터 비밀번호(암호화용, 6자+)
-                    <input type="password" value={syncPass} onChange={(e) => setSyncPass(e.target.value)} placeholder="나만 아는 암호화 비밀번호" disabled={!authState.loggedIn} />
+                  <label style={{ flex: 1 }}>키 잠금 비밀번호 (6자+, 로그인 비번과 별개)
+                    <input type="password" value={syncPass} onChange={(e) => setSyncPass(e.target.value)} placeholder="나만 아는 키 잠금 비밀번호" disabled={!authState.loggedIn} />
                   </label>
                 </div>
                 <div className="form-row">
-                  <button className="btn" disabled={syncBusy || !authState.loggedIn} onClick={doSyncPush}>① 내 키를 클라우드에 저장(암호화)</button>
-                  <button className="btn btn-start" disabled={syncBusy || !authState.loggedIn} onClick={doSyncPull}>② 클라우드에서 불러오기</button>
+                  <button className="btn" disabled={syncBusy || !authState.loggedIn} onClick={doSyncPush}>① 내 키를 클라우드에 올리기(잠가서)</button>
+                  <button className="btn btn-start" disabled={syncBusy || !authState.loggedIn} onClick={doSyncPull}>② 클라우드에서 받기</button>
                 </div>
                 {syncMsg && <p className={syncMsg.startsWith("✅") ? "ok" : "hint"} style={{ whiteSpace: "pre-wrap" }}>{syncMsg}</p>}
               </div>
 
               <p className="hint small">
-                💡 <b>종훈(2기기)</b>: 맥에서 로그인+키+마스터비번 저장(①) → 윈도우에선 같은 계정 로그인 + 마스터비번으로 ②. 재발급 시 한 기기서 ①만.
-                <br />💡 <b>카일(신규)</b>: 설치 → 가입/로그인 → [토스 API 키]에 <b>자기 키</b> 입력·저장 → 마스터비번 정해 ① → 끝. 자기 다른 기기선 로그인+②.
-                <br />동기화를 안 쓰면 기존처럼 이 기기 로컬(.env)에만 저장됩니다.
+                💡 <b>내 PC 2대 쓸 때</b>: 첫 기기에서 로그인 + [토스 키] 저장 + 키 잠금 비번으로 ① → 다른 기기에선 같은 계정 로그인 + 같은 비번으로 ②. 키를 새로 받았으면 한 기기에서 ①만 다시.
+                <br />동기화를 안 쓰면 기존처럼 이 기기 안에만 저장됩니다.
               </p>
             </div>
           </section>
 
-          {/* [v0.12.0] 고급 · 도구 기록(진단) — 옛 '기록' 탭을 설정 하위로 이동. 기본 접힘. */}
+          {/* ── ④ 화면 표시 — 손익 색 관습(미국식/한국식) ── */}
+          <section className="card wide">
+            <h2>🎨 화면 표시</h2>
+            <label className="radio" style={{ cursor: "pointer" }}>
+              <input type="checkbox" checked={pnlKr} onChange={(e) => setPnlKr(e.target.checked)} />
+              <span>손익 색 <b>한국식</b>으로 (이익 = <b style={{ color: "#f87171" }}>빨강</b> · 손실 = <b style={{ color: "#5b9dff" }}>파랑</b>)</span>
+            </label>
+            <p className="hint">
+              끄면 미국식(이익 = 초록 · 손실 = 빨강, 기본). 색과 함께 <b>부호(+/−)</b>도 늘 표시되어 헷갈리지 않습니다.
+              이 설정은 <b>이 기기</b>에만 저장됩니다(폰·PC 각각).
+            </p>
+          </section>
+
+          {/* ── ⑤ 주문 기본값 · 안전 옵션 ──
+              한 번 정해 두면 잘 안 바꾸는 값들 + 원할 때만 켜는 보조 안전장치. 아래쪽에 모음. */}
+          <section className="card wide">
+            <h2>⚙️ 주문 기본값 · 안전 옵션</h2>
+            <p className="hint">한 번 정해 두면 자주 안 바꾸는 값들이에요. 원할 때만 손보세요.</p>
+
+            {/* [v0.8.3] 기본 손익비 설정 */}
+            <div className="settings-block">
+              <h3>기본 익절% / 손절% (계산기 시작값)</h3>
+              <p className="hint">
+                계산기 <b>익절%·손절% 칸에 처음 채워질 값</b>을 정해 둡니다. 앱을 껐다 켜거나 종목을 바꿔도 유지돼요
+                (계산할 때 그때그때 고치는 건 여전히 가능). 지금 값: <b>익절 {settings.defaultTpPct ?? 2}% / 손절 {settings.defaultSlPct ?? 10}%</b>
+              </p>
+              <div className="form-row">
+                <label>기본 익절 %
+                  <input type="text" inputMode="decimal" value={defForm.tp} onChange={(e) => isNumericDraft(e.target.value) && setDefForm({ ...defForm, tp: e.target.value })} placeholder="예: 2" />
+                </label>
+                <label>기본 손절 %
+                  <input type="text" inputMode="decimal" value={defForm.sl} onChange={(e) => isNumericDraft(e.target.value) && setDefForm({ ...defForm, sl: e.target.value })} placeholder="예: 10" />
+                </label>
+                <button className="btn btn-start" onClick={saveDefaults}>기본 손익비 저장</button>
+                {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
+              </div>
+              <p className="hint small">처음 값은 익절 2% / 손절 10%. 소수점(예: 2.5)도 되고, 0 이하는 저장 안 됩니다.</p>
+            </div>
+
+            {/* [v0.3.0] 세션별 시드 비율 설정 */}
+            <div className="settings-block">
+              <h3>장별 매수 비율 (진입 수량 자동 제안)</h3>
+              <p className="hint">
+                장(프리마켓·데이마켓·본장)마다 <b>가진 돈의 몇 %로 살지</b> 정해 둡니다. 계산기가 지금이 어느 장인지
+                자동으로 보고 <b>살 수량을 제안</b>해요(강제 아님 — 다른 수량을 넣어도 그대로 나갑니다).
+              </p>
+              <div className="form-row">
+                <label>데이마켓 %
+                  <input type="text" inputMode="decimal" value={seedForm.day} onChange={(e) => isNumericDraft(e.target.value) && setSeedForm({ ...seedForm, day: e.target.value })} placeholder="90" />
+                </label>
+                <label>프리마켓 %
+                  <input type="text" inputMode="decimal" value={seedForm.pre} onChange={(e) => isNumericDraft(e.target.value) && setSeedForm({ ...seedForm, pre: e.target.value })} placeholder="50" />
+                </label>
+                <label>정규장(본장) %
+                  <input type="text" inputMode="decimal" value={seedForm.regular} onChange={(e) => isNumericDraft(e.target.value) && setSeedForm({ ...seedForm, regular: e.target.value })} placeholder="50" />
+                </label>
+              </div>
+              <p className="hint">몇 %의 '기준 금액'을 무엇으로 볼지:</p>
+              <label className="radio">
+                <input type="radio" checked={seedForm.basis === "auto"} onChange={() => setSeedForm({ ...seedForm, basis: "auto" })} />
+                <b>계좌의 살 수 있는 돈(예수금)으로 자동</b> — 지금 계좌 달러 잔고 기준 (기본)
+              </label>
+              <label className="radio">
+                <input type="radio" checked={seedForm.basis === "fixed"} onChange={() => setSeedForm({ ...seedForm, basis: "fixed" })} />
+                <b>고정 금액 직접 입력</b> — 아래 달러 금액을 기준으로 사용
+              </label>
+              {seedForm.basis === "fixed" && (
+                <div className="form-row">
+                  <label>고정 기준 금액 $
+                    <input type="text" inputMode="decimal" value={seedForm.fixed} onChange={(e) => isNumericDraft(e.target.value) && setSeedForm({ ...seedForm, fixed: e.target.value })} placeholder="예: 1000" />
+                  </label>
+                </div>
+              )}
+              <div className="form-row">
+                <button className="btn btn-start" onClick={saveSeed}>매수 비율 저장</button>
+                {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
+                <span className="hint">예) 데이 90%, 기준 $1,000, 현재가 $10 → 제안 약 90주</span>
+              </div>
+            </div>
+
+            {/* [v0.20.0] 주문 편의·안전 옵션 — 원할 때만 켜는 보조 기능 */}
+            <div className="settings-block">
+              <h3>보조 안전 옵션 (원할 때만 켜기)</h3>
+              <p className="hint">
+                평소엔 <b>앱이 주문을 막지 않습니다.</b> 아래는 실수를 줄이려고 <b>원할 때만</b> 켜는 보조 기능이에요.
+              </p>
+              <label className="radio">
+                <input
+                  type="checkbox"
+                  checked={settings.priceGuardEnabled}
+                  onChange={async (e) => {
+                    await window.kyletool.setPriceGuard(e.target.checked, toNum(guardPct) ?? undefined);
+                    setSettings(await window.kyletool.getSettings());
+                  }}
+                />
+                <b>오입력 방지</b> — 현재가에서 <b>너무 동떨어진 가격</b>이면 경고하고 막기
+              </label>
+              <div className="form-row">
+                <label>
+                  허용 차이 (%)
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={guardPct}
+                    onChange={(e) => isNumericDraft(e.target.value) && setGuardPct(e.target.value)}
+                    placeholder="예: 15"
+                  />
+                </label>
+                <button
+                  className="mini"
+                  onClick={async () => {
+                    await window.kyletool.setPriceGuard(settings.priceGuardEnabled, toNum(guardPct) ?? undefined);
+                    setSettings(await window.kyletool.getSettings());
+                    setSavedMsg("오입력 방지 한도를 저장했습니다.");
+                    setTimeout(() => setSavedMsg(""), 3000);
+                  }}
+                >
+                  한도 저장
+                </button>
+                {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
+                <span className="hint">현재: {settings.priceGuardEnabled ? `켜짐 (±${settings.priceGuardPct}%)` : "꺼짐 (막지 않음)"}</span>
+              </div>
+              <label className="radio">
+                <input
+                  type="checkbox"
+                  checked={settings.skipOrderConfirm}
+                  onChange={async (e) => {
+                    await window.kyletool.setSkipConfirm(e.target.checked);
+                    setSettings(await window.kyletool.getSettings());
+                    await refreshStatus();
+                  }}
+                />
+                <b>주문 확인 팝업 건너뛰기</b> — 버튼을 누르면 <b>바로 전송</b>(실수 주문 위험 ↑, 권장 안 함)
+              </label>
+            </div>
+          </section>
+
+          {/* ── ⑥ 고급 · 진단 (도구 기록) — 문제 생겼을 때만 보는 진단 로그. 기본 접힘. ── */}
           <section className="card wide">
             <button className="mini ghost" onClick={() => setShowJournal((v) => !v)}>
-              {showJournal ? "▾" : "▸"} 🛠 고급 · 도구 기록(주문·드라이런·취소 진단 로그)
+              {showJournal ? "▾" : "▸"} 🛠 고급 · 도구 기록 (문제 확인용 상세 기록)
             </button>
             {showJournal && (
               <div className="logbox tall" style={{ marginTop: 8 }}>
@@ -2963,7 +3014,7 @@ ${msg}
       {ocoEdit && (
         <div className="modal-back">
           <div className="modal">
-            <h2>조건주문(익절+손절) — {symbol.toUpperCase()}</h2>
+            <h2>익절+손절 걸기 — {symbol.toUpperCase()}</h2>
             {/* [v0.3.1] 보유 0주 안내 — 익절/손절은 '매도'라 보유분이 있어야 등록된다.
                 막지는 않고(원하면 그대로 전송), 이번 같은 422(insufficient-sellable-quantity)를
                 누르기 전에 이해하도록 친절히 알려준다. */}
@@ -2971,12 +3022,12 @@ ${msg}
               <div className="warn-box">
                 ⚠️ 이 종목은 <b>보유 0주</b>입니다. 익절·손절은 <b>매도</b>라 보유분이 있어야 토스에 등록돼요.
                 <br />
-                먼저 <b>[진입 지정가]로 매수 → 체결 확인</b> 후 걸어주세요. (그래도 보내면 토스가 "보유 수량 없음"으로 거부합니다)
+                먼저 <b>[매수만 (지정가)]로 사서 체결된 걸 확인</b>한 뒤 걸어 주세요. (그래도 보내면 토스가 "보유 수량 없음"으로 거부해요)
               </div>
             )}
             <p className="hint">
-              계산값을 참고로 채워뒀습니다. <b>원하는 값으로 자유롭게 고치세요.</b> 앱은 막지 않고 그대로 토스에
-              보냅니다(토스가 거부하면 그 응답을 보여드립니다).
+              계산한 값을 참고로 채워 뒀어요. <b>원하는 값으로 자유롭게 고치세요.</b> 앱이 값을 막지 않고 그대로 토스에
+              보내며, 토스가 거부하면 그 이유를 화면에 보여드립니다.
               {curPrice != null && <> 현재가 <b>{usdKrw(curPrice, fx)}</b></>}
               {cap && (
                 <>
@@ -3050,8 +3101,8 @@ ${msg}
               </button>
             </div>
             <p className="hint">
-              💡 토스 규칙: <b>익절가 &gt; 현재가 &gt; 손절가</b> 여야 등록됩니다. 어긋나면 토스가 거부할 수 있어요
-              (앱은 막지 않고 보냅니다).
+              💡 토스 규칙: <b>익절가 &gt; 현재가 &gt; 손절가</b> 순서여야 등록돼요(익절은 위, 손절은 아래).
+              순서가 어긋나면 토스가 거부할 수 있습니다.
             </p>
             <div className="form-row">
               <button className="btn btn-start" disabled={busy} onClick={submitOcoFromEditor}>
@@ -3120,7 +3171,7 @@ ${msg}
           <div className="modal">
             <h2>매도 — {sellModal.symbol}</h2>
             <p className="hint">
-              보유(매도가능) <b>{sellModal.heldQty}주</b>. 원하는 수량·방식으로 파세요. 앱은 막지 않고 그대로 토스에 보냅니다.
+              팔 수 있는 수량 <b>{sellModal.heldQty}주</b>. 원하는 수량·방식으로 파세요. 입력한 대로 토스에 그대로 보냅니다.
             </p>
             <div className="form-row">
               <label className="radio">
@@ -3158,9 +3209,9 @@ ${msg}
             <h2>매매 근거 — {ratModal.symbol}</h2>
             <p>{rationaleLine(ratModal)}</p>
             <p className="hint small">
-              {ratModal.kind === "entry" ? "진입" : ratModal.kind === "oco" ? "조건주문" : "진입+익절(OTO)"} · {ratModal.ts}
+              {ratModal.kind === "entry" ? "매수(진입)" : ratModal.kind === "oco" ? "익절+손절" : "매수+익절 자동"} · {ratModal.ts}
               {ratModal.tossOrderId ? ` · 토스번호 ${ratModal.tossOrderId}` : ""}
-              {ratModal.dryRun ? " · (모의)" : ""}
+              {ratModal.dryRun ? " · (연습)" : ""}
             </p>
             <div className="form-row">
               <button className="btn" onClick={() => setRatModal(null)}>닫기</button>
@@ -3179,7 +3230,7 @@ ${msg}
             ))}
             {status.dryRun ? (
               <p className="hint">
-                🔒 현재 <b>주문 잠금(드라이런)</b> — 아래 버튼을 눌러도 실제 주문은 나가지 않고 모의 기록만 남습니다.
+                🔒 지금은 <b>주문 잠금(연습)</b> 상태예요 — 아래 버튼을 눌러도 실제 주문은 안 나가고 연습 기록만 남습니다.
               </p>
             ) : (
               <div className="live-confirm">
@@ -3201,7 +3252,7 @@ ${msg}
             )}
             <div className="form-row">
               <button className="btn btn-start" disabled={busy} onClick={sendPending}>
-                {status.dryRun ? "모의 전송(기록만)" : "주문 전송"}
+                {status.dryRun ? "연습으로 보내기(기록만)" : "주문 전송"}
               </button>
               <button className="btn" disabled={busy} onClick={() => setPending(null)}>
                 취소

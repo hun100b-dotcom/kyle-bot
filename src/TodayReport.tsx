@@ -123,15 +123,15 @@ export default function TodayReport({
       {/* [v0.9.8] 숫자가 어디서 왔는지 — 홈 PC 연결이 없을 때 사장님이 헷갈리지 않게 */}
       {data?.source === "cache" && (
         <div className="rp-source">
-          💾 저장된 기록으로 표시 중
+          💾 저장해 둔 기록으로 보는 중
           {data.lastSyncMs ? ` · 마지막 갱신 ${new Date(data.lastSyncMs).toLocaleString("ko-KR", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}` : ""}
-          <span className="wide-only"> · 최신 매매 반영은 홈 PC 연결 시</span>
+          <span className="wide-only"> · 집 PC에 연결되면 최신으로 채워져요</span>
         </div>
       )}
       {/* [v0.10.1] 매매가 너무 많아 이 기간 일부가 빠졌을 수 있을 때만(정직 표시). 평소엔 안 뜬다. */}
       {data?.truncated && (
         <div className="rp-warn">
-          ⚠️ 매매가 매우 많아 이 기간 <b>일부가 아직 안 불러와졌을 수 있어요</b>. 홈 PC에 연결해 새로고침하면 채워집니다.
+          ⚠️ 매매가 아주 많아 이 기간 <b>일부가 아직 안 불러와졌을 수 있어요</b>. 집 PC에 연결해 새로고침하면 나머지가 채워집니다.
         </div>
       )}
     </section>
@@ -149,18 +149,18 @@ export default function TodayReport({
               {/* 저장된 이력이 진짜 하나도 없는 경우 */}
               <h2>아직 저장된 매매 기록이 없어요</h2>
               <p className="hint">
-                <b>홈 PC에 연결된 상태에서 이 화면을 한 번만 열면</b> 그동안의 매매가 이 기기에 저장되고,
-                그 뒤로는 <b>회사에서도·이동 중에도</b> 연결 없이 볼 수 있습니다.
+                <b>집 PC에 연결된 상태로 이 화면을 한 번만 열면</b> 그동안의 매매가 이 기기에 저장되고,
+                그 뒤로는 <b>회사에서도·이동 중에도</b> 연결 없이 볼 수 있어요.
                 <br />
-                (PC의 Capri → 설정 → 📱 폰에서 쓰기 → QR 찍기)
+                (연결하는 법: PC의 Capri에서 <b>설정 → 📱 폰에서 쓰기</b>를 켜고, 폰으로 <b>QR을 찍으면</b> 끝)
               </p>
             </>
           ) : (
             <>
               {/* 저장된 이력은 있는데 '이 기간'에만 매매가 없는 경우 */}
-              <h2>{data?.periodLabel ?? "오늘"} 정리된 거래가 없어요</h2>
+              <h2>{data?.periodLabel ?? "오늘"} 판 거래가 없어요</h2>
               <p className="hint">
-                다른 기간을 눌러 보세요 — 저장된 매매 {data?.savedTotal ?? 0}건 중 이 기간에 해당하는 것이 없습니다.
+                다른 기간을 눌러 보세요 — 저장된 매매 {data?.savedTotal ?? 0}건 중 이 기간에 판 것이 없습니다.
                 {data && data.openNow > 0 && (
                   <>
                     <br />
@@ -197,7 +197,7 @@ export default function TodayReport({
 
       {/* ① 번 돈 — 가장 크게 */}
       <section className="card wide report-hero">
-        <div className="report-hero-label">{data.periodLabel} 실현 손익</div>
+        <div className="report-hero-label">{data.periodLabel} 손익 <span className="hint">(실제로 판 것만)</span></div>
         <div className={`report-hero-num ${positive ? "up" : "down"}`}>
           {pnl != null
             ? `${pnl >= 0 ? "+" : "−"}${money(shownPnl)}`
@@ -213,7 +213,7 @@ export default function TodayReport({
           <b className={positive ? "up" : "down"}>
             {data.avgPct != null ? `${data.avgPct >= 0 ? "+" : ""}${data.avgPct}%` : "—"}
           </b>
-          {pnl == null && <span className="hint"> · 수량 정보가 없는 옛 기록이라 금액은 생략</span>}
+          {pnl == null && <span className="hint"> · 수량이 안 남은 옛 기록이라 금액은 생략(수익률만)</span>}
         </div>
         <button className="mini report-refresh" onClick={onRefresh} disabled={busy}>
           ↻ 새로고침
