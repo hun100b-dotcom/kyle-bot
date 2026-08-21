@@ -61,6 +61,23 @@
 
 * { box-sizing: border-box; }
 
+/* [v0.21.0 A수정] 전역 커스텀 스크롤바 — OS 기본(넓은 회색 막대)이 다크 테마와 이질적이라,
+   얇고 어두운 테마색 막대로 교체한다. 앱 전체·모든 스크롤 영역(.grid·.pane·표·로그 등)에 적용.
+   · Firefox: scrollbar-width:thin + scrollbar-color(막대색, 트랙 투명)
+   · WebKit(크롬/엣지/사파리): 8px 폭, 둥근 thumb, 트랙 투명, 호버 시 살짝 밝게.
+   ※ 가로 스크롤을 숨기는 .tabs/.brand 등은 더 구체적인 선택자라 그대로 유지된다. */
+* { scrollbar-width: thin; scrollbar-color: var(--surface3) transparent; }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--surface3);
+  border-radius: 999px;
+  border: 2px solid transparent;   /* 안쪽 여백 → 막대가 더 얇아 보이게 */
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: #3a4152; background-clip: padding-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+
 body {
   margin: 0;
   background: var(--bg);
