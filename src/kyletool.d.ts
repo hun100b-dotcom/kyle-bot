@@ -221,6 +221,30 @@ interface StrengthSample {
   session: string;
 }
 /** [v0.5.0] 체결강도 상태(현재값 + 최근 시계열) */
+interface TradeCycle {
+  symbol: string;
+  buyAtMs?: number;
+  sellAtMs: number;
+  holdMs?: number;
+  qty: number;
+  entryPrice: number;
+  exitPrice: number;
+  pnl: number;
+  pct: number;
+  win: boolean;
+  technique?: string;
+  entryStrength?: number | null;
+}
+interface TradeBucket { n: number; winRate: number | null; avgPct: number | null; }
+interface TradeSymbolStat { symbol: string; n: number; wins: number; winRate: number | null; totalPnl: number; avgPct: number; }
+interface TradeInsights {
+  n: number; wins: number; losses: number; winRate: number | null;
+  totalPnl: number; avgPct: number | null; avgHoldMin: number | null;
+  best: TradeCycle | null; worst: TradeCycle | null;
+  strong: TradeBucket; weak: TradeBucket; strengthKnown: number;
+  headline: string | null; bySymbol: TradeSymbolStat[];
+}
+
 interface StrengthSignals {
   bottomReversal: boolean;
   bullishDivergence: boolean;
@@ -518,6 +542,7 @@ interface KyletoolBridge {
   tradesList(): Promise<StrengthTrade[]>;
   todayReport(): Promise<DailyReport>;
   report(kind: PeriodKind, picked?: string): Promise<DailyReport>;
+  tradeAnalysis(): Promise<{ cycles: TradeCycle[]; insights: TradeInsights; source: "live" | "cache" | "none" }>; // [v0.19.0]
   /** [v0.10.0] 매매 이력 동기화 */
   tradeSyncPush(pass?: string): Promise<{ ok: boolean; message: string; count?: number }>;
   tradeSyncPull(pass?: string): Promise<{ ok: boolean; message: string; count?: number }>;

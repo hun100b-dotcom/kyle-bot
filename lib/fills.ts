@@ -34,6 +34,7 @@ export interface Fill {
 export interface RealizedTrade {
   symbol: string;
   sellAtMs: number;
+  buyAtMs?: number; //    [v0.19.0] 팔린 물량 중 '가장 이른 매수' 시각(보유기간용). 폴백매칭이면 없음.
   qty: number;
   buyAvg: number; //      팔린 수량의 평균 매입가
   sellPrice: number; //   평균 매도가
@@ -47,6 +48,7 @@ interface Lot {
   qty: number;
   price: number;
   feePerShare: number; // 매수 수수료를 주당으로 나눠 둔 값
+  atMs: number; //       [v0.19.0] 그 매수 체결 시각(보유기간 계산용)
 }
 
 /**
@@ -65,7 +67,7 @@ export function matchFifo(fills: Fill[], avgCostFallback: Record<string, number>
 
     if (f.side === "BUY") {
       const q = lots.get(f.symbol) ?? [];
-      q.push({ qty: f.qty, price: f.price, feePerShare: f.qty > 0 ? (f.commission + f.tax) / f.qty : 0 });
+      q.push({ qty: f.qty, price: f.price, feePerShare: f.qty > 0 ? (f.commission + f.tax) / f.qty : 0, atMs: f.atMs });
       lots.set(f.symbol, q);
       continue;
     }
@@ -76,12 +78,14 @@ export function matchFifo(fills: Fill[], avgCostFallback: Record<string, number>
     let costSum = 0; //  팔린 수량의 매입 원가 합
     let buyFee = 0; //   그 수량에 해당하는 매수 수수료
     let filled = 0; //   실제로 매칭된 수량
+    let firstBuyAtMs = Number.POSITIVE_INFINITY; // [v0.19.0] 이 매도에 채워진 가장 이른 매수 시각
 
     while (remain > 0 && q.length > 0) {
       const lot = q[0];
       const take = Math.min(lot.qty, remain);
       costSum += take * lot.price;
       buyFee += take * lot.feePerShare;
+      firstBuyAtMs = Math.min(firstBuyAtMs, lot.atMs);
       lot.qty -= take;
       remain -= take;
       filled += take;
@@ -113,6 +117,8 @@ export function matchFifo(fills: Fill[], avgCostFallback: Record<string, number>
     out.push({
       symbol: f.symbol,
       sellAtMs: f.atMs,
+      // [v0.19.0] 매수 시각 → 보유기간(sellAtMs - buyAtMs). 매칭된 매수가 없으면(폴백만) undefined.
+      buyAtMs: Number.isFinite(firstBuyAtMs) ? firstBuyAtMs : undefined,
       qty: filled,
       buyAvg: Math.round(buyAvg * 10000) / 10000,
       sellPrice: f.price,

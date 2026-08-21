@@ -272,6 +272,7 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:trades:list", () => e.getTradeLog());
   ipcMain.handle("tool:report:today", () => e.todayReport()); // [v0.9.1] 오늘의 매매 리포트
   ipcMain.handle("tool:report", (_ev, kind, picked) => e.report(kind, picked)); // [v0.9.2] 기간별 리포트
+  ipcMain.handle("tool:trade-analysis", () => e.tradeAnalysis()); // [v0.19.0] 매매 사이클 자동추적·분석
   // [v0.10.0] 매매 이력 암호화 동기화(PC 올리기 / 폰 받기)
   ipcMain.handle("tool:tradesync:push", (_ev, pass) => e.syncPushTrades(pass));
   ipcMain.handle("tool:tradesync:pull", (_ev, pass) => e.syncPullTrades(pass));

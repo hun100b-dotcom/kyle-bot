@@ -78,6 +78,7 @@ contextBridge.exposeInMainWorld("kyletool", {
   tradesList: () => ipcRenderer.invoke("tool:trades:list"),
   todayReport: () => ipcRenderer.invoke("tool:report:today"),
   report: (kind, picked) => ipcRenderer.invoke("tool:report", kind, picked),
+  tradeAnalysis: () => ipcRenderer.invoke("tool:trade-analysis"),
   tradeSyncPush: (pass) => ipcRenderer.invoke("tool:tradesync:push", pass),
   tradeSyncPull: (pass) => ipcRenderer.invoke("tool:tradesync:pull", pass),
   tradeSyncPass: (pass) => ipcRenderer.invoke("tool:tradesync:pass", pass),

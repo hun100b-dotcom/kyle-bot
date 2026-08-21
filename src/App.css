@@ -411,6 +411,22 @@ ul.hint { padding-left: 18px; }
 .muted { color: #8a93a4; }
 
 /* 세그먼트 토글 */
+/* [v0.19.0] 매매분석 인사이트 카드 + 강/약 비교 */
+.insight-card {
+  margin: 12px 0 4px; padding: 16px 18px; border-radius: var(--r-md);
+  background: linear-gradient(135deg, rgba(76,130,251,0.16), rgba(76,130,251,0.04));
+  border: 1px solid rgba(76,130,251,0.35); box-shadow: var(--edge-hi);
+  font-size: 15px; line-height: 1.55; color: var(--text);
+}
+.strong-weak { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+.sw-col { padding: 14px 16px; border-radius: var(--r-md); background: var(--panel2); border: 1px solid var(--border); box-shadow: var(--edge-hi); }
+.sw-col.ok { border-color: rgba(47,211,154,0.35); }
+.sw-col.danger { border-color: rgba(246,96,111,0.35); }
+.sw-h { font-size: 13px; color: var(--muted); }
+.sw-v { font-size: 22px; font-weight: 800; margin: 4px 0 2px; font-variant-numeric: tabular-nums; }
+.sw-col.ok .sw-v { color: var(--profit); }
+.sw-col.danger .sw-v { color: var(--loss); }
+
 /* [v0.17.0] 알약형 세그먼트(주문현황 미체결/체결·필터 등) */
 .seg { display: inline-flex; gap: 4px; padding: 4px; background: var(--panel2); border-radius: var(--r-pill); }
 .seg button { background: transparent; color: var(--muted); border: none; padding: 8px 15px; cursor: pointer; font-size: 13px; font-weight: 600; border-radius: var(--r-pill); min-height: 38px; }

@@ -124,10 +124,14 @@ function strClass(v: number | null | undefined): string {
   return v >= 100 ? "ok" : "danger";
 }
 /** 체결강도 값 표시. null(매도0=매수 일방)이면 ∞, 없으면 —. */
-function fmtStr(v: number | null | undefined): string {
-  if (v === null) return "∞";
-  if (v === undefined) return "—";
-  return v.toFixed(1);
+/** [v0.19.0] 보유기간(분)을 사람 말로: "45분" / "2시간 15분" / "3일 2시간". */
+function fmtHoldMin(min: number): string {
+  if (!Number.isFinite(min) || min < 0) return "—";
+  if (min < 60) return `${min}분`;
+  const h = Math.floor(min / 60), m = min % 60;
+  if (h < 24) return m ? `${h}시간 ${m}분` : `${h}시간`;
+  const d = Math.floor(h / 24), rh = h % 24;
+  return rh ? `${d}일 ${rh}시간` : `${d}일`;
 }
 
 /** [v0.3.3] 달러 금액 + (원화) 병기 — holdings가 준 실제 원화값이 있으면 그걸 쓰고, 없으면 fx로 환산 안 함. */
@@ -368,8 +372,9 @@ function App() {
     void loadReport(kind, picked ?? reportDate);
   }
   // [v0.7.0] 체결강도 자동 기록(매매 연동) — 트레이드 목록 + 요약.
-  const [trades, setTrades] = useState<StrengthTrade[]>([]);
-  const [tradeStats, setTradeStats] = useState<TradeStats | null>(null);
+  // [v0.19.0] 실제 체결이력 기반 매매 사이클 자동추적·분석
+  const [analysis, setAnalysis] = useState<{ cycles: TradeCycle[]; insights: TradeInsights; source: "live" | "cache" | "none" } | null>(null);
+  const [analysisBusy, setAnalysisBusy] = useState(false);
   // [v0.6.0] 종목 스크리너(탐색). 결과·진행률·스캔중 여부·도지 몸통비율 슬라이더.
   const [screenRun, setScreenRun] = useState<ScreenRun | null>(null);
   const [screenBusy, setScreenBusy] = useState(false);
@@ -536,7 +541,7 @@ function App() {
     });
     window.kyletool.appVersion?.().then(setAppVer).catch(() => {});
     window.kyletool.authStatus?.().then(setAuthState).catch(() => {}); // [v0.8.1] 로그인 상태 복원
-    void refreshTrades(); // [v0.12.0 · B리뷰 #1] 매매분석이 체결강도 탭 하위로 옮겨져 시작 시 한 번 로드해 둔다
+    void loadAnalysis(); // [v0.19.0] 매매분석(실체결) 시작 시 로드
     const off = window.kyletool.onJournal((e) => setJournal((prev) => [...prev.slice(-99), e]));
     // [v0.5.0] 체결강도 실시간 갱신: 지금 화면에서 보고 있는 종목의 이벤트만 반영.
     const offStr = window.kyletool.onStrength?.((state) => {
@@ -545,7 +550,7 @@ function App() {
     // [v0.6.0] 스크리너 진행률 실시간 표시
     const offScr = window.kyletool.onScreenerProgress?.((p) => setScreenProg(p));
     // [v0.7.0] 매매 시 자동 기록된 트레이드가 갱신되면 목록·요약 새로고침
-    const offTrd = window.kyletool.onTrades?.(() => void refreshTrades());
+    const offTrd = window.kyletool.onTrades?.(() => void loadAnalysis());
     // 업데이트 이벤트 구독(있음/진행률/완료). 오류는 조용히 무시(앱 정상 동작 우선).
     const offUpd = window.kyletool.onUpdate?.({
       available: (info) => setUpdate(info),
@@ -589,7 +594,7 @@ function App() {
   const activateTab = (t: TabId) => {
     if (t === "orders") refreshStatusTab();
     else if (t === "splits") refreshSplits();
-    else if (t === "strength") { void loadStrength(strSym); void refreshTrades(); }
+    else if (t === "strength") { void loadStrength(strSym); void loadAnalysis(); }
     else if (t === "report") void loadReport();
   };
   // [v0.15.0] 2컬럼이 켜지거나 좌/우 패널 탭이 바뀌면 그 탭들의 데이터를 로드한다(1컬럼과 동일한 지연 로딩).
@@ -1226,40 +1231,16 @@ ${msg}
   // -------------------------------------------------------------------------
 
   /** 트레이드 목록 + 요약을 다시 읽어 화면 갱신. */
-  async function refreshTrades() {
+  /** [v0.19.0] 매매 사이클 자동추적·분석을 불러온다(실제 체결이력 기반). */
+  async function loadAnalysis() {
+    setAnalysisBusy(true);
     try {
-      const [list, stats] = await Promise.all([window.kyletool.tradesList(), window.kyletool.tradesStats()]);
-      setTrades(list);
-      setTradeStats(stats);
+      const a = await window.kyletool.tradeAnalysis();
+      setAnalysis(a);
     } catch (e) {
-      console.error("트레이드 조회 실패", e);
-    }
-  }
-
-  /** 미청산 트레이드 수동 청산 — 확정가·구분(익절/손절/수동)을 받아 마감. */
-  async function closeTrade(t: StrengthTrade) {
-    const priceStr = prompt(`청산가를 입력하세요 (${t.symbol}, 진입 $${t.entryPrice})`, String(t.entryPrice));
-    if (priceStr == null) return;
-    const px = toNum(priceStr);
-    if (px == null || px <= 0) { alert("청산가를 숫자로 입력하세요."); return; }
-    const k = prompt("구분: tp(익절) / sl(손절) / manual(수동) 중 하나", "manual");
-    const kind = k === "tp" || k === "sl" ? k : "manual";
-    try {
-      await window.kyletool.tradesClose(t.id, px, kind);
-      await refreshTrades();
-    } catch (e) {
-      alert("청산 기록 실패: " + String(e));
-    }
-  }
-
-  /** 트레이드 삭제(잘못 기록된 것 정리). */
-  async function deleteTrade(id: string) {
-    if (!confirm("이 트레이드 기록을 삭제할까요?")) return;
-    try {
-      await window.kyletool.tradesDelete(id);
-      await refreshTrades();
-    } catch (e) {
-      alert("삭제 실패: " + String(e));
+      console.error("매매분석 로드 실패", e);
+    } finally {
+      setAnalysisBusy(false);
     }
   }
 
@@ -1596,7 +1577,7 @@ ${msg}
               setTab(t);
               if (t === "orders") refreshStatusTab();
               if (t === "splits") refreshSplits(); // 탭 열 때 최신 목록 다시 읽기
-              if (t === "strength") { void loadStrength(strSym); void refreshTrades(); } // [v0.12.0] 매매분석이 체결강도 탭 하위로 통합 → 함께 로드
+              if (t === "strength") { void loadStrength(strSym); void loadAnalysis(); } // [v0.12.0] 매매분석이 체결강도 탭 하위로 통합 → 함께 로드
             }}
           >
             {TAB_LABEL[t]}
@@ -2294,63 +2275,71 @@ ${msg}
         </main>
       )}
 
-      {/* ===== ①-4) 매매분석 — [v0.12.0] 체결강도 탭 하위 섹션으로 통합 (main 중복 방지 위해 div) ===== */}
+      {/* ===== ①-4) 매매분석 — [v0.19.0] 실제 체결이력으로 진입→청산 자동추적·분석 ===== */}
       {paneTab === "strength" && (
         <div className="grid">
           <section className="card wide">
             <div className="split-list-head">
-              <h2>매매분석 <span className="hint">(내가 '강할 때' 샀는지 실제 매매로 검증 — 진입·청산 체결강도 자동 기록)</span></h2>
-              <button className="mini" onClick={() => void refreshTrades()}>↻ 새로고침</button>
+              <h2>매매분석 <span className="hint small">내 매매를 진입→청산 한 사이클로 자동 추적</span></h2>
+              <button className="mini" disabled={analysisBusy} onClick={() => void loadAnalysis()}>↻ 새로고침</button>
             </div>
             <p className="hint">
-              계산기·탐색에서 <b>진입 주문</b>을 내면 그 순간의 체결강도가 <b>자동 스냅샷</b>되고, <b>매도</b>하면 청산 체결강도+결과(%)가 기록됩니다.
-              지금은 <b>드라이런/모의</b>라 <b>페이퍼(모의) 데이터</b>로 쌓이고, <b>실주문을 켜면 그대로 실데이터</b>로 이어집니다.
-              <br/>※ 토스 서버가 처리하는 OCO/OTO 익절·손절은 앱이 체결을 직접 못 보므로, 아래 <b>[청산 기록]</b>으로 확정가를 넣어 마감하세요.
+              토스 <b>실제 체결이력</b>으로, 판 매매를 <b>진입가→청산가·수량·보유기간·수익률·손익금액·승패</b>까지 자동 정리합니다.
+              카프리로 주문해 근거가 남은 매매엔 <b>기법·진입 시 체결강도</b>도 함께 보여줍니다.
             </p>
 
-            {/* 요약 카드 */}
-            {tradeStats && (
-              <div className="trade-stats">
-                <div className="tstat"><span className="sb-k">전체/청산</span><b>{tradeStats.total} / {tradeStats.closed}</b></div>
-                <div className="tstat"><span className="sb-k">승률</span><b>{tradeStats.winRate != null ? `${tradeStats.winRate}% (${tradeStats.wins}승 ${tradeStats.losses}패)` : "—"}</b></div>
-                <div className="tstat"><span className="sb-k">평균 결과</span><b className={pnlClass(tradeStats.avgResultPct)}>{tradeStats.avgResultPct != null ? `${tradeStats.avgResultPct >= 0 ? "+" : ""}${tradeStats.avgResultPct}%` : "—"}</b></div>
-                <div className="tstat highlight"><span className="sb-k">진입 시 평균 체결강도 — 수익</span><b className="ok">{tradeStats.avgEntryStrengthWin ?? "—"}</b></div>
-                <div className="tstat highlight"><span className="sb-k">진입 시 평균 체결강도 — 손실</span><b className="danger">{tradeStats.avgEntryStrengthLoss ?? "—"}</b></div>
-              </div>
-            )}
-            {tradeStats && tradeStats.avgEntryStrengthWin != null && tradeStats.avgEntryStrengthLoss != null && (
-              <p className="hint">
-                💡 수익 트레이드의 진입 시 평균 체결강도가 손실보다 <b>{tradeStats.avgEntryStrengthWin > tradeStats.avgEntryStrengthLoss ? "높습니다" : "낮습니다"}</b>
-                {" "}({tradeStats.avgEntryStrengthWin} vs {tradeStats.avgEntryStrengthLoss}). 표본이 쌓일수록 신뢰도가 올라갑니다.
-              </p>
+            {analysis?.source === "cache" && <div className="rp-source">💾 저장된 기록으로 표시 중 · 홈 PC 연결 시 최신 반영</div>}
+            {analysis?.source === "none" && (
+              <div className="result-empty hint">아직 저장된 매매가 없습니다. 홈 PC에 연결된 상태로 <b>주문현황·리포트</b>를 한 번 열면 체결이력이 이 기기에 쌓입니다.</div>
             )}
 
-            {trades.length === 0 ? (
-              <div className="result-empty hint">아직 기록된 트레이드가 없습니다. 계산기/탐색에서 진입 주문을 내보세요(드라이런도 기록됩니다).</div>
-            ) : (
-              <table className="result-table trade-table">
-                <thead>
-                  <tr><th>모드</th><th>종목</th><th>진입</th><th>진입 강도</th><th>청산</th><th>청산 강도</th><th>결과</th><th></th></tr>
-                </thead>
-                <tbody>
-                  {trades.map((t) => (
-                    <tr key={t.id} className={t.outcome === "win" ? "trade-win" : t.outcome === "loss" ? "trade-loss" : ""}>
-                      <td><span className={`mode-tag mode-${t.mode}`}>{ { mock: "모의", dryrun: "드라이런", real: "실거래" }[t.mode] }</span></td>
-                      <td><b>{t.symbol}</b></td>
-                      <td>{t.entryTs}<br/><span className="hint">${t.entryPrice}</span></td>
-                      <td className={strClass(t.entry?.strength)}>{fmtStr(t.entry?.strength)}</td>
-                      <td>{t.exitTs ? <>{t.exitTs}<br/><span className="hint">${t.exitPrice} · { { tp: "익절", sl: "손절", manual: "수동" }[t.exitKind ?? "manual"] }</span></> : <span className="warn-txt">미청산</span>}</td>
-                      <td className={strClass(t.exit?.strength)}>{fmtStr(t.exit?.strength)}</td>
-                      <td className={pnlClass(t.resultPct)}>{t.resultPct != null ? `${t.resultPct >= 0 ? "+" : ""}${t.resultPct}%` : "—"}</td>
-                      <td className="order-cell">
-                        {t.outcome == null && <button className="mini btn-start" onClick={() => void closeTrade(t)}>청산 기록</button>}
-                        <button className="mini btn-del" onClick={() => void deleteTrade(t.id)}>🗑</button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
+            {analysis && analysis.cycles.length > 0 && (() => {
+              const ins = analysis.insights;
+              return (
+                <>
+                  {/* 인사이트 헤드라인(강할 때 vs 약할 때) */}
+                  {ins.headline && <div className="insight-card">💡 {ins.headline}</div>}
+
+                  {/* 요약 KPI */}
+                  <div className="sum-cards" style={{ marginTop: 12 }}>
+                    <div className="sum-card"><span className="sum-k">매매 수</span><b className="sum-v">{ins.n}건</b><span className="sum-sub">{ins.wins}승 {ins.losses}패</span></div>
+                    <div className={`sum-card ${pnlClass(ins.winRate != null ? ins.winRate - 50 : null)}`}><span className="sum-k">승률</span><b className="sum-v">{ins.winRate != null ? `${ins.winRate}%` : "—"}</b></div>
+                    <div className={`sum-card ${pnlClass(ins.totalPnl)}`}><span className="sum-k">총 실현손익</span><b className="sum-v">{ins.totalPnl >= 0 ? "+" : "−"}${Math.abs(ins.totalPnl).toFixed(2)}</b><span className="sum-sub">평균 {ins.avgPct != null ? `${ins.avgPct >= 0 ? "+" : ""}${ins.avgPct}%` : "—"}</span></div>
+                    <div className="sum-card"><span className="sum-k">평균 보유</span><b className="sum-v">{ins.avgHoldMin != null ? fmtHoldMin(ins.avgHoldMin) : "—"}</b></div>
+                  </div>
+
+                  {/* 강함 vs 약함(진입 체결강도 아는 매매) */}
+                  {ins.strengthKnown > 0 && (
+                    <div className="strong-weak">
+                      <div className="sw-col ok"><div className="sw-h">체결강도 강할 때(100↑)</div><div className="sw-v">{ins.strong.winRate != null ? `승률 ${ins.strong.winRate}%` : "—"}</div><div className="hint small">{ins.strong.n}건 · 평균 {ins.strong.avgPct != null ? `${ins.strong.avgPct}%` : "—"}</div></div>
+                      <div className="sw-col danger"><div className="sw-h">약할 때(100↓)</div><div className="sw-v">{ins.weak.winRate != null ? `승률 ${ins.weak.winRate}%` : "—"}</div><div className="hint small">{ins.weak.n}건 · 평균 {ins.weak.avgPct != null ? `${ins.weak.avgPct}%` : "—"}</div></div>
+                      <p className="hint small" style={{ gridColumn: "1 / -1", margin: "2px 0 0" }}>※ 진입 시 체결강도를 아는 매매 {ins.strengthKnown}건만 비교(카프리로 주문한 매매). 표본이 쌓일수록 정확해집니다.</p>
+                    </div>
+                  )}
+
+                  {/* 사이클 목록(최신순) */}
+                  <table className="result-table trade-table" style={{ marginTop: 12 }}>
+                    <thead>
+                      <tr><th>종목</th><th>진입→청산</th><th>수량</th><th>보유</th><th>수익률</th><th>손익</th><th>진입강도</th></tr>
+                    </thead>
+                    <tbody>
+                      {analysis.cycles.slice(0, 100).map((c, i) => (
+                        <tr key={c.symbol + c.sellAtMs + i} className={c.win ? "trade-win" : "trade-loss"}>
+                          <td><b>{c.symbol}</b>{c.technique && <><br/><span className="hint small">{TECH_LABEL[c.technique] ?? c.technique}</span></>}</td>
+                          <td>${c.entryPrice} → ${c.exitPrice}</td>
+                          <td>{c.qty}</td>
+                          <td>{c.holdMs != null ? fmtHoldMin(Math.round(c.holdMs / 60000)) : "—"}</td>
+                          {/* [리뷰 LOW] 수익률·손익 색을 '실제 손익(win)' 기준으로 통일(행 색과 일치) */}
+                          <td className={c.win ? "pnl-up" : "pnl-down"}>{c.pct >= 0 ? "+" : ""}{c.pct}%</td>
+                          <td className={c.win ? "pnl-up" : "pnl-down"}>{c.pnl >= 0 ? "+" : "−"}${Math.abs(c.pnl).toFixed(2)}</td>
+                          <td className={strClass(c.entryStrength)}>{c.entryStrength != null ? c.entryStrength.toFixed(0) : "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
+              );
+            })()}
           </section>
         </div>
       )}

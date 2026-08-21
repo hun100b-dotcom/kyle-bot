@@ -214,6 +214,7 @@ export function installKyleTool(): ToolEngine {
     tradesList: () => Promise.resolve(e.getTradeLog()),
     todayReport: () => Promise.resolve(e.todayReport()), // [v0.9.1] 오늘의 매매 리포트
     report: (kind: Parameters<ToolEngine["report"]>[0], picked?: string) => Promise.resolve(e.report(kind, picked)),
+    tradeAnalysis: () => Promise.resolve(e.tradeAnalysis()), // [v0.19.0] 매매 사이클 분석
     // [v0.10.0] 매매 이력 동기화 — 폰은 '받기'만 쓴다(올리기는 집 PC 담당)
     tradeSyncPush: (pass?: string) => e.syncPushTrades(pass),
     tradeSyncPull: (pass?: string) => e.syncPullTrades(pass),

@@ -25,7 +25,8 @@ import { calcSplit3, calcOrderbook, calcCandle, roundPrice, getTick, type SplitO
 import { encryptSecret, decryptSecret } from "../lib/keysync"; // [v0.8.0] 키 기기 간 동기화(클라이언트 암호화)
 import { strengthFromTicks, analyzeStrengthSeries, type Side, type StrengthSignals } from "../lib/strength";
 import { buildReport, buildReportFromRealized, makePeriod, type DailyReport, type PeriodKind } from "../lib/report"; // [v0.9.1] 매매 리포트
-import { matchFifo, mergeFills, coveredSince, shouldReuseCache, type Fill } from "../lib/fills"; // [v0.9.6] 토스 실제 체결내역으로 손익 계산 (+v0.10.1 기간 커버리지 헬퍼)
+import { matchFifo, mergeFills, coveredSince, shouldReuseCache, type Fill, type RealizedTrade } from "../lib/fills"; // [v0.9.6] 토스 실제 체결내역으로 손익 계산 (+v0.10.1 기간 커버리지 헬퍼)
+import { buildCycles, analyzeTrades, type TradeCycle, type TradeInsights } from "../lib/trade-analysis"; // [v0.19.0] 매매 사이클 자동추적·분석
 import { encryptJson, decryptJson, deriveSyncId } from "../lib/keysync"; // [v0.10.0] 매매 이력 암호화 동기화
 import { toSyncPayload, isSyncPayload, syncReadUrl, syncPath, SYNC_REPO, type TradeSyncPayload } from "../lib/trade-sync";
 import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, WICK_MIN_RATIO, type Candle, type SessionPattern } from "../lib/indicators";
@@ -2513,6 +2514,62 @@ export class ToolEngine extends EventEmitter {
       savedTotal: realized.length, // 기간과 무관하게 저장된 '매도' 총 건수
       truncated, // [v0.10.1] 이 기간 일부가 빠졌을 수 있으면 true → 화면이 경고를 띄운다
     };
+  }
+
+  /**
+   * [v0.19.0] tradeAnalysis — 실제 체결이력으로 '매매 사이클'(진입→청산)을 자동 추적하고 분석한다.
+   *   · 저장된 체결(savedFills)을 선입선출로 매칭 → 매도 건별 [진입가·청산가·수량·보유기간·수익률·손익·승패].
+   *   · Capri로 주문해 근거가 남은 매매엔 [기법·진입 체결강도]를 붙인다(외부 주문은 '기록 없음').
+   *   · "강할 때 산 매매 vs 약할 때" 인사이트까지. 실주문/DRY_RUN 무관 — 실제 체결이 있으면 잡힌다.
+   *   ⚠️ 읽기 전용(주문 발사 없음).
+   */
+  async tradeAnalysis(): Promise<{ cycles: TradeCycle[]; insights: TradeInsights; source: "live" | "cache" | "none" }> {
+    // 리포트와 같은 방식으로 최신 체결을 저장본에 합친다(연결 없으면 저장본만).
+    let source: "live" | "cache" | "none" = "cache";
+    if (this.mode === "live") {
+      try {
+        // [v0.19.0 · 리뷰 MEDIUM] 리포트와 같은 75일 바닥으로 조회 → 60초 캐시를 공유(429 폭풍/캐시 무력화 방지).
+        //   더 옛 매매는 이미 저장본(savedFills, 2년치 누적)에 있으므로 라이브는 최근만 top-up 하면 된다.
+        const need = Date.now() - 75 * 86_400_000;
+        const { fills, fetched } = await this.collectFills(need);
+        this.absorbFills(fills);
+        source = fetched ? "live" : "cache";
+      } catch {
+        /* 연결 없으면 저장본으로 */
+      }
+    }
+    if (source !== "live" && this.getSyncPass()) {
+      try { await this.syncPullTrades(); } catch { /* 실패해도 저장본으로 */ }
+    }
+    const realized = matchFifo(this.savedFills, this.lastAvgCost);
+    if (this.savedFills.length === 0) source = "none";
+
+    // 진입정보 붙이기 — [v0.19.0 · 리뷰 HIGH] 오염 방지를 위해 엄격하게:
+    //   ① **실거래(real) 기록만** 쓴다. DRY_RUN/연습(mock) 스냅샷은 진짜 진입이 아니므로 인사이트를 좌우하면 안 됨.
+    //      → 실주문을 카프리로 내기 전엔 진입강도/기법이 안 붙는다(정직: 사이클·손익은 그대로, 강/약 비교만 비활성).
+    //   ② **1:1 소비**: 한 체결강도/근거 기록은 사이클 하나에만 매칭(중복 카운트로 강/약 표본이 부풀지 않게).
+    const near = (a: number, b: number) => b > 0 && Math.abs(a - b) / b < 0.005; // 0.5% 이내면 같은 진입으로 봄
+    const realTrades = this.trades.filter((t) => t.mode === "real");
+    const realRationales = this.rationales.filter((x) => x.dryRun !== true);
+    const usedTrade = new Set<string>();
+    const usedRat = new Set<string>();
+    // 최신 청산이 위로 오도록 먼저 정렬한 뒤, 그 순서대로 1:1 매칭한다.
+    const realizedSorted = [...realized].sort((a, b) => b.sellAtMs - a.sellAtMs);
+    const enrichMap = new Map<RealizedTrade, { technique?: string; entryStrength: number | null }>();
+    for (const r of realizedSorted) {
+      const st = realTrades.find((t) => !usedTrade.has(t.id) && t.symbol === r.symbol && Number.isFinite(t.entryPrice) && near(t.entryPrice, r.buyAvg));
+      const rat = realRationales.find((x) => !usedRat.has(x.clientOrderId) && x.symbol === r.symbol && x.entry != null && near(x.entry as number, r.buyAvg));
+      if (st) usedTrade.add(st.id);
+      if (rat) usedRat.add(rat.clientOrderId);
+      const entryStrength = st?.entry?.strength ?? null;
+      const technique = rat?.technique;
+      if (entryStrength != null || technique != null) enrichMap.set(r, { technique, entryStrength });
+    }
+    const enrich = (r: RealizedTrade) => enrichMap.get(r);
+
+    const cycles = buildCycles(realizedSorted, enrich); // 이미 최신순 정렬됨
+    const insights = analyzeTrades(cycles);
+    return { cycles, insights, source };
   }
 
   /**
