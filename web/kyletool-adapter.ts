@@ -195,7 +195,7 @@ export function installKyleTool(): ToolEngine {
     splitsRename: (id: string, memo: string) => Promise.resolve(e.renameSplit(id, memo)),
 
     // ── 체결강도 ───────────────────────────────────────────────
-    strengthStart: (symbol: string, intervalSec?: number) => e.startStrength(symbol, intervalSec),
+    strengthStart: (symbol: string, intervalSec?: number, auto?: boolean) => e.startStrength(symbol, intervalSec, auto),
     strengthStop: (symbol: string) => Promise.resolve(e.stopStrength(symbol)),
     strengthGet: (symbol: string) => Promise.resolve(e.getStrengthState(symbol)),
     onStrength: (cb: (v: unknown) => void) => {

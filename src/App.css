@@ -543,6 +543,21 @@ ul.hint { padding-left: 18px; }
 /* ===== [v0.5.0] 체결강도 기록 ===== */
 .str-controls { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
 .str-field { display: flex; flex-direction: column; gap: 4px; }
+/* [v0.23.0] 보유 종목 체결강도 칩 — 종목명 + 현재 강도값(색). 선택 종목은 떠오른다. */
+.held-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 4px; }
+.chip-sym {
+  display: inline-flex; align-items: center; gap: 8px; min-width: 0;
+  padding: 8px 12px; border-radius: var(--r-pill); cursor: pointer;
+  background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+  font-size: 13px; font-weight: 600; box-shadow: var(--edge-hi);
+}
+.chip-sym:hover { border-color: var(--border-strong); }
+.chip-sym.on { background: var(--surface3); box-shadow: var(--sh-card); border-color: var(--border-strong); }
+.chip-sym .chip-str { font-variant-numeric: tabular-nums; font-weight: 800; }
+.chip-sym .chip-str.up { color: var(--profit); }
+.chip-sym .chip-str.down { color: var(--loss); }
+.chip-sym .chip-str.flat { color: var(--muted); }
+.str-detail-head { margin: 14px 0 2px; font-size: 13px; }
 .str-sym-input, .str-iv {
   padding: 7px 10px; font-size: 14px; background: #0f131a; color: #e6e9ef;
   border: 1px solid var(--border); border-radius: 8px;

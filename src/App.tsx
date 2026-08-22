@@ -13,7 +13,7 @@
 //   ④ 설정: 연습/실서버 모드, 토스 API 키(값은 화면에 재표시 안 됨)
 // =============================================================================
 
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import "./App.css";
 import TodayReport from "./TodayReport"; // [v0.9.1] 오늘의 매매 리포트 화면
 import { useTabOrder } from "./useTabOrder"; // [v0.9.2] 탭 순서 드래그로 변경
@@ -33,8 +33,8 @@ const TAB_LABEL: Record<TabId, string> = {
   report: "📊 매매 리포트",
   screener: "탐색",
   splits: "내 삼분할 기록",
-  strength: "체결강도",
-  trades: "매매분석",
+  strength: "매매분석",
+  trades: "매매분석(구)",
   orders: "주문 현황",
   journal: "기록",
   settings: "설정",
@@ -413,9 +413,14 @@ function App() {
   const [editSplitId, setEditSplitId] = useState<string | null>(null);
   const [editSplitText, setEditSplitText] = useState("");
   // [v0.5.0] 체결강도 기록. 대상 종목·간격 입력 + 현재 상태(현재값·시계열).
-  const [strSym, setStrSym] = useState("AAPL"); //     기록 대상 종목
-  const [strIv, setStrIv] = useState("10"); //         폴링 간격(초) 선택값
-  const [strState, setStrState] = useState<StrengthState | null>(null); // 엔진이 주는 현재 상태
+  const [strSym, setStrSym] = useState("AAPL"); //     현재 상세로 보는 종목(보유 목록에서 선택)
+  const [strState, setStrState] = useState<StrengthState | null>(null); // 선택 종목의 실시간 상태
+  // [v0.23.0] 보유 종목 체결강도 자동표시: 보유현황을 가져와 각 종목의 기록을 자동으로 켜고 보여준다.
+  const [heldSyms, setHeldSyms] = useState<string[]>([]); //                보유 중인(달러) 종목들
+  const [heldStates, setHeldStates] = useState<Record<string, StrengthState>>({}); // 종목별 최신 상태(목록 표시용)
+  const [strLoading, setStrLoading] = useState(false); //                   보유현황 불러오는 중
+  const [strErr, setStrErr] = useState<string | null>(null); //            연결/조회 오류(무음 실패 금지)
+  const strFocusRef = useRef<string | null>(null); //  [리뷰 H2] '체결강도 보기'로 콕 집은 종목(2컬럼 이중호출에도 유실 방지)
 
   // --- 계산기 입력 상태 ---
   const [symbol, setSymbol] = useState("AAPL");
@@ -550,6 +555,8 @@ function App() {
     // [v0.5.0] 체결강도 실시간 갱신: 지금 화면에서 보고 있는 종목의 이벤트만 반영.
     const offStr = window.kyletool.onStrength?.((state) => {
       setStrState((prev) => (state.symbol === (prev?.symbol ?? state.symbol) ? state : prev));
+      // [v0.23.0] 보유 목록에 있는 종목이면 그 카드 값도 실시간 갱신.
+      setHeldStates((prev) => (prev[state.symbol] ? { ...prev, [state.symbol]: state } : prev));
     });
     // [v0.6.0] 스크리너 진행률 실시간 표시
     const offScr = window.kyletool.onScreenerProgress?.((p) => setScreenProg(p));
@@ -598,7 +605,7 @@ function App() {
   const activateTab = (t: TabId) => {
     if (t === "orders") refreshStatusTab();
     else if (t === "splits") refreshSplits();
-    else if (t === "strength") { void loadStrength(strSym); void loadAnalysis(); }
+    else if (t === "strength") { void loadHoldingsStrength(); void loadAnalysis(); }
     else if (t === "report") void loadReport();
   };
   // [v0.15.0] 2컬럼이 켜지거나 좌/우 패널 탭이 바뀌면 그 탭들의 데이터를 로드한다(1컬럼과 동일한 지연 로딩).
@@ -1158,24 +1165,70 @@ ${msg}
     }
   }
 
-  /** [기록 시작] — 이 종목의 체결강도 폴링을 시작. */
-  async function startStrength() {
-    const sym = (strSym || "").toUpperCase().trim();
-    if (!sym) { alert("종목 코드를 입력하세요."); return; }
-    try {
-      setStrState(await window.kyletool.strengthStart(sym, toNum(strIv) ?? 10));
-    } catch (e) {
-      alert("기록 시작 실패: " + String(e));
-    }
-  }
+  // [v0.23.0] 수동 [기록 시작]/[중지]는 제거됨 — 보유 종목은 loadHoldingsStrength가 자동으로 켜고 보여준다.
+  //   (엔진의 strengthStart/Stop IPC는 그대로 존재 — 자동 기록 로직이 계속 사용)
 
-  /** [중지] — 이 종목의 폴링을 멈춘다(저장된 시계열은 남는다). */
-  async function stopStrength() {
-    const sym = (strSym || "").toUpperCase().trim();
+  /**
+   * [v0.23.0] loadHoldingsStrength — 보유현황(주문현황 탭과 같은 소스)을 가져와,
+   *   각 보유(달러) 종목의 체결강도 기록을 '자동으로' 켜고(auto=true → 수명 제한) 상태를 받아 온다.
+   *   매매하면 이미 자동 기록되지만, 이 탭을 열면 '지금 보유 중인' 종목들의 강도를 한눈에 보여주려는 것.
+   *   집 PC 릴레이 연결이 없으면 보유현황 조회가 실패하므로, 조용히 실패하지 않고 안내를 남긴다.
+   */
+  async function loadHoldingsStrength(focusSym?: string) {
+    // [리뷰 H2] 콕 집은 종목은 ref로 받는다 — 2컬럼에서 이 함수가 focus 없이 한 번 더 호출돼도(effect 경합)
+    //   두 호출 다 같은 focus를 동기적으로 집어 관찰 종목이 유실되지 않게 한다.
+    const focus = (focusSym || strFocusRef.current || "").toUpperCase().trim();
+    setStrLoading(true);
+    setStrErr(null);
     try {
-      setStrState(await window.kyletool.strengthStop(sym));
+      const hv = await window.kyletool.holdingsView();
+      // 달러 종목만(체결강도는 미국 주식 틱 기준). 수량 0 제외.
+      let syms = hv.items
+        .filter((it) => it.quantity > 0 && (it.currency || "USD").toUpperCase() === "USD")
+        .map((it) => it.symbol.toUpperCase());
+      // [리뷰 H1] holdingsView는 '연결 없음'이어도 throw가 아니라 빈 배열을 준다(엔진이 삼킴).
+      //   그래서 보유가 비면 '진짜 0'인지 '연결 없음'인지 시세 한 번으로 확인한다(연결 없으면 quote가 throw).
+      //   → 연결 없음을 "보유 종목 없음"으로 잘못 안내하던 회귀를 막는다(무음 실패 금지).
+      if (syms.length === 0 && !focus) {
+        try {
+          await window.kyletool.quote("AAPL");
+        } catch {
+          setStrErr("연결이 없어 보유 종목을 불러오지 못했습니다.");
+          setHeldSyms([]);
+          setHeldStates({});
+          return;
+        }
+      }
+      // [삼분할 '체결강도 보기'처럼] 특정 종목을 콕 집어 보려 하면, 보유 목록에 없어도 맨 앞에 넣어 관찰한다.
+      if (focus && !syms.includes(focus)) syms = [focus, ...syms];
+      // [v0.23.0 · 리뷰 방어] 실시간 폴링은 최대 12종목만(10초마다 조회 → 종목이 너무 많으면 요청 폭주·429 방지).
+      //   그 이상 보유해도 목록엔 다 보이되, 상한 밖 종목은 '저장된 값만'(strengthGet) 표시한다.
+      const MAX_LIVE = 12;
+      const states: Record<string, StrengthState> = {};
+      for (let i = 0; i < syms.length; i++) {
+        const s = syms[i];
+        try {
+          states[s] = i < MAX_LIVE
+            ? await window.kyletool.strengthStart(s, 10, true) // 자동 기록 켜기(수명 제한) + 상태
+            : await window.kyletool.strengthGet(s); //           상한 초과: 저장된 값만(폴링 안 켬)
+        } catch {
+          try { states[s] = await window.kyletool.strengthGet(s); } catch { /* 개별 실패 무시 */ }
+        }
+      }
+      setHeldSyms(syms);
+      setHeldStates(states);
+      // 상세로 볼 종목: 콕 집은 게 있으면 그것, 아니면 기존 선택(보유 목록에 있을 때), 아니면 첫 종목.
+      const pick = focus || (syms.includes(strSym) ? strSym : syms[0]);
+      if (pick) { setStrSym(pick); void loadStrength(pick); }
     } catch (e) {
-      alert("중지 실패: " + String(e));
+      // 보유현황 조회 실패 = 대개 집 PC 릴레이 연결 없음. 무음 실패 금지 — 안내 남김.
+      setStrErr(String(e instanceof Error ? e.message : e));
+      setHeldSyms([]);
+      setHeldStates({});
+    } finally {
+      setStrLoading(false);
+      // 콕 집은 종목은 한 번 소비했으면 비운다(focus는 함수 진입 시 동기적으로 이미 읽었으므로 경합 안전).
+      if (strFocusRef.current === focus && focus) strFocusRef.current = null;
     }
   }
 
@@ -1270,11 +1323,13 @@ ${msg}
     void autoLoad(r.symbol); // 예수금·시세·수량 자동 로드
   }
 
-  /** [내 삼분할 기록] 카드에서 "체결강도 보기"를 누르면 이 종목으로 체결강도 탭 열기. */
+  /** [내 삼분할 기록] 카드에서 "체결강도 보기"를 누르면 그 종목을 콕 집어 매매분석 탭에서 본다(보유 아니어도). */
   function openStrengthFor(symbol: string) {
-    setStrSym(symbol);
+    const sym = (symbol || "").toUpperCase().trim();
+    strFocusRef.current = sym; // [리뷰 H2] 2컬럼 effect가 focus 없이 재호출해도 ref로 관찰 종목 유지
+    setStrSym(sym);
     goToTab("strength");
-    void loadStrength(symbol);
+    void loadHoldingsStrength(sym); // 보유 목록 + 이 종목(관찰)까지 자동 로드
   }
 
   /** 상태(미체결/체결) 필터를 바꾸면 그 상태로 주문·조건주문을 다시 불러온다. */
@@ -1581,7 +1636,7 @@ ${msg}
               setTab(t);
               if (t === "orders") refreshStatusTab();
               if (t === "splits") refreshSplits(); // 탭 열 때 최신 목록 다시 읽기
-              if (t === "strength") { void loadStrength(strSym); void loadAnalysis(); } // [v0.12.0] 매매분석이 체결강도 탭 하위로 통합 → 함께 로드
+              if (t === "strength") { void loadHoldingsStrength(); void loadAnalysis(); } // [v0.23.0] 매매분석 탭: 보유 종목 체결강도 자동표시 + 진입/청산 분석
             }}
           >
             {TAB_LABEL[t]}
@@ -2166,52 +2221,65 @@ ${msg}
       {paneTab === "strength" && (
         <main className="grid">
           <section className="card wide">
-            <h2>체결강도 기록 <span className="hint">(사려는 힘 vs 팔려는 힘)</span></h2>
+            {/* [v0.23.0] '체결강도 기록' → '보유 종목 체결강도'. 수동 [기록 시작] 제거하고,
+                지금 보유 중인 종목들의 체결강도를 자동으로 가져와 칩으로 보여준다(종목 클릭 시 상세). */}
+            <h2>보유 종목 체결강도 <span className="hint">(사려는 힘 vs 팔려는 힘)</span></h2>
             <p className="hint">
               <b>체결강도</b>는 방금 사고팔린 양을 비교해 <b>지금 어느 쪽 힘이 센지</b> 보는 숫자예요
-              (매수 체결량 ÷ 매도 체결량 × 100 → <b>100보다 크면 사는 힘이, 작으면 파는 힘이 우세</b>).
-              <br />✅ <b>이제 카프리로 매매하면 자동으로 기록됩니다.</b> 진입(매수) 주문을 내는 순간 그 종목의 체결강도 기록이
-              저절로 켜지고 보유하는 동안 쌓입니다. 그 기록을 바탕으로 <b>매매분석</b>이 그 매매의 <b>진입·청산 강도</b>를 자동으로 붙여요.
-              <br /><span className="hint small">아래 <b>[기록 시작]</b>은 <b>아직 안 산 종목을 미리 지켜볼 때</b> 쓰는 선택 기능이에요(매매 기록에는 이제 필요 없습니다).
-              실시간 값은 <b>집 PC 연결</b>이 있어야 쌓입니다 — 연결이 없으면 잠시 재시도하다 <b>자동으로 멈추고</b> 화면에 안내가 뜹니다(조용히 실패하지 않아요).</span>
-              <br /><span className="hint small">※ 토스가 매수/매도 방향을 직접 알려 주지 않아, 값이 오르며 체결되면 매수·내리며 체결되면 매도로 <b>추정</b>합니다. 참고용이에요.</span>
+              (매수 ÷ 매도 × 100 → <b>100보다 크면 사는 힘, 작으면 파는 힘 우세</b>).
+              <br />✅ <b>매매하면 자동으로 기록됩니다.</b> 여기엔 <b>지금 보유 중인 종목</b>의 체결강도가 저절로 떠요 — 종목을 눌러 자세히 봅니다.
+              <br /><span className="hint small">실시간 값은 <b>집 PC 연결</b>이 있어야 쌓입니다(폰이면 [폰에서 쓰기]). 연결이 없으면 아래에 안내가 떠요(조용히 실패하지 않아요).
+              ※ 방향은 추정치예요(토스가 매수/매도를 직접 주지 않아, 오르며 체결=매수·내리며 체결=매도로 추정). 참고용.</span>
             </p>
 
-            {/* --- 조작줄: 종목 · 간격 · 시작/중지 --- */}
+            {/* --- 보유 종목 줄: 새로고침 + (있으면) 종목 칩 --- */}
             <div className="str-controls">
-              <label className="str-field">
-                <span className="sb-k">종목</span>
-                <input
-                  type="text"
-                  className="str-sym-input"
-                  value={strSym}
-                  disabled={!!strState?.running}
-                  onChange={(e) => setStrSym(e.target.value.toUpperCase())}
-                  onBlur={() => void loadStrength(strSym)}
-                />
-              </label>
-              <label className="str-field">
-                <span className="sb-k">간격</span>
-                <select className="str-iv" value={strIv} disabled={!!strState?.running} onChange={(e) => setStrIv(e.target.value)}>
-                  <option value="5">5초</option>
-                  <option value="10">10초</option>
-                  <option value="15">15초</option>
-                </select>
-              </label>
-              {strState?.running ? (
-                <button className="mini btn-stop" onClick={() => void stopStrength()}>■ 기록 중지</button>
-              ) : (
-                <button className="mini btn-start" onClick={() => void startStrength()}>● 기록 시작</button>
-              )}
-              {strState?.running && <span className="ok str-live">● 기록 중 ({strState.intervalSec}초 간격)</span>}
+              <button className="mini" onClick={() => void loadHoldingsStrength()} disabled={strLoading}>↻ 새로고침</button>
+              {strLoading && <span className="hint">보유 종목 불러오는 중…</span>}
+              {!strLoading && !strErr && heldSyms.length > 0 && <span className="hint">보유 {heldSyms.length}종목 · 종목을 눌러 자세히</span>}
             </div>
 
-            {strState?.lastError && (
-              <div className="note red" style={{ fontSize: 13 }}>⚠️ 조회 오류: {strState.lastError} (다음 주기에 다시 시도합니다)</div>
+            {/* 연결 없음(보유현황 조회 실패) 안내 — 무음 실패 금지 */}
+            {strErr && (
+              <div className="note red" style={{ fontSize: 13 }}>
+                ⚠️ 보유 종목을 불러오지 못했어요. <b>집 PC 연결</b>(폰이면 PC에서 [설정 → 📱 폰에서 쓰기])이 켜져 있어야
+                보유 종목과 실시간 체결강도가 자동으로 표시됩니다. <button className="mini" onClick={() => void loadHoldingsStrength()}>다시 시도</button>
+              </div>
             )}
 
+            {/* 연결은 됐는데 보유가 없음 */}
+            {!strLoading && !strErr && heldSyms.length === 0 && (
+              <div className="result-empty hint">보유 중인 (미국) 종목이 없어요. 매수하면 그 종목의 체결강도가 여기 자동으로 표시됩니다.</div>
+            )}
+
+            {/* 보유 종목 칩(현재 강도값·색 표시). 클릭하면 아래 상세가 그 종목으로 바뀐다. */}
+            {heldSyms.length > 0 && (
+              <div className="held-chips">
+                {heldSyms.map((sym) => {
+                  const st = heldStates[sym];
+                  const v = st?.latest?.strength ?? null;
+                  const oneWayBuy = v == null && !!st?.latest && st.latest.buyVol > 0; // 매도 0 = 초강세 매수(∞)
+                  const cls = v == null ? (oneWayBuy ? "up" : "flat") : v >= 100 ? "up" : "down";
+                  const valTxt = v != null ? v.toFixed(0) : (oneWayBuy ? "∞" : "—");
+                  return (
+                    <button key={sym} className={`chip-sym ${strSym === sym ? "on" : ""}`} onClick={() => { setStrSym(sym); void loadStrength(sym); }}>
+                      <b className="min0">{sym}</b>
+                      <span className={`chip-str ${cls}`}>{valTxt}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {strState?.lastError && heldSyms.length > 0 && (
+              <div className="note red" style={{ fontSize: 13 }}>⚠️ {strSym} 조회 오류: {strState.lastError} (연결이 있으면 다음 주기에 다시 시도합니다)</div>
+            )}
+
+            {/* ===== 선택 종목 상세(현재값·신호·차트·표) — 보유가 있을 때만 ===== */}
+            {heldSyms.length > 0 && strState && <div className="str-detail-head hint">▾ <b>{strSym}</b> 자세히</div>}
+
             {/* --- 현재값 --- */}
-            {(() => {
+            {heldSyms.length > 0 && (() => {
               const latest = strState?.latest ?? null;
               const v = latest?.strength ?? null;
               const cls = v == null ? "str-oneway" : v >= 100 ? "ok" : "danger";
@@ -2225,7 +2293,7 @@ ${msg}
                   <div className="str-meta">
                     <div>매수량 <b className="ok">{latest ? latest.buyVol.toLocaleString() : "—"}</b> · 매도량 <b className="danger">{latest ? latest.sellVol.toLocaleString() : "—"}</b></div>
                     <div className="hint">
-                      {latest ? `표본 ${latest.nTicks}틱 · ${latest.session} · ${latest.ts}` : "아직 표본 없음 — [기록 시작]을 눌러 주세요."}
+                      {latest ? `표본 ${latest.nTicks}틱 · ${latest.session} · ${latest.ts}` : "아직 표본이 없어요 — 집 PC에 연결돼 있으면 잠시 뒤 자동으로 채워집니다."}
                       {latest?.price != null && ` · 체결가 ${usdKrw(latest.price, fx)}`}
                     </div>
                   </div>
@@ -2234,7 +2302,7 @@ ${msg}
             })()}
 
             {/* --- [v0.12.0] 국면 배지 + 신호(정본 3장) --- */}
-            {strState && (() => {
+            {heldSyms.length > 0 && strState && (() => {
               // [B리뷰 #2] 구버전 엔진 payload엔 signals가 없을 수 있다 → 안전 기본값으로 방어(크래시 방지).
               const sig = strState.signals ?? { bottomReversal: false, bullishDivergence: false, peakRollover: false, phase: "중립" as const, thinSample: true };
               const pb = phaseBadge(sig.phase);
@@ -2251,10 +2319,10 @@ ${msg}
             })()}
 
             {/* --- [v0.12.0] 가격·강도 겹쳐보기 차트(신호 마커). [B리뷰 #6] 신호와 같은 창(최근 30개)으로 정렬 --- */}
-            {strState && strState.samples.length >= 2 && <StrengthChart samples={strState.samples.slice(-30)} signals={strState.signals} />}
+            {heldSyms.length > 0 && strState && strState.samples.length >= 2 && <StrengthChart samples={strState.samples.slice(-30)} signals={strState.signals} />}
 
             {/* --- 최근 값 표(최신이 위) --- */}
-            {strState && strState.samples.length > 0 && (
+            {heldSyms.length > 0 && strState && strState.samples.length > 0 && (
               <table className="result-table str-table">
                 <thead>
                   <tr><th>시각</th><th>체결강도</th><th>매수량</th><th>매도량</th><th>표본</th></tr>
@@ -2275,12 +2343,14 @@ ${msg}
               </table>
             )}
 
-            <p className="hint">
-              💡 짧게 치고 빠질 때 참고: 내리던 중 <b>체결강도가 바닥에서 반등</b>하면 매수 참고,
-              오르던 중 <b>고점에서 꺾이면</b> 익절 참고. 특히 <b>가격은 더 내렸는데 체결강도는 오히려 오르면</b>
-              (＝사는 힘이 살아나는 신호) 반등이 가까울 수 있어요.
-              <br/>⚠️ 이 값은 <b>참고용 보조 신호</b>일 뿐이에요(방향을 추정한 값). <b>이것만 보고 결정하지 말고</b> 가격·거래량·캔들과 함께 보세요.
-            </p>
+            {heldSyms.length > 0 && (
+              <p className="hint">
+                💡 짧게 치고 빠질 때 참고: 내리던 중 <b>체결강도가 바닥에서 반등</b>하면 매수 참고,
+                오르던 중 <b>고점에서 꺾이면</b> 익절 참고. 특히 <b>가격은 더 내렸는데 체결강도는 오히려 오르면</b>
+                (＝사는 힘이 살아나는 신호) 반등이 가까울 수 있어요.
+                <br/>⚠️ 이 값은 <b>참고용 보조 신호</b>일 뿐이에요(방향을 추정한 값). <b>이것만 보고 결정하지 말고</b> 가격·거래량·캔들과 함께 보세요.
+              </p>
+            )}
           </section>
 
           {/* ===== ①-4) 매매분석 — [v0.19.0] 실제 체결이력으로 진입→청산 자동추적·분석 =====

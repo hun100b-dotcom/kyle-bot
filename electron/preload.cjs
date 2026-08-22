@@ -57,7 +57,7 @@ contextBridge.exposeInMainWorld("kyletool", {
   splitsRename: (id, memo) => ipcRenderer.invoke("tool:splits:rename", id, memo), // [v0.5.1] 제목 수정
 
   // [v0.5.0] 체결강도 기록(온디맨드 시계열) — 시작/중지/조회 + 실시간 구독
-  strengthStart: (symbol, intervalSec) => ipcRenderer.invoke("tool:strength:start", symbol, intervalSec),
+  strengthStart: (symbol, intervalSec, auto) => ipcRenderer.invoke("tool:strength:start", symbol, intervalSec, auto),
   strengthStop: (symbol) => ipcRenderer.invoke("tool:strength:stop", symbol),
   strengthGet: (symbol) => ipcRenderer.invoke("tool:strength:get", symbol),
   onStrength: (cb) => {
