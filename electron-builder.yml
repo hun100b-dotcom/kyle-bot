@@ -56,6 +56,12 @@ win:
       arch: [x64]
   # 코드서명 인증서 없음(유료) → 미서명 빌드. 첫 실행 시 SmartScreen 경고는
   # "추가 정보 → 실행"으로 통과(README 안내). 개인 사용엔 충분.
+  # [교훈] signExecutable: false 가 없으면 electron-builder가 실제 서명 없이도
+  #   exe에 "서명 흉내" 단계(signtool.exe 호출)를 시도하는데, 이건 윈도우가 아닌
+  #   빌드 환경(예: 리눅스 CI/클라우드 세션)에서는 wine 이 없어 그대로 실패한다.
+  #   아이콘·버전 정보 등 resedit 기반 메타데이터 편집(signAndEditExecutable)은 그대로
+  #   두고, 서명 시도만 꺼서 어떤 OS에서 빌드하든 항상 성공하게 만든다.
+  signExecutable: false
 
 nsis:
   # [oneClick=true] 업데이트가 "매끄럽게" 적용되게 하는 핵심 설정.
