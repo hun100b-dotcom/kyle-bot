@@ -17,8 +17,8 @@ contextBridge.exposeInMainWorld("kyletool", {
   saveSettings: (input) => ipcRenderer.invoke("tool:settings:save", input),
   saveSeedSettings: (input) => ipcRenderer.invoke("tool:settings:seed", input), // [v0.3.0]
   saveDefaultRatio: (input) => ipcRenderer.invoke("tool:settings:defaults", input), // [v0.8.3]
-  syncPushKeys: (passphrase) => ipcRenderer.invoke("tool:sync:push", passphrase), // [v0.8.0]
-  syncPullKeys: (passphrase) => ipcRenderer.invoke("tool:sync:pull", passphrase), // [v0.8.0]
+  syncPushKeys: () => ipcRenderer.invoke("tool:sync:push"), // [v0.8.0→v0.24.0] 로그인 비밀번호로 암호화
+  syncPullKeys: () => ipcRenderer.invoke("tool:sync:pull"), // [v0.8.0→v0.24.0] 로그인 시 자동 호출됨
   authSignUp: (email, pw) => ipcRenderer.invoke("tool:auth:signup", email, pw), // [v0.8.1]
   authSignIn: (email, pw) => ipcRenderer.invoke("tool:auth:signin", email, pw),
   authSignOut: () => ipcRenderer.invoke("tool:auth:signout"),
@@ -79,9 +79,8 @@ contextBridge.exposeInMainWorld("kyletool", {
   todayReport: () => ipcRenderer.invoke("tool:report:today"),
   report: (kind, picked) => ipcRenderer.invoke("tool:report", kind, picked),
   tradeAnalysis: () => ipcRenderer.invoke("tool:trade-analysis"),
-  tradeSyncPush: (pass) => ipcRenderer.invoke("tool:tradesync:push", pass),
-  tradeSyncPull: (pass) => ipcRenderer.invoke("tool:tradesync:pull", pass),
-  tradeSyncPass: (pass) => ipcRenderer.invoke("tool:tradesync:pass", pass),
+  tradeSyncPush: () => ipcRenderer.invoke("tool:tradesync:push"), // [v0.24.0] 로그인 비밀번호로 암호화
+  tradeSyncPull: () => ipcRenderer.invoke("tool:tradesync:pull"), // [v0.24.0] 로그인 시 자동 호출됨
   tradesStats: () => ipcRenderer.invoke("tool:trades:stats"),
   tradesClose: (id, exitPrice, kind) => ipcRenderer.invoke("tool:trades:close", id, exitPrice, kind),
   tradesDelete: (id) => ipcRenderer.invoke("tool:trades:delete", id),

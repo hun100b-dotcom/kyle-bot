@@ -459,8 +459,8 @@ interface KyletoolBridge {
     seedBasis?: "auto" | "fixed";
     seedFixedUsd?: number | null;
   }): Promise<ToolSettings>;
-  syncPushKeys(passphrase: string): Promise<{ ok: boolean; message: string }>;
-  syncPullKeys(passphrase: string): Promise<{ ok: boolean; message: string }>;
+  syncPushKeys(): Promise<{ ok: boolean; message: string }>;
+  syncPullKeys(): Promise<{ ok: boolean; message: string }>;
   authSignUp(email: string, password: string): Promise<{ ok: boolean; needsConfirm: boolean; message: string }>;
   authSignIn(email: string, password: string): Promise<{ ok: boolean; message: string }>;
   authSignOut(): Promise<{ ok: boolean }>;
@@ -544,10 +544,9 @@ interface KyletoolBridge {
   todayReport(): Promise<DailyReport>;
   report(kind: PeriodKind, picked?: string): Promise<DailyReport>;
   tradeAnalysis(): Promise<{ cycles: TradeCycle[]; insights: TradeInsights; source: "live" | "cache" | "none" }>; // [v0.19.0]
-  /** [v0.10.0] 매매 이력 동기화 */
-  tradeSyncPush(pass?: string): Promise<{ ok: boolean; message: string; count?: number }>;
-  tradeSyncPull(pass?: string): Promise<{ ok: boolean; message: string; count?: number }>;
-  tradeSyncPass(pass?: string): Promise<string | void>;
+  /** [v0.10.0→v0.24.0] 매매 이력 동기화(로그인 비밀번호로 암호화, 로그인 시 자동 호출됨) */
+  tradeSyncPush(): Promise<{ ok: boolean; message: string; count?: number }>;
+  tradeSyncPull(): Promise<{ ok: boolean; message: string; count?: number }>;
   tradesStats(): Promise<TradeStats>;
   tradesClose(id: string, exitPrice: number, kind: "tp" | "sl" | "manual"): Promise<StrengthTrade[]>;
   tradesDelete(id: string): Promise<StrengthTrade[]>;

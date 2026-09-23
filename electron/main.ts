@@ -229,8 +229,8 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:settings:save", (_ev, input) => e.saveSettings(input));
   ipcMain.handle("tool:settings:seed", (_ev, input) => e.saveSeedSettings(input)); // [v0.3.0] 세션 시드 설정
   ipcMain.handle("tool:settings:defaults", (_ev, input) => e.saveDefaultRatio(input)); // [v0.8.3] 기본 손익비
-  ipcMain.handle("tool:sync:push", (_ev, passphrase) => e.syncPushKeys(passphrase)); // [v0.8.0] 키 클라우드 저장(암호문)
-  ipcMain.handle("tool:sync:pull", (_ev, passphrase) => e.syncPullKeys(passphrase)); // [v0.8.0] 키 클라우드 불러오기
+  ipcMain.handle("tool:sync:push", () => e.syncPushKeys()); // [v0.8.0→v0.24.0] 키 클라우드 저장(로그인 비밀번호로 암호화)
+  ipcMain.handle("tool:sync:pull", () => e.syncPullKeys()); // [v0.8.0→v0.24.0] 키 클라우드 불러오기(로그인 시 자동 호출됨)
   ipcMain.handle("tool:auth:signup", (_ev, email, pw) => e.authSignUp(email, pw)); // [v0.8.1] 회원가입
   ipcMain.handle("tool:auth:signin", (_ev, email, pw) => e.authSignIn(email, pw)); // [v0.8.1] 로그인
   ipcMain.handle("tool:auth:signout", () => e.authSignOut());
@@ -273,10 +273,9 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:report:today", () => e.todayReport()); // [v0.9.1] 오늘의 매매 리포트
   ipcMain.handle("tool:report", (_ev, kind, picked) => e.report(kind, picked)); // [v0.9.2] 기간별 리포트
   ipcMain.handle("tool:trade-analysis", () => e.tradeAnalysis()); // [v0.19.0] 매매 사이클 자동추적·분석
-  // [v0.10.0] 매매 이력 암호화 동기화(PC 올리기 / 폰 받기)
-  ipcMain.handle("tool:tradesync:push", (_ev, pass) => e.syncPushTrades(pass));
-  ipcMain.handle("tool:tradesync:pull", (_ev, pass) => e.syncPullTrades(pass));
-  ipcMain.handle("tool:tradesync:pass", (_ev, pass) => (pass === undefined ? e.getSyncPass() : e.setSyncPass(pass)));
+  // [v0.10.0→v0.24.0] 매매 이력 암호화 동기화(로그인 비밀번호로, 로그인 시 자동 호출됨)
+  ipcMain.handle("tool:tradesync:push", () => e.syncPushTrades());
+  ipcMain.handle("tool:tradesync:pull", () => e.syncPullTrades());
   ipcMain.handle("tool:trades:stats", () => e.getTradeStats());
   ipcMain.handle("tool:trades:close", (_ev, id: string, exitPrice: number, kind: "tp" | "sl" | "manual") => e.closeTradeManual(id, exitPrice, kind));
   ipcMain.handle("tool:trades:delete", (_ev, id: string) => e.deleteTrade(id));

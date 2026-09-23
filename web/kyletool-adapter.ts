@@ -151,8 +151,8 @@ export function installKyleTool(): ToolEngine {
     authSignIn: (email: string, pw: string) => e.authSignIn(email, pw),
     authSignOut: () => Promise.resolve(e.authSignOut()),
     authStatus: () => Promise.resolve(e.authStatus()),
-    syncPushKeys: (passphrase: string) => e.syncPushKeys(passphrase),
-    syncPullKeys: (passphrase: string) => e.syncPullKeys(passphrase),
+    syncPushKeys: () => e.syncPushKeys(),
+    syncPullKeys: () => e.syncPullKeys(),
 
     // ── 안전장치 토글 ──────────────────────────────────────────
     setKillSwitch: (on: boolean) => e.setKillSwitch(!!on),
@@ -215,10 +215,9 @@ export function installKyleTool(): ToolEngine {
     todayReport: () => Promise.resolve(e.todayReport()), // [v0.9.1] 오늘의 매매 리포트
     report: (kind: Parameters<ToolEngine["report"]>[0], picked?: string) => Promise.resolve(e.report(kind, picked)),
     tradeAnalysis: () => Promise.resolve(e.tradeAnalysis()), // [v0.19.0] 매매 사이클 분석
-    // [v0.10.0] 매매 이력 동기화 — 폰은 '받기'만 쓴다(올리기는 집 PC 담당)
-    tradeSyncPush: (pass?: string) => e.syncPushTrades(pass),
-    tradeSyncPull: (pass?: string) => e.syncPullTrades(pass),
-    tradeSyncPass: (pass?: string) => Promise.resolve(pass === undefined ? e.getSyncPass() : e.setSyncPass(pass)),
+    // [v0.10.0→v0.24.0] 매매 이력 동기화 — 로그인 비밀번호로 암호화, 로그인 시 자동 호출됨
+    tradeSyncPush: () => e.syncPushTrades(),
+    tradeSyncPull: () => e.syncPullTrades(),
     tradesStats: () => Promise.resolve(e.getTradeStats()),
     tradesClose: (id: string, exitPrice: number, kind: "tp" | "sl" | "manual") => e.closeTradeManual(id, exitPrice, kind),
     tradesDelete: (id: string) => Promise.resolve(e.deleteTrade(id)),

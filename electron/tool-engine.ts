@@ -22,13 +22,12 @@ import { join } from "node:path";
 import { DateTime } from "luxon";
 import { getSession, getSessionStart, getMarketStatus, isOrderFrozen, type Session } from "../lib/session";
 import { calcSplit3, calcOrderbook, calcCandle, roundPrice, getTick, type SplitOrder } from "../lib/calc";
-import { encryptSecret, decryptSecret } from "../lib/keysync"; // [v0.8.0] 키 기기 간 동기화(클라이언트 암호화)
+import { encryptSecret, decryptSecret, encryptJson, decryptJson } from "../lib/keysync"; // [v0.8.0] 키 기기 간 동기화(클라이언트 암호화) + [v0.10.0] 매매 이력용
 import { strengthFromTicks, analyzeStrengthSeries, type Side, type StrengthSignals } from "../lib/strength";
 import { buildReport, buildReportFromRealized, makePeriod, type DailyReport, type PeriodKind } from "../lib/report"; // [v0.9.1] 매매 리포트
 import { matchFifo, mergeFills, coveredSince, shouldReuseCache, type Fill, type RealizedTrade } from "../lib/fills"; // [v0.9.6] 토스 실제 체결내역으로 손익 계산 (+v0.10.1 기간 커버리지 헬퍼)
 import { buildCycles, analyzeTrades, type TradeCycle, type TradeInsights } from "../lib/trade-analysis"; // [v0.19.0] 매매 사이클 자동추적·분석
-import { encryptJson, decryptJson, deriveSyncId } from "../lib/keysync"; // [v0.10.0] 매매 이력 암호화 동기화
-import { toSyncPayload, isSyncPayload, syncReadUrl, syncPath, SYNC_REPO, type TradeSyncPayload } from "../lib/trade-sync";
+import { toSyncPayload, isSyncPayload, type TradeSyncPayload } from "../lib/trade-sync";
 import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, WICK_MIN_RATIO, type Candle, type SessionPattern } from "../lib/indicators";
 import {
   getPrice,
@@ -669,6 +668,12 @@ export class ToolEngine extends EventEmitter {
   private authEmail: string | null = null;
   private authUserId: string | null = null;
   private authExpiresAtMs = 0;
+  // [v0.24.0] 로그인 비밀번호 — 오직 "이번에 앱을 켠 동안"만 메모리에 들고 있는다.
+  //   ⚠️ 파일에 절대 저장하지 않는다(persistEnv에도 안 씀). 이 값을 그대로
+  //   토스 키·매매 이력 암호화 열쇠로 재사용해서, 사용자가 따로 외울 "동기화 비밀번호"가
+  //   없어진다(로그인 비밀번호 = 잠금 비밀번호). 앱을 다시 켜면(재로그인 전까지) null이라
+  //   자동 동기화가 잠시 쉬는데, 그동안도 로컬에 저장된 값으로는 그대로 동작한다.
+  private authPassword: string | null = null;
 
   private mock: ReturnType<typeof createMockTossServer> | null = null;
   private mockPort = 0;
@@ -914,6 +919,15 @@ export class ToolEngine extends EventEmitter {
 
     this.persistEnv(); // [v0.3.0] 모든 설정을 한 경로로 저장(토글·시드 포함)
     this.addJournal({ kind: "info", symbol: "-", summary: `설정 저장 (모드: ${this.mode === "mock" ? "연습" : "실서버(주문 잠금)"})` });
+
+    // [v0.24.0] 로그인 상태면 방금 저장한 키를 조용히 클라우드에도 올린다(실패해도 무시).
+    //   → "로그인 + 키 저장"만 하면 다른 기기는 로그인만으로 자동으로 받아간다.
+    if (this.authPassword && (input.clientId || input.clientSecret)) {
+      void this.syncPushKeys().catch(() => {
+        /* 업로드 실패는 조용히 넘어간다(로컬 저장은 이미 됐다) */
+      });
+    }
+
     return this.getSettings();
   }
 
@@ -929,9 +943,23 @@ export class ToolEngine extends EventEmitter {
   private static readonly SUPABASE_ANON =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZhdWlleWtqeGRma25nd3Zmb2t5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUxNDY0NDIsImV4cCI6MjEwMDcyMjQ0Mn0.Wq9jnoKGO5CbRbDfzYKrZCaV3RD4zjZCdBgQJLQrqRI";
 
-  // ---- 로그인(Supabase Auth) — 사람마다 자기 계정, 키는 계정별로 격리 ----
+  // ---- 로그인(Supabase Auth) — 사람마다 자기 계정, 키·매매이력은 계정별로 격리 ----
+  //   [v0.24.0] "허용된 사람만 가입할 수 있다" — Supabase 쪽에 가입 허용목록 트리거가
+  //   있어(supabase/migrations/…_capri_v2_…), 목록에 없는 이메일은 가입 자체가 막힌다.
+  //   몇 명까지 쓸지는 오너가 그 목록에 이메일을 추가/삭제하는 것으로 정한다(앱은 관여 안 함).
 
-  /** [v0.8.1] 회원가입. 이 프로젝트는 이메일 확인이 켜져 있어, 가입 후 메일 링크 클릭이 필요하다. */
+  /** 서버가 돌려준 원문 오류를 사람이 이해할 문구로 바꾼다(허용목록 거부 케이스 포함). */
+  private static explainSignupError(raw: string): string {
+    if (/CAPRI_NOT_ALLOWED/i.test(raw)) return "아직 사용 승인이 안 된 이메일입니다. 운영자에게 사용 신청을 해주세요.";
+    // Supabase는 보안상 트리거의 원문 예외를 그대로 안 돌려주고 일반 문구로 감쌀 때가 있다
+    // (예: "Database error saving new user"). 그런 경우도 같은 안내를 우선 보여준다.
+    if (/database error|unexpected_failure/i.test(raw)) {
+      return `가입할 수 없습니다 — 아직 운영자 승인 목록에 없는 이메일일 수 있어요. 운영자에게 사용 신청을 해주세요.\n(자세한 오류: ${raw})`;
+    }
+    return raw;
+  }
+
+  /** [v0.8.1] 회원가입. [v0.24.0] 허용목록에 있는 이메일만 가입되고, 성공하면 바로 로그인·자동 동기화까지 된다. */
   async authSignUp(email: string, password: string): Promise<{ ok: boolean; needsConfirm: boolean; message: string }> {
     try {
       const res = await fetch(`${ToolEngine.SUPABASE_URL}/auth/v1/signup`, {
@@ -941,13 +969,14 @@ export class ToolEngine extends EventEmitter {
       });
       const data = (await res.json()) as Record<string, unknown>;
       if (!res.ok) {
-        const msg = String(data.msg ?? data.error_description ?? data.error ?? `가입 실패(HTTP ${res.status})`);
-        return { ok: false, needsConfirm: false, message: msg };
+        const raw = String(data.msg ?? data.error_description ?? data.error ?? `가입 실패(HTTP ${res.status})`);
+        return { ok: false, needsConfirm: false, message: ToolEngine.explainSignupError(raw) };
       }
       // [v0.8.2] 서버에 자동확인이 걸려 있어 가입하면 보통 바로 세션이 온다 → 즉시 로그인 상태.
       if (data.access_token) {
         this.applySession(data);
-        this.persistEnv(); // 세션 저장(재시작해도 로그인 유지)
+        this.authPassword = password; // [v0.24.0] 이번 로그인 비밀번호를 그대로 잠금 열쇠로 재사용
+        this.persistEnv(); // 세션 저장(재시작해도 로그인 유지). 비밀번호는 저장하지 않는다.
         return { ok: true, needsConfirm: false, message: "가입·로그인 완료되었습니다." };
       }
       // 혹시 세션이 안 오면(설정 변경 등) 같은 자격증명으로 바로 로그인 시도.
@@ -959,7 +988,11 @@ export class ToolEngine extends EventEmitter {
     }
   }
 
-  /** [v0.8.1] 로그인(이메일+비밀번호). 성공 시 세션 저장(재시작해도 유지). */
+  /**
+   * [v0.8.1] 로그인(이메일+비밀번호). 성공 시 세션 저장(재시작해도 유지).
+   * [v0.24.0] 로그인 = 동기화. 이 기기에 아직 없는 토스 키·매매 이력을 로그인 직후
+   *   조용히(실패해도 무시) 자동으로 받아온다 — 사용자가 따로 버튼을 누를 필요가 없다.
+   */
   async authSignIn(email: string, password: string): Promise<{ ok: boolean; message: string }> {
     try {
       const res = await fetch(`${ToolEngine.SUPABASE_URL}/auth/v1/token?grant_type=password`, {
@@ -974,8 +1007,19 @@ export class ToolEngine extends EventEmitter {
         return { ok: false, message: msg };
       }
       this.applySession(data);
-      this.persistEnv(); // refresh 토큰·이메일 저장(재시작 후에도 로그인 유지)
-      return { ok: true, message: `로그인되었습니다(${this.authEmail}).` };
+      this.authPassword = password; // [v0.24.0] 이번 로그인 비밀번호를 그대로 잠금 열쇠로 재사용
+      this.persistEnv(); // refresh 토큰·이메일 저장(재시작 후에도 로그인 유지). 비밀번호는 저장하지 않는다.
+
+      // 자동 동기화: 이 기기에 키가 없으면 클라우드에서 받아오고, 매매 이력도 함께 받아온다.
+      let extra = "";
+      if (!process.env.TOSS_CLIENT_ID) {
+        const pulled = await this.syncPullKeys().catch(() => null);
+        if (pulled?.ok) extra += " 저장된 토스 키를 자동으로 불러왔습니다.";
+      }
+      const pulledTrades = await this.syncPullTrades().catch(() => null);
+      if (pulledTrades?.ok && (pulledTrades.count ?? 0) > 0) extra += ` 매매 이력 ${pulledTrades.count}건도 함께 받아왔습니다.`;
+
+      return { ok: true, message: `로그인되었습니다(${this.authEmail}).${extra}` };
     } catch (e) {
       return { ok: false, message: String(e).replace(/^Error:\s*/, "") };
     }
@@ -988,6 +1032,7 @@ export class ToolEngine extends EventEmitter {
     this.authEmail = null;
     this.authUserId = null;
     this.authExpiresAtMs = 0;
+    this.authPassword = null; // [v0.24.0] 메모리에서만 들고 있던 비밀번호도 지운다
     this.persistEnv();
     return { ok: true };
   }
@@ -1034,18 +1079,21 @@ export class ToolEngine extends EventEmitter {
   }
 
   /**
-   * [v0.8.1] 지금 이 기기의 토스 키를 마스터 비밀번호로 암호화해 '내 계정' 행에 저장.
+   * [v0.8.1] 지금 이 기기의 토스 키를 로그인 비밀번호로 암호화해 '내 계정' 행에 저장.
    *   RLS가 user_id=본인만 허용하므로 다른 사람은 절대 못 본다. 평문은 올라가지 않는다.
+   * [v0.24.0] 인자로 비밀번호를 따로 안 받는다 — 로그인할 때 쓴 비밀번호(authPassword)를
+   *   그대로 잠금 열쇠로 쓴다. [설정 저장] 시 로그인 상태면 자동으로도 호출된다(saveSettings).
    */
-  async syncPushKeys(passphrase: string): Promise<{ ok: boolean; message: string }> {
+  async syncPushKeys(): Promise<{ ok: boolean; message: string }> {
     const token = await this.ensureAccessToken();
     if (!token) return { ok: false, message: "먼저 로그인하세요(설정 탭 상단). 로그인해야 내 계정에 키를 저장할 수 있어요." };
+    if (!this.authPassword) return { ok: false, message: "다시 로그인해야 동기화할 수 있습니다(비밀번호는 저장해 두지 않아요)." };
     const clientId = process.env.TOSS_CLIENT_ID ?? "";
     const clientSecret = process.env.TOSS_CLIENT_SECRET ?? "";
     const account = process.env.TOSS_ACCOUNT ?? "";
     if (!clientId || !clientSecret) return { ok: false, message: "먼저 [설정]에서 Client ID/Secret을 입력·저장한 뒤 동기화하세요." };
     try {
-      const rec = await encryptSecret({ clientId, clientSecret, account }, passphrase);
+      const rec = await encryptSecret({ clientId, clientSecret, account }, this.authPassword);
       // upsert: 내 user_id 행이 있으면 갱신, 없으면 삽입. user_id 는 JWT의 것으로 명시(RLS with_check 통과).
       const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_secrets?on_conflict=user_id`, {
         method: "POST",
@@ -1054,19 +1102,22 @@ export class ToolEngine extends EventEmitter {
       });
       if (!res.ok) return { ok: false, message: `클라우드 저장 실패(HTTP ${res.status}). ${await res.text().catch(() => "")}`.slice(0, 160) };
       this.addJournal({ kind: "info", symbol: "-", summary: "🔐 내 토스 키를 암호화해 클라우드(내 계정)에 저장" });
-      return { ok: true, message: "내 계정에 암호화 저장했습니다. 다른 기기에서 같은 계정 로그인 + 같은 마스터 비밀번호로 [불러오기] 하세요." };
+      return { ok: true, message: "내 계정에 암호화 저장했습니다. 다른 기기에서 같은 계정으로 로그인만 하면 자동으로 받아집니다." };
     } catch (e) {
       return { ok: false, message: String(e).replace(/^Error:\s*/, "") };
     }
   }
 
   /**
-   * [v0.8.1] 내 계정의 암호문을 받아 마스터 비밀번호로 복호화해 이 기기에 적용.
+   * [v0.8.1] 내 계정의 암호문을 받아 로그인 비밀번호로 복호화해 이 기기에 적용.
    *   복호화 성공 시 로컬 .env에도 저장하고 토큰을 재발급한다(즉시 사용 가능).
+   * [v0.24.0] authSignIn 이 로그인 직후 자동으로 이 함수를 부른다 — 보통 사람이 직접
+   *   호출할 일이 없다(문제가 있을 때 다시 시도하는 용도로만 UI에 남겨 둔다).
    */
-  async syncPullKeys(passphrase: string): Promise<{ ok: boolean; message: string }> {
+  async syncPullKeys(): Promise<{ ok: boolean; message: string }> {
     const token = await this.ensureAccessToken();
     if (!token) return { ok: false, message: "먼저 로그인하세요(설정 탭 상단)." };
+    if (!this.authPassword) return { ok: false, message: "다시 로그인해야 키를 불러올 수 있습니다(비밀번호는 저장해 두지 않아요)." };
     try {
       // RLS 덕분에 select 는 자동으로 '내 행'만 돌려준다(user_id 조건 불필요).
       const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_secrets?select=ciphertext,salt,iv`, {
@@ -1075,9 +1126,9 @@ export class ToolEngine extends EventEmitter {
       if (!res.ok) return { ok: false, message: `클라우드 조회 실패(HTTP ${res.status}).` };
       const rows = (await res.json()) as Array<{ ciphertext: string; salt: string; iv: string }>;
       if (!rows || rows.length === 0) {
-        return { ok: false, message: "내 계정에 저장된 키가 없습니다. 키가 있는 기기에서 먼저 [클라우드에 저장]하세요." };
+        return { ok: false, message: "내 계정에 저장된 키가 없습니다. 이 기기에서 [설정]에 키를 입력·저장하면 자동으로 클라우드에도 올라갑니다." };
       }
-      const payload = await decryptSecret(rows[0], passphrase); // 틀린 비번이면 여기서 실패
+      const payload = await decryptSecret(rows[0], this.authPassword); // 틀린 비번이면 여기서 실패
       await this.saveSettings({ mode: "live", clientId: payload.clientId, clientSecret: payload.clientSecret, account: payload.account });
       this.addJournal({ kind: "info", symbol: "-", summary: "🔓 클라우드(내 계정)에서 토스 키를 복호화해 이 기기에 적용" });
       return { ok: true, message: "내 계정에서 키를 불러와 적용했습니다. 이제 이 기기에서 바로 조회·주문이 됩니다." };
@@ -2211,37 +2262,33 @@ export class ToolEngine extends EventEmitter {
     }
   }
 
-  // ── [v0.10.0] 매매 이력 암호화 동기화 (PC가 올리고, 폰이 받는다) ────────────
-  //   회사에서도 리포트를 보려면 이력이 폰에 있어야 한다. 집 PC가 이력을 **암호화해서**
-  //   인터넷 보관함에 올려 두면, 폰은 비밀번호로 풀어서 쓴다.
+  // ── [v0.10.0→v0.24.0] 매매 이력 암호화 동기화 (로그인 계정 안에서 PC↔폰) ────
+  //   회사에서도 리포트를 보려면 이력이 폰에 있어야 한다. 로그인한 기기가 이력을
+  //   **로그인 비밀번호로 암호화해서** Supabase(내 계정 전용 행)에 올려 두면, 같은
+  //   계정으로 로그인한 다른 기기가 자동으로 받아서 푼다.
   //   ⚠️ 토스 키·토큰·계좌번호는 **절대** 올리지 않는다(매매 결과만).
-
-  /** 동기화 비밀번호를 저장/조회 (PC는 .env, 폰은 브라우저 저장소에 남는다) */
-  getSyncPass(): string {
-    return process.env.TRADE_SYNC_PASS ?? "";
-  }
-
-  setSyncPass(pass: string): void {
-    process.env.TRADE_SYNC_PASS = pass.trim();
-    this.persistEnv();
-  }
+  //   [v0.24.0] 예전엔 GitHub 공개 저장소 + 별도 "동기화 비밀번호"를 썼다(githubToken
+  //   으로 git 자격증명을 찾아야 해서, 일반 사용자 PC에서는 애초에 작동하지 않았다).
+  //   지금은 토스 키(capri_secrets)와 완전히 같은 방식 — capri_trades 표에 RLS로
+  //   저장한다. 비밀번호는 로그인 비밀번호(authPassword) 하나뿐이다.
 
   /**
-   * syncPushTrades — [PC] 저장된 매매 이력을 암호화해 공개 저장소에 올린다.
-   *   토큰은 이 PC에 이미 있는 GitHub 자격증명에서 가져온다(새로 저장하지 않는다).
+   * syncPushTrades — 저장된 매매 이력을 암호화해 내 계정(capri_trades) 행에 올린다.
    */
-  async syncPushTrades(passphrase?: string): Promise<{ ok: boolean; message: string; count?: number }> {
-    const pass = (passphrase ?? this.getSyncPass()).trim();
-    if (!pass) return { ok: false, message: "동기화 비밀번호를 먼저 정해 주세요(6자 이상)." };
+  async syncPushTrades(): Promise<{ ok: boolean; message: string; count?: number }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요." };
+    if (!this.authPassword) return { ok: false, message: "다시 로그인해야 동기화할 수 있습니다(비밀번호는 저장해 두지 않아요)." };
     if (this.savedFills.length === 0) return { ok: false, message: "올릴 매매 이력이 없습니다." };
 
     try {
-      const rec = await encryptJson(toSyncPayload(this.savedFills, Date.now()), pass);
-      const token = await this.githubToken();
-      if (!token) {
-        return { ok: false, message: "이 PC의 GitHub 자격증명을 찾지 못했습니다(터미널에서 gh auth login 한 번 필요)." };
-      }
-      await this.githubPutFile(token, syncPath(rec.syncId), JSON.stringify(rec));
+      const rec = await encryptJson(toSyncPayload(this.savedFills, Date.now()), this.authPassword);
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_trades?on_conflict=user_id`, {
+        method: "POST",
+        headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({ user_id: this.authUserId, ciphertext: rec.ciphertext, salt: rec.salt, iv: rec.iv, updated_at: new Date().toISOString() }),
+      });
+      if (!res.ok) return { ok: false, message: `클라우드 저장 실패(HTTP ${res.status}).` };
       this.lastSyncPushAtMs = Date.now();
       return { ok: true, message: `매매 이력 ${this.savedFills.length}건을 올렸습니다(암호화됨).`, count: this.savedFills.length };
     } catch (e) {
@@ -2250,24 +2297,25 @@ export class ToolEngine extends EventEmitter {
   }
 
   /**
-   * syncPullTrades — [폰·PC] 올려 둔 매매 이력을 받아 복호화해 저장본에 합친다.
-   *   홈 PC 연결(터널)이 없어도, 인터넷만 되면 어디서든 된다.
+   * syncPullTrades — 내 계정에 올려 둔 매매 이력을 받아 복호화해 저장본에 합친다.
+   *   authSignIn 이 로그인 직후 자동으로 부른다 — 보통 사람이 직접 누를 일이 없다.
    */
-  async syncPullTrades(passphrase?: string): Promise<{ ok: boolean; message: string; count?: number }> {
-    const pass = (passphrase ?? this.getSyncPass()).trim();
-    if (!pass) return { ok: false, message: "동기화 비밀번호를 입력해 주세요." };
+  async syncPullTrades(): Promise<{ ok: boolean; message: string; count?: number }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요." };
+    if (!this.authPassword) return { ok: false, message: "다시 로그인해야 매매 이력을 받을 수 있습니다(비밀번호는 저장해 두지 않아요)." };
 
     try {
-      const syncId = await deriveSyncId(pass);
-      const res = await fetch(syncReadUrl(syncId));
-      if (res.status === 404) {
-        return { ok: false, message: "올려 둔 매매 이력이 없습니다(집 PC에서 먼저 [올리기]를 눌러 주세요)." };
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_trades?select=ciphertext,salt,iv`, {
+        headers: this.authRestHeaders(token),
+      });
+      if (!res.ok) return { ok: false, message: `클라우드 조회 실패(HTTP ${res.status}).` };
+      const rows = (await res.json()) as Array<{ ciphertext: string; salt: string; iv: string }>;
+      if (!rows || rows.length === 0) {
+        return { ok: false, message: "내 계정에 저장된 매매 이력이 없습니다." };
       }
-      if (!res.ok) return { ok: false, message: `받기 실패(HTTP ${res.status})` };
-
-      const rec = (await res.json()) as { ciphertext: string; salt: string; iv: string };
-      const payload = await decryptJson<TradeSyncPayload>(rec, pass);
-      if (!isSyncPayload(payload)) return { ok: false, message: "받은 파일 형식이 올바르지 않습니다." };
+      const payload = await decryptJson<TradeSyncPayload>(rows[0], this.authPassword); // 틀린 비번이면 여기서 실패
+      if (!isSyncPayload(payload)) return { ok: false, message: "받은 데이터 형식이 올바르지 않습니다." };
 
       const before = this.savedFills.length;
       this.savedFills = mergeFills(this.savedFills, payload.fills);
@@ -2284,49 +2332,6 @@ export class ToolEngine extends EventEmitter {
     }
   }
 
-  /** 이 PC에 이미 있는 GitHub 자격증명을 찾는다(값은 저장하지 않는다). */
-  private async githubToken(): Promise<string | null> {
-    if (process.env.GH_TOKEN) return process.env.GH_TOKEN;
-    try {
-      const { execFileSync } = await import("node:child_process");
-      const out = execFileSync("git", ["credential", "fill"], {
-        input: ["protocol=https", "host=github.com", "", ""].join(String.fromCharCode(10)),
-        encoding: "utf8",
-        stdio: ["pipe", "pipe", "ignore"],
-      });
-      const m = out.match(/^password=(.*)$/m);
-      return m ? m[1].trim() : null;
-    } catch {
-      return null; // 브라우저(폰)에서는 여기까지 오지 않는다(올리기는 PC 전용)
-    }
-  }
-
-  /** 공개 저장소에 파일 하나를 올린다(있으면 덮어쓴다). */
-  private async githubPutFile(token: string, path: string, body: string): Promise<void> {
-    const api = `https://api.github.com/repos/${SYNC_REPO.owner}/${SYNC_REPO.repo}/contents/${path}`;
-    const headers = {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github+json",
-      "Content-Type": "application/json",
-    };
-    // 이미 있으면 sha 가 필요하다(덮어쓰기 규칙).
-    let sha: string | undefined;
-    const cur = await fetch(`${api}?ref=${SYNC_REPO.branch}`, { headers });
-    if (cur.ok) sha = ((await cur.json()) as { sha?: string }).sha;
-
-    const put = await fetch(api, {
-      method: "PUT",
-      headers,
-      body: JSON.stringify({
-        message: `매매 이력 동기화 ${new Date().toISOString()}`,
-        content: Buffer.from(body, "utf8").toString("base64"),
-        branch: SYNC_REPO.branch,
-        ...(sha ? { sha } : {}),
-      }),
-    });
-    if (!put.ok) throw new Error(`업로드 실패(HTTP ${put.status})`);
-  }
-
   /** 새로 받은 체결을 저장본에 합친다(중복 제거). 다른 화면(주문 현황 등)에서도 부를 수 있다. */
   private absorbFills(incoming: Fill[]): void {
     if (incoming.length === 0) return;
@@ -2339,12 +2344,12 @@ export class ToolEngine extends EventEmitter {
     this.persistFills();
 
     // [v0.10.0] 새 매매가 생겼으면 클라우드에도 올려 둔다(폰이 회사에서 볼 수 있게).
-    //   · 비밀번호를 정해 둔 경우에만 동작한다.
+    //   · 로그인 상태(authPassword 있음)일 때만 동작한다.
     //   · 실패해도 무시한다(로컬 저장본은 그대로라 화면은 정상).
     //   · 5분에 한 번으로 제한 — 너무 잦은 업로드 방지.
     const changed = this.savedFills.length !== before;
     const longEnough = Date.now() - (this.lastSyncPushAtMs ?? 0) > 5 * 60_000;
-    if (changed && longEnough && this.getSyncPass()) {
+    if (changed && longEnough && this.authPassword) {
       void this.syncPushTrades().catch(() => {
         /* 업로드 실패는 조용히 넘어간다 */
       });
@@ -2519,9 +2524,9 @@ export class ToolEngine extends EventEmitter {
       }
     }
 
-    // ①-B [v0.10.0] 토스 조회가 안 됐고(회사·PC 꺼짐) 동기화 비밀번호가 있으면,
+    // ①-B [v0.10.0] 토스 조회가 안 됐고(회사·PC 꺼짐) 로그인 상태면,
     //     클라우드에 올려 둔 매매 이력을 받아 온다 → 홈 연결 없이도 리포트가 채워진다.
-    if (source !== "live" && this.getSyncPass()) {
+    if (source !== "live" && this.authPassword) {
       try {
         await this.syncPullTrades();
       } catch {
@@ -2593,7 +2598,7 @@ export class ToolEngine extends EventEmitter {
         /* 연결 없으면 저장본으로 */
       }
     }
-    if (source !== "live" && this.getSyncPass()) {
+    if (source !== "live" && this.authPassword) {
       try { await this.syncPullTrades(); } catch { /* 실패해도 저장본으로 */ }
     }
     const realized = matchFifo(this.savedFills, this.lastAvgCost);

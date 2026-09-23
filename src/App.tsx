@@ -325,15 +325,6 @@ function App() {
   const [tab, setTab] = useState<TabId>("calc");
   /** 웹앱(폰)인가? — 데스크톱에만 있는 '폰 연결' 기능 유무로 구분한다 */
   const isWebApp = !window.kyletool.phoneStart;
-  // [v0.10.0] 매매 이력 동기화(암호화) — PC가 올리고 폰이 받는다
-  const [syncTradePass, setSyncTradePass] = useState("");
-  const [syncTradeMsg, setSyncTradeMsg] = useState("");
-  const [syncTradeBusy, setSyncTradeBusy] = useState(false);
-  useEffect(() => {
-    void window.kyletool.tradeSyncPass?.().then((v) => {
-      if (typeof v === "string" && v) setSyncTradePass(v);
-    });
-  }, []);
   // [v0.9.2] 탭 순서(드래그로 변경, 이 기기에 저장)
   const { order: tabOrder, dragProps, isDragging } = useTabOrder(TOP_TABS); // [v0.12.0] 상단은 7개만(trades·journal 흡수)
   // [v0.9.1] 매매 리포트 + [v0.9.2] 기간 선택(오늘/1주일/1개월/날짜)
@@ -481,8 +472,7 @@ function App() {
   const [formAccount, setFormAccount] = useState("");
   const [savedMsg, setSavedMsg] = useState("");
   const [guardPct, setGuardPct] = useState("15"); // 오입력 방지 한도(사용자 지정)
-  // [v0.8.0] 키 클라우드 동기화: 마스터 비밀번호(저장 안 함, 세션 중에만 메모리) + 상태 메시지
-  const [syncPass, setSyncPass] = useState("");
+  // [v0.24.0] 클라우드 동기화 상태 메시지 — 비밀번호는 로그인 비밀번호를 그대로 쓰므로 따로 안 둔다.
   const [syncMsg, setSyncMsg] = useState("");
   const [syncBusy, setSyncBusy] = useState(false);
   // [v0.8.1] 로그인(멀티유저). 이메일/비번은 화면에서만, 서버 인증 후 세션은 엔진이 보관.
@@ -1499,26 +1489,22 @@ ${msg}
     await refreshAuth();
   }
 
-  /** [v0.8.0] 이 기기 키를 마스터 비밀번호로 암호화해 클라우드에 저장. */
-  async function doSyncPush() {
-    if (syncPass.length < 6) { setSyncMsg("⚠️ 마스터 비밀번호를 6자 이상 입력하세요."); return; }
-    setSyncBusy(true); setSyncMsg("암호화해서 저장 중…");
+  /**
+   * [v0.24.0] 로그인 비밀번호로 클라우드에서 토스 키·매매 이력을 다시 받아온다.
+   *   로그인하는 순간 이미 자동으로 한 번 실행되므로, 평소엔 이 버튼을 쓸 일이 없다.
+   *   다른 기기에서 방금 키를 새로 저장했을 때 등, "지금 바로 반영하고 싶을 때"만 누른다.
+   */
+  async function doSyncNow() {
+    setSyncBusy(true); setSyncMsg("클라우드에서 받아오는 중…");
     try {
-      const r = await window.kyletool.syncPushKeys(syncPass);
-      setSyncMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
-    } finally { setSyncBusy(false); }
-  }
-  /** [v0.8.0] 클라우드에서 키를 받아 복호화해 이 기기에 적용(재입력 불필요). */
-  async function doSyncPull() {
-    if (syncPass.length < 6) { setSyncMsg("⚠️ 마스터 비밀번호를 6자 이상 입력하세요."); return; }
-    setSyncBusy(true); setSyncMsg("클라우드에서 불러와 복호화 중…");
-    try {
-      const r = await window.kyletool.syncPullKeys(syncPass);
-      setSyncMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
-      if (r.ok) {
+      const rKeys = await window.kyletool.syncPullKeys();
+      const rTrades = await window.kyletool.tradeSyncPull();
+      setSyncMsg([rKeys.message, rTrades.message].filter(Boolean).join(" "));
+      if (rKeys.ok) {
         const s = await window.kyletool.getSettings(); setSettings(s); setFormMode(s.mode); setFormAccount(s.account);
         await refreshStatus();
       }
+      if (rTrades.ok) void loadReport();
     } finally { setSyncBusy(false); }
   }
 
@@ -2792,140 +2778,53 @@ ${msg}
             </div>
           </section>
 
-          {/* ── ③ 동기화 (여러 기기에서 같이 쓰기) ──
-              예전엔 '매매 이력 동기화'와 '키 클라우드 동기화'가 서로 떨어져 있어
-              둘 다 '동기화'라 헷갈렸다 → 한 카드에 두 소절로 합쳐 무엇을 옮기는지 명확히. */}
+          {/* ── ③ 계정 (로그인 하나로 끝) ──
+              [v0.24.0] 예전엔 비밀번호가 3개(로그인·키 잠금·매매이력 동기화)라 너무 복잡했다.
+              → 로그인 비밀번호 하나로 통일. 로그인하면 토스 키·매매 이력이 전부 자동으로
+              이 계정 안에서 동기화된다(따로 버튼을 누를 일이 거의 없다). */}
           <section className="card wide">
-            <h2>☁️ 동기화 (폰·PC에서 같이 쓰기)</h2>
+            <h2>☁️ 계정 (로그인하면 자동으로 동기화)</h2>
             <p className="hint">
-              폰과 PC가 같은 정보를 보게 맞춰 줍니다. 옮기는 대상이 다른 <b>두 가지</b>가 있어요 —
-              <b>① 매매 이력</b>(리포트용)과 <b>② 토스 키</b>(연결용).
+              누구나 <b>자기 계정</b>으로 로그인해 <b>자기 토스 키</b>를 연결하면 바로 쓸 수 있습니다.
+              다른 사람의 키·매매 이력은 서로 <b>절대 볼 수 없어요</b>. 가입은 <b>운영자가 승인한
+              이메일만</b> 됩니다(사용 인원은 운영자가 정합니다) — 아직 승인 전이면 운영자에게
+              사용 신청을 해주세요.
+            </p>
+            <p className="hint">
+              로그인하면 <b>토스 키</b>와 <b>매매 이력</b>이 자동으로 이 기기와 동기화됩니다.
+              외울 비밀번호는 <b>로그인 비밀번호 하나</b>뿐입니다(따로 "동기화 비밀번호"가 없습니다).
             </p>
 
-            {/* ③-① 매매 이력 동기화 (구 '☁️ 매매 이력 동기화' 카드) */}
-            <div className="settings-block">
-              <h3>① 매매 이력 — 리포트를 다른 기기에서도 보기</h3>
-              <p className="hint">
-                집 PC가 <b>매매 이력을 자물쇠로 잠가</b> 인터넷에 올려 두면, 폰이 같은 비밀번호로 풀어서 봅니다.
-                → <b>집 PC가 꺼져 있어도, 회사에서도</b> 매매 리포트가 보여요.
-                <br />
-                <b>토스 키·계좌번호·비밀번호는 절대 올라가지 않습니다</b>(매매 결과만, 그것도 암호문으로).
-              </p>
-              <div className="row">
-                <label>동기화 비밀번호 (6자 이상 · PC와 폰에 <b>같은 값</b>을 넣으세요)</label>
-                <input
-                  type="password"
-                  value={syncTradePass}
-                  onChange={(e) => setSyncTradePass(e.target.value)}
-                  placeholder="예: 나만 아는 문장"
-                  autoComplete="off"
-                />
+            {authState.loggedIn ? (
+              <div className="form-row">
+                <span className="ok">✅ 로그인됨: <b>{authState.email}</b></span>
+                <button className="mini" disabled={syncBusy} onClick={doSignOut}>로그아웃</button>
+                <button className="btn" disabled={syncBusy} onClick={doSyncNow}>지금 다시 동기화</button>
               </div>
-              <div className="row" style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
-                {!isWebApp && (
-                  <button
-                    className="btn"
-                    disabled={syncTradeBusy || syncTradePass.length < 6}
-                    onClick={async () => {
-                      setSyncTradeBusy(true);
-                      try {
-                        await window.kyletool.tradeSyncPass?.(syncTradePass); // 다음부터 자동 업로드
-                        const r = await window.kyletool.tradeSyncPush(syncTradePass);
-                        setSyncTradeMsg(r.message);
-                      } finally {
-                        setSyncTradeBusy(false);
-                      }
-                    }}
-                  >
-                    ⬆ 지금 올리기 (이 PC)
-                  </button>
-                )}
-                <button
-                  className="btn"
-                  disabled={syncTradeBusy || syncTradePass.length < 6}
-                  onClick={async () => {
-                    setSyncTradeBusy(true);
-                    try {
-                      await window.kyletool.tradeSyncPass?.(syncTradePass); // 다음부터 자동으로 받아온다
-                      const r = await window.kyletool.tradeSyncPull(syncTradePass);
-                      setSyncTradeMsg(r.message);
-                      if (r.ok) void loadReport();
-                    } finally {
-                      setSyncTradeBusy(false);
-                    }
-                  }}
-                >
-                  ⬇ 지금 받기 {isWebApp ? "(이 폰)" : ""}
-                </button>
-              </div>
-              {syncTradeMsg && <p className="hint">{syncTradeMsg}</p>}
-              <p className="hint">
-                한 번 넣어 두면 다음부터는 <b>자동</b>이에요 — PC는 새 매매가 생길 때 올리고, 폰은 리포트를 열 때 받아옵니다.
-              </p>
-            </div>
-
-            {/* ③-② 토스 키 동기화 (구 '🔐 키 클라우드 동기화' — 멀티유저) */}
-            <div className="settings-block">
-              <h3>② 토스 키 — 키를 다른 기기로 옮기기 (사람마다 따로 보관)</h3>
-              <p className="hint">
-                <b>사람마다 자기 계정</b>에 <b>자기 토스 키</b>를 두고, 자기 기기들끼리만 나눠 씁니다. 다른 사람의 키는
-                서로 <b>절대 볼 수 없어요</b>. 키는 <b>비밀번호로 잠근 채</b> 올라가서, 운영자도 남의 키를 못 봅니다.
-                <br />
-                <span className="hint small">※ 폰은 보통 [폰에서 쓰기]로 PC 키를 빌려 쓰므로 이건 <b>PC가 여러 대일 때</b> 주로 씁니다.</span>
-              </p>
-
-              {/* STEP 1: 로그인 */}
-              <div className="step-box">
-                <div className="step-title">1단계 · 로그인</div>
-                {authState.loggedIn ? (
-                  <div className="form-row">
-                    <span className="ok">✅ 로그인됨: <b>{authState.email}</b></span>
-                    <button className="mini" disabled={syncBusy} onClick={doSignOut}>로그아웃</button>
-                  </div>
-                ) : (
-                  <>
-                    <div className="form-row">
-                      <label style={{ flex: 1 }}>이메일
-                        <input type="email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="you@example.com" />
-                      </label>
-                      <label style={{ flex: 1 }}>비밀번호(6자+)
-                        <input type="password" value={authPw} onChange={(e) => setAuthPw(e.target.value)} placeholder="계정 비밀번호" />
-                      </label>
-                    </div>
-                    <div className="form-row">
-                      <button className="btn btn-start" disabled={syncBusy} onClick={doSignIn}>로그인</button>
-                      <button className="btn" disabled={syncBusy} onClick={doSignUp}>가입(처음이면)</button>
-                      <span className="hint small">가입하면 바로 로그인됩니다(확인 메일 클릭 불필요).</span>
-                    </div>
-                  </>
-                )}
-                {authMsg && <p className={authMsg.startsWith("✅") ? "ok" : "hint"} style={{ whiteSpace: "pre-wrap" }}>{authMsg}</p>}
-              </div>
-
-              {/* STEP 2: 키 + 마스터 비밀번호 (로그인 후에만) */}
-              <div className={`step-box ${authState.loggedIn ? "" : "step-disabled"}`}>
-                <div className="step-title">2단계 · 비밀번호로 키 저장 / 불러오기</div>
-                <p className="hint small">
-                  위 [토스 키]에 내 키를 저장한 뒤, <b>키 잠금 비밀번호</b>(로그인 비번과 다른 것)를 정해
-                  <b> ①로 클라우드에 올리세요.</b> 다른 기기에선 같은 계정 로그인 + 같은 비밀번호로 <b>②만</b> 누르면 끝.
-                </p>
+            ) : (
+              <>
                 <div className="form-row">
-                  <label style={{ flex: 1 }}>키 잠금 비밀번호 (6자+, 로그인 비번과 별개)
-                    <input type="password" value={syncPass} onChange={(e) => setSyncPass(e.target.value)} placeholder="나만 아는 키 잠금 비밀번호" disabled={!authState.loggedIn} />
+                  <label style={{ flex: 1 }}>이메일
+                    <input type="email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="you@example.com" />
+                  </label>
+                  <label style={{ flex: 1 }}>비밀번호(6자+)
+                    <input type="password" value={authPw} onChange={(e) => setAuthPw(e.target.value)} placeholder="계정 비밀번호" />
                   </label>
                 </div>
                 <div className="form-row">
-                  <button className="btn" disabled={syncBusy || !authState.loggedIn} onClick={doSyncPush}>① 내 키를 클라우드에 올리기(잠가서)</button>
-                  <button className="btn btn-start" disabled={syncBusy || !authState.loggedIn} onClick={doSyncPull}>② 클라우드에서 받기</button>
+                  <button className="btn btn-start" disabled={syncBusy} onClick={doSignIn}>로그인</button>
+                  <button className="btn" disabled={syncBusy} onClick={doSignUp}>가입(처음이면)</button>
+                  <span className="hint small">가입하면 바로 로그인됩니다(확인 메일 클릭 불필요).</span>
                 </div>
-                {syncMsg && <p className={syncMsg.startsWith("✅") ? "ok" : "hint"} style={{ whiteSpace: "pre-wrap" }}>{syncMsg}</p>}
-              </div>
-
-              <p className="hint small">
-                💡 <b>내 PC 2대 쓸 때</b>: 첫 기기에서 로그인 + [토스 키] 저장 + 키 잠금 비번으로 ① → 다른 기기에선 같은 계정 로그인 + 같은 비번으로 ②. 키를 새로 받았으면 한 기기에서 ①만 다시.
-                <br />동기화를 안 쓰면 기존처럼 이 기기 안에만 저장됩니다.
-              </p>
-            </div>
+              </>
+            )}
+            {authMsg && <p className={authMsg.startsWith("✅") ? "ok" : "hint"} style={{ whiteSpace: "pre-wrap" }}>{authMsg}</p>}
+            {syncMsg && <p className="hint" style={{ whiteSpace: "pre-wrap" }}>{syncMsg}</p>}
+            <p className="hint small">
+              💡 [설정]에 키를 입력·저장하면 로그인 상태에서 자동으로 클라우드에도 올라갑니다.
+              다른 기기에서는 같은 계정으로 <b>로그인만</b> 하면 키와 매매 이력을 자동으로 받습니다.
+              로그인을 안 쓰면 기존처럼 이 기기 안에만 저장됩니다.
+            </p>
           </section>
 
           {/* ── ④ 화면 표시 — 손익 색 관습(미국식/한국식) ── */}
