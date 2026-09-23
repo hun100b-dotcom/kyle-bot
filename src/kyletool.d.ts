@@ -461,10 +461,15 @@ interface KyletoolBridge {
   }): Promise<ToolSettings>;
   syncPushKeys(): Promise<{ ok: boolean; message: string }>;
   syncPullKeys(): Promise<{ ok: boolean; message: string }>;
-  authSignUp(email: string, password: string): Promise<{ ok: boolean; needsConfirm: boolean; message: string }>;
+  authSignUp(email: string, password: string): Promise<{ ok: boolean; needsConfirm: boolean; message: string; canRequestAccess?: boolean }>;
   authSignIn(email: string, password: string): Promise<{ ok: boolean; message: string }>;
   authSignOut(): Promise<{ ok: boolean }>;
-  authStatus(): Promise<{ email: string | null; loggedIn: boolean }>;
+  authStatus(): Promise<{ email: string | null; loggedIn: boolean; isOwner: boolean }>;
+  /** [v0.24.0] 가입 승인 요청함 — 누구나 신청(로그인 불필요), 운영자만 조회·승인·거절 */
+  requestAccess(email: string, note?: string): Promise<{ ok: boolean; message: string }>;
+  listAccessRequests(): Promise<Array<{ email: string; note: string | null; requestedAt: string }>>;
+  approveAccessRequest(email: string): Promise<{ ok: boolean; message: string }>;
+  rejectAccessRequest(email: string): Promise<{ ok: boolean; message: string }>;
   setKillSwitch(on: boolean): Promise<void>;
   setLiveOrders(on: boolean): Promise<void>;
   setPriceGuard(on: boolean, pct?: number): Promise<void>;

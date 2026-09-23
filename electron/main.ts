@@ -235,6 +235,11 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:auth:signin", (_ev, email, pw) => e.authSignIn(email, pw)); // [v0.8.1] 로그인
   ipcMain.handle("tool:auth:signout", () => e.authSignOut());
   ipcMain.handle("tool:auth:status", () => e.authStatus());
+  // [v0.24.0] 가입 승인 요청함 — 누구나 신청, 운영자만 조회·승인·거절.
+  ipcMain.handle("tool:auth:requestAccess", (_ev, email: string, note?: string) => e.requestAccess(email, note));
+  ipcMain.handle("tool:auth:listRequests", () => e.listAccessRequests());
+  ipcMain.handle("tool:auth:approve", (_ev, email: string) => e.approveAccessRequest(email));
+  ipcMain.handle("tool:auth:reject", (_ev, email: string) => e.rejectAccessRequest(email));
   ipcMain.handle("tool:killSwitch", (_ev, on: boolean) => e.setKillSwitch(!!on));
   ipcMain.handle("tool:liveOrders", (_ev, on: boolean) => e.setLiveOrders(!!on));
   ipcMain.handle("tool:priceGuard", (_ev, on: boolean, pct?: number) => e.setPriceGuard(!!on, pct));

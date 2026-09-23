@@ -151,6 +151,11 @@ export function installKyleTool(): ToolEngine {
     authSignIn: (email: string, pw: string) => e.authSignIn(email, pw),
     authSignOut: () => Promise.resolve(e.authSignOut()),
     authStatus: () => Promise.resolve(e.authStatus()),
+    // [v0.24.0] 가입 승인 요청함
+    requestAccess: (email: string, note?: string) => e.requestAccess(email, note),
+    listAccessRequests: () => e.listAccessRequests(),
+    approveAccessRequest: (email: string) => e.approveAccessRequest(email),
+    rejectAccessRequest: (email: string) => e.rejectAccessRequest(email),
     syncPushKeys: () => e.syncPushKeys(),
     syncPullKeys: () => e.syncPullKeys(),
 

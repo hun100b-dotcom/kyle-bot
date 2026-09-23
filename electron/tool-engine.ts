@@ -942,25 +942,36 @@ export class ToolEngine extends EventEmitter {
   private static readonly SUPABASE_URL = "https://fauieykjxdfkngwvfoky.supabase.co";
   private static readonly SUPABASE_ANON =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZhdWlleWtqeGRma25nd3Zmb2t5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUxNDY0NDIsImV4cCI6MjEwMDcyMjQ0Mn0.Wq9jnoKGO5CbRbDfzYKrZCaV3RD4zjZCdBgQJLQrqRI";
+  // [v0.24.0] 유일한 운영자 계정. 가입 승인 화면(설정 탭)은 로그인한 이메일이 이 값과
+  //   같을 때만 보인다. 실제 권한 검사는 Supabase RLS 정책이 같은 이메일 조건으로
+  //   서버에서 한 번 더 하므로(마이그레이션 4번), 이 값을 바꿔치기해도 서버가 막는다.
+  private static readonly OWNER_EMAIL = "hun100b@gmail.com";
 
   // ---- 로그인(Supabase Auth) — 사람마다 자기 계정, 키·매매이력은 계정별로 격리 ----
   //   [v0.24.0] "허용된 사람만 가입할 수 있다" — Supabase 쪽에 가입 허용목록 트리거가
   //   있어(supabase/migrations/…_capri_v2_…), 목록에 없는 이메일은 가입 자체가 막힌다.
   //   몇 명까지 쓸지는 오너가 그 목록에 이메일을 추가/삭제하는 것으로 정한다(앱은 관여 안 함).
+  //   [v0.24.0 추가] 오너는 더 이상 SQL을 직접 안 써도 된다 — 앱(설정 탭 → 가입 승인)에
+  //   로그인만 하면 대기 중인 요청을 보고 [승인]을 누를 수 있다(PC가 꺼져 있어도 폰으로 가능).
 
-  /** 서버가 돌려준 원문 오류를 사람이 이해할 문구로 바꾼다(허용목록 거부 케이스 포함). */
-  private static explainSignupError(raw: string): string {
-    if (/CAPRI_NOT_ALLOWED/i.test(raw)) return "아직 사용 승인이 안 된 이메일입니다. 운영자에게 사용 신청을 해주세요.";
+  /** 서버가 돌려준 원문 오류를 사람이 이해할 문구로 바꾼다. notAllowed면 "승인 요청 남기기" 버튼을 보여줄 근거가 된다. */
+  private static explainSignupError(raw: string): { message: string; notAllowed: boolean } {
+    if (/CAPRI_NOT_ALLOWED/i.test(raw)) {
+      return { message: "아직 사용 승인이 안 된 이메일입니다. 아래에서 승인 요청을 남겨 주세요.", notAllowed: true };
+    }
     // Supabase는 보안상 트리거의 원문 예외를 그대로 안 돌려주고 일반 문구로 감쌀 때가 있다
     // (예: "Database error saving new user"). 그런 경우도 같은 안내를 우선 보여준다.
     if (/database error|unexpected_failure/i.test(raw)) {
-      return `가입할 수 없습니다 — 아직 운영자 승인 목록에 없는 이메일일 수 있어요. 운영자에게 사용 신청을 해주세요.\n(자세한 오류: ${raw})`;
+      return {
+        message: `가입할 수 없습니다 — 아직 운영자 승인이 안 된 이메일일 수 있어요. 아래에서 승인 요청을 남겨 보세요.\n(자세한 오류: ${raw})`,
+        notAllowed: true,
+      };
     }
-    return raw;
+    return { message: raw, notAllowed: false };
   }
 
   /** [v0.8.1] 회원가입. [v0.24.0] 허용목록에 있는 이메일만 가입되고, 성공하면 바로 로그인·자동 동기화까지 된다. */
-  async authSignUp(email: string, password: string): Promise<{ ok: boolean; needsConfirm: boolean; message: string }> {
+  async authSignUp(email: string, password: string): Promise<{ ok: boolean; needsConfirm: boolean; message: string; canRequestAccess?: boolean }> {
     try {
       const res = await fetch(`${ToolEngine.SUPABASE_URL}/auth/v1/signup`, {
         method: "POST",
@@ -970,7 +981,8 @@ export class ToolEngine extends EventEmitter {
       const data = (await res.json()) as Record<string, unknown>;
       if (!res.ok) {
         const raw = String(data.msg ?? data.error_description ?? data.error ?? `가입 실패(HTTP ${res.status})`);
-        return { ok: false, needsConfirm: false, message: ToolEngine.explainSignupError(raw) };
+        const explained = ToolEngine.explainSignupError(raw);
+        return { ok: false, needsConfirm: false, message: explained.message, canRequestAccess: explained.notAllowed };
       }
       // [v0.8.2] 서버에 자동확인이 걸려 있어 가입하면 보통 바로 세션이 온다 → 즉시 로그인 상태.
       if (data.access_token) {
@@ -1037,9 +1049,13 @@ export class ToolEngine extends EventEmitter {
     return { ok: true };
   }
 
-  /** 로그인 상태(화면 표시용). */
-  authStatus(): { email: string | null; loggedIn: boolean } {
-    return { email: this.authEmail, loggedIn: !!(this.authAccessToken || this.authRefreshToken) };
+  /** 로그인 상태(화면 표시용). isOwner면 화면이 "가입 승인" 패널을 보여준다. */
+  authStatus(): { email: string | null; loggedIn: boolean; isOwner: boolean } {
+    return {
+      email: this.authEmail,
+      loggedIn: !!(this.authAccessToken || this.authRefreshToken),
+      isOwner: this.authEmail === ToolEngine.OWNER_EMAIL,
+    };
   }
 
   /** 토큰 응답을 세션 상태로 반영. */
@@ -1076,6 +1092,98 @@ export class ToolEngine extends EventEmitter {
   /** RLS 보호 REST 호출용 헤더(로그인 유저의 JWT). auth.uid()=이 유저 → 본인 행만 접근. */
   private authRestHeaders(token: string): Record<string, string> {
     return { apikey: ToolEngine.SUPABASE_ANON, Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+  }
+
+  /** 로그인 없이(비로그인) REST 호출용 헤더 — 승인 요청 접수처럼 계정이 아직 없는 사람이 쓴다. */
+  private anonRestHeaders(): Record<string, string> {
+    return { apikey: ToolEngine.SUPABASE_ANON, Authorization: `Bearer ${ToolEngine.SUPABASE_ANON}`, "Content-Type": "application/json" };
+  }
+
+  // --------------------------------------------------------------------------
+  // [v0.24.0] 가입 승인 요청함 — 오너가 앱 안(로그인만 하면)에서 승인할 수 있게 한다.
+  //   PC가 꺼져 있어도, Supabase 사이트에 안 들어가도, 오너가 폰으로 로그인만 하면 된다.
+  //   보안: capri_access_requests 는 "요청서 우편함"일 뿐이다. 실제로 가입을 허용하는
+  //   열쇠는 capri_allowed_emails 뿐이라, 이 우편함에 아무나 써넣어도 스스로를
+  //   승인시킬 수는 없다(RLS로 오너 계정만 capri_allowed_emails 에 쓸 수 있음).
+  // --------------------------------------------------------------------------
+
+  /** 가입이 막힌 사람이 "승인해 주세요" 요청을 접수한다. 로그인 불필요(아직 계정이 없으니까). */
+  async requestAccess(email: string, note?: string): Promise<{ ok: boolean; message: string }> {
+    const e = email.trim().toLowerCase();
+    if (!e || !e.includes("@")) return { ok: false, message: "올바른 이메일을 입력하세요." };
+    try {
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_access_requests`, {
+        method: "POST",
+        headers: { ...this.anonRestHeaders(), Prefer: "return=minimal" },
+        body: JSON.stringify({ email: e, note: note?.trim() || null }),
+      });
+      if (res.status === 409) return { ok: true, message: "이미 신청하셨습니다. 운영자 승인을 기다려 주세요." };
+      if (!res.ok) return { ok: false, message: `신청 실패(HTTP ${res.status}).` };
+      return { ok: true, message: "사용 신청을 접수했습니다. 운영자 승인 후 가입할 수 있어요." };
+    } catch (err) {
+      return { ok: false, message: String(err).replace(/^Error:\s*/, "") };
+    }
+  }
+
+  /** [운영자 전용] 대기 중인 승인 요청 목록. RLS가 운영자 계정 로그인일 때만 결과를 준다. */
+  async listAccessRequests(): Promise<Array<{ email: string; note: string | null; requestedAt: string }>> {
+    const token = await this.ensureAccessToken();
+    if (!token) return [];
+    try {
+      const res = await fetch(
+        `${ToolEngine.SUPABASE_URL}/rest/v1/capri_access_requests?status=eq.pending&select=email,note,requested_at&order=requested_at.asc`,
+        { headers: this.authRestHeaders(token) },
+      );
+      if (!res.ok) return [];
+      const rows = (await res.json()) as Array<{ email: string; note: string | null; requested_at: string }>;
+      return rows.map((r) => ({ email: r.email, note: r.note, requestedAt: r.requested_at }));
+    } catch {
+      return [];
+    }
+  }
+
+  /** [운영자 전용] 요청을 승인 — 허용목록(capri_allowed_emails)에 추가 + 요청 상태를 갱신한다. */
+  async approveAccessRequest(email: string): Promise<{ ok: boolean; message: string }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요." };
+    const e = email.trim().toLowerCase();
+    try {
+      const insertRes = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_allowed_emails`, {
+        method: "POST",
+        headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({ email: e, note: "앱에서 승인" }),
+      });
+      if (!insertRes.ok) {
+        return { ok: false, message: `허용 목록 추가 실패(HTTP ${insertRes.status}). 운영자 계정으로 로그인했는지 확인하세요.` };
+      }
+      await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_access_requests?email=eq.${encodeURIComponent(e)}`, {
+        method: "PATCH",
+        headers: { ...this.authRestHeaders(token), Prefer: "return=minimal" },
+        body: JSON.stringify({ status: "approved", decided_at: new Date().toISOString() }),
+      });
+      this.addJournal({ kind: "info", symbol: "-", summary: `✅ 가입 승인: ${e}` });
+      return { ok: true, message: `${e} 승인 완료. 이제 이 이메일로 가입할 수 있습니다.` };
+    } catch (err) {
+      return { ok: false, message: String(err).replace(/^Error:\s*/, "") };
+    }
+  }
+
+  /** [운영자 전용] 요청을 거절(허용목록에는 추가하지 않고, 요청 상태만 갱신). */
+  async rejectAccessRequest(email: string): Promise<{ ok: boolean; message: string }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요." };
+    const e = email.trim().toLowerCase();
+    try {
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_access_requests?email=eq.${encodeURIComponent(e)}`, {
+        method: "PATCH",
+        headers: { ...this.authRestHeaders(token), Prefer: "return=minimal" },
+        body: JSON.stringify({ status: "rejected", decided_at: new Date().toISOString() }),
+      });
+      if (!res.ok) return { ok: false, message: `거절 처리 실패(HTTP ${res.status}).` };
+      return { ok: true, message: `${e} 요청을 거절했습니다.` };
+    } catch (err) {
+      return { ok: false, message: String(err).replace(/^Error:\s*/, "") };
+    }
   }
 
   /**

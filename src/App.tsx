@@ -478,8 +478,15 @@ function App() {
   // [v0.8.1] 로그인(멀티유저). 이메일/비번은 화면에서만, 서버 인증 후 세션은 엔진이 보관.
   const [authEmail, setAuthEmail] = useState("");
   const [authPw, setAuthPw] = useState("");
-  const [authState, setAuthState] = useState<{ email: string | null; loggedIn: boolean }>({ email: null, loggedIn: false });
+  const [authState, setAuthState] = useState<{ email: string | null; loggedIn: boolean; isOwner: boolean }>({ email: null, loggedIn: false, isOwner: false });
   const [authMsg, setAuthMsg] = useState("");
+  // [v0.24.0] 가입이 아직 승인 안 된 사람용 — "승인 요청 남기기" 버튼 노출 여부 + 처리 상태.
+  const [canRequestAccess, setCanRequestAccess] = useState(false);
+  const [reqBusy, setReqBusy] = useState(false);
+  const [reqMsg, setReqMsg] = useState("");
+  // [v0.24.0][운영자 전용] 대기 중인 가입 승인 요청 목록.
+  const [accessRequests, setAccessRequests] = useState<Array<{ email: string; note: string | null; requestedAt: string }>>([]);
+  const [reqActionBusy, setReqActionBusy] = useState<string | null>(null); // 처리 중인 이메일(버튼 개별 비활성용)
   // [v0.3.0] 세션별 시드 비율 설정 입력칸(설정 탭). 문자열 보관(입력 중 뭉개짐 방지).
   // [v0.8.3] 기본 손익비 설정 입력칸(설정 탭). 공장값 2/10, 저장하면 계산기 초기값이 됨.
   const [defForm, setDefForm] = useState<{ tp: string; sl: string }>({ tp: "2", sl: "10" });
@@ -539,7 +546,7 @@ function App() {
       }
     });
     window.kyletool.appVersion?.().then(setAppVer).catch(() => {});
-    window.kyletool.authStatus?.().then(setAuthState).catch(() => {}); // [v0.8.1] 로그인 상태 복원
+    void refreshAuth(); // [v0.8.1] 로그인 상태 복원(+운영자면 승인 대기 목록도, v0.24.0)
     void loadAnalysis(); // [v0.19.0] 매매분석(실체결) 시작 시 로드
     const off = window.kyletool.onJournal((e) => setJournal((prev) => [...prev.slice(-99), e]));
     // [v0.5.0] 체결강도 실시간 갱신: 지금 화면에서 보고 있는 종목의 이벤트만 반영.
@@ -1457,17 +1464,27 @@ ${msg}
     setTimeout(() => setSavedMsg(""), 4000);
   }
 
-  /** [v0.8.1] 로그인 상태 새로고침. */
+  /** [v0.8.1] 로그인 상태 새로고침. 운영자면 대기 중인 가입 승인 요청도 함께 불러온다. */
   async function refreshAuth() {
     try {
-      setAuthState(await window.kyletool.authStatus());
+      const s = await window.kyletool.authStatus();
+      setAuthState(s);
+      if (s.isOwner) void loadAccessRequests();
+    } catch {
+      /* 무시 */
+    }
+  }
+  /** [v0.24.0][운영자 전용] 대기 중인 가입 승인 요청 목록을 다시 불러온다. */
+  async function loadAccessRequests() {
+    try {
+      setAccessRequests(await window.kyletool.listAccessRequests());
     } catch {
       /* 무시 */
     }
   }
   async function doSignIn() {
     if (!authEmail || !authPw) { setAuthMsg("⚠️ 이메일과 비밀번호를 입력하세요."); return; }
-    setSyncBusy(true); setAuthMsg("로그인 중…");
+    setSyncBusy(true); setAuthMsg("로그인 중…"); setCanRequestAccess(false); setReqMsg("");
     try {
       const r = await window.kyletool.authSignIn(authEmail, authPw);
       setAuthMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
@@ -1476,17 +1493,46 @@ ${msg}
   }
   async function doSignUp() {
     if (!authEmail || authPw.length < 6) { setAuthMsg("⚠️ 이메일과 6자 이상 비밀번호를 입력하세요."); return; }
-    setSyncBusy(true); setAuthMsg("가입 요청 중…");
+    setSyncBusy(true); setAuthMsg("가입 요청 중…"); setCanRequestAccess(false); setReqMsg("");
     try {
       const r = await window.kyletool.authSignUp(authEmail, authPw);
       setAuthMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      setCanRequestAccess(!!r.canRequestAccess);
       if (r.ok && !r.needsConfirm) { setAuthPw(""); await refreshAuth(); }
     } finally { setSyncBusy(false); }
   }
   async function doSignOut() {
     await window.kyletool.authSignOut();
-    setAuthMsg(""); setSyncMsg("");
+    setAuthMsg(""); setSyncMsg(""); setAccessRequests([]);
     await refreshAuth();
+  }
+  /** [v0.24.0] 가입이 막힌 사람이 "승인해 주세요" 요청을 접수한다(로그인 불필요). */
+  async function doRequestAccess() {
+    if (!authEmail) { setReqMsg("⚠️ 이메일을 먼저 입력하세요."); return; }
+    setReqBusy(true); setReqMsg("신청 접수 중…");
+    try {
+      const r = await window.kyletool.requestAccess(authEmail);
+      setReqMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      if (r.ok) setCanRequestAccess(false); // 접수됐으면 버튼은 다시 안 보여도 됨
+    } finally { setReqBusy(false); }
+  }
+  /** [v0.24.0][운영자 전용] 요청을 승인 — 허용목록에 추가되고 그 사람은 바로 가입할 수 있게 된다. */
+  async function doApproveRequest(email: string) {
+    setReqActionBusy(email);
+    try {
+      const r = await window.kyletool.approveAccessRequest(email);
+      setSyncMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      if (r.ok) await loadAccessRequests();
+    } finally { setReqActionBusy(null); }
+  }
+  /** [v0.24.0][운영자 전용] 요청 거절(허용목록에는 추가 안 함). */
+  async function doRejectRequest(email: string) {
+    setReqActionBusy(email);
+    try {
+      const r = await window.kyletool.rejectAccessRequest(email);
+      setSyncMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      if (r.ok) await loadAccessRequests();
+    } finally { setReqActionBusy(null); }
   }
 
   /**
@@ -2816,6 +2862,14 @@ ${msg}
                   <button className="btn" disabled={syncBusy} onClick={doSignUp}>가입(처음이면)</button>
                   <span className="hint small">가입하면 바로 로그인됩니다(확인 메일 클릭 불필요).</span>
                 </div>
+                {/* [v0.24.0] 아직 승인 안 된 이메일로 가입을 시도했을 때만 나타난다 */}
+                {canRequestAccess && (
+                  <div className="form-row">
+                    <button className="btn" disabled={reqBusy} onClick={doRequestAccess}>📮 승인 요청 남기기</button>
+                    <span className="hint small">운영자가 앱에서 승인하면 바로 가입할 수 있어요.</span>
+                  </div>
+                )}
+                {reqMsg && <p className={reqMsg.startsWith("✅") ? "ok" : "hint"} style={{ whiteSpace: "pre-wrap" }}>{reqMsg}</p>}
               </>
             )}
             {authMsg && <p className={authMsg.startsWith("✅") ? "ok" : "hint"} style={{ whiteSpace: "pre-wrap" }}>{authMsg}</p>}
@@ -2825,6 +2879,28 @@ ${msg}
               다른 기기에서는 같은 계정으로 <b>로그인만</b> 하면 키와 매매 이력을 자동으로 받습니다.
               로그인을 안 쓰면 기존처럼 이 기기 안에만 저장됩니다.
             </p>
+
+            {/* [v0.24.0][운영자 전용] 로그인한 이메일이 운영자일 때만 보인다(서버도 RLS로 한 번 더 확인). */}
+            {authState.isOwner && (
+              <div className="settings-block">
+                <h3>📋 가입 승인 대기 ({accessRequests.length}건)</h3>
+                <p className="hint small">
+                  사용 신청이 들어오면 여기 쌓입니다. PC가 꺼져 있어도, 폰으로 로그인만 하면 이 화면에서 바로 처리할 수 있어요.
+                </p>
+                <button className="mini" onClick={loadAccessRequests}>🔄 새로고침</button>
+                {accessRequests.length === 0 ? (
+                  <p className="hint">대기 중인 요청이 없습니다.</p>
+                ) : (
+                  accessRequests.map((r) => (
+                    <div key={r.email} className="form-row">
+                      <span>{r.email}</span>
+                      <button className="btn btn-start" disabled={reqActionBusy === r.email} onClick={() => doApproveRequest(r.email)}>✅ 승인</button>
+                      <button className="mini" disabled={reqActionBusy === r.email} onClick={() => doRejectRequest(r.email)}>거절</button>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
           </section>
 
           {/* ── ④ 화면 표시 — 손익 색 관습(미국식/한국식) ── */}

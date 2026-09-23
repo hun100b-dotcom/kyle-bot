@@ -11,29 +11,40 @@
 --      올리는 방식이라 일반 사용자 PC에선 아예 작동도 안 했다). 이제는 매매 이력도
 --      토스 키(capri_secrets)와 "완전히 같은 방식"으로 Supabase에 저장해서,
 --      비밀번호는 로그인 비밀번호 하나만 쓴다.
+--   ③ [추가 요청] "허용 인원을 오너한테 SQL로 부탁하는 건 PC가 꺼져 있으면 못 하는
+--      방법이라 대안이 필요하다" → 4)가 이걸 처리한다. Supabase SQL 편집기 대신
+--      **카프리 앱 안에서** 오너 계정으로 로그인해 승인 요청을 보고 [승인] 누르는
+--      화면을 만든다. 오너는 폰(웹앱)으로도, PC 없이도 아무 때나 승인할 수 있다.
 -- =============================================================================
 
 
 -- -----------------------------------------------------------------------------
 -- 1) capri_allowed_emails — "이 이메일은 가입해도 된다" 허용목록
 -- -----------------------------------------------------------------------------
--- [왜 RLS 정책(policy)을 하나도 안 만드나 — 일부러 그렇게 했다]
---   RLS를 켜기만 하고 정책을 하나도 안 주면, anon(비로그인)이든 authenticated(로그인)든
---   앱의 REST API로는 이 표를 절대 읽거나 쓸 수 없다. 오직 Supabase SQL 편집기(또는
---   이 프로젝트에 직접 접속하는 관리 도구)로만 손댈 수 있다.
---   → "허용 인원은 오너가 정한다"를 앱 버그나 우회 경로 걱정 없이 가장 확실하게
---     보장하는 방법이다. 이메일 추가/삭제는 오너가 담당자(Claude)에게 말로 요청하면
---     SQL 한 줄로 처리한다 — 별도 관리 화면을 만들지 않는다(그것도 "복잡함"이므로).
+-- [RLS 정책(policy) — 오너 계정만 API로 손댈 수 있게 한다]
+--   RLS를 켜고, "로그인한 사람의 이메일이 오너 이메일과 같을 때만" 전부(조회/추가/
+--   수정/삭제) 허용하는 정책 하나만 둔다. 그 밖의 모든 사람(비로그인·다른 계정)은
+--   기본값(RLS는 정책에 없으면 전부 차단)대로 이 표를 절대 못 본다.
+--   → 오너는 카프리 앱 안(설정 탭 → 가입 승인)에서 로그인만 하면 이 표를 바로
+--     다룰 수 있다. PC가 꺼져 있어도, Supabase 사이트에 안 들어가도, 폰 앱으로 된다.
+--   [왜 이메일을 SQL에 그대로 박아 넣나?] 오너가 딱 한 명뿐인 개인용 도구라, 별도
+--   "관리자 역할(role)" 표를 만드는 것 자체가 불필요한 복잡함이다. 오너 이메일이
+--   바뀌면 이 마이그레이션에 새 파일을 하나 더 추가해 정책만 바꾸면 된다.
 create table if not exists public.capri_allowed_emails (
   email    text primary key,   -- 항상 소문자로 저장(아래 트리거가 강제)
   note     text,               -- 누구인지 메모(선택, 예: '지인 A')
   added_at timestamptz not null default now()
 );
 alter table public.capri_allowed_emails enable row level security;
--- 정책을 만들지 않는다 = API로는 아무도 접근 불가(의도적 설계).
+
+create policy "capri_allowed_emails_owner_all" on public.capri_allowed_emails
+  for all
+  to authenticated
+  using ((auth.jwt() ->> 'email') = 'hun100b@gmail.com')
+  with check ((auth.jwt() ->> 'email') = 'hun100b@gmail.com');
 
 comment on table public.capri_allowed_emails is
-  '가입 허용 이메일 목록. RLS만 켜고 정책은 0개 → API로 절대 접근 불가, SQL로만 오너가 관리.';
+  '가입 허용 이메일 목록. RLS로 오너 계정(hun100b@gmail.com)만 API로 관리 가능(앱 안에서 승인).';
 
 -- 이메일을 어떤 대소문자로 넣든 항상 소문자로 저장(가입 검사와 비교 기준을 통일).
 create or replace function public.capri_lower_email()
@@ -129,3 +140,56 @@ create policy "capri_trades_update_own" on public.capri_trades
 
 comment on table public.capri_trades is
   '매매 이력(체결 결과)을 로그인 비밀번호로 암호화해 보관. 평문 없음. RLS로 본인 행만 접근.';
+
+
+-- -----------------------------------------------------------------------------
+-- 4) capri_access_requests — "저 좀 승인해 주세요" 요청함 (앱 안에서 오너가 처리)
+-- -----------------------------------------------------------------------------
+-- [흐름] 허용목록에 없는 이메일로 가입을 시도하면 2)의 게이트가 막는다. 그 사람이
+--   화면의 [승인 요청 남기기]를 누르면 이 표에 이메일이 한 줄 쌓인다(로그인 없이도
+--   가능 — 아직 계정이 없으니 당연하다). 오너가 앱에 로그인해 "가입 승인" 화면을
+--   열면 대기 목록이 보이고, [승인]을 누르면 1)의 허용목록에 자동으로 추가된다.
+-- [anon(비로그인)이 이 표에 쓸 수 있게 한 것이 안전한 이유]
+--   이 표에 아무리 마음대로 써넣어도(심지어 status를 직접 조작해도) **실제 가입 허용
+--   여부는 오직 capri_allowed_emails 로만 결정**된다(2)의 게이트가 그 표만 본다).
+--   즉 이 표는 "요청서 우편함"일 뿐 열쇠가 아니라서, 아무나 접수는 해도 아무도
+--   스스로를 승인시킬 수는 없다.
+create table if not exists public.capri_access_requests (
+  email        text primary key,  -- 이메일 하나당 요청 한 줄(같은 이메일 중복 신청 방지)
+  note         text,              -- 신청자가 남긴 메모(선택)
+  status       text not null default 'pending' check (status in ('pending', 'approved', 'rejected')),
+  requested_at timestamptz not null default now(),
+  decided_at   timestamptz        -- 오너가 승인/거절한 시각(대기 중이면 NULL)
+);
+alter table public.capri_access_requests enable row level security;
+
+drop trigger if exists trg_capri_access_requests_lower on public.capri_access_requests;
+create trigger trg_capri_access_requests_lower
+  before insert or update on public.capri_access_requests
+  for each row execute function public.capri_lower_email();
+
+-- 누구나(비로그인 포함) 새 요청을 접수할 수 있다 — 아직 계정이 없는 사람이 보내는 것이므로.
+create policy "capri_access_requests_anyone_insert" on public.capri_access_requests
+  for insert
+  to anon, authenticated
+  with check (true);
+
+-- 조회·승인/거절 처리·정리(삭제)는 오너 계정만(capri_allowed_emails와 같은 규칙).
+create policy "capri_access_requests_owner_select" on public.capri_access_requests
+  for select
+  to authenticated
+  using ((auth.jwt() ->> 'email') = 'hun100b@gmail.com');
+
+create policy "capri_access_requests_owner_update" on public.capri_access_requests
+  for update
+  to authenticated
+  using ((auth.jwt() ->> 'email') = 'hun100b@gmail.com')
+  with check ((auth.jwt() ->> 'email') = 'hun100b@gmail.com');
+
+create policy "capri_access_requests_owner_delete" on public.capri_access_requests
+  for delete
+  to authenticated
+  using ((auth.jwt() ->> 'email') = 'hun100b@gmail.com');
+
+comment on table public.capri_access_requests is
+  '가입 승인 요청함. 누구나 접수(insert) 가능하지만, 실제 가입 허용은 capri_allowed_emails 로만 결정된다. 조회·승인은 오너 전용.';

@@ -23,6 +23,11 @@ contextBridge.exposeInMainWorld("kyletool", {
   authSignIn: (email, pw) => ipcRenderer.invoke("tool:auth:signin", email, pw),
   authSignOut: () => ipcRenderer.invoke("tool:auth:signout"),
   authStatus: () => ipcRenderer.invoke("tool:auth:status"),
+  // [v0.24.0] 가입 승인 요청함
+  requestAccess: (email, note) => ipcRenderer.invoke("tool:auth:requestAccess", email, note),
+  listAccessRequests: () => ipcRenderer.invoke("tool:auth:listRequests"),
+  approveAccessRequest: (email) => ipcRenderer.invoke("tool:auth:approve", email),
+  rejectAccessRequest: (email) => ipcRenderer.invoke("tool:auth:reject", email),
   setKillSwitch: (on) => ipcRenderer.invoke("tool:killSwitch", on),
   setLiveOrders: (on) => ipcRenderer.invoke("tool:liveOrders", on),
   setPriceGuard: (on, pct) => ipcRenderer.invoke("tool:priceGuard", on, pct),
