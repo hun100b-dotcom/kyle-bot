@@ -419,6 +419,8 @@ ul.hint { padding-left: 18px; }
 
 /* [v0.3.2] 진입+익절(OTO) 버튼 — 매수(파랑)/조건(초록)과 구분되는 주황 */
 .btn-oto { background: #d97706; color: #fff; }
+/* [v0.25.0] 매수+익절+손절 한번에 — 기존 3색(파랑/초록/주황)과 구분되는 보라 */
+.btn-bracket { background: #7c3aed; color: #fff; }
 .order-cell { white-space: normal; display: flex; flex-wrap: wrap; gap: 4px; }
 
 /* ===== [v0.3.4] 주문 현황 — 위계 + 접기 재설계 ===== */
@@ -588,6 +590,10 @@ ul.hint { padding-left: 18px; }
 .str-table { margin-top: 6px; }
 /* [v0.12.0] 가격·강도 겹쳐보기 차트 + 신호 배지 */
 .str-chart { display: block; color: var(--muted); margin: 6px 0 14px; border: 1px solid var(--border); border-radius: 8px; background: #0f131a; }
+/* [v0.25.0] 탐색 결과 캔들차트 */
+.screen-chart-wrap { padding: 4px 0 2px; }
+.screen-chart { display: block; border: 1px solid var(--border); border-radius: 8px; background: #0f131a; }
+.screen-chart-legend { margin-top: 6px; }
 /* [v0.13.0] 틱 플래시 — 새 표본이 올 때 값이 잠깐 반짝(업비트식). 모션 최소화 설정이면 끈다. */
 @keyframes str-flash-up { from { background: rgba(52,211,153,0.28); } to { background: transparent; } }
 @keyframes str-flash-down { from { background: rgba(248,113,113,0.28); } to { background: transparent; } }

@@ -13,7 +13,7 @@ import { DateTime } from "luxon";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, isBearishDoji, scanSessionPattern, type Candle } from "../lib/indicators";
+import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, isBearishDoji, scanSessionPattern, WICK_MIN_RATIO, type Candle } from "../lib/indicators";
 import { getSessionStart, getSession } from "../lib/session";
 import { ToolEngine } from "../electron/tool-engine";
 
@@ -131,6 +131,50 @@ describe("세션 패턴(scanSessionPattern)", () => {
     expect(r.status).toBe("none"); // 말아올려 신고가 → 무효
     // 신고가가 없으면 그대로 confirmed
     expect(scanSessionPattern([highC, dojiC, bearC], 0, 0.3).status).toBe("confirmed");
+  });
+});
+
+describe("[v0.25.0] 도지 신선도(20분 초과 시 불합격)", () => {
+  // c0=최고점(0분), c1=도지(1분), c2=도지 다음 음봉(2분) — 위 describe와 동일한 시나리오.
+  const highC = c(0, 98, 100, 97, 99);
+  const dojiC = c(1 * MIN, 99, 99.5, 98.5, 98.9); // 도지 시각 = 1분
+  const bearC = c(2 * MIN, 98.9, 99, 98, 98.2);
+
+  it("nowMs를 안 주면(과거 호출 호환) 시간 검사를 생략하고 그대로 confirmed", () => {
+    const r = scanSessionPattern([highC, dojiC, bearC], 0, 0.3);
+    expect(r.status).toBe("confirmed");
+    expect(r.tooOld).toBe(false);
+  });
+
+  it("도지 시각이 지금으로부터 20분 이내면 그대로 confirmed", () => {
+    // 도지=1분, now=1분+19분=20분 → 경과 19분 < 20분
+    const r = scanSessionPattern([highC, dojiC, bearC], 0, 0.3, undefined, 20 * MIN + 1 * MIN);
+    expect(r.tooOld).toBe(false);
+    expect(r.status).toBe("confirmed");
+  });
+
+  it("도지 시각이 지금으로부터 20분 넘게 지났으면 confirmed였어도 강제로 none", () => {
+    // 도지=1분, now=1분+21분=22분 → 경과 21분 > 20분
+    const now = 1 * MIN + 21 * MIN;
+    const r = scanSessionPattern([highC, dojiC, bearC], 0, 0.3, WICK_MIN_RATIO, now);
+    expect(r.tooOld).toBe(true);
+    expect(r.status).toBe("none");
+    // 근거(도지·다음봉)는 여전히 남아 있어야 화면에서 '왜 오래됐는지' 보여줄 수 있다.
+    expect(r.dojiCandle).not.toBeNull();
+  });
+
+  it("watch 상태(다음 봉 아직 없음)여도 도지가 오래됐으면 none", () => {
+    const now = 1 * MIN + 21 * MIN;
+    const r = scanSessionPattern([highC, dojiC], 0, 0.3, WICK_MIN_RATIO, now);
+    expect(r.tooOld).toBe(true);
+    expect(r.status).toBe("none");
+  });
+
+  it("maxAgeMinutes를 직접 지정하면 그 기준을 따른다", () => {
+    // 도지=1분, now=1분+3분=4분(경과 3분). 기준 5분이면 안 오래됨, 기준 2분이면 오래됨.
+    const now = 1 * MIN + 3 * MIN;
+    expect(scanSessionPattern([highC, dojiC, bearC], 0, 0.3, WICK_MIN_RATIO, now, 5).tooOld).toBe(false);
+    expect(scanSessionPattern([highC, dojiC, bearC], 0, 0.3, WICK_MIN_RATIO, now, 2).tooOld).toBe(true);
   });
 });
 

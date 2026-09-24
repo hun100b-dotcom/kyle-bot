@@ -43,6 +43,7 @@ import {
   getExchangeRate,
   createOrder,
   createConditionalOrder,
+  getOrder,
   listOrders,
   listConditionalOrders,
   listOrdersRaw,
@@ -465,6 +466,7 @@ export interface ScreenEvidence {
     firstDoji: boolean; //   최고점 이후 첫 음봉 도지 존재
     bothWicks: boolean; //   [v0.6.3] 위·아래 꼬리 둘 다 존재(망치형·유성형 아님)
     nextBearish: boolean; // 그 다음 봉도 음봉
+    recentDoji: boolean; //  [v0.25.0] 도지 발생 시점이 20분 이내(오래되면 false → 불합격)
   };
 }
 
@@ -513,6 +515,30 @@ export interface ScreenRun {
   priceMax: number; //   [v0.11.0] 사용한 가격 상한($)
   excludedEtf: number; // [v0.6.3] ETF·레버리지·인버스로 제외한 종목 수
   results: ScreenResult[]; // 후보(confirmed·watch) + 참고 목록
+}
+
+/** [v0.25.0] 차트 캔들 한 개(하이킨아시, 화면 표시용) */
+export interface ScreenChartCandle {
+  time: string; // HH:mm(KST)
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+/** [v0.25.0] 탐색 결과 종목의 차트 — 스캔 때와 '완전히 같은 계산'(HA·EMA200·구름·패턴)을 재사용해
+ *   그대로 그린다(다른 계산이면 "왜 표에서 본 근거랑 차트가 다르지" 하는 혼란이 생긴다). */
+export interface ScreenChart {
+  symbol: string;
+  candles: ScreenChartCandle[]; //  최근 구간 5분봉(HA, 완성봉만)
+  ema200: number | null;
+  cloudTop: number | null;
+  sessionHigh: number | null;
+  sessionHighTime: string | null; //  세션 최고점 시각(candles 안의 time과 매칭)
+  dojiTime: string | null; //         기준 음봉 도지 시각(candles 안의 time과 매칭)
+  nextTime: string | null; //         도지 다음 봉 시각
+  price: number | null; //           현재가(조회 실패하면 null — 차트는 그대로 보여준다)
+  patternStatus: ScreenStatus; //    참고용 패턴 판정(가격대·EMA·구름 하드게이트는 미적용, 패턴 자체만)
 }
 
 // -----------------------------------------------------------------------------
@@ -1962,6 +1988,144 @@ export class ToolEngine extends EventEmitter {
     });
   }
 
+  /**
+   * ④ [v0.25.0] 매수+익절+손절 한 번에("브라켓 주문").
+   *
+   * [왜 OTO/OCO 하나로 안 되나 — 오너 질문에 대한 답]
+   *   토스 조건주문(OCO/OTO) 스펙은 다리(leg)가 first/second **최대 2개**뿐이다(위 OTO 주석 참고,
+   *   공식 openapi.json으로 이미 확인됨). "매수+익절+손절"은 다리가 3개라 토스 서버가 한 번의
+   *   조건주문으로 못 받는다 — PC 화면에서 못 찾은 게 아니라 API 자체의 제약이다. 토스 모바일
+   *   앱이 "한 번에" 거는 것처럼 보여도, 내부적으로는 ①매수 주문 ②체결 확인 ③OCO(익절+손절) 등록,
+   *   이렇게 최소 2단계일 수밖에 없다(OCO는 실제 보유가 있어야만 등록되기 때문).
+   *
+   * [그래서 이 기능이 하는 일]
+   *   ①진입 지정가 매수를 접수하고 ②그 주문이 체결되는지 이 프로그램이 지켜보다가(최대
+   *   watchMinutes분, 기본 15분) ③체결되면 즉시 OCO(익절+손절)를 자동으로 등록한다. 사람이 미리
+   *   정한 값(진입가·익절가·손절가·수량)을 그대로 실행할 뿐이라 "판단은 사람, 실행은 기계"
+   *   원칙에 어긋나지 않는다.
+   *
+   * [⚠️ 중요한 한계 — 반드시 알아야 함]
+   *   이 감시는 **이 프로그램이 켜져 있는 동안만** 작동한다. OCO 등록 전에 앱을 끄거나 컴퓨터가
+   *   잠들면, 체결이 돼도 손절/익절이 자동으로 걸리지 않는다(진입 주문 자체는 토스에 그대로
+   *   남아 있다). 정해진 시간 안에 체결이 안 되면 조용히 감시를 멈추고 알림만 남긴다(진입은 취소
+   *   하지 않는다 — 취소는 사람이 판단할 일).
+   */
+  async placeBracket(spec: {
+    symbol: string;
+    price: number; //     진입 지정가
+    quantity: number;
+    tpTrigger: number; //  익절 감시가
+    tpPrice: number; //    익절 지정가
+    slTrigger: number; //  손절 감시가
+    slPrice: number; //    손절 지정가
+    expireDate: string; // OCO(익절+손절) 만료일 YYYY-MM-DD
+    watchMinutes?: number; // 체결 감시 최대 시간(기본 15분)
+    pollMs?: number; // [테스트 전용] 체결 확인 주기(기본 5000ms) — 자동 테스트를 빠르게 돌리기 위한 값
+    rationale?: RationaleInput;
+  }): Promise<JournalEntry> {
+    const symbol = spec.symbol.toUpperCase();
+    const cur = await this.orderGate(symbol, [spec.price]);
+    await this.assertAffordable(spec.price, spec.quantity);
+
+    const clientOrderId = makeClientOrderId(`brk${DateTime.now().toFormat("HHmmss")}`, 1, "entry");
+
+    if (this.isDryRun()) {
+      // 드라이런은 실제 체결이 없으니(연습·실주문잠금 공통) 진입+조건주문을 한 번에 시뮬레이션한다.
+      this.saveRationale(spec.rationale, { clientOrderId, kind: "entry", symbol, quantity: spec.quantity, priceAtOrder: cur, dryRun: true });
+      void this.recordEntry(symbol, spec.price, this.currentMode(), spec.quantity);
+      this.addJournal({
+        kind: "dryrun",
+        symbol,
+        summary: `[드라이런] 진입 매수 ${symbol} $${spec.price} × ${spec.quantity}주 접수(연습)`,
+      });
+      return this.addJournal({
+        kind: "dryrun",
+        symbol,
+        summary: `[드라이런] 체결 시뮬레이션 → OCO 등록 ${symbol} ${spec.quantity}주: 익절 $${spec.tpTrigger}↑ / 손절 $${spec.slTrigger}↓ (실주문 잠금 — 매수+익절+손절 한번에)`,
+        detail: { ...spec, clientOrderId },
+      });
+    }
+
+    const o = await createOrder({ symbol, side: "BUY", orderType: "LIMIT", price: spec.price, quantity: spec.quantity, clientOrderId });
+    this.saveRationale(spec.rationale, { clientOrderId, kind: "entry", symbol, quantity: spec.quantity, priceAtOrder: cur, dryRun: false, tossOrderId: o.tossOrderId });
+    void this.recordEntry(symbol, spec.price, this.currentMode(), spec.quantity);
+    const entryJournal = this.addJournal({
+      kind: "entry",
+      symbol,
+      summary: `진입 지정가 매수 접수 ${symbol} $${spec.price} × ${spec.quantity}주 (주문번호 ${o.tossOrderId}) — 체결되면 자동으로 조건주문(익절+손절)을 등록합니다(최대 ${spec.watchMinutes ?? 15}분 감시)`,
+      detail: o,
+    });
+
+    void this.watchAndBracket(symbol, o.tossOrderId, spec); // 백그라운드 감시(반환은 기다리지 않음)
+    return entryJournal;
+  }
+
+  /**
+   * 진입 주문의 체결을 기다렸다가, 체결되면 OCO(익절+손절)를 자동 등록한다.
+   *   [수명 제한] watchMinutes(기본 15분)를 넘기면 조용히 감시를 멈춘다(무한 폴링 방지 —
+   *   v0.22.0 체결강도 자동 기록과 같은 원칙). 진입 주문 자체는 취소하지 않는다.
+   */
+  private async watchAndBracket(
+    symbol: string,
+    tossOrderId: string,
+    spec: {
+      quantity: number;
+      tpTrigger: number;
+      tpPrice: number;
+      slTrigger: number;
+      slPrice: number;
+      expireDate: string;
+      watchMinutes?: number;
+      pollMs?: number;
+      rationale?: RationaleInput;
+    },
+  ): Promise<void> {
+    const watchMinutes = spec.watchMinutes ?? 15;
+    const deadline = Date.now() + watchMinutes * 60_000;
+    const pollMs = spec.pollMs ?? 5000; // 테스트에서 짧게(예: 20ms) 넣으면 폴링 루프를 빠르게 검증 가능
+
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      let o: OrderResponse;
+      try {
+        o = await getOrder(tossOrderId);
+      } catch {
+        continue; // 조회 실패는 다음 폴링에서 재시도(막지 않음)
+      }
+      if (o.status === "filled") {
+        try {
+          await this.placeOco({
+            symbol,
+            quantity: o.filled_qty && o.filled_qty > 0 ? o.filled_qty : spec.quantity,
+            tpTrigger: spec.tpTrigger,
+            tpPrice: spec.tpPrice,
+            slTrigger: spec.slTrigger,
+            slPrice: spec.slPrice,
+            expireDate: spec.expireDate,
+            rationale: spec.rationale,
+          });
+        } catch (e) {
+          this.addJournal({
+            kind: "info",
+            symbol,
+            summary: `⚠️ 진입 체결을 확인했지만 조건주문(익절+손절) 자동 등록에 실패했습니다 — 직접 걸어 주세요: ${String(e).replace(/^Error:\s*/, "")}`,
+          });
+        }
+        return;
+      }
+      if (o.status === "cancelled" || o.status === "failed") {
+        this.addJournal({ kind: "info", symbol, summary: `진입 주문이 ${o.status === "cancelled" ? "취소" : "실패"}돼 자동 감시를 멈췄습니다.` });
+        return;
+      }
+      // pending/partial/unknown이면 계속 기다린다.
+    }
+    this.addJournal({
+      kind: "info",
+      symbol,
+      summary: `⏱ ${watchMinutes}분 동안 체결을 기다렸지만 되지 않아 자동 감시를 멈췄습니다. 진입 주문은 그대로 있으니, 체결되면 [주문현황]에서 직접 조건주문(익절+손절)을 걸어 주세요.`,
+    });
+  }
+
   // --------------------------------------------------------------------------
   // 주문 현황(조회·취소) — 조회는 드라이런과 무관하게 실서버에서도 안전(읽기)
   // --------------------------------------------------------------------------
@@ -2958,7 +3122,9 @@ export class ToolEngine extends EventEmitter {
           const priceInBand = inPriceBand(price, priceMin, priceMax); // [v0.11.0] 사용자 지정 가격대
           const ema200 = ema(closes, 200);
           const cloud = ichimoku(candles5m);
-          const pat = scanSessionPattern(candles5m, sessionStartMs, br); // HA 캔들로 패턴 판정
+          // [v0.25.0] now.toMillis()를 넘겨 "너무 오래된 도지"(기본 20분 초과)는 scanSessionPattern이
+          //   스스로 status를 none으로 강제하게 한다(실 매매엔 불확실한 과거 데이터라는 오너 지적 반영).
+          const pat = scanSessionPattern(candles5m, sessionStartMs, br, WICK_MIN_RATIO, now.toMillis()); // HA 캔들로 패턴 판정
 
           const aboveEma = ema200 != null && price > ema200;
           const aboveCloud = cloud != null && price > cloud.cloudTop;
@@ -3054,7 +3220,55 @@ export class ToolEngine extends EventEmitter {
         firstDoji: pat.dojiIndex >= 0,
         bothWicks: pat.dojiUpperWickPct != null && pat.dojiLowerWickPct != null && pat.dojiUpperWickPct >= WICK_MIN_RATIO && pat.dojiLowerWickPct >= WICK_MIN_RATIO,
         nextBearish: pat.nextCandle ? pat.nextCandle.close < pat.nextCandle.open : false,
+        recentDoji: !pat.tooOld,
       },
+    };
+  }
+
+  /**
+   * [v0.25.0] getScreenerChart — 탐색 결과 한 종목의 차트를 불러온다(온디맨드, 클릭 시에만).
+   *   scanScreener가 판정할 때 쓴 것과 **완전히 같은 계산**(1분봉→5분봉→하이킨아시→EMA200·구름·
+   *   세션패턴)을 그대로 재실행해 돌려준다 — 표에서 본 근거와 차트가 서로 다른 계산이면 안 되므로.
+   *   ⚠️ 읽기 전용(시세·캔들 조회만). 주문과 무관. 버튼을 눌렀을 때만 호출된다(자동 폴링 없음).
+   */
+  async getScreenerChart(symbol: string): Promise<ScreenChart> {
+    await this.prepareBackend();
+    const sym = symbol.trim().toUpperCase();
+    const now = DateTime.now().setZone("Asia/Seoul");
+    const sessionStart = getSessionStart(now);
+    const sessionStartMs = sessionStart ? sessionStart.toMillis() : now.toMillis() - 8 * 3600_000;
+
+    const oneMin = await getCandles1mPaged(sym, 1100);
+    const raw5m = dropIncompleteBucket(aggregate1mTo5m(oneMin), now.toMillis());
+    if (raw5m.length === 0) throw new Error(`${sym}: 캔들 데이터를 받지 못했습니다(시장 휴장 또는 데이터 없음).`);
+    const candles5m = toHeikinAshi(raw5m);
+    const closes = candles5m.map((c) => c.close);
+    const ema200 = ema(closes, 200);
+    const cloud = ichimoku(candles5m);
+    const pat = scanSessionPattern(candles5m, sessionStartMs, 0.3, WICK_MIN_RATIO, now.toMillis());
+
+    let price: number | null = null;
+    try {
+      price = (await getPrice(sym)).price;
+    } catch {
+      /* 시세 조회 실패해도 차트(과거 캔들)는 그대로 보여준다 */
+    }
+
+    const hm = (ms: number) => DateTime.fromMillis(ms).setZone("Asia/Seoul").toFormat("HH:mm");
+    const MAX_CANDLES = 60; // 너무 많으면 빽빽해져 안 보인다 — 현재 세션의 최근 구간만.
+    const shown = candles5m.filter((c) => c.time >= sessionStartMs).slice(-MAX_CANDLES);
+
+    return {
+      symbol: sym,
+      candles: shown.map((c) => ({ time: hm(c.time), open: c.open, high: c.high, low: c.low, close: c.close })),
+      ema200,
+      cloudTop: cloud?.cloudTop ?? null,
+      sessionHigh: pat.sessionHigh,
+      sessionHighTime: pat.highTime != null ? hm(pat.highTime) : null,
+      dojiTime: pat.dojiCandle ? hm(pat.dojiCandle.time) : null,
+      nextTime: pat.nextCandle ? hm(pat.nextCandle.time) : null,
+      price,
+      patternStatus: pat.status,
     };
   }
 

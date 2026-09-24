@@ -257,6 +257,7 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:order:entry", (_ev, spec) => e.placeEntry(spec));
   ipcMain.handle("tool:order:oco", (_ev, spec) => e.placeOco(spec));
   ipcMain.handle("tool:order:oto", (_ev, spec) => e.placeOto(spec)); // [v0.3.2] 진입+익절(OTO)
+  ipcMain.handle("tool:order:bracket", (_ev, spec) => e.placeBracket(spec)); // [v0.25.0] 매수+익절+손절 한번에
   // [v0.2.10] 매매 근거 목록 / 보유 포지션(손익 포함) — 둘 다 읽기 전용이라 안전하다.
   ipcMain.handle("tool:rationales", () => e.getRationales());
   // [v0.4.0] 삼분할 타점 기록(여러 종목 동시 운용) — 저장/조회/삭제/진입완료 체크
@@ -272,6 +273,7 @@ function registerIpc(e: ToolEngine): void {
   e.on("strength", (state) => win?.webContents.send("tool:strengthEvent", state));
   // [v0.6.0] 종목 스크리너(탐색) — 온디맨드 스캔 + 진행률 이벤트 중계
   ipcMain.handle("tool:screener:scan", (_ev, opts?: { bodyRatio?: number; count?: number; priceMin?: number; priceMax?: number }) => e.scanScreener(opts));
+  ipcMain.handle("tool:screener:chart", (_ev, symbol: string) => e.getScreenerChart(symbol)); // [v0.25.0] 탐색 종목 차트(온디맨드)
   e.on("screener:progress", (p) => win?.webContents.send("tool:screenerProgress", p));
   // [v0.7.0] 체결강도 자동 기록(매매 연동) — 목록/요약/수동청산/삭제 + 실시간 이벤트
   ipcMain.handle("tool:trades:list", () => e.getTradeLog());

@@ -203,6 +203,9 @@ export function isBearishDoji(c: Candle, bodyRatioMax = 0.3, wickMinRatio = WICK
 
 export type PatternStatus = "confirmed" | "watch" | "none";
 
+/** [v0.25.0] 도지 발생 시점이 이보다 오래되면(기본 20분) 실 매매에 쓰기엔 불확실한 과거 데이터로 보고 불합격시킨다. */
+export const DOJI_MAX_AGE_MINUTES = 20;
+
 export interface SessionPattern {
   sessionHigh: number | null; // 현재 장 시작 이후 최고 고가
   highTime: number | null; //   그 최고점을 만든 봉의 시각(ms, 없으면 null)
@@ -214,6 +217,7 @@ export interface SessionPattern {
   dojiLowerWickPct: number | null; // [v0.6.3] 그 도지의 아래꼬리 비율
   nextCandle: Candle | null; // 도지 다음 봉(근거 표시용)
   status: PatternStatus; //     confirmed(도지+다음음봉) / watch(도지만) / none
+  tooOld: boolean; //           [v0.25.0] 도지 발생 시점이 기준(maxAgeMinutes)보다 오래돼 강제로 none 처리됐는지
 }
 
 /**
@@ -222,17 +226,34 @@ export interface SessionPattern {
  *   @param candles5m      5분봉 전체(시각 오름차순)
  *   @param sessionStartMs 현재 활성 장의 시작 시각(ms). 이 시각 이후 봉만 본다.
  *   @param bodyRatioMax   도지 몸통 비율 상한(기본 0.3)
+ *   @param wickMinRatio   도지 최소 꼬리 비율(기본 WICK_MIN_RATIO)
+ *   @param nowMs          [v0.25.0] 지금 시각(ms). 주면 도지 발생 시점이 오래됐는지 검사한다(안 주면 검사 생략 — 과거 호출 호환).
+ *   @param maxAgeMinutes  [v0.25.0] 도지가 이보다 오래되면 불합격(기본 20분)
  *
  *   판정 규칙:
  *     1) 현재 장 봉들 중 '최고 고가'를 찾는다(같은 값이면 마지막 것 — 고점 재terminal 시 리셋 효과).
  *     2) 그 최고점 '이후' 첫 음봉 도지를 찾는다.
  *     3) 도지 다음 봉이 있고 음봉이면 → confirmed. 다음 봉이 아직 없으면 → watch.
  *        다음 봉이 양봉이면 패턴이 깨진 것 → none.
+ *     4) [v0.25.0] 그 도지가 nowMs 기준 maxAgeMinutes보다 오래전 봉이면, 위 판정과 무관하게 → none.
+ *        [왜?] 세션 최고점 갱신 없이 오래 옆걸음치면, 몇 시간 전에 잡힌 도지가 계속 "확정"으로 남아
+ *        나온다. 그 시점 가격 흐름은 이미 다 지나간 과거라 지금 매매 근거로 쓰기엔 불확실하다.
  */
-export function scanSessionPattern(candles5m: Candle[], sessionStartMs: number, bodyRatioMax = 0.3, wickMinRatio = WICK_MIN_RATIO): SessionPattern {
+export function scanSessionPattern(
+  candles5m: Candle[],
+  sessionStartMs: number,
+  bodyRatioMax = 0.3,
+  wickMinRatio = WICK_MIN_RATIO,
+  nowMs?: number,
+  maxAgeMinutes = DOJI_MAX_AGE_MINUTES,
+): SessionPattern {
   // 현재 장 봉만 추린다(원래 인덱스 매핑은 필요 없어 새 배열로 다룬다).
   const s = candles5m.filter((c) => c.time >= sessionStartMs);
-  const empty: SessionPattern = { sessionHigh: null, highTime: null, highIndex: -1, dojiIndex: -1, dojiCandle: null, dojiBodyRatio: null, dojiUpperWickPct: null, dojiLowerWickPct: null, nextCandle: null, status: "none" };
+  const empty: SessionPattern = {
+    sessionHigh: null, highTime: null, highIndex: -1, dojiIndex: -1, dojiCandle: null,
+    dojiBodyRatio: null, dojiUpperWickPct: null, dojiLowerWickPct: null, nextCandle: null,
+    status: "none", tooOld: false,
+  };
   if (s.length === 0) return empty;
 
   // 1) 세션 '전체' 최고 고가와, 그 최고를 마지막으로 찍은 봉의 인덱스.
@@ -261,9 +282,13 @@ export function scanSessionPattern(candles5m: Candle[], sessionStartMs: number, 
   const dojiBodyRatio = range > 0 ? (dojiCandle.open - dojiCandle.close) / range : null;
   const wk = candleWicks(dojiCandle);
 
+  // 4) [v0.25.0] 도지가 너무 오래됐는지 먼저 판정 — 오래됐으면 아래 3)의 결과와 무관하게 none.
+  const tooOld = nowMs != null && dojiCandle.time < nowMs - maxAgeMinutes * 60_000;
+
   // 3) 도지 다음 봉 판정.
   const next = s[dojiIndex + 1] ?? null;
-  const base = { sessionHigh, highTime, highIndex, dojiIndex, dojiCandle, dojiBodyRatio, dojiUpperWickPct: wk.upperPct, dojiLowerWickPct: wk.lowerPct, nextCandle: next };
+  const base = { sessionHigh, highTime, highIndex, dojiIndex, dojiCandle, dojiBodyRatio, dojiUpperWickPct: wk.upperPct, dojiLowerWickPct: wk.lowerPct, nextCandle: next, tooOld };
+  if (tooOld) return { ...base, status: "none" };
   if (!next) return { ...base, status: "watch" as PatternStatus }; //   다음 봉 대기
   const nextBearish = next.close < next.open;
   return { ...base, status: (nextBearish ? "confirmed" : "none") as PatternStatus };

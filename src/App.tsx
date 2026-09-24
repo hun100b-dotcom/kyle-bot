@@ -281,6 +281,7 @@ function ScreenEvidenceView({ ev, price }: { ev: ScreenEvidence; price: number |
         {chip(ev.filters.aboveCloud, "현재가>구름top")}
         {chip(ev.filters.firstDoji, "최고점 후 첫 음봉 도지")}
         {chip(ev.filters.bothWicks, "위·아래 꼬리 둘 다(망치형 아님)")}
+        {chip(ev.filters.recentDoji, "도지 발생 20분 이내")}
         {chip(ev.filters.nextBearish, "다음 봉도 음봉")}
       </div>
       <table className="evid-table">
@@ -304,6 +305,75 @@ function ScreenEvidenceView({ ev, price }: { ev: ScreenEvidence; price: number |
   );
 }
 
+/**
+ * [v0.25.0] ScreenCandleChart — 탐색 결과 종목의 차트(하이킨아시 캔들 + EMA200·구름top·세션고점 겹쳐보기).
+ *   외부 차트 라이브러리 없이 SVG로 직접 그린다(StrengthChart와 같은 방식). 표에서 본 근거(도지·다음봉)를
+ *   차트 위에 노란/보라 테두리로 표시해 "이게 그 캔들이구나"를 눈으로 바로 확인할 수 있다.
+ */
+function ScreenCandleChart({ chart }: { chart: ScreenChart }) {
+  const W = 640, H = 220, PAD = 10;
+  const n = chart.candles.length;
+  if (n === 0) return <div className="hint">표시할 캔들이 없습니다(데이터 부족).</div>;
+
+  const highs = chart.candles.map((c) => c.high);
+  const lows = chart.candles.map((c) => c.low);
+  let lo = Math.min(...lows), hi = Math.max(...highs);
+  // 기준선(EMA200·구름top·세션고점)이 캔들 범위 밖이어도 잘리지 않게 범위에 포함시킨다.
+  for (const v of [chart.ema200, chart.cloudTop, chart.sessionHigh]) {
+    if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+  }
+  const span = Math.max(hi - lo, 1e-9);
+  const y = (v: number) => PAD + (1 - (v - lo) / span) * (H - 2 * PAD);
+  const slot = (W - 2 * PAD) / n;
+  const cx = (i: number) => PAD + slot * (i + 0.5);
+  const bodyW = Math.max(1.5, slot * 0.6);
+  const refLine = (v: number | null) => (v != null ? y(v) : null);
+  const highY = refLine(chart.sessionHigh);
+  const emaY = refLine(chart.ema200);
+  const cloudY = refLine(chart.cloudTop);
+
+  return (
+    <div className="screen-chart-wrap">
+      <svg className="screen-chart" viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none" role="img" aria-label={`${chart.symbol} 캔들차트`}>
+        {highY != null && <line x1={PAD} y1={highY} x2={W - PAD} y2={highY} stroke="#facc15" strokeDasharray="3 3" strokeOpacity="0.8" />}
+        {emaY != null && <line x1={PAD} y1={emaY} x2={W - PAD} y2={emaY} stroke="#60a5fa" strokeDasharray="5 3" strokeOpacity="0.8" />}
+        {cloudY != null && <line x1={PAD} y1={cloudY} x2={W - PAD} y2={cloudY} stroke="#fb923c" strokeDasharray="5 3" strokeOpacity="0.8" />}
+        {chart.candles.map((c, i) => {
+          const up = c.close >= c.open;
+          const color = up ? "#34d399" : "#f87171";
+          const isDoji = c.time === chart.dojiTime;
+          const isNext = c.time === chart.nextTime;
+          const bodyTop = Math.min(y(c.open), y(c.close));
+          const bodyH = Math.max(1, Math.abs(y(c.open) - y(c.close)));
+          return (
+            <g key={`${c.time}-${i}`}>
+              <line x1={cx(i)} y1={y(c.high)} x2={cx(i)} y2={y(c.low)} stroke={color} strokeWidth="1" />
+              <rect
+                x={cx(i) - bodyW / 2}
+                y={bodyTop}
+                width={bodyW}
+                height={bodyH}
+                fill={color}
+                stroke={isDoji ? "#facc15" : isNext ? "#a78bfa" : "none"}
+                strokeWidth={isDoji || isNext ? 2 : 0}
+              />
+            </g>
+          );
+        })}
+      </svg>
+      <div className="screen-chart-legend hint small">
+        현재가 {chart.price != null ? `$${chart.price.toFixed(2)}` : "—"}
+        {chart.sessionHigh != null && <span> · 🟡 세션고점 ${chart.sessionHigh.toFixed(2)}{chart.sessionHighTime ? ` @${chart.sessionHighTime}` : ""}</span>}
+        {chart.ema200 != null && <span> · 🔵 EMA200 ${chart.ema200.toFixed(2)}</span>}
+        {chart.cloudTop != null && <span> · 🟠 구름top ${chart.cloudTop.toFixed(2)}</span>}
+        {chart.dojiTime && <span> · 🟨 도지 {chart.dojiTime}</span>}
+        {chart.nextTime && <span> · 🟪 다음봉 {chart.nextTime}</span>}
+        {!chart.dojiTime && <span> · 아직 도지 없음</span>}
+      </div>
+    </div>
+  );
+}
+
 /** 조건주문 만료일 기본값: (KST 기준) 오늘 + 30일.
  *   [주의] toISOString()은 UTC라, KST 새벽(00~09시)엔 하루 이르게 찍힌다.
  *   그래서 KST 오프셋(+9h)을 더한 뒤 날짜를 뽑아 KST 날짜와 일치시킨다. */
@@ -314,7 +384,7 @@ function defaultExpire(): string {
 
 // 주문 확인 팝업에 담기는 내용(무엇을 전송할지 사람이 최종 확인)
 interface PendingOrder {
-  kind: "entry" | "oco" | "oto";
+  kind: "entry" | "oco" | "oto" | "bracket";
   title: string;
   lines: string[];
   send: () => Promise<JournalEntry>;
@@ -395,6 +465,11 @@ function App() {
   const [tabR, setTabR] = useState<TabId>("strength"); // 오른쪽 패널 탭(기본: 신호 보며 매매)
   const showTwoCol = twoCol && isWide;
   const [openEvid, setOpenEvid] = useState<Set<string>>(new Set()); // 근거 펼친 종목들
+  // [v0.25.0] 탐색 결과 종목의 차트 — 펼친 종목 집합 + 심볼별 캐시(재클릭 시 재조회 방지) + 로딩/에러.
+  const [openChart, setOpenChart] = useState<Set<string>>(new Set());
+  const [chartCache, setChartCache] = useState<Record<string, ScreenChart>>({});
+  const [chartBusy, setChartBusy] = useState<Set<string>>(new Set());
+  const [chartErr, setChartErr] = useState<Record<string, string>>({});
   const [journal, setJournal] = useState<JournalEntry[]>([]);
   // [v0.4.0] 내 삼분할 기록(여러 종목 동시 운용). 저장 목록 + 저장 시 메모 입력칸.
   const [splits, setSplits] = useState<SavedSplit[]>([]);
@@ -942,6 +1017,48 @@ function App() {
     });
   }
 
+  /**
+   * [v0.25.0] 매수+익절+손절 한번에 — 진입 접수 후 체결되면 자동으로 OCO(익절+손절) 등록.
+   *   토스 조건주문은 다리가 2개까지만 가능해 "한 번의 API 호출"로는 안 되지만, 이 버튼을 누르면
+   *   진입→체결감시(최대 15분)→OCO 자동등록까지 이어서 처리한다(자세한 이유는 확인 팝업에 안내).
+   */
+  function confirmBracket(lv: CalcLevel) {
+    const q = toNum(qty);
+    if (q === null || q <= 0) {
+      alert("수량을 0보다 큰 숫자로 입력하세요. (예: 1 또는 0.5)");
+      return;
+    }
+    const expire = defaultExpire();
+    const slLimit = roundPrice(lv.sl * 0.99); // OCO와 동일 규칙: 손절 지정가는 감시가 1% 아래
+    const watchMinutes = 15;
+    requestOrder({
+      kind: "bracket",
+      title: `매수+익절+손절 한번에 — ${symbol.toUpperCase()}`,
+      lines: [
+        `매수 ${usdKrw(lv.entry, fx)} × ${q}주`,
+        `→ 체결 확인되면 자동으로: 익절 감시가 ${usdKrw(lv.tp, fx)} / 손절 감시가 ${usdKrw(lv.sl, fx)} (지정가 ${usdKrw(slLimit, fx)}) OCO 등록`,
+        `⚠️ 토스 조건주문은 다리 2개까지만 가능해 "매수+익절+손절"을 한 번에 못 받습니다. 그래서 이 프로그램이`,
+        `체결을 최대 ${watchMinutes}분 지켜보다가 확인되는 즉시 OCO를 대신 걸어 드립니다.`,
+        `⚠️ 이 감시는 앱이 켜져 있는 동안만 작동합니다 — ${watchMinutes}분 안에 체결이 안 되거나 그 사이 앱을 끄면`,
+        `자동으로 안 걸리니, [주문현황]에서 체결 여부를 확인하고 직접 걸어 주세요.`,
+        `만료일(OCO) ${expire} · 지정가 · 진입 주문 유효기간: 당일만`,
+      ],
+      send: () =>
+        window.kyletool.placeBracket({
+          symbol,
+          price: lv.entry,
+          quantity: q,
+          tpTrigger: lv.tp,
+          tpPrice: lv.tp,
+          slTrigger: lv.sl,
+          slPrice: slLimit,
+          expireDate: expire,
+          watchMinutes,
+          rationale: buildRationale(lv, { tp: lv.tp, sl: lv.sl }),
+        }),
+    });
+  }
+
   /** 확인 팝업을 띄우거나(기본), 설정에서 건너뛰기를 켰으면 곧바로 전송한다. */
   async function requestOrder(po: PendingOrder) {
     if (status?.skipOrderConfirm) {
@@ -1275,6 +1392,7 @@ ${msg}
       //   (= !bothWicks 가지는 현재 도달 안 함). 기준이 나중에 갈릴 경우 대비해 방어적으로 남겨 둔다.
       if (!f.firstDoji) reasons.push("최고점 이후 음봉 도지 없음");
       else if (!f.bothWicks) reasons.push("도지에 꼬리가 한쪽만(망치형·유성형)");
+      else if (!f.recentDoji) reasons.push("도지 발생이 너무 오래전(20분 초과 — 신뢰 불가)");
       else if (!f.nextBearish) reasons.push("도지 다음 봉이 음봉 아님(패턴 미완성)");
     }
     return { passed, reasons };
@@ -1306,6 +1424,31 @@ ${msg}
       else next.add(symbol);
       return next;
     });
+  }
+
+  /** [v0.25.0] 결과 행의 [📈 차트] 펼치기/접기 — 처음 펼칠 때만 불러오고(온디맨드), 이후엔 캐시 재사용. */
+  function toggleChart(symbol: string) {
+    setOpenChart((prev) => {
+      const next = new Set(prev);
+      if (next.has(symbol)) next.delete(symbol);
+      else next.add(symbol);
+      return next;
+    });
+    if (!chartCache[symbol] && !chartBusy.has(symbol)) void loadScreenChart(symbol);
+  }
+
+  /** 탐색 종목 차트를 불러온다(실패해도 표는 그대로 — 에러만 그 자리에 표시). */
+  async function loadScreenChart(symbol: string) {
+    setChartBusy((prev) => new Set(prev).add(symbol));
+    setChartErr((prev) => { const { [symbol]: _drop, ...rest } = prev; return rest; });
+    try {
+      const chart = await window.kyletool.screenerChart(symbol);
+      setChartCache((prev) => ({ ...prev, [symbol]: chart }));
+    } catch (e) {
+      setChartErr((prev) => ({ ...prev, [symbol]: String(e).replace(/^Error:\s*(Error invoking remote method '[^']+':\s*Error:\s*)?/, "") }));
+    } finally {
+      setChartBusy((prev) => { const next = new Set(prev); next.delete(symbol); return next; });
+    }
   }
 
   /** 결과 행 클릭 → 계산기 탭에 그 종목 + [v0.16.0] 전봉종가·EMA200까지 자동으로 채운다(재입력 수고 제거).
@@ -1926,14 +2069,16 @@ ${msg}
                             <button className="mini btn-buy" disabled={status.killSwitch} onClick={() => confirmEntry(lv)} title="이 가격에 사기만 합니다(지정가 = 가격을 정해 두는 주문)">매수만 (지정가)</button>
                             <button className="mini btn-oto" disabled={status.killSwitch} onClick={() => confirmOto(lv)} title="사자마자 익절 주문까지 자동으로 걸립니다. 손절은 안 걸리니 직접 챙기세요.">매수+익절 자동</button>
                             <button className="mini btn-oco" disabled={status.killSwitch} onClick={() => openOcoEditor(lv)} title="이미 보유 중일 때, 익절과 손절을 동시에 걸어 둡니다(한쪽 체결되면 다른쪽 자동 취소)">익절+손절 걸기</button>
+                            <button className="mini btn-bracket" disabled={status.killSwitch} onClick={() => confirmBracket(lv)} title="매수 후 체결이 확인되면 이 프로그램이 자동으로 익절+손절(OCO)까지 걸어 줍니다(최대 15분 감시, 앱이 켜져 있어야 함)">매수+익절+손절 한번에</button>
                           </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                   <p className="hint">
-                    💡 1·2·3차 매수가는 <b>어느 것이 낫다고 정해진 게 아닙니다</b>(취향껏 고르세요). 버튼 3개 뜻:
+                    💡 1·2·3차 매수가는 <b>어느 것이 낫다고 정해진 게 아닙니다</b>(취향껏 고르세요). 버튼 4개 뜻:
                     <br />· <b>매수만 (지정가)</b> = 이 가격에 사기만. · <b>매수+익절 자동</b> = 사자마자 익절까지 자동(<b>손절은 직접</b>). · <b>익절+손절 걸기</b> = <b>이미 갖고 있을 때</b> 익절·손절 동시.
+                    <br />· <b>매수+익절+손절 한번에</b> = 매수 후 체결되면 이 프로그램이 자동으로 익절+손절을 걸어 줍니다(<b>앱이 켜져 있는 동안만</b>, 최대 15분 감시 — 토스 조건주문은 다리가 2개까지만 가능해 한 번의 API로는 3개를 못 받기 때문입니다).
                     <br />익절·손절 감시는 <b>토스 서버가 대신</b> 해줘서, 앱을 꺼 둬도 작동합니다.
                     {status.dryRun && " (지금은 주문 잠금 — 실제로 안 나가고 연습 기록만)"}
                   </p>
@@ -2058,12 +2203,17 @@ ${msg}
                       <tbody>
                         {cand.map((r) => {
                           const open = openEvid.has(r.symbol);
+                          const chartOpen = openChart.has(r.symbol);
                           return (
                           <Fragment key={r.symbol}>
                             <tr className="screen-row" onClick={() => pickScreenSymbol(r)} title="클릭하면 계산기로 이동 + 이 종목의 전봉종가·EMA200이 자동 입력됩니다(수정 가능)">
                               <td>
                                 <button className="mini btn-evid" onClick={(e) => { e.stopPropagation(); toggleEvid(r.symbol); }} title="판정 근거 펼치기/접기">
                                   {open ? "▾ 근거" : "▸ 근거"}
+                                </button>
+                                {" "}
+                                <button className="mini btn-evid" onClick={(e) => { e.stopPropagation(); toggleChart(r.symbol); }} title="이 종목의 캔들차트 불러오기(도지·EMA200·구름·세션고점 표시)">
+                                  {chartOpen ? "▾ 📈" : "▸ 📈"}
                                 </button>
                               </td>
                               <td>{r.status === "confirmed" ? "🔴 확정" : "🟡 관찰"}</td>
@@ -2080,6 +2230,20 @@ ${msg}
                             {open && r.evidence && (
                               <tr className="evid-row">
                                 <td colSpan={9}><ScreenEvidenceView ev={r.evidence} price={r.price} /></td>
+                              </tr>
+                            )}
+                            {chartOpen && (
+                              <tr className="evid-row" onClick={(e) => e.stopPropagation()}>
+                                <td colSpan={9}>
+                                  {chartBusy.has(r.symbol) && <p className="hint">차트 불러오는 중…</p>}
+                                  {chartErr[r.symbol] && (
+                                    <p className="hint">
+                                      ⚠️ 차트를 못 불러왔습니다: {chartErr[r.symbol]}
+                                      {" "}<button className="mini" onClick={() => void loadScreenChart(r.symbol)}>다시 시도</button>
+                                    </p>
+                                  )}
+                                  {chartCache[r.symbol] && <ScreenCandleChart chart={chartCache[r.symbol]} />}
+                                </td>
                               </tr>
                             )}
                           </Fragment>

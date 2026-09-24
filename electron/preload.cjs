@@ -49,6 +49,7 @@ contextBridge.exposeInMainWorld("kyletool", {
   placeEntry: (spec) => ipcRenderer.invoke("tool:order:entry", spec),
   placeOco: (spec) => ipcRenderer.invoke("tool:order:oco", spec),
   placeOto: (spec) => ipcRenderer.invoke("tool:order:oto", spec), // [v0.3.2] 진입+익절(OTO)
+  placeBracket: (spec) => ipcRenderer.invoke("tool:order:bracket", spec), // [v0.25.0] 매수+익절+손절 한번에
 
   // 주문 현황
   // [v0.2.10] 주문 근거(기법 스냅샷) 목록 / 보유 포지션 손익
@@ -73,6 +74,7 @@ contextBridge.exposeInMainWorld("kyletool", {
 
   // [v0.6.0] 종목 스크리너(탐색) — 스캔 + 진행률 구독
   screenerScan: (opts) => ipcRenderer.invoke("tool:screener:scan", opts),
+  screenerChart: (symbol) => ipcRenderer.invoke("tool:screener:chart", symbol), // [v0.25.0]
   onScreenerProgress: (cb) => {
     const h = (_ev, p) => cb(p);
     ipcRenderer.on("tool:screenerProgress", h);

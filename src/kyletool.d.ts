@@ -288,6 +288,7 @@ interface ScreenEvidence {
     firstDoji: boolean;
     bothWicks: boolean;
     nextBearish: boolean;
+    recentDoji: boolean; // [v0.25.0] 도지 발생 시점이 20분 이내인지
   };
 }
 interface ScreenResult {
@@ -322,6 +323,27 @@ interface ScreenRun {
   priceMax: number;
   excludedEtf: number;
   results: ScreenResult[];
+}
+
+/** [v0.25.0] 탐색 종목 차트 캔들/전체 */
+interface ScreenChartCandle {
+  time: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+interface ScreenChart {
+  symbol: string;
+  candles: ScreenChartCandle[];
+  ema200: number | null;
+  cloudTop: number | null;
+  sessionHigh: number | null;
+  sessionHighTime: string | null;
+  dojiTime: string | null;
+  nextTime: string | null;
+  price: number | null;
+  patternStatus: ScreenStatus;
 }
 
 /** [v0.7.0] 체결강도 자동 기록 트레이드 */
@@ -520,6 +542,20 @@ interface KyletoolBridge {
     expireDate: string;
     rationale?: RationaleInput;
   }): Promise<JournalEntry>;
+  /** [v0.25.0] 매수+익절+손절 한번에 — 진입 접수 후 체결을 감시(최대 watchMinutes)하다 체결되면 자동으로 OCO(익절+손절) 등록 */
+  placeBracket(spec: {
+    symbol: string;
+    price: number;
+    quantity: number;
+    tpTrigger: number;
+    tpPrice: number;
+    slTrigger: number;
+    slPrice: number;
+    expireDate: string;
+    watchMinutes?: number;
+    pollMs?: number; // [테스트 전용] 체결 확인 주기(기본 5000ms)
+    rationale?: RationaleInput;
+  }): Promise<JournalEntry>;
   rationales(): Promise<TradeRationale[]>;
   // [v0.4.0] 삼분할 타점 기록(여러 종목 동시 운용)
   splitsList(): Promise<SavedSplit[]>;
@@ -543,6 +579,8 @@ interface KyletoolBridge {
   onStrength(cb: (state: StrengthState) => void): () => void;
   // [v0.6.0] 종목 스크리너(탐색)
   screenerScan(opts?: { bodyRatio?: number; count?: number; priceMin?: number; priceMax?: number }): Promise<ScreenRun>;
+  /** [v0.25.0] 탐색 결과 한 종목의 차트를 불러온다(클릭 시에만, 온디맨드). */
+  screenerChart(symbol: string): Promise<ScreenChart>;
   onScreenerProgress(cb: (p: ScreenProgress) => void): () => void;
   // [v0.7.0] 체결강도 자동 기록(매매 연동)
   tradesList(): Promise<StrengthTrade[]>;

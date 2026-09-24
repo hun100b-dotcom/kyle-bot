@@ -179,6 +179,7 @@ export function installKyleTool(): ToolEngine {
     placeEntry: (spec: Parameters<ToolEngine["placeEntry"]>[0]) => e.placeEntry(spec),
     placeOco: (spec: Parameters<ToolEngine["placeOco"]>[0]) => e.placeOco(spec),
     placeOto: (spec: Parameters<ToolEngine["placeOto"]>[0]) => e.placeOto(spec),
+    placeBracket: (spec: Parameters<ToolEngine["placeBracket"]>[0]) => e.placeBracket(spec), // [v0.25.0]
     placeSell: (spec: Parameters<ToolEngine["placeSell"]>[0]) => e.placeSell(spec),
     openOrders: () => e.openOrders(),
     conditionals: () => e.conditionals(),
@@ -210,6 +211,7 @@ export function installKyleTool(): ToolEngine {
 
     // ── 스크리너(탐색) ─────────────────────────────────────────
     screenerScan: (opts?: { bodyRatio?: number; count?: number; priceMin?: number; priceMax?: number }) => e.scanScreener(opts),
+    screenerChart: (symbol: string) => e.getScreenerChart(symbol), // [v0.25.0]
     onScreenerProgress: (cb: (v: unknown) => void) => {
       subs.screener.add(cb);
       return () => subs.screener.delete(cb);
