@@ -97,6 +97,35 @@ describe("매수+익절+손절 동시 주문(브라켓) — v0.25.0", () => {
     }
   }, 10_000);
 
+  it("pollMs를 안 주면(실사용 기본값) 진입 직후엔 5초가 아니라 1초 간격으로 빠르게 확인한다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-brk-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      // 절대 체결 안 되는 가격 + 아주 짧은 감시시간(1.8초) → 감시 종료까지 걸리는 시간으로
+      // "몇 초 간격으로 폴링했는지"를 역산한다. 느슨한 5초 간격이었다면 이 테스트 자체가
+      // 감시시간(1.8초)보다 훨씬 오래 걸려야 하는데, 실제로는 빠르게(약 1초) 끝나야 한다.
+      const startedAt = Date.now();
+      const timeoutPromise = waitForJournal(eng, (e) => e.kind === "info" && e.summary.includes("자동 감시를 멈췄습니다"), 4000);
+      await eng.placeBracket({
+        symbol: "AAPL",
+        price: 1.0,
+        quantity: 1,
+        tpTrigger: 2.5,
+        tpPrice: 2.5,
+        slTrigger: 1.8,
+        slPrice: 1.79,
+        expireDate: "2026-12-30",
+        watchMinutes: 0.03, // 약 1.8초
+        // pollMs 생략 — 적응형(진입 직후 1초 간격) 기본값 검증
+      });
+      await timeoutPromise;
+      const elapsedMs = Date.now() - startedAt;
+      expect(elapsedMs).toBeLessThan(3000); // 5초 간격이었다면 이 시간 안에 못 끝남
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
   it("감시 중 진입 주문이 취소되면 OCO 등록 없이 감시를 멈춘다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-brk-"));
     try {

@@ -2004,7 +2004,17 @@ export class ToolEngine extends EventEmitter {
    *   정한 값(진입가·익절가·손절가·수량)을 그대로 실행할 뿐이라 "판단은 사람, 실행은 기계"
    *   원칙에 어긋나지 않는다.
    *
-   * [⚠️ 중요한 한계 — 반드시 알아야 함]
+   * [⚠️ "즉시"의 실제 의미 — 완전한 무지연(0초)은 불가능함, 반드시 알아야 함]
+   *   토스 주문 API에는 "체결됐다"고 먼저 알려주는 실시간 알림(웹소켓·푸시) 채널이 없다(공식
+   *   openapi.json에도, 이 코드베이스 전체에도 그런 기능은 없음 — 조사 완료). 심지어 주문을 낼 때
+   *   받는 응답에도 상태값이 안 들어있고(생성 응답은 orderId뿐), 상태는 오직 "단건 조회"를
+   *   반복해서 물어봐야만(폴링) 알 수 있다. 그래서 이 기능도 어쩔 수 없이 주기적으로 "체결됐나요?"
+   *   하고 물어보는 방식이며, **그 확인 간격만큼은 항상 지연이 생긴다.** 아래 watchAndBracket이
+   *   그 지연을 최대한 줄이도록 "진입 직후 1분은 1초 간격으로 빠르게, 그 이후엔 5초 간격으로
+   *   느슨하게" 확인한다(v0.25.1) — 실전에서 체감상 "거의 즉시"에 가깝지만, 수학적으로 정확히
+   *   0초는 아니다(최악의 경우 최대 약 1초).
+   *
+   * [⚠️ 또 다른 중요한 한계 — 반드시 알아야 함]
    *   이 감시는 **이 프로그램이 켜져 있는 동안만** 작동한다. OCO 등록 전에 앱을 끄거나 컴퓨터가
    *   잠들면, 체결이 돼도 손절/익절이 자동으로 걸리지 않는다(진입 주문 자체는 토스에 그대로
    *   남아 있다). 정해진 시간 안에 체결이 안 되면 조용히 감시를 멈추고 알림만 남긴다(진입은 취소
@@ -2064,7 +2074,19 @@ export class ToolEngine extends EventEmitter {
    * 진입 주문의 체결을 기다렸다가, 체결되면 OCO(익절+손절)를 자동 등록한다.
    *   [수명 제한] watchMinutes(기본 15분)를 넘기면 조용히 감시를 멈춘다(무한 폴링 방지 —
    *   v0.22.0 체결강도 자동 기록과 같은 원칙). 진입 주문 자체는 취소하지 않는다.
+   *   [v0.25.1 — 적응형(빠르게→느슨하게) 폴링] 토스 주문 API는 체결을 먼저 알려주는 실시간
+   *   채널이 없어(위 placeBracket 주석 참고) "물어봐야만" 아는데, 무작정 빨리 자주 물어보면
+   *   API 호출이 너무 많아지고(공식 한도가 명시돼 있진 않지만 다른 그룹들처럼 초당 제한이
+   *   있을 가능성이 큼), 너무 느리게 물어보면 체결→보호(익절/손절) 등록 사이 무방비 시간이
+   *   길어진다. 그래서 "체결될 가능성이 가장 높은 진입 직후 FAST_WINDOW_MS(1분) 동안은
+   *   FAST_POLL_MS(1초) 간격으로, 그 뒤엔 느슨한 간격(기본 5초)으로" 절충한다. 테스트에서
+   *   spec.pollMs를 넘기면 이 적응형 로직을 끄고 그 값 하나로 처음부터 끝까지 폴링한다
+   *   (빠른 자동 테스트용 — 화면(UI)은 이 값을 넘기지 않으므로 실사용에는 영향 없음).
    */
+  private static readonly BRACKET_FAST_POLL_MS = 1000; // 진입 직후엔 1초 간격(체결 반응을 최대한 빠르게)
+  private static readonly BRACKET_FAST_WINDOW_MS = 60_000; // "진입 직후"로 볼 구간(1분)
+  private static readonly BRACKET_SLOW_POLL_MS = 5000; // 그 이후엔 5초 간격(API 부담 완화)
+
   private async watchAndBracket(
     symbol: string,
     tossOrderId: string,
@@ -2081,10 +2103,15 @@ export class ToolEngine extends EventEmitter {
     },
   ): Promise<void> {
     const watchMinutes = spec.watchMinutes ?? 15;
-    const deadline = Date.now() + watchMinutes * 60_000;
-    const pollMs = spec.pollMs ?? 5000; // 테스트에서 짧게(예: 20ms) 넣으면 폴링 루프를 빠르게 검증 가능
+    const startedAt = Date.now();
+    const deadline = startedAt + watchMinutes * 60_000;
 
     while (Date.now() < deadline) {
+      // spec.pollMs가 있으면(테스트 전용) 처음부터 끝까지 그 값 하나로 고정. 없으면(실사용)
+      // 진입 직후 1분은 1초, 그 이후는 5초로 적응형 폴링(위 클래스 설명 참고).
+      const elapsed = Date.now() - startedAt;
+      const pollMs =
+        spec.pollMs ?? (elapsed < ToolEngine.BRACKET_FAST_WINDOW_MS ? ToolEngine.BRACKET_FAST_POLL_MS : ToolEngine.BRACKET_SLOW_POLL_MS);
       await new Promise((resolve) => setTimeout(resolve, pollMs));
       let o: OrderResponse;
       try {
