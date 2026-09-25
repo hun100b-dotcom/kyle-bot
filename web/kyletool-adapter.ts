@@ -189,6 +189,8 @@ export function installKyleTool(): ToolEngine {
     autoTradeStop: () => Promise.resolve(e.stopAutoTrade()),
     autoTradeStatus: () => Promise.resolve(e.getAutoTradeStatus()),
     saveAutoTradeSettings: (input: Parameters<ToolEngine["saveAutoTradeSettings"]>[0]) => Promise.resolve(e.saveAutoTradeSettings(input)),
+    saveAutoScanSettings: (input: Parameters<ToolEngine["saveAutoScanSettings"]>[0]) => Promise.resolve(e.saveAutoScanSettings(input)),
+    autoScanNow: () => e.autoScanNow(),
     placeSell: (spec: Parameters<ToolEngine["placeSell"]>[0]) => e.placeSell(spec),
     openOrders: () => e.openOrders(),
     conditionals: () => e.conditionals(),

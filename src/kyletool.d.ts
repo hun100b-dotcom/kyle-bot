@@ -110,6 +110,11 @@ interface ToolSettings {
   autoTradeMaxLossPct: number;
   autoTradeMaxInvestPct: number;
   autoTradeEnabled: boolean;
+  // [v0.28.0] 자동매매용 스크리너 조건(4개, 전부 수정 가능 — 메뉴얼 스크리너와 같은 항목)
+  autoScanCount: number;
+  autoScanPriceMin: number;
+  autoScanPriceMax: number;
+  autoScanBodyRatio: number;
 }
 
 /** [v0.26.0] 자동매매가 지금 감시·보유 중인 포지션 하나. */
@@ -593,6 +598,9 @@ interface KyletoolBridge {
   autoTradeStop(): Promise<AutoTradeStatus>;
   autoTradeStatus(): Promise<AutoTradeStatus>;
   saveAutoTradeSettings(input: { maxPositions?: number; maxLossPct?: number; maxInvestPct?: number }): Promise<ToolSettings>;
+  // [v0.28.0] 자동매매용 스크리너 조건 저장 + 수동 새로고침(5분 기다리지 않고 지금 훑기)
+  saveAutoScanSettings(input: { count?: number; priceMin?: number; priceMax?: number; bodyRatio?: number }): Promise<ToolSettings>;
+  autoScanNow(): Promise<AutoTradeStatus>;
   rationales(): Promise<TradeRationale[]>;
   // [v0.4.0] 삼분할 타점 기록(여러 종목 동시 운용)
   splitsList(): Promise<SavedSplit[]>;

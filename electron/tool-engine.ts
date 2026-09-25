@@ -507,7 +507,7 @@ export interface ScreenProgress {
 
 /** [v0.11.0] 스크리너 스캔 옵션 — 화면에서 사용자가 조절한다(전부 선택, 없으면 기본값). */
 export interface ScreenOpts {
-  bodyRatio?: number; // 도지 몸통비율 상한(0.1~0.5, 기본 0.3)
+  bodyRatio?: number; // 도지 몸통비율 상한(0.1~0.8, 기본 0.3) — [v0.28.0] 0.5→0.8로 상한 확대
   count?: number; //     스캔할 거래량 상위 종목 수(10~200, 기본 60)
   priceMin?: number; //  현재가 하한($, 기본 1)
   priceMax?: number; //  현재가 상한($, 기본 9)
@@ -774,6 +774,12 @@ export class ToolEngine extends EventEmitter {
   private autoTradeMaxPositions = 3; //  동시 보유 최대 종목 수(오너 기본값)
   private autoTradeMaxLossPct = 5; //    최대손실 한도(시드 대비 %) — 넘으면 자동매매 자동 중단
   private autoTradeMaxInvestPct = 30; // 종목 1개당 배정하는 시드 대비 투입 비율(%) — 종목 수로 나누지 않음
+  // [v0.28.0] 자동매매가 5분마다 스스로 돌리는 스크리너의 조건 — 메뉴얼 스크리너와 같은 4항목을
+  //   오너가 똑같이 조절할 수 있게 한다(공장값은 메뉴얼 스크리너 기본값과 동일).
+  private autoScanCount = 60; //      스캔할 거래량 상위 종목 수(10~200)
+  private autoScanPriceMin = 1; //    현재가 하한($)
+  private autoScanPriceMax = 9; //    현재가 상한($)
+  private autoScanBodyRatio = 0.3; // 도지 몸통비율 상한(0.1~0.8)
 
   // [v0.26.0] 자동매매 실행 상태(런타임 전용, 저장 안 함 — 앱 재시작하면 전부 초기화).
   private autoTradeEnabled = false;
@@ -890,6 +896,15 @@ export class ToolEngine extends EventEmitter {
     if (Number.isFinite(alp) && alp > 0) this.autoTradeMaxLossPct = alp;
     const aip = Number(process.env.AUTO_MAX_INVEST_PCT);
     if (Number.isFinite(aip) && aip > 0) this.autoTradeMaxInvestPct = aip;
+    // [v0.28.0] 저장된 자동매매 스크리너 조건 복원(4개 전부 오너가 수정 가능).
+    const asc = Number(process.env.AUTO_SCAN_COUNT);
+    if (Number.isFinite(asc) && asc > 0) this.autoScanCount = Math.round(asc);
+    const aspMin = Number(process.env.AUTO_SCAN_PRICE_MIN);
+    if (Number.isFinite(aspMin) && aspMin >= 0) this.autoScanPriceMin = aspMin;
+    const aspMax = Number(process.env.AUTO_SCAN_PRICE_MAX);
+    if (Number.isFinite(aspMax) && aspMax >= 0) this.autoScanPriceMax = aspMax;
+    const asbr = Number(process.env.AUTO_SCAN_BODY_RATIO);
+    if (Number.isFinite(asbr) && asbr > 0) this.autoScanBodyRatio = asbr;
     // [v0.8.1] 저장된 로그인 세션 복원(리프레시 토큰만). access token 은 필요 시 갱신한다.
     if (process.env.CAPRI_AUTH_REFRESH) this.authRefreshToken = process.env.CAPRI_AUTH_REFRESH;
     if (process.env.CAPRI_AUTH_EMAIL) this.authEmail = process.env.CAPRI_AUTH_EMAIL;
@@ -919,6 +934,11 @@ export class ToolEngine extends EventEmitter {
       autoTradeMaxLossPct: this.autoTradeMaxLossPct,
       autoTradeMaxInvestPct: this.autoTradeMaxInvestPct,
       autoTradeEnabled: this.autoTradeEnabled,
+      // [v0.28.0] 자동매매 스크리너 조건(4개)
+      autoScanCount: this.autoScanCount,
+      autoScanPriceMin: this.autoScanPriceMin,
+      autoScanPriceMax: this.autoScanPriceMax,
+      autoScanBodyRatio: this.autoScanBodyRatio,
     };
   }
 
@@ -958,6 +978,58 @@ export class ToolEngine extends EventEmitter {
   }
 
   /**
+   * [v0.28.0] 자동매매가 5분마다 스스로 돌리는 스크리너의 조건 4개(스캔 종목수·가격 하한/상한·
+   *   도지 몸통비율 상한) 저장. 메뉴얼 스크리너와 같은 항목이지만 별도로 저장한다 — 자동매매는
+   *   사람이 매번 값을 넣어주는 메뉴얼 스크리너와 달리 무인으로 반복 실행되므로, 오너가 "자동매매용"
+   *   조건을 따로 정해 두고 화면(메뉴얼 스크리너)의 즉흥적인 값 변경에 영향받지 않게 하기 위함.
+   *   0 이하·비정상 값은 무시(이전값 유지). bodyRatio는 0.1~0.8로 보정.
+   */
+  saveAutoScanSettings(input: { count?: number; priceMin?: number; priceMax?: number; bodyRatio?: number }) {
+    if (typeof input.count === "number" && Number.isFinite(input.count) && input.count > 0) {
+      this.autoScanCount = Math.round(Math.min(200, Math.max(10, input.count)));
+    }
+    if (typeof input.priceMin === "number" && Number.isFinite(input.priceMin) && input.priceMin >= 0) {
+      this.autoScanPriceMin = input.priceMin;
+    }
+    if (typeof input.priceMax === "number" && Number.isFinite(input.priceMax) && input.priceMax >= 0) {
+      this.autoScanPriceMax = input.priceMax;
+    }
+    if (typeof input.bodyRatio === "number" && Number.isFinite(input.bodyRatio) && input.bodyRatio > 0) {
+      this.autoScanBodyRatio = Math.min(0.8, Math.max(0.1, input.bodyRatio));
+    }
+    this.persistEnv();
+    this.addJournal({
+      kind: "info",
+      symbol: "-",
+      summary: `자동매매 스크리너 조건 저장 — 종목수 ${this.autoScanCount} · 가격 $${this.autoScanPriceMin}~$${this.autoScanPriceMax} · 도지 몸통상한 ${Math.round(this.autoScanBodyRatio * 100)}%`,
+    });
+    return this.getSettings();
+  }
+
+  /**
+   * [v0.28.0] 자동매매 스크리너 수동 새로고침 — 5분 주기를 기다리지 않고 지금 바로 다시 훑어
+   *   "스크리닝 결과" 탭을 갱신한다. autoTradeTick과 달리 진입 시도는 하지 않는다(모니터링·미리보기
+   *   전용) — 자동매매가 꺼져 있어도 "켜면 뭐가 나올지" 미리 확인하는 용도로도 쓸 수 있다.
+   */
+  async autoScanNow(): Promise<AutoTradeStatus> {
+    try {
+      await this.prepareBackend();
+      const run = await this.scanScreener({
+        count: this.autoScanCount,
+        priceMin: this.autoScanPriceMin,
+        priceMax: this.autoScanPriceMax,
+        bodyRatio: this.autoScanBodyRatio,
+      });
+      this.autoTradeLastScan = run;
+      const cand = run.results.filter((r) => r.status === "confirmed" || r.status === "watch").length;
+      this.addJournal({ kind: "info", symbol: "-", summary: `🤖 자동매매 스크리너 수동 새로고침 — 후보 ${cand}개` });
+    } catch (e) {
+      this.addJournal({ kind: "info", symbol: "-", summary: `🤖 자동매매 스크리너 수동 새로고침 실패 — ${String(e).replace(/^Error:\s*/, "")}` });
+    }
+    return this.getAutoTradeStatus();
+  }
+
+  /**
    * [v0.3.0] 모든 설정을 .env 파일에 한 번에 다시 쓴다(단일 저장 경로).
    *   비밀값(키·계좌)은 process.env에 이미 있으므로 그대로 유지된다.
    *   [왜 한 곳으로?] 예전엔 saveSettings만 파일을 썼고 토글은 메모리에만 있어, 앱을 끄면
@@ -991,6 +1063,11 @@ export class ToolEngine extends EventEmitter {
       `AUTO_MAX_POSITIONS=${this.autoTradeMaxPositions}`,
       `AUTO_MAX_LOSS_PCT=${this.autoTradeMaxLossPct}`,
       `AUTO_MAX_INVEST_PCT=${this.autoTradeMaxInvestPct}`,
+      // --- [v0.28.0] 자동매매 스크리너 조건(4개) ---
+      `AUTO_SCAN_COUNT=${this.autoScanCount}`,
+      `AUTO_SCAN_PRICE_MIN=${this.autoScanPriceMin}`,
+      `AUTO_SCAN_PRICE_MAX=${this.autoScanPriceMax}`,
+      `AUTO_SCAN_BODY_RATIO=${this.autoScanBodyRatio}`,
       // --- [v0.8.1] 로그인 세션(리프레시 토큰만 로컬 저장 → 재시작해도 로그인 유지). 비밀번호·마스터 비번은 저장 안 함. ---
       `CAPRI_AUTH_REFRESH=${this.authRefreshToken ?? ""}`,
       `CAPRI_AUTH_EMAIL=${this.authEmail ?? ""}`,
@@ -3264,12 +3341,14 @@ export class ToolEngine extends EventEmitter {
    * scanScreener — 거래량 상위 종목을 훑어 조건 만족 후보를 찾는다.
    *   진행 상황은 "screener:progress" 이벤트로 화면에 실시간 전달하고, 최종 결과는 반환한다.
    *   [v0.11.0] 옵션 객체로 바뀜 — 몸통비율뿐 아니라 스캔 종목수·가격대(하한/상한)를 사용자가 조절.
-   *   @param opts { bodyRatio(0.1~0.5), count(10~200), priceMin($), priceMax($) } — 전부 선택(기본값 있음).
+   *   @param opts { bodyRatio(0.1~0.8), count(10~200), priceMin($), priceMax($) } — 전부 선택(기본값 있음).
    */
   async scanScreener(opts: ScreenOpts = {}): Promise<ScreenRun> {
     if (this.screenBusy) throw new Error("이미 스캔이 진행 중입니다. 끝날 때까지 기다려 주세요.");
     this.screenBusy = true;
-    const br = Math.min(0.5, Math.max(0.1, opts.bodyRatio ?? 0.3)); // 0.1~0.5로 안전 보정
+    // [v0.28.0] 상한 0.5→0.8로 확대(오너 지시) — 자동매매용 스크리너 화면에서 더 깐깐하지 않은
+    //   (몸통이 커도 도지로 인정하는) 완화된 조건까지 선택할 수 있게 한다.
+    const br = Math.min(0.8, Math.max(0.1, opts.bodyRatio ?? 0.3)); // 0.1~0.8로 안전 보정
     const count = Math.min(200, Math.max(10, Math.round(opts.count ?? 60))); // 10~200으로 안전 보정
     // 가격대: 하한이 상한보다 크면 자동 교정(사용자 실수 방어). 음수는 0으로.
     let priceMin = Math.max(0, opts.priceMin ?? 1);
@@ -3671,7 +3750,14 @@ export class ToolEngine extends EventEmitter {
 
       let run: ScreenRun;
       try {
-        run = await this.scanScreener({}); // ③빈자리를 "현재 스크리닝으로 탐색된 다른 종목"으로 채움
+        // [v0.28.0] 오너가 "자동매매 현황" 탭에서 조절한 스크리너 조건(종목수·가격대·도지
+        //   몸통비율)을 그대로 쓴다 — 예전엔 항상 공장값({})만 썼다.
+        run = await this.scanScreener({
+          count: this.autoScanCount,
+          priceMin: this.autoScanPriceMin,
+          priceMax: this.autoScanPriceMax,
+          bodyRatio: this.autoScanBodyRatio,
+        }); // ③빈자리를 "현재 스크리닝으로 탐색된 다른 종목"으로 채움
         this.autoTradeLastScan = run; // [v0.27.0] 버리지 않고 보관 → "스크리닝 결과" 탭이 그대로 보여줌
       } catch (e) {
         this.addJournal({ kind: "info", symbol: "-", summary: `🤖 자동매매: 이번 사이클 스크리닝 실패 — ${String(e).replace(/^Error:\s*/, "")}` });

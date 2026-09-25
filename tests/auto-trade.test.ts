@@ -43,6 +43,84 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
     }
   });
 
+  it("[v0.28.0] 자동매매 스크리너 조건의 공장값은 메뉴얼 스크리너 기본값과 같다(종목수 60·$1~$9·몸통 30%)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const s = eng.getSettings();
+      expect(s.autoScanCount).toBe(60);
+      expect(s.autoScanPriceMin).toBe(1);
+      expect(s.autoScanPriceMax).toBe(9);
+      expect(s.autoScanBodyRatio).toBe(0.3);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("[v0.28.0] saveAutoScanSettings는 4개 조건을 저장하고 재시작해도 유지된다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const saved = eng.saveAutoScanSettings({ count: 120, priceMin: 2, priceMax: 15, bodyRatio: 0.6 });
+      expect(saved.autoScanCount).toBe(120);
+      expect(saved.autoScanPriceMin).toBe(2);
+      expect(saved.autoScanPriceMax).toBe(15);
+      expect(saved.autoScanBodyRatio).toBe(0.6);
+
+      const eng2 = new ToolEngine(dir, { forceMock: true });
+      const s2 = eng2.getSettings();
+      expect(s2.autoScanCount).toBe(120);
+      expect(s2.autoScanPriceMin).toBe(2);
+      expect(s2.autoScanPriceMax).toBe(15);
+      expect(s2.autoScanBodyRatio).toBe(0.6);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("[v0.28.0] 도지 몸통비율은 0.1~0.8로 보정된다(오너 지시: 상한 80%까지)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      expect(eng.saveAutoScanSettings({ bodyRatio: 0.95 }).autoScanBodyRatio).toBe(0.8); // 상한 넘으면 0.8로
+      expect(eng.saveAutoScanSettings({ bodyRatio: 0.8 }).autoScanBodyRatio).toBe(0.8); // 정확히 상한은 그대로
+      expect(eng.saveAutoScanSettings({ bodyRatio: 0.05 }).autoScanBodyRatio).toBe(0.1); // 하한 밑이면 0.1로
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("[v0.28.0] 스캔 종목수는 10~200으로 보정되고, 0 이하·비정상 값은 무시한다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      expect(eng.saveAutoScanSettings({ count: 500 }).autoScanCount).toBe(200);
+      expect(eng.saveAutoScanSettings({ count: 1 }).autoScanCount).toBe(10);
+      const before = eng.saveAutoScanSettings({ count: 50 });
+      expect(before.autoScanCount).toBe(50);
+      const after = eng.saveAutoScanSettings({ count: 0 });
+      expect(after.autoScanCount).toBe(50); // 무시되고 이전값 유지
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("[v0.28.0] autoScanNow는 자동매매가 꺼져 있어도 스캔해서 lastScan을 채운다(진입 없이 미리보기)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.saveAutoScanSettings({ count: 10 }); // 빠른 테스트를 위해 최소치로
+      expect(eng.getAutoTradeStatus().enabled).toBe(false);
+      const s = await eng.autoScanNow();
+      expect(s.enabled).toBe(false); // 자동매매 자체는 켜지지 않는다(미리보기 전용)
+      expect(s.lastScan).not.toBeNull();
+      expect(Array.isArray(s.lastScan!.results)).toBe(true);
+      expect(s.positions).toEqual([]); // 진입 시도를 안 했으므로 포지션도 그대로 없음
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   // [v0.27.0] autoTradeTick이 실제로 lastScan을 채우는지(기본 60종목 스캔)는 여기서 끝까지 기다리며
   //   검증하지 않는다 — 직접 재보니 목 서버라도 기본 스캔(count=60)이 끝나는 데 70초 넘게 걸려
   //   이 테스트 파일의 기존 방침(파일 상단 주석: 실제 스캔 완료까지 시뮬레이션하지 않음)과 같은

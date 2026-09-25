@@ -54,7 +54,7 @@ const TAB_LABEL: Record<TabId, string> = {
   splits: "내 삼분할 기록",
   strength: "매매분석",
   autoControl: "자동매매 현황",
-  autoScan: "스크리닝 결과",
+  autoScan: "자동 스크리너",
   orders: "주문 현황",
   journal: "기록",
   settings: "설정",
@@ -706,6 +706,15 @@ function App() {
   });
   const [autoStatus, setAutoStatus] = useState<AutoTradeStatus | null>(null);
   const [autoBusy, setAutoBusy] = useState(false);
+  // [v0.28.0] 자동매매용 스크리너 조건(메뉴얼 스크리너와 같은 4항목) + 수동 새로고침 상태.
+  const [autoScanForm, setAutoScanForm] = useState<{ scanCount: string; priceMin: string; priceMax: string }>({
+    scanCount: "60",
+    priceMin: "1",
+    priceMax: "9",
+  });
+  const [autoScanBodyRatio, setAutoScanBodyRatio] = useState(0.3);
+  const [autoScanBusy, setAutoScanBusy] = useState(false); // "지금 새로고침" 버튼 눌러 응답 기다리는 중
+  const [autoScanProg, setAutoScanProg] = useState<ScreenProgress | null>(null); // 스캔 진행률(수동/자동 사이클 공용)
   // [v0.2.8] 조건주문 편집 창 — 계산값에 묶이지 않고 오너가 직접 고칠 수 있게 한다.
   const [ocoEdit, setOcoEdit] = useState<{ tp: string; sl: string; qty: string } | null>(null);
   // [v0.2.9] 토스에서 받아온 수량 정보(주문가능 최대 / 보유 / 매도가능). 표시용 참고값.
@@ -754,6 +763,13 @@ function App() {
         maxLossPct: String(s.autoTradeMaxLossPct ?? 5),
         maxInvestPct: String(s.autoTradeMaxInvestPct ?? 30),
       });
+      // [v0.28.0] 저장된 자동매매 스크리너 조건을 입력칸 초기값으로.
+      setAutoScanForm({
+        scanCount: String(s.autoScanCount ?? 60),
+        priceMin: String(s.autoScanPriceMin ?? 1),
+        priceMax: String(s.autoScanPriceMax ?? 9),
+      });
+      setAutoScanBodyRatio(s.autoScanBodyRatio ?? 0.3);
       // [v0.3.0] 실서버면 켜자마자 상단 바(예수금·손익)와 기본 종목 시세를 자동 로드한다.
       if (s.mode === "live") {
         void loadAccount();
@@ -772,7 +788,9 @@ function App() {
       setHeldStates((prev) => (prev[state.symbol] ? { ...prev, [state.symbol]: state } : prev));
     });
     // [v0.6.0] 스크리너 진행률 실시간 표시
-    const offScr = window.kyletool.onScreenerProgress?.((p) => setScreenProg(p));
+    // [v0.28.0] 이 이벤트는 스캔이 메뉴얼 버튼이든 자동매매 5분 사이클이든 상관없이 온다 —
+    //   두 화면(메뉴얼 스크리너·자동 스크리너) 모두 같은 진행률을 각자 보여줄 수 있게 둘 다 갱신.
+    const offScr = window.kyletool.onScreenerProgress?.((p) => { setScreenProg(p); setAutoScanProg(p); });
     // [v0.7.0] 매매 시 자동 기록된 트레이드가 갱신되면 목록·요약 새로고침
     const offTrd = window.kyletool.onTrades?.(() => void loadAnalysis());
     // 업데이트 이벤트 구독(있음/진행률/완료). 오류는 조용히 무시(앱 정상 동작 우선).
@@ -1777,6 +1795,33 @@ ${msg}
     setSettings(s);
     setSavedMsg(`자동매매 한도 저장됨 — 최대 ${s.autoTradeMaxPositions}종목 · 손실한도 ${s.autoTradeMaxLossPct}% · 투입한도 ${s.autoTradeMaxInvestPct}%`);
     setTimeout(() => setSavedMsg(""), 4000);
+  }
+
+  /** [v0.28.0] 자동매매 스크리너 조건 4개(스캔 종목수·가격 하한/상한·도지 몸통비율 상한) 저장. */
+  async function saveAutoScanSettingsUI() {
+    const scanCount = toNum(autoScanForm.scanCount);
+    const pMin = toNum(autoScanForm.priceMin);
+    const pMax = toNum(autoScanForm.priceMax);
+    if (scanCount === null || scanCount <= 0 || pMin === null || pMin < 0 || pMax === null || pMax < 0) {
+      setSavedMsg("⚠️ 스캔 종목수·가격 하한/상한을 올바른 숫자로 입력하세요.");
+      setTimeout(() => setSavedMsg(""), 4000);
+      return;
+    }
+    const s = await window.kyletool.saveAutoScanSettings({ count: scanCount, priceMin: pMin, priceMax: pMax, bodyRatio: autoScanBodyRatio });
+    setSettings(s);
+    setSavedMsg(`자동매매 스크리너 조건 저장됨 — 종목수 ${s.autoScanCount} · $${s.autoScanPriceMin}~$${s.autoScanPriceMax} · 도지 몸통상한 ${Math.round(s.autoScanBodyRatio * 100)}%`);
+    setTimeout(() => setSavedMsg(""), 4000);
+  }
+
+  /** [v0.28.0] 자동매매 스크리너 수동 새로고침 — 5분 사이클을 기다리지 않고 지금 바로 훑는다(진입은 안 함). */
+  async function refreshAutoScanNow() {
+    if (autoScanBusy) return;
+    setAutoScanBusy(true);
+    try {
+      setAutoStatus(await window.kyletool.autoScanNow());
+    } finally {
+      setAutoScanBusy(false);
+    }
   }
 
   /** [v0.26.0] 자동매매 시작/중지 버튼. 시작은 확인 팝업으로 한 번 더 의사를 묻는다(실계좌라 신중하게). */
@@ -2934,20 +2979,69 @@ ${msg}
         </main>
       )}
 
-      {/* ===== 🤖 자동매매 → 스크리닝 결과 (v0.27.0 신규, 읽기 전용) =====
+      {/* ===== 🤖 자동매매 → 자동 스크리너 (v0.27.0 신규, v0.28.0 설정+수동새로고침 추가) =====
           [오너 지시] 자동매매를 켜면 스크리너에서 스크리닝을 진행하고, 그 결과를 여기서 볼 수 있어야
-          한다 — 설정 탭에 컨트롤만 있고 "탐색→진입" 과정이 안 보이던 문제를 고친다. 이 화면은
-          모니터링 전용(분리형 스크리너 — 수동 스캔은 [메뉴얼 → 스크리너] 탭에 따로 있음): "계산기로
-          불러오기" 같은 수동 액션은 없다(자동매매가 이미 판단을 마쳤으므로). */}
+          한다 — 설정 탭에 컨트롤만 있고 "탐색→진입" 과정이 안 보이던 문제를 고친다. 메뉴얼 스크리너와의
+          차별점: 여기서 조절하는 조건은 "자동매매가 실제로 쓰는 조건"이다(자동매매 5분 사이클이 이
+          값을 그대로 읽어 감). 진입 관련 액션은 여전히 없다(자동매매가 스스로 판단·실행, 오너는
+          조건만 정하고 지켜보는 구조 — 분리형 스크리너, 수동 진입용 스캔은 [메뉴얼 → 스크리너]에
+          따로 있음). */}
       {paneTab === "autoScan" && (
         <main className="grid">
           <section className="card wide">
-            <h2>스크리닝 결과 <span className="hint">(자동매매가 5분마다 훑은 종목 — 읽기 전용)</span></h2>
+            <h2>자동 스크리너 <span className="hint">(자동매매가 실제로 쓰는 조건 — 5분마다 스스로 갱신)</span></h2>
             <p className="hint">
-              자동매매가 켜져 있는 동안 5분마다 자동으로 스캔한 결과예요. 여기 뜨는 후보 중 <b>진입 조건(빈
-              자리·중복 방지·안전 한도)</b>을 통과한 것만 실제로 매수됩니다 — 아래 배지로 진입 여부를 바로
-              확인할 수 있어요.
+              자동매매가 켜져 있는 동안 여기서 정한 조건으로 5분마다 자동으로 스캔해요. 여기 뜨는 후보 중{" "}
+              <b>진입 조건(빈 자리·중복 방지·안전 한도)</b>을 통과한 것만 실제로 매수됩니다 — 아래 배지로
+              진입 여부를 바로 확인할 수 있어요. 조건을 바꾸면 다음 사이클(최대 5분)부터, 또는 아래{" "}
+              <b>[지금 새로고침]</b>으로 바로 적용됩니다.
             </p>
+
+            {/* [v0.28.0] 자동매매용 스크리너 조건 — 메뉴얼 스크리너와 같은 4항목, 도지 몸통비율만 80%까지 확대 */}
+            <div className="screen-controls">
+              <label className="str-field" style={{ flex: 1, maxWidth: 360 }}>
+                <span className="sb-k">도지로 인정할 <b>몸통 크기 상한</b>: <b>{(autoScanBodyRatio * 100).toFixed(0)}%</b> <span className="hint">(작을수록 깐깐하게, 자동매매는 최대 80%까지)</span></span>
+                <input type="range" min={0.1} max={0.8} step={0.05} value={autoScanBodyRatio}
+                  onChange={(e) => setAutoScanBodyRatio(Number(e.target.value))} />
+              </label>
+              <div className="screen-filters">
+                <label className="str-field sf-num">
+                  <span className="sb-k">스캔 종목수 <span className="hint">(10~200)</span></span>
+                  <input type="text" inputMode="numeric" value={autoScanForm.scanCount}
+                    onChange={(e) => setAutoScanForm({ ...autoScanForm, scanCount: e.target.value })}
+                    onBlur={() => setAutoScanForm((f) => ({ ...f, scanCount: String(Math.min(200, Math.max(10, Math.round(toNum(f.scanCount) ?? 60)))) }))} />
+                </label>
+                <label className="str-field sf-num">
+                  <span className="sb-k">가격 하한 $</span>
+                  <input type="text" inputMode="decimal" value={autoScanForm.priceMin}
+                    onChange={(e) => setAutoScanForm({ ...autoScanForm, priceMin: e.target.value })} />
+                </label>
+                <label className="str-field sf-num">
+                  <span className="sb-k">가격 상한 $</span>
+                  <input type="text" inputMode="decimal" value={autoScanForm.priceMax}
+                    onChange={(e) => setAutoScanForm({ ...autoScanForm, priceMax: e.target.value })} />
+                </label>
+              </div>
+              <div className="form-row">
+                <button className="btn btn-start" onClick={saveAutoScanSettingsUI}>조건 저장</button>
+                <button className="mini" disabled={autoScanBusy} onClick={() => void refreshAutoScanNow()}>
+                  {autoScanBusy ? "새로고침 중…" : "🔄 지금 새로고침"}
+                </button>
+                {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
+              </div>
+            </div>
+
+            {/* [v0.28.0] 진행률 바 — 자동 사이클이든 수동 새로고침이든 스캔이 도는 동안 똑같이 보여준다. */}
+            {autoScanProg && autoScanProg.phase !== "done" && (
+              <div className="screen-prog">
+                <div className="screen-prog-bar">
+                  <div className="screen-prog-fill" style={{ width: `${autoScanProg.total ? Math.round((autoScanProg.done / autoScanProg.total) * 100) : 0}%` }} />
+                </div>
+                <div className="hint">
+                  {autoScanProg.phase === "ranking" ? "거래량 랭킹 불러오는 중…" : `${autoScanProg.done}/${autoScanProg.total} · ${autoScanProg.symbol} 분석 중…`}
+                </div>
+              </div>
+            )}
 
             {!autoStatus?.lastScan && (
               <div className="result-empty hint">
