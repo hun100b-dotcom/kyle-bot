@@ -131,6 +131,10 @@ async function api(token, url, init = {}) {
       Authorization: `Bearer ${token}`,
       Accept: "application/vnd.github+json",
       "X-GitHub-Api-Version": "2022-11-28",
+      // [수정] 요청 바디가 JSON 문자열인데 Content-Type을 안 붙이면, 이 요청을 중계하는
+      // 프록시(정책 검사를 위해 바디를 읽어야 함)가 415로 거부한다 — 실제 파일 업로드(바이너리
+      // octet-stream)는 아래 uploadAsset()이 자기 헤더로 덮어써서 영향 없다.
+      ...(init.body ? { "Content-Type": "application/json" } : {}),
       ...(init.headers ?? {}),
     },
   });
