@@ -3640,7 +3640,7 @@ export class ToolEngine extends EventEmitter {
           const raw5m: Candle[] = dropIncompleteBucket(aggregate1mTo5m(oneMin), now.toMillis());
           // 데이터 부족(EMA200 불가 = 완성된 5분봉 200개 미만)이면 건너뛴다
           if (raw5m.length < 200) {
-            results.push(this.insufficientResult(rk, oneMin.length, raw5m.length));
+            results.push(this.insufficientResult(rk, oneMin.length, raw5m.length, priceMin, priceMax));
             done++;
             continue;
           }
@@ -3685,7 +3685,7 @@ export class ToolEngine extends EventEmitter {
         } catch (err) {
           // 한 종목 실패가 전체 스캔을 죽이지 않게(개별 오류는 '데이터 부족'류로 표시)
           const msg = err instanceof Error ? err.message : String(err);
-          results.push({ ...this.insufficientResult(rk, 0, 0), note: `오류: ${msg}` });
+          results.push({ ...this.insufficientResult(rk, 0, 0, priceMin, priceMax), note: `오류: ${msg}` });
         }
         done++;
       }
@@ -3700,8 +3700,21 @@ export class ToolEngine extends EventEmitter {
     }
   }
 
-  /** 데이터 부족(저유동성 등) 결과 한 줄을 만든다. */
-  private insufficientResult(rk: { rank: number; symbol: string; lastPrice: number }, n1m: number, n5m: number): ScreenResult {
+  /**
+   * 데이터 부족(저유동성 등) 결과 한 줄을 만든다.
+   * [묵혀뒀던 버그 수정 — 2026-09-04 작성돼 병합 안 된 채 남아있던 PR #1] priceMin/priceMax를
+   *   못박지 않고 인자로 받는다 — 예전엔 항상 $1~9로 고정돼 있어, 스캔 가격대를 다르게 설정해도
+   *   "데이터 부족" 종목만 엉뚱한 기준으로 판정됐다(화면에 안 보이는 값이라 티는 안 났지만,
+   *   같은 스캔 안에서 종목마다 다른 기준을 쓰는 내부 불일치였다). 기본값을 안 둔 이유도 그대로
+   *   유지 — 호출부가 늘어나도 컴파일 단계에서 빠뜨릴 수 없게 강제한다.
+   */
+  private insufficientResult(
+    rk: { rank: number; symbol: string; lastPrice: number },
+    n1m: number,
+    n5m: number,
+    priceMin: number,
+    priceMax: number,
+  ): ScreenResult {
     const price = Number.isFinite(rk.lastPrice) ? rk.lastPrice : null;
     return {
       rank: rk.rank,
@@ -3709,7 +3722,7 @@ export class ToolEngine extends EventEmitter {
       price,
       ema200: null,
       cloudTop: null,
-      priceInBand: inPriceBand(price, 1, 9),
+      priceInBand: inPriceBand(price, priceMin, priceMax),
       aboveEma: false,
       aboveCloud: false,
       status: "insufficient",
