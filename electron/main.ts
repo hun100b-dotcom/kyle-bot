@@ -38,6 +38,12 @@ function setupAutoUpdater(): void {
   // 사용자 승낙 전에는 자동으로 받지도, 자동으로 설치하지도 않는다.
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = false;
+  // [v0.27.1] "업데이트 다운로드에 실패했습니다" 오류 대응 — electron-updater는 기본적으로
+  //   "차등 업데이트"(설치돼 있는 옛 버전과 새 버전을 비교해 달라진 부분만 내려받음)를 먼저
+  //   시도한다. 이 방식은 옛 버전의 blockmap이 없거나(첫 업데이트 등) 조건이 안 맞으면 중간에
+  //   실패하는 경우가 실제로 보고돼 있다(우리 앱은 서명 인증서가 없어 더 취약한 조합).
+  //   용량을 좀 더 받더라도(설치파일 전체, 약 100MB) 항상 되는 전체 다운로드만 쓰도록 끈다.
+  autoUpdater.disableDifferentialDownload = true;
 
   // 새 버전이 있을 때: 화면에 버전·변경사항을 보내 팝업을 띄운다.
   autoUpdater.on("update-available", (info) => {

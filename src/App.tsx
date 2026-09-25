@@ -874,7 +874,11 @@ function App() {
     const r = await window.kyletool.downloadUpdate();
     if (!r.ok) {
       setUpdateProgress(null);
-      alert("업데이트 다운로드에 실패했습니다. 인터넷 연결을 확인하고 나중에 다시 시도하세요. (앱은 계속 사용 가능합니다)");
+      // [v0.27.1] 예전엔 실패 이유를 화면에서 감춰서(고정 문구만) 사장님도 저도 원인을 알
+      // 방법이 없었다 — 실제 오류 메시지(r.error)를 그대로 덧붙여, 다음에 또 실패해도
+      // 이 문구를 캡처해 보내주시면 바로 원인을 찾을 수 있게 한다.
+      const detail = r.error ? `\n\n(자세히: ${r.error})` : "";
+      alert(`업데이트 다운로드에 실패했습니다. 인터넷 연결을 확인하고 나중에 다시 시도하세요. (앱은 계속 사용 가능합니다)${detail}`);
     }
   }
 
