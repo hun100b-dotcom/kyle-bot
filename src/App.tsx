@@ -206,17 +206,21 @@ function usdKrw(usd: number, fx: number | null): string {
  * [v0.12.0 · 2단계] StrengthChart — 가격과 체결강도를 '겹쳐(위아래로)' 그려 다이버전스를 눈으로 보게 한다.
  *   정본(체결강도_분석 3장)의 그림을 그대로: 위=가격선, 아래=강도선(100 기준). 외부 라이브러리 0.
  *   마지막 점에 신호 마커: ▲(초록)=진입(바닥반전/다이버전스), ▼(빨강)=익절(정점꺾임).
+ * [v0.27.0 고도화] 축 숫자 라벨·옅은 그리드라인 추가, 범례를 칩으로, 컨테이너 폭에 맞춰
+ *   찌그러짐 없이 스케일(고정 height 대신 CSS aspect-ratio), 호버 시 그 시점 값 툴팁.
  */
 function StrengthChart({ samples, signals }: { samples: StrengthSample[]; signals?: StrengthSignals }) {
-  const W = 640, H = 170, PAD = 8;
+  const W = 640, H = 170, PAD = 8, LBLW = 34; // LBLW: 오른쪽 축 숫자 라벨 공간
   const priceH = 62; //   위 패널(가격) 높이
   const gap = 14; //      두 패널 사이 라벨 공간
   const strTop = priceH + gap; //  아래 패널(강도) 시작 y
   const strH = H - strTop - PAD; // 아래 패널 높이
+  const plotR = W - PAD - LBLW; // 그래프 오른쪽 끝(라벨 공간 제외)
   const n = samples.length;
   const strengths = samples.map((s) => s.strength).filter((v): v is number => v != null);
+  const [hover, setHover] = useState<{ i: number; x: number } | null>(null);
   if (n < 2 || strengths.length < 2) return null;
-  const x = (i: number) => PAD + (i / (n - 1)) * (W - 2 * PAD);
+  const x = (i: number) => PAD + (i / (n - 1)) * (plotR - PAD);
 
   // 위 패널: 가격(있는 점만). 자기 범위로 정규화.
   const prices = samples.map((s) => s.price).filter((v): v is number => v != null);
@@ -248,24 +252,68 @@ function StrengthChart({ samples, signals }: { samples: StrengthSample[]; signal
   const up = signals?.phase === "진입";
   const down = signals?.phase === "익절";
 
+  // [v0.27.0] 호버: svg 위 마우스 x좌표(뷰박스 단위)로 가장 가까운 샘플을 찾는다.
+  const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const vx = ((e.clientX - rect.left) / rect.width) * W;
+    let best = 0, bestDist = Infinity;
+    for (let i = 0; i < n; i++) { const d = Math.abs(x(i) - vx); if (d < bestDist) { bestDist = d; best = i; } }
+    setHover({ i: best, x: x(best) });
+  };
+  const hoverSample = hover ? samples[hover.i] : null;
+
   return (
-    <svg className="str-chart" viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none" role="img" aria-label="가격·체결강도 겹쳐보기">
-      {/* 패널 라벨 */}
-      <text x={PAD} y={12} fontSize="10" fill="currentColor" fillOpacity="0.55">가격</text>
-      <text x={PAD} y={strTop - 3} fontSize="10" fill="currentColor" fillOpacity="0.55">체결강도 (100 기준)</text>
-      {/* 가격선 */}
-      <path d={dp.trim()} fill="none" stroke="#a78bfa" strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" />
-      {/* 강도 100 기준선 + 강도선 */}
-      <line x1={PAD} y1={y100} x2={W - PAD} y2={y100} stroke="currentColor" strokeOpacity="0.35" strokeDasharray="4 4" />
-      <path d={ds.trim()} fill="none" stroke={lastV != null && lastV >= 100 ? "#34d399" : "#f87171"} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-      {/* 신호 마커 */}
-      {up && lastV != null && (
-        <g><circle cx={lastX} cy={lastY} r="4" fill="#34d399" /><text x={lastX} y={lastY - 8} fontSize="12" fill="#34d399" textAnchor="middle">▲</text></g>
+    <div className="chart-wrap-rel">
+      <svg
+        className="str-chart" viewBox={`0 0 ${W} ${H}`} width="100%" preserveAspectRatio="xMidYMid meet"
+        style={{ aspectRatio: `${W} / ${H}` }} role="img" aria-label="가격·체결강도 겹쳐보기"
+        onMouseMove={onMove} onMouseLeave={() => setHover(null)}
+      >
+        {/* [v0.27.0] 옅은 그리드라인(recessive — 데이터보다 눈에 덜 띄게) */}
+        <line x1={PAD} y1={PAD} x2={plotR} y2={PAD} stroke="var(--chart-grid)" />
+        <line x1={PAD} y1={priceH} x2={plotR} y2={priceH} stroke="var(--chart-grid)" />
+        <line x1={PAD} y1={strTop} x2={plotR} y2={strTop} stroke="var(--chart-grid)" />
+        <line x1={PAD} y1={H - PAD} x2={plotR} y2={H - PAD} stroke="var(--chart-grid)" />
+        {/* 패널 라벨 + y축 숫자(최소·최대) */}
+        <text x={PAD} y={12} fontSize="10" fill="currentColor" fillOpacity="0.55">가격</text>
+        <text x={plotR + 4} y={PAD + 8} fontSize="9" fill="var(--chart-axis)">{pHi.toFixed(2)}</text>
+        <text x={plotR + 4} y={priceH} fontSize="9" fill="var(--chart-axis)">{pLo.toFixed(2)}</text>
+        <text x={PAD} y={strTop - 3} fontSize="10" fill="currentColor" fillOpacity="0.55">체결강도 (100 기준)</text>
+        <text x={plotR + 4} y={strTop + 8} fontSize="9" fill="var(--chart-axis)">{sHi.toFixed(0)}</text>
+        <text x={plotR + 4} y={H - PAD} fontSize="9" fill="var(--chart-axis)">{sLo.toFixed(0)}</text>
+        {/* 가격선 */}
+        <path d={dp.trim()} fill="none" stroke="#3987e5" strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" />
+        {/* 강도 100 기준선 + 강도선 */}
+        <line x1={PAD} y1={y100} x2={plotR} y2={y100} stroke="currentColor" strokeOpacity="0.35" strokeDasharray="4 4" />
+        <path d={ds.trim()} fill="none" stroke={lastV != null && lastV >= 100 ? "#34d399" : "#f87171"} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+        {/* 신호 마커 */}
+        {up && lastV != null && (
+          <g><circle cx={lastX} cy={lastY} r="4" fill="#34d399" /><text x={lastX} y={lastY - 8} fontSize="12" fill="#34d399" textAnchor="middle">▲</text></g>
+        )}
+        {down && lastV != null && (
+          <g><circle cx={lastX} cy={lastY} r="4" fill="#f87171" /><text x={lastX} y={lastY + 16} fontSize="12" fill="#f87171" textAnchor="middle">▼</text></g>
+        )}
+        {/* [v0.27.0] 호버 크로스헤어(세로선 + 두 점) */}
+        {hover && (
+          <g>
+            <line x1={hover.x} y1={PAD} x2={hover.x} y2={H - PAD} stroke="var(--chart-axis)" strokeDasharray="2 2" />
+            {hoverSample?.price != null && <circle cx={hover.x} cy={py(hoverSample.price)} r="2.5" fill="#3987e5" />}
+            {hoverSample?.strength != null && <circle cx={hover.x} cy={sy(hoverSample.strength)} r="2.5" fill={hoverSample.strength >= 100 ? "#34d399" : "#f87171"} />}
+          </g>
+        )}
+      </svg>
+      {hoverSample && (
+        <div className="chart-tooltip" style={{ left: `${(hover!.x / W) * 100}%`, top: 0 }}>
+          {hoverSample.ts} · {hoverSample.price != null ? `$${hoverSample.price.toFixed(2)}` : "가격 —"} ·
+          {" "}강도 {hoverSample.strength != null ? hoverSample.strength.toFixed(1) : "—"}
+        </div>
       )}
-      {down && lastV != null && (
-        <g><circle cx={lastX} cy={lastY} r="4" fill="#f87171" /><text x={lastX} y={lastY + 16} fontSize="12" fill="#f87171" textAnchor="middle">▼</text></g>
-      )}
-    </svg>
+      <div className="chart-legend">
+        <span className="chart-chip"><span className="swatch" style={{ background: "#3987e5" }} />가격</span>
+        <span className="chart-chip"><span className="swatch" style={{ background: "#34d399" }} />강도(매수우세, ≥100)</span>
+        <span className="chart-chip"><span className="swatch" style={{ background: "#f87171" }} />강도(매도우세, &lt;100)</span>
+      </div>
+    </div>
   );
 }
 
@@ -330,9 +378,22 @@ function ScreenEvidenceView({ ev, price }: { ev: ScreenEvidence; price: number |
  *   외부 차트 라이브러리 없이 SVG로 직접 그린다(StrengthChart와 같은 방식). 표에서 본 근거(도지·다음봉)를
  *   차트 위에 노란/보라 테두리로 표시해 "이게 그 캔들이구나"를 눈으로 바로 확인할 수 있다.
  */
+/**
+ * [v0.25.0] ScreenCandleChart — 스크리너 결과 종목의 캔들차트(도지·EMA200·구름·세션고점 표시).
+ * [v0.27.0 고도화] 가격 축 숫자·시간 축 라벨·옅은 그리드라인 추가, 범례를 칩으로, 컨테이너 폭에
+ *   맞춰 찌그러짐 없이 스케일, 호버 시 그 봉의 OHLC 툴팁.
+ *   [색상 정리] 예전엔 세션고점 참조선과 도지 강조 테두리가 똑같은 노란색(#facc15)을 써서 서로
+ *   구분이 안 됐다. 참조선 3개(세션고점·EMA200·구름top)는 dataviz 팔레트의 검증된 카테고리컬
+ *   3색(청록·파랑·주황, validate_palette.js --surface #0f131a --mode dark 통과)으로 고정 배정하고,
+ *   도지·다음봉 강조는 그 3색과 절대 안 겹치는 별도 색(--chart-highlight, 중립 밝은색) 하나를
+ *   "실선(도지)/파선(다음봉)"이라는 선모양(형태 채널)으로 구분한다 — 4번째 색을 더 쓰면
+ *   참조선과의 전 쌍(all-pairs) 구분 검증이 깨진다는 게 팔레트 문서의 명시적 경고라, 색을
+ *   늘리는 대신 형태로 구분했다.
+ */
 function ScreenCandleChart({ chart }: { chart: ScreenChart }) {
-  const W = 640, H = 220, PAD = 10;
+  const W = 640, H = 220, PAD = 10, LBLW = 40;
   const n = chart.candles.length;
+  const [hover, setHover] = useState<number | null>(null);
   if (n === 0) return <div className="hint">표시할 캔들이 없습니다(데이터 부족).</div>;
 
   const highs = chart.candles.map((c) => c.high);
@@ -343,8 +404,9 @@ function ScreenCandleChart({ chart }: { chart: ScreenChart }) {
     if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
   }
   const span = Math.max(hi - lo, 1e-9);
+  const plotR = W - PAD - LBLW;
   const y = (v: number) => PAD + (1 - (v - lo) / span) * (H - 2 * PAD);
-  const slot = (W - 2 * PAD) / n;
+  const slot = (plotR - PAD) / n;
   const cx = (i: number) => PAD + slot * (i + 0.5);
   const bodyW = Math.max(1.5, slot * 0.6);
   const refLine = (v: number | null) => (v != null ? y(v) : null);
@@ -352,12 +414,39 @@ function ScreenCandleChart({ chart }: { chart: ScreenChart }) {
   const emaY = refLine(chart.ema200);
   const cloudY = refLine(chart.cloudTop);
 
+  // [v0.27.0] 시간축 라벨: 봉이 많으면 다 못 넣으니 최대 4개만 고르게 뽑는다.
+  const tickCount = Math.min(4, n);
+  const tickIdx = Array.from({ length: tickCount }, (_, k) => Math.round((k / Math.max(1, tickCount - 1)) * (n - 1)));
+
+  const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const vx = ((e.clientX - rect.left) / rect.width) * W;
+    const i = Math.min(n - 1, Math.max(0, Math.round((vx - PAD) / slot - 0.5)));
+    setHover(i);
+  };
+  const hc = hover != null ? chart.candles[hover] : null;
+
   return (
-    <div className="screen-chart-wrap">
-      <svg className="screen-chart" viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none" role="img" aria-label={`${chart.symbol} 캔들차트`}>
-        {highY != null && <line x1={PAD} y1={highY} x2={W - PAD} y2={highY} stroke="#facc15" strokeDasharray="3 3" strokeOpacity="0.8" />}
-        {emaY != null && <line x1={PAD} y1={emaY} x2={W - PAD} y2={emaY} stroke="#60a5fa" strokeDasharray="5 3" strokeOpacity="0.8" />}
-        {cloudY != null && <line x1={PAD} y1={cloudY} x2={W - PAD} y2={cloudY} stroke="#fb923c" strokeDasharray="5 3" strokeOpacity="0.8" />}
+    <div className="screen-chart-wrap chart-wrap-rel">
+      <svg
+        className="screen-chart" viewBox={`0 0 ${W} ${H}`} width="100%" preserveAspectRatio="xMidYMid meet"
+        style={{ aspectRatio: `${W} / ${H}` }} role="img" aria-label={`${chart.symbol} 캔들차트`}
+        onMouseMove={onMove} onMouseLeave={() => setHover(null)}
+      >
+        {/* 옅은 가격 그리드라인(recessive) + y축 숫자(최고·최저) */}
+        <line x1={PAD} y1={PAD} x2={plotR} y2={PAD} stroke="var(--chart-grid)" />
+        <line x1={PAD} y1={H / 2} x2={plotR} y2={H / 2} stroke="var(--chart-grid)" />
+        <line x1={PAD} y1={H - PAD} x2={plotR} y2={H - PAD} stroke="var(--chart-grid)" />
+        <text x={plotR + 4} y={PAD + 8} fontSize="9" fill="var(--chart-axis)">${hi.toFixed(2)}</text>
+        <text x={plotR + 4} y={H - PAD} fontSize="9" fill="var(--chart-axis)">${lo.toFixed(2)}</text>
+        {/* 시간축 라벨 */}
+        {tickIdx.map((i) => (
+          <text key={i} x={cx(i)} y={H - 1} fontSize="9" fill="var(--chart-axis)" textAnchor="middle">{chart.candles[i].time}</text>
+        ))}
+        {/* 참조선 3개 — 검증된 카테고리컬 3색 고정 배정(청록·파랑·주황) */}
+        {highY != null && <line x1={PAD} y1={highY} x2={plotR} y2={highY} stroke="var(--chart-ref-3)" strokeDasharray="3 3" strokeOpacity="0.9" />}
+        {emaY != null && <line x1={PAD} y1={emaY} x2={plotR} y2={emaY} stroke="var(--chart-ref-1)" strokeDasharray="5 3" strokeOpacity="0.9" />}
+        {cloudY != null && <line x1={PAD} y1={cloudY} x2={plotR} y2={cloudY} stroke="var(--chart-ref-2)" strokeDasharray="5 3" strokeOpacity="0.9" />}
         {chart.candles.map((c, i) => {
           const up = c.close >= c.open;
           const color = up ? "#34d399" : "#f87171";
@@ -374,21 +463,37 @@ function ScreenCandleChart({ chart }: { chart: ScreenChart }) {
                 width={bodyW}
                 height={bodyH}
                 fill={color}
-                stroke={isDoji ? "#facc15" : isNext ? "#a78bfa" : "none"}
+                stroke={isDoji || isNext ? "var(--chart-highlight)" : "none"}
                 strokeWidth={isDoji || isNext ? 2 : 0}
+                strokeDasharray={isNext ? "3 2" : undefined}
               />
+              {/* [형태 채널] 도지=◆, 다음봉=▸ — 색이 같아도 모양으로 구분(범례에 뜻풀이) */}
+              {isDoji && <text x={cx(i)} y={bodyTop - 5} fontSize="9" fill="var(--chart-highlight)" textAnchor="middle">◆</text>}
+              {isNext && <text x={cx(i)} y={bodyTop - 5} fontSize="9" fill="var(--chart-highlight)" textAnchor="middle">▸</text>}
+              {hover === i && <rect x={cx(i) - slot / 2} y={PAD} width={slot} height={H - 2 * PAD} fill="var(--chart-axis)" fillOpacity="0.08" />}
             </g>
           );
         })}
       </svg>
-      <div className="screen-chart-legend hint small">
-        현재가 {chart.price != null ? `$${chart.price.toFixed(2)}` : "—"}
-        {chart.sessionHigh != null && <span> · 🟡 세션고점 ${chart.sessionHigh.toFixed(2)}{chart.sessionHighTime ? ` @${chart.sessionHighTime}` : ""}</span>}
-        {chart.ema200 != null && <span> · 🔵 EMA200 ${chart.ema200.toFixed(2)}</span>}
-        {chart.cloudTop != null && <span> · 🟠 구름top ${chart.cloudTop.toFixed(2)}</span>}
-        {chart.dojiTime && <span> · 🟨 도지 {chart.dojiTime}</span>}
-        {chart.nextTime && <span> · 🟪 다음봉 {chart.nextTime}</span>}
-        {!chart.dojiTime && <span> · 아직 도지 없음</span>}
+      {hc && (
+        <div className="chart-tooltip" style={{ left: `${(cx(hover!) / W) * 100}%`, top: 0 }}>
+          {hc.time} · 시 ${hc.open.toFixed(2)} 고 ${hc.high.toFixed(2)} 저 ${hc.low.toFixed(2)} 종 ${hc.close.toFixed(2)}
+        </div>
+      )}
+      <div className="chart-legend">
+        <span className="hint small">현재가 {chart.price != null ? `$${chart.price.toFixed(2)}` : "—"}</span>
+        {chart.sessionHigh != null && (
+          <span className="chart-chip"><span className="swatch" style={{ background: "var(--chart-ref-3)" }} />세션고점 ${chart.sessionHigh.toFixed(2)}{chart.sessionHighTime ? ` @${chart.sessionHighTime}` : ""}</span>
+        )}
+        {chart.ema200 != null && (
+          <span className="chart-chip"><span className="swatch" style={{ background: "var(--chart-ref-1)" }} />EMA200 ${chart.ema200.toFixed(2)}</span>
+        )}
+        {chart.cloudTop != null && (
+          <span className="chart-chip"><span className="swatch" style={{ background: "var(--chart-ref-2)" }} />구름top ${chart.cloudTop.toFixed(2)}</span>
+        )}
+        {chart.dojiTime && <span className="chart-chip">◆ 도지 {chart.dojiTime}</span>}
+        {chart.nextTime && <span className="chart-chip">▸ 다음봉 {chart.nextTime}</span>}
+        {!chart.dojiTime && <span className="hint small">아직 도지 없음</span>}
       </div>
     </div>
   );

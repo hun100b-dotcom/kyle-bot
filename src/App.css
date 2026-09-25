@@ -45,6 +45,20 @@
   --fs-sub: 17px;      /* 섹션 헤더 */
   --fs-body: 15px;     /* 본문 */
   --fs-cap: 13px;      /* 캡션·₩ 병기 */
+
+  /* [v0.27.0 · dataviz 스킬 팔레트] 차트(체결강도·스크리너 캔들) 전용 토큰.
+     3곳에 따로 하드코딩돼 있던 배경(#0f131a)을 여기 하나로 모으고, 참조선(세션고점·EMA200·
+     구름top) 3색은 dataviz 스킬의 dark-surface 검증 카테고리컬 팔레트에서 1~3번 슬롯을 그대로
+     썼다(node validate_palette.js로 --surface #0f131a --mode dark 검증 통과, CVD·명도·대비 전부
+     PASS). 도지·다음봉 강조는 새 색상 슬롯을 더 쓰지 않고(4번째 슬롯부터는 all-pairs 검증이
+     깨짐 — 스킬 palette.md 명시) 대신 굵기·선모양(실선/파선)으로 구분한다(색이 아닌 형태 채널). */
+  --chart-surface: #0f131a;
+  --chart-grid: rgba(255,255,255,0.08);   /* 옅은 그리드라인(recessive) */
+  --chart-axis: rgba(255,255,255,0.35);   /* 축 라벨 글자 */
+  --chart-ref-1: #3987e5; /* 파랑 — EMA200 */
+  --chart-ref-2: #d95926; /* 주황 — 구름top */
+  --chart-ref-3: #199e70; /* 청록 — 세션고점 */
+  --chart-highlight: #f1f3f9; /* 도지·다음봉 강조(선모양으로 구분, 참조선과 색이 안 겹침) */
 }
 
 /* [v0.13.0] 손익색 한국식 토글: 설정에서 켜면 이익=빨강/손실=파랑으로 스왑(부호·삼각형은 그대로).
@@ -597,13 +611,27 @@ ul.hint { padding-left: 18px; }
 .str-meta > div { margin: 2px 0; }
 
 /* 스파크라인: 부모 색을 기준선에 물려주기 위해 color 지정(다크/라이트 자동) */
-.str-spark { display: block; color: var(--muted); margin: 6px 0 14px; border: 1px solid var(--border); border-radius: 8px; background: #0f131a; }
+.str-spark { display: block; color: var(--muted); margin: 6px 0 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--chart-surface); }
 .str-table { margin-top: 6px; }
 /* [v0.12.0] 가격·강도 겹쳐보기 차트 + 신호 배지 */
-.str-chart { display: block; color: var(--muted); margin: 6px 0 14px; border: 1px solid var(--border); border-radius: 8px; background: #0f131a; }
+.str-chart { display: block; width: 100%; color: var(--muted); margin: 6px 0 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--chart-surface); }
 /* [v0.25.0] 탐색 결과 캔들차트 */
 .screen-chart-wrap { padding: 4px 0 2px; }
-.screen-chart { display: block; border: 1px solid var(--border); border-radius: 8px; background: #0f131a; }
+.screen-chart { display: block; width: 100%; border: 1px solid var(--border); border-radius: 8px; background: var(--chart-surface); }
+/* [v0.27.0] 차트 범례를 이모지+텍스트 한 줄에서 색상 스와치가 붙은 칩(chip) 여러 개로 교체
+   (.evid-chip 알약형 패턴 재사용) — 줄바꿈 시 자연스럽게 wrap. */
+.chart-legend { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.chart-chip {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 3px 9px 3px 7px;
+  border-radius: 999px; border: 1px solid var(--border); color: var(--muted); background: var(--panel2);
+}
+.chart-chip .swatch { width: 9px; height: 9px; border-radius: 3px; flex: 0 0 auto; }
+.chart-tooltip {
+  position: absolute; pointer-events: none; font-size: 11px; padding: 5px 8px; border-radius: 6px;
+  background: var(--panel2); border: 1px solid var(--border-strong); color: var(--text); white-space: nowrap;
+  box-shadow: var(--sh-card); z-index: 3;
+}
+.chart-wrap-rel { position: relative; }
 .screen-chart-legend { margin-top: 6px; }
 /* [v0.13.0] 틱 플래시 — 새 표본이 올 때 값이 잠깐 반짝(업비트식). 모션 최소화 설정이면 끈다. */
 @keyframes str-flash-up { from { background: rgba(52,211,153,0.28); } to { background: transparent; } }
