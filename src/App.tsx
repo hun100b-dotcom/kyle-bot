@@ -572,6 +572,14 @@ function App() {
     basis: "auto",
     fixed: "",
   });
+  // [v0.26.0] 자동매매 한도 입력칸(설정 탭) + 현재 현황(켜짐 여부·포지션·누적손익).
+  const [autoForm, setAutoForm] = useState<{ maxPositions: string; maxLossPct: string; maxInvestPct: string }>({
+    maxPositions: "3",
+    maxLossPct: "5",
+    maxInvestPct: "30",
+  });
+  const [autoStatus, setAutoStatus] = useState<AutoTradeStatus | null>(null);
+  const [autoBusy, setAutoBusy] = useState(false);
   // [v0.2.8] 조건주문 편집 창 — 계산값에 묶이지 않고 오너가 직접 고칠 수 있게 한다.
   const [ocoEdit, setOcoEdit] = useState<{ tp: string; sl: string; qty: string } | null>(null);
   // [v0.2.9] 토스에서 받아온 수량 정보(주문가능 최대 / 보유 / 매도가능). 표시용 참고값.
@@ -614,12 +622,19 @@ function App() {
       if (s.defaultTpPct) setTpPct(String(s.defaultTpPct));
       if (s.defaultSlPct) setSlPct(String(s.defaultSlPct));
       setDefForm({ tp: String(s.defaultTpPct ?? 2), sl: String(s.defaultSlPct ?? 10) });
+      // [v0.26.0] 저장된 자동매매 한도를 입력칸 초기값으로("켜짐" 자체는 저장 안 되므로 항상 꺼진 채 시작).
+      setAutoForm({
+        maxPositions: String(s.autoTradeMaxPositions ?? 3),
+        maxLossPct: String(s.autoTradeMaxLossPct ?? 5),
+        maxInvestPct: String(s.autoTradeMaxInvestPct ?? 30),
+      });
       // [v0.3.0] 실서버면 켜자마자 상단 바(예수금·손익)와 기본 종목 시세를 자동 로드한다.
       if (s.mode === "live") {
         void loadAccount();
         void autoLoad("AAPL");
       }
     });
+    void window.kyletool.autoTradeStatus().then(setAutoStatus); // [v0.26.0] 자동매매 현재 상태(항상 꺼진 채 시작)
     window.kyletool.appVersion?.().then(setAppVer).catch(() => {});
     void refreshAuth(); // [v0.8.1] 로그인 상태 복원(+운영자면 승인 대기 목록도, v0.24.0)
     void loadAnalysis(); // [v0.19.0] 매매분석(실체결) 시작 시 로드
@@ -707,6 +722,14 @@ function App() {
     const id = setInterval(() => void refreshStatusTab(), 30_000);
     return () => clearInterval(id);
   }, [autoRefresh, tab, showTwoCol, tabL, tabR]);
+
+  // [v0.26.0] 자동매매가 켜져 있는 동안만 현황(포지션·누적손익)을 20초마다 새로고침.
+  //   꺼져 있을 땐 돌 이유가 없다(자율 동작 최소화 원칙 — 위 702번째 줄 주석 참고).
+  useEffect(() => {
+    if (!autoStatus?.enabled) return;
+    const id = setInterval(() => void window.kyletool.autoTradeStatus().then(setAutoStatus), 20_000);
+    return () => clearInterval(id);
+  }, [autoStatus?.enabled]);
 
   // [v0.3.0] 자동 계산 — 재료·익절/손절%·기법이 바뀌면 0.35초 뒤 조용히 다시 계산한다.
   //   [계산하기] 버튼을 없앤 대신 이 효과가 대신한다. 타이핑 중 잠깐 멈추면 결과가 갱신된다.
@@ -1606,6 +1629,50 @@ ${msg}
     setSlPct(String(s.defaultSlPct));
     setSavedMsg(`기본 손익비 저장됨 — 익절 ${s.defaultTpPct}% / 손절 ${s.defaultSlPct}%`);
     setTimeout(() => setSavedMsg(""), 4000);
+  }
+
+  /** [v0.26.0] 자동매매 한도 3개(최대 종목 수·최대손실 한도·최대 투입 비율) 저장. */
+  async function saveAutoSettings() {
+    const maxPositions = toNum(autoForm.maxPositions);
+    const maxLossPct = toNum(autoForm.maxLossPct);
+    const maxInvestPct = toNum(autoForm.maxInvestPct);
+    if (maxPositions === null || maxPositions <= 0 || maxLossPct === null || maxLossPct <= 0 || maxInvestPct === null || maxInvestPct <= 0) {
+      setSavedMsg("⚠️ 자동매매 한도 3개 모두 0보다 큰 숫자로 입력하세요.");
+      setTimeout(() => setSavedMsg(""), 4000);
+      return;
+    }
+    const s = await window.kyletool.saveAutoTradeSettings({ maxPositions, maxLossPct, maxInvestPct });
+    setSettings(s);
+    setSavedMsg(`자동매매 한도 저장됨 — 최대 ${s.autoTradeMaxPositions}종목 · 손실한도 ${s.autoTradeMaxLossPct}% · 투입한도 ${s.autoTradeMaxInvestPct}%`);
+    setTimeout(() => setSavedMsg(""), 4000);
+  }
+
+  /** [v0.26.0] 자동매매 시작/중지 버튼. 시작은 확인 팝업으로 한 번 더 의사를 묻는다(실계좌라 신중하게). */
+  async function toggleAutoTrade() {
+    if (autoBusy) return;
+    setAutoBusy(true);
+    try {
+      if (autoStatus?.enabled) {
+        setAutoStatus(await window.kyletool.autoTradeStop());
+        return;
+      }
+      const ok = window.confirm(
+        [
+          "🤖 자동매매를 시작합니다.",
+          "",
+          `이 프로그램이 켜져 있는 동안, 5분마다 스스로 탐색해 합격 종목을 최대 ${autoForm.maxPositions}종목까지`,
+          "삼분할 매매기법의 '1분할' 타점으로 자동 매수하고, 체결되면 익절/손절까지 자동으로 겁니다.",
+          `최대손실 한도(시드 대비 ${autoForm.maxLossPct}%)에 닿으면 스스로 멈춥니다.`,
+          "",
+          "⚠️ 이 창(앱)을 끄면 자동매매도 함께 멈춥니다. 계속할까요?",
+        ].join("\n"),
+      );
+      if (!ok) return;
+      setAutoStatus(await window.kyletool.autoTradeStart());
+    } finally {
+      setAutoBusy(false);
+      void window.kyletool.journal().then(setJournal);
+    }
   }
 
   /** [v0.8.1] 로그인 상태 새로고침. 운영자면 대기 중인 가입 승인 요청도 함께 불러온다. */
@@ -3202,6 +3269,76 @@ ${msg}
                 />
                 <b>주문 확인 팝업 건너뛰기</b> — 버튼을 누르면 <b>바로 전송</b>(실수 주문 위험 ↑, 권장 안 함)
               </label>
+            </div>
+          </section>
+
+          {/* ── ⑤.5 [v0.26.0] 자동매매 — 오너가 명시적으로 켰을 때만, 이 앱이 켜져 있는 동안만 작동 ── */}
+          <section className="card wide">
+            <h2>🤖 자동매매</h2>
+            <p className="hint">
+              5분마다 스스로 탐색해 <b>합격 종목을 삼분할 '1분할' 타점으로 자동 매수</b>하고, 체결되면 익절·손절까지
+              자동으로 겁니다. <b>이 프로그램이 켜져 있는 동안만</b> 작동하고, 앱을 끄면 자동매매도 함께 멈춥니다
+              (이미 낸 주문·조건주문은 토스에 그대로 남아 있어요 — 토스 서버가 계속 감시합니다).
+            </p>
+
+            <div className="settings-block">
+              <div className="form-row">
+                <button
+                  className={`btn ${autoStatus?.enabled ? "btn-kill kill-on" : "btn-start"}`}
+                  disabled={autoBusy || status?.killSwitch}
+                  onClick={toggleAutoTrade}
+                >
+                  {autoStatus?.enabled ? "🔴 자동매매 중지" : "▶ 자동매매 시작"}
+                </button>
+                <span className="hint">
+                  상태: <b>{autoStatus?.enabled ? "켜짐" : "꺼짐"}</b>
+                  {autoStatus?.lastCycleAt && <> · 마지막 확인 {autoStatus.lastCycleAt}</>}
+                  {autoStatus && <> · 이번 실행 누적손익 <b className={autoStatus.realizedPnlUsd < 0 ? "pnl-down" : "pnl-up"}>${autoStatus.realizedPnlUsd.toFixed(2)}</b></>}
+                </span>
+              </div>
+              {status?.killSwitch && <p className="hint small danger">킬 스위치(🛑 비상 정지)가 켜져 있어 자동매매를 시작할 수 없습니다.</p>}
+
+              <h3>한도 설정 (전부 직접 수정 가능)</h3>
+              <div className="form-row">
+                <label>최대 보유 종목 수
+                  <input type="text" inputMode="numeric" value={autoForm.maxPositions} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxPositions: e.target.value })} placeholder="3" />
+                </label>
+                <label>최대손실 한도 (시드 대비 %)
+                  <input type="text" inputMode="decimal" value={autoForm.maxLossPct} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxLossPct: e.target.value })} placeholder="5" />
+                </label>
+                <label>최대 투입 비율 (시드 대비 %, 종목수만큼 균등 분배)
+                  <input type="text" inputMode="decimal" value={autoForm.maxInvestPct} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxInvestPct: e.target.value })} placeholder="30" />
+                </label>
+                <button className="btn btn-start" onClick={saveAutoSettings}>한도 저장</button>
+                {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
+              </div>
+              <p className="hint small">
+                예) 최대 투입 30% · 3종목 → 종목당 예산은 시드의 10%. 손실 한도는 이번 자동매매 실행 동안 누적된
+                실현손익(달러) 기준으로, 시드 대비 %를 넘으면 자동매매가 스스로 멈춥니다.
+              </p>
+
+              {autoStatus && autoStatus.positions.length > 0 && (
+                <>
+                  <h3>지금 감시 중인 자동매매 포지션</h3>
+                  <table className="result-table">
+                    <thead>
+                      <tr><th>종목</th><th>진입가</th><th>익절가</th><th>손절가</th><th>수량</th><th>상태</th></tr>
+                    </thead>
+                    <tbody>
+                      {autoStatus.positions.map((p) => (
+                        <tr key={`${p.symbol}@${p.entry}`}>
+                          <td>{p.symbol}</td>
+                          <td>${p.entry}</td>
+                          <td>${p.tp}</td>
+                          <td>${p.sl}</td>
+                          <td>{p.quantity}</td>
+                          <td>{p.status === "active" ? "익절/손절 등록됨" : "매수 체결 대기중"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
+              )}
             </div>
           </section>
 

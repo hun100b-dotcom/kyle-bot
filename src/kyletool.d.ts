@@ -105,6 +105,34 @@ interface ToolSettings {
   // [v0.8.3] 기본 손익비
   defaultTpPct: number;
   defaultSlPct: number;
+  // [v0.26.0] 자동매매 한도(3개, 전부 수정 가능) + 켜짐 여부(런타임 전용 — 저장 안 됨)
+  autoTradeMaxPositions: number;
+  autoTradeMaxLossPct: number;
+  autoTradeMaxInvestPct: number;
+  autoTradeEnabled: boolean;
+}
+
+/** [v0.26.0] 자동매매가 지금 감시·보유 중인 포지션 하나. */
+interface AutoPosition {
+  symbol: string;
+  entry: number;
+  tp: number;
+  sl: number;
+  quantity: number;
+  enteredAtMs: number;
+  status: "watching" | "active";
+  conditionalOrderId: string | null;
+}
+
+/** [v0.26.0] 자동매매 현황판. */
+interface AutoTradeStatus {
+  enabled: boolean;
+  positions: AutoPosition[];
+  realizedPnlUsd: number;
+  maxPositions: number;
+  maxLossPct: number;
+  maxInvestPct: number;
+  lastCycleAt: string | null;
 }
 
 /** [v0.3.0] orderCapacity(capacity) 응답 — 주문가능/보유 + 세션 시드 제안 */
@@ -556,6 +584,11 @@ interface KyletoolBridge {
     pollMs?: number; // [테스트 전용] 체결 확인 주기(기본 5000ms)
     rationale?: RationaleInput;
   }): Promise<JournalEntry>;
+  // [v0.26.0] 자동매매 — 시작/중지/현황 + 한도 설정
+  autoTradeStart(): Promise<AutoTradeStatus>;
+  autoTradeStop(): Promise<AutoTradeStatus>;
+  autoTradeStatus(): Promise<AutoTradeStatus>;
+  saveAutoTradeSettings(input: { maxPositions?: number; maxLossPct?: number; maxInvestPct?: number }): Promise<ToolSettings>;
   rationales(): Promise<TradeRationale[]>;
   // [v0.4.0] 삼분할 타점 기록(여러 종목 동시 운용)
   splitsList(): Promise<SavedSplit[]>;

@@ -258,6 +258,11 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:order:oco", (_ev, spec) => e.placeOco(spec));
   ipcMain.handle("tool:order:oto", (_ev, spec) => e.placeOto(spec)); // [v0.3.2] 진입+익절(OTO)
   ipcMain.handle("tool:order:bracket", (_ev, spec) => e.placeBracket(spec)); // [v0.25.0] 매수+익절+손절 한번에
+  // [v0.26.0] 자동매매 — 시작/중지/현황 + 한도 설정(3개, 전부 수정 가능)
+  ipcMain.handle("tool:autoTrade:start", () => e.startAutoTrade());
+  ipcMain.handle("tool:autoTrade:stop", () => e.stopAutoTrade());
+  ipcMain.handle("tool:autoTrade:status", () => e.getAutoTradeStatus());
+  ipcMain.handle("tool:autoTrade:settings", (_ev, input) => e.saveAutoTradeSettings(input));
   // [v0.2.10] 매매 근거 목록 / 보유 포지션(손익 포함) — 둘 다 읽기 전용이라 안전하다.
   ipcMain.handle("tool:rationales", () => e.getRationales());
   // [v0.4.0] 삼분할 타점 기록(여러 종목 동시 운용) — 저장/조회/삭제/진입완료 체크

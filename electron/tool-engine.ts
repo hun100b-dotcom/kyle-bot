@@ -44,6 +44,7 @@ import {
   createOrder,
   createConditionalOrder,
   getOrder,
+  getConditionalOrder,
   listOrders,
   listConditionalOrders,
   listOrdersRaw,
@@ -57,6 +58,7 @@ import {
   type OrderResponse,
 } from "../lib/toss";
 import { createMockTossServer } from "../mocks/toss-mock";
+import { canAutoEnter, isLossLimitBreached, perSlotInvestPct, type AutoTradeLimits } from "../lib/auto-risk";
 
 // -----------------------------------------------------------------------------
 // 타입: 화면과 주고받는 모양
@@ -623,6 +625,68 @@ export function summarizeTrades(trades: StrengthTrade[]): TradeStats {
 }
 
 // -----------------------------------------------------------------------------
+// [v0.25.0/v0.26.0] 브라켓 주문(매수+익절+손절 한번에) 공용 타입
+// -----------------------------------------------------------------------------
+
+/** placeBracket(수동 버튼)과 자동매매가 함께 쓰는 입력 스펙. */
+export interface BracketSpec {
+  symbol: string;
+  price: number; //     진입 지정가
+  quantity: number;
+  tpTrigger: number; //  익절 감시가
+  tpPrice: number; //    익절 지정가
+  slTrigger: number; //  손절 감시가
+  slPrice: number; //    손절 지정가
+  expireDate: string; // OCO(익절+손절) 만료일 YYYY-MM-DD
+  watchMinutes?: number; // 체결 감시 최대 시간(기본 15분)
+  pollMs?: number; // [테스트 전용] 체결 확인 주기(기본 5000ms) — 자동 테스트를 빠르게 돌리기 위한 값
+  rationale?: RationaleInput;
+}
+
+/**
+ * watchAndBracket의 결과 — [v0.26.0] 자동매매가 "체결→OCO 등록"까지 실제로 됐는지, 됐다면
+ *   그 조건주문 번호가 뭔지 알아야 포지션을 추적할 수 있어 void 대신 이 결과를 돌려준다.
+ *   (수동 버튼 경로는 이 값을 여전히 기다리지 않는다 — placeBracket 참고.)
+ */
+export type WatchAndBracketResult =
+  | { status: "oco_registered"; conditionalOrderId: string }
+  | { status: "oco_failed"; error: string }
+  | { status: "cancelled" | "failed" }
+  | { status: "timeout" };
+
+// -----------------------------------------------------------------------------
+// [v0.26.0] 자동매매 타입
+// -----------------------------------------------------------------------------
+
+/**
+ * 자동매매가 스스로 진입시킨 포지션 하나. 5분 사이클마다 이 목록을 다시 확인해서
+ *   ①아직 매수 체결 대기 중인지(watching) ②매수 체결돼 OCO(익절+손절)까지 걸렸는지(active)
+ *   ③OCO가 발동돼 끝났는지(closed) 판단한다("빈자리 채우기"·"중복 진입 방지"의 근거 데이터).
+ */
+export interface AutoPosition {
+  symbol: string;
+  entry: number; //   계산된 1분할 진입가(중복 진입 방지 키의 일부)
+  tp: number;
+  sl: number;
+  quantity: number;
+  enteredAtMs: number;
+  status: "watching" | "active";
+  /** OCO 등록 성공 후 채워짐(watching→active 전환 시). 이 번호로 발동 여부를 재조회한다. */
+  conditionalOrderId: string | null;
+}
+
+/** 자동매매 화면 현황판에 보여줄 요약. */
+export interface AutoTradeStatus {
+  enabled: boolean;
+  positions: AutoPosition[];
+  realizedPnlUsd: number;
+  maxPositions: number;
+  maxLossPct: number;
+  maxInvestPct: number;
+  lastCycleAt: string | null;
+}
+
+// -----------------------------------------------------------------------------
 // 엔진 본체
 // -----------------------------------------------------------------------------
 
@@ -687,6 +751,26 @@ export class ToolEngine extends EventEmitter {
   // [v0.8.3] 기본 손익비(익절%/손절%). 공장 초기값 2/10. 사용자가 저장하면 그 값을 계산기 초기값으로 쓴다.
   private defaultTpPct = 2;
   private defaultSlPct = 10;
+
+  // -----------------------------------------------------------------------------
+  // [v0.26.0] 자동매매(오너 결정으로 v2 "자율 봇 아님" 원칙에서 벗어난 첫 예외 — CLAUDE.md 갱신 참고)
+  //   3개 한도(최대 종목 수·최대손실 한도·최대 투입 비율)는 설정 탭에서 오너가 언제든 수정 가능하고
+  //   재시작해도 유지된다(persistEnv). 단 "자동매매 켜짐" 자체는 절대 저장하지 않는다 — 앱을 새로
+  //   켤 때마다 오너가 다시 명시적으로 눌러야만 자동매매가 돈다(안전 우선, 아래 startAutoTrade 참고).
+  // -----------------------------------------------------------------------------
+  private autoTradeMaxPositions = 3; //  동시 보유 최대 종목 수(오너 기본값)
+  private autoTradeMaxLossPct = 5; //    최대손실 한도(시드 대비 %) — 넘으면 자동매매 자동 중단
+  private autoTradeMaxInvestPct = 30; // 시드 대비 총 투입 비율 한도(%) — 종목 수만큼 균등 분배
+
+  // [v0.26.0] 자동매매 실행 상태(런타임 전용, 저장 안 함 — 앱 재시작하면 전부 초기화).
+  private autoTradeEnabled = false;
+  private autoTradeTimer: ReturnType<typeof setInterval> | null = null;
+  private autoTradeTickBusy = false; // 한 사이클이 겹쳐 실행되지 않게
+  private autoTradeRealizedPnlUsd = 0; // 이번 자동매매 실행 동안 누적 실현손익(달러, 손실이면 음수)
+  private autoTradePositions: AutoPosition[] = []; // 지금 자동매매로 감시·보유 중인 포지션
+  private autoTradeUsedKeys = new Set<string>(); // `${symbol}@${entry}` — 같은 종목 같은 타점 재진입 방지
+  private autoTradeLastCycleAt: string | null = null; // 마지막 사이클 시각(KST, 화면 표시용)
+  private static readonly AUTO_TRADE_INTERVAL_MS = 5 * 60_000; // "기본적으로 5분마다"(오너 지시)
 
   // [v0.8.1] 로그인 세션(Supabase Auth). refresh 토큰만 로컬 저장, access 는 메모리+필요시 갱신.
   private authAccessToken: string | null = null;
@@ -782,6 +866,13 @@ export class ToolEngine extends EventEmitter {
     if (Number.isFinite(dtp) && dtp > 0) this.defaultTpPct = dtp;
     const dsl = Number(process.env.DEFAULT_SL_PCT);
     if (Number.isFinite(dsl) && dsl > 0) this.defaultSlPct = dsl;
+    // [v0.26.0] 저장된 자동매매 한도 복원(3개 전부 오너가 수정 가능). "켜짐" 자체는 저장 안 함.
+    const amp = Number(process.env.AUTO_MAX_POSITIONS);
+    if (Number.isFinite(amp) && amp > 0) this.autoTradeMaxPositions = Math.round(amp);
+    const alp = Number(process.env.AUTO_MAX_LOSS_PCT);
+    if (Number.isFinite(alp) && alp > 0) this.autoTradeMaxLossPct = alp;
+    const aip = Number(process.env.AUTO_MAX_INVEST_PCT);
+    if (Number.isFinite(aip) && aip > 0) this.autoTradeMaxInvestPct = aip;
     // [v0.8.1] 저장된 로그인 세션 복원(리프레시 토큰만). access token 은 필요 시 갱신한다.
     if (process.env.CAPRI_AUTH_REFRESH) this.authRefreshToken = process.env.CAPRI_AUTH_REFRESH;
     if (process.env.CAPRI_AUTH_EMAIL) this.authEmail = process.env.CAPRI_AUTH_EMAIL;
@@ -806,6 +897,11 @@ export class ToolEngine extends EventEmitter {
       // [v0.8.3] 기본 손익비
       defaultTpPct: this.defaultTpPct,
       defaultSlPct: this.defaultSlPct,
+      // [v0.26.0] 자동매매 한도(3개, 전부 수정 가능) + 켜짐 여부(런타임 전용)
+      autoTradeMaxPositions: this.autoTradeMaxPositions,
+      autoTradeMaxLossPct: this.autoTradeMaxLossPct,
+      autoTradeMaxInvestPct: this.autoTradeMaxInvestPct,
+      autoTradeEnabled: this.autoTradeEnabled,
     };
   }
 
@@ -818,6 +914,29 @@ export class ToolEngine extends EventEmitter {
     if (typeof input.slPct === "number" && Number.isFinite(input.slPct) && input.slPct > 0) this.defaultSlPct = input.slPct;
     this.persistEnv();
     this.addJournal({ kind: "info", symbol: "-", summary: `기본 손익비 저장 — 익절 ${this.defaultTpPct}% / 손절 ${this.defaultSlPct}%` });
+    return this.getSettings();
+  }
+
+  /**
+   * [v0.26.0] 자동매매 한도 3개(최대 종목 수·최대손실 한도·최대 투입 비율) 저장.
+   *   0 이하·비정상 값은 무시(이전값 유지). "켜짐" 여부는 여기서 다루지 않는다(startAutoTrade 참고).
+   */
+  saveAutoTradeSettings(input: { maxPositions?: number; maxLossPct?: number; maxInvestPct?: number }) {
+    if (typeof input.maxPositions === "number" && Number.isFinite(input.maxPositions) && input.maxPositions > 0) {
+      this.autoTradeMaxPositions = Math.round(input.maxPositions);
+    }
+    if (typeof input.maxLossPct === "number" && Number.isFinite(input.maxLossPct) && input.maxLossPct > 0) {
+      this.autoTradeMaxLossPct = input.maxLossPct;
+    }
+    if (typeof input.maxInvestPct === "number" && Number.isFinite(input.maxInvestPct) && input.maxInvestPct > 0) {
+      this.autoTradeMaxInvestPct = input.maxInvestPct;
+    }
+    this.persistEnv();
+    this.addJournal({
+      kind: "info",
+      symbol: "-",
+      summary: `자동매매 한도 저장 — 최대 ${this.autoTradeMaxPositions}종목 · 최대손실 시드대비 ${this.autoTradeMaxLossPct}% · 총 투입한도 시드대비 ${this.autoTradeMaxInvestPct}%`,
+    });
     return this.getSettings();
   }
 
@@ -851,6 +970,10 @@ export class ToolEngine extends EventEmitter {
       // --- [v0.8.3] 기본 손익비 ---
       `DEFAULT_TP_PCT=${this.defaultTpPct}`,
       `DEFAULT_SL_PCT=${this.defaultSlPct}`,
+      // --- [v0.26.0] 자동매매 한도(3개). "켜짐" 자체는 여기 없음 — 절대 저장하지 않는다(안전). ---
+      `AUTO_MAX_POSITIONS=${this.autoTradeMaxPositions}`,
+      `AUTO_MAX_LOSS_PCT=${this.autoTradeMaxLossPct}`,
+      `AUTO_MAX_INVEST_PCT=${this.autoTradeMaxInvestPct}`,
       // --- [v0.8.1] 로그인 세션(리프레시 토큰만 로컬 저장 → 재시작해도 로그인 유지). 비밀번호·마스터 비번은 저장 안 함. ---
       `CAPRI_AUTH_REFRESH=${this.authRefreshToken ?? ""}`,
       `CAPRI_AUTH_EMAIL=${this.authEmail ?? ""}`,
@@ -2020,19 +2143,21 @@ export class ToolEngine extends EventEmitter {
    *   남아 있다). 정해진 시간 안에 체결이 안 되면 조용히 감시를 멈추고 알림만 남긴다(진입은 취소
    *   하지 않는다 — 취소는 사람이 판단할 일).
    */
-  async placeBracket(spec: {
-    symbol: string;
-    price: number; //     진입 지정가
-    quantity: number;
-    tpTrigger: number; //  익절 감시가
-    tpPrice: number; //    익절 지정가
-    slTrigger: number; //  손절 감시가
-    slPrice: number; //    손절 지정가
-    expireDate: string; // OCO(익절+손절) 만료일 YYYY-MM-DD
-    watchMinutes?: number; // 체결 감시 최대 시간(기본 15분)
-    pollMs?: number; // [테스트 전용] 체결 확인 주기(기본 5000ms) — 자동 테스트를 빠르게 돌리기 위한 값
-    rationale?: RationaleInput;
-  }): Promise<JournalEntry> {
+  async placeBracket(spec: BracketSpec): Promise<JournalEntry> {
+    const { entryJournal, watchPromise } = await this.placeBracketCore(spec);
+    // 화면(수동) 버튼 경로: 최대 watchMinutes만큼 걸릴 수 있는 감시를 기다리지 않는다(기존 동작 그대로).
+    //   [v0.26.0] 자동매매 경로(startAutoTrade)는 이 watchPromise를 직접 기다려 OCO 등록 여부를
+    //   알아내야 하므로 placeBracketCore를 따로 호출한다(아래 autoTradeTick 참고).
+    if (watchPromise) void watchPromise;
+    return entryJournal;
+  }
+
+  /**
+   * placeBracket의 실제 로직(공용 코어). placeBracket(수동 버튼)과 자동매매 경로가 함께 쓴다.
+   *   [v0.26.0] 자동매매는 watchPromise를 끝까지 기다려 "OCO가 실제로 등록됐는지, 등록됐다면
+   *   그 조건주문 번호가 뭔지"를 알아야 포지션을 추적할 수 있어 이렇게 분리했다.
+   */
+  private async placeBracketCore(spec: BracketSpec): Promise<{ entryJournal: JournalEntry; watchPromise: Promise<WatchAndBracketResult> | null }> {
     const symbol = spec.symbol.toUpperCase();
     const cur = await this.orderGate(symbol, [spec.price]);
     await this.assertAffordable(spec.price, spec.quantity);
@@ -2048,12 +2173,13 @@ export class ToolEngine extends EventEmitter {
         symbol,
         summary: `[드라이런] 진입 매수 ${symbol} $${spec.price} × ${spec.quantity}주 접수(연습)`,
       });
-      return this.addJournal({
+      const entryJournal = this.addJournal({
         kind: "dryrun",
         symbol,
         summary: `[드라이런] 체결 시뮬레이션 → OCO 등록 ${symbol} ${spec.quantity}주: 익절 $${spec.tpTrigger}↑ / 손절 $${spec.slTrigger}↓ (실주문 잠금 — 매수+익절+손절 한번에)`,
         detail: { ...spec, clientOrderId },
       });
+      return { entryJournal, watchPromise: null };
     }
 
     const o = await createOrder({ symbol, side: "BUY", orderType: "LIMIT", price: spec.price, quantity: spec.quantity, clientOrderId });
@@ -2066,8 +2192,8 @@ export class ToolEngine extends EventEmitter {
       detail: o,
     });
 
-    void this.watchAndBracket(symbol, o.tossOrderId, spec); // 백그라운드 감시(반환은 기다리지 않음)
-    return entryJournal;
+    const watchPromise = this.watchAndBracket(symbol, o.tossOrderId, spec);
+    return { entryJournal, watchPromise };
   }
 
   /**
@@ -2101,7 +2227,7 @@ export class ToolEngine extends EventEmitter {
       pollMs?: number;
       rationale?: RationaleInput;
     },
-  ): Promise<void> {
+  ): Promise<WatchAndBracketResult> {
     const watchMinutes = spec.watchMinutes ?? 15;
     const startedAt = Date.now();
     const deadline = startedAt + watchMinutes * 60_000;
@@ -2121,7 +2247,7 @@ export class ToolEngine extends EventEmitter {
       }
       if (o.status === "filled") {
         try {
-          await this.placeOco({
+          const ocoJournal = await this.placeOco({
             symbol,
             quantity: o.filled_qty && o.filled_qty > 0 ? o.filled_qty : spec.quantity,
             tpTrigger: spec.tpTrigger,
@@ -2131,18 +2257,25 @@ export class ToolEngine extends EventEmitter {
             expireDate: spec.expireDate,
             rationale: spec.rationale,
           });
+          // [v0.26.0] 자동매매가 이 OCO를 추적할 수 있게 조건주문 번호를 결과로 돌려준다.
+          const conditionalOrderId = (ocoJournal.detail as { conditionalOrderId?: string } | undefined)?.conditionalOrderId;
+          if (conditionalOrderId) return { status: "oco_registered", conditionalOrderId };
+          // 드라이런처럼 conditionalOrderId가 없는 경우(이론상 이 분기는 isDryRun()이 이미
+          // placeBracketCore에서 걸러내 도달하지 않지만, 안전하게 실패로 취급한다).
+          return { status: "oco_failed", error: "조건주문 번호를 확인할 수 없습니다." };
         } catch (e) {
+          const error = String(e).replace(/^Error:\s*/, "");
           this.addJournal({
             kind: "info",
             symbol,
-            summary: `⚠️ 진입 체결을 확인했지만 조건주문(익절+손절) 자동 등록에 실패했습니다 — 직접 걸어 주세요: ${String(e).replace(/^Error:\s*/, "")}`,
+            summary: `⚠️ 진입 체결을 확인했지만 조건주문(익절+손절) 자동 등록에 실패했습니다 — 직접 걸어 주세요: ${error}`,
           });
+          return { status: "oco_failed", error };
         }
-        return;
       }
       if (o.status === "cancelled" || o.status === "failed") {
         this.addJournal({ kind: "info", symbol, summary: `진입 주문이 ${o.status === "cancelled" ? "취소" : "실패"}돼 자동 감시를 멈췄습니다.` });
-        return;
+        return { status: o.status };
       }
       // pending/partial/unknown이면 계속 기다린다.
     }
@@ -2151,6 +2284,7 @@ export class ToolEngine extends EventEmitter {
       symbol,
       summary: `⏱ ${watchMinutes}분 동안 체결을 기다렸지만 되지 않아 자동 감시를 멈췄습니다. 진입 주문은 그대로 있으니, 체결되면 [주문현황]에서 직접 조건주문(익절+손절)을 걸어 주세요.`,
     });
+    return { status: "timeout" };
   }
 
   // --------------------------------------------------------------------------
@@ -3297,6 +3431,302 @@ export class ToolEngine extends EventEmitter {
       price,
       patternStatus: pat.status,
     };
+  }
+
+  // ==========================================================================
+  // [v0.26.0] 자동매매 — 오너가 명시적으로 켰을 때만, 이 앱이 켜져 있는 동안만 작동한다.
+  //
+  // [CLAUDE.md 원칙과의 관계 — 반드시 읽을 것]
+  //   이 저장소의 CLAUDE.md에는 "자율 봇 아님(오너 결정) — 자동 루프·자율판단 금지"라고 적혀
+  //   있다. 이 기능은 그 원칙에서 벗어나는 **오너의 명시적인 새 결정**이다(대화에서 "B(완전
+  //   자동화) 진행할거야"라고 직접 지시함). CLAUDE.md는 이 결정을 반영해 함께 갱신했다.
+  //   대신 아래 안전장치로 "무엇을 얼마나 자동으로 할지"는 여전히 오너가 정한다:
+  //     ① 마스터 스위치(이 자체는 절대 저장 안 함 — 앱 켤 때마다 다시 켜야 함)
+  //     ② 최대 종목 수·최대손실 한도·최대 투입 비율(전부 설정 탭에서 언제든 수정 가능)
+  //     ③ 오직 삼분할 매매기법의 "1분할" 타점만 쓴다(가장 얕게 눌렸을 때만 — 오너 지시)
+  //     ④ 신규 진입은 반드시 lib/auto-risk.ts의 canAutoEnter 게이트를 통과해야 나간다(우회 금지 —
+  //        이 원칙은 CLAUDE.md의 옛 lib/risk.ts canPlaceOrder 규칙을 v2 방식으로 재구현한 것.
+  //        조사해보니 실제 lib/risk.ts 파일은 이미 삭제되어 있었다 — 오너에게 보고함).
+  //
+  // [5분마다 무엇을 하나]
+  //   ①기존 자동매매 포지션을 다시 확인한다(매수 체결→OCO 등록 완료됐는지, OCO가 익절/손절로
+  //     "발동"돼 끝났는지). 끝난 자리는 즉시 빈자리가 된다("같은 5분 사이클 안에 빈자리를
+  //     채운다"는 오너 지시를 만족하려면 이 확인이 스캔보다 먼저 끝나 있어야 한다).
+  //   ②최대손실 한도(시드 대비 %)를 넘었으면 자동매매 자체를 끄고 끝낸다.
+  //   ③빈자리가 있으면 스크리닝을 새로 돌려 "합격(confirmed)" 종목 중 지금 보유 중이 아니고
+  //     이전에 같은 가격으로 이미 시도하지 않은 종목만 골라, 빈자리 수만큼 진입한다.
+  //
+  // [체결·발동 확인 방법 — 왜 이렇게 하나]
+  //   토스 API는 실시간 알림이 없어(v0.25.1 조사 결과 재확인) 전부 "물어봐서" 안다. 매수 체결은
+  //   기존 브라켓 기능(watchAndBracket)을 그대로 재사용하고, OCO(익절+손절)가 "발동"됐는지는
+  //   5분 사이클마다 조건주문 단건 조회(getConditionalOrder)로 확인한다 — 이 정도 지연은
+  //   "5분마다 도는 자동매매"의 취지에 맞고, 실시간성이 중요한 손절/익절 자체는 여전히
+  //   토스 서버(OCO)가 즉시 처리한다(우리는 "끝났다는 사실"만 뒤늦게 확인할 뿐).
+  // ==========================================================================
+
+  /** 자동매매를 켠다. 이미 켜져 있으면 아무 일도 하지 않는다(타이머 중복 방지). */
+  startAutoTrade(): AutoTradeStatus {
+    if (this.autoTradeEnabled) return this.getAutoTradeStatus();
+    this.autoTradeEnabled = true;
+    this.autoTradeRealizedPnlUsd = 0;
+    this.autoTradePositions = [];
+    this.autoTradeUsedKeys = new Set();
+    this.addJournal({
+      kind: "info",
+      symbol: "-",
+      summary:
+        `🤖 자동매매 시작 — 최대 ${this.autoTradeMaxPositions}종목 · 최대손실 한도 시드대비 ${this.autoTradeMaxLossPct}% · ` +
+        `총 투입한도 시드대비 ${this.autoTradeMaxInvestPct}% · 5분마다 탐색(삼분할 1분할 타점만, 이 프로그램이 켜져 있는 동안만 작동)`,
+    });
+    void this.autoTradeTick(); // 시작하자마자 한 번 즉시 돌리고
+    this.autoTradeTimer = setInterval(() => void this.autoTradeTick(), ToolEngine.AUTO_TRADE_INTERVAL_MS); // 이후 5분마다
+    return this.getAutoTradeStatus();
+  }
+
+  /** 자동매매를 끈다. 타이머만 멈출 뿐, 이미 낸 진입·조건주문은 취소하지 않는다(취소는 사람 판단). */
+  stopAutoTrade(reason?: string): AutoTradeStatus {
+    this.autoTradeEnabled = false;
+    if (this.autoTradeTimer) {
+      clearInterval(this.autoTradeTimer);
+      this.autoTradeTimer = null;
+    }
+    this.addJournal({
+      kind: "info",
+      symbol: "-",
+      summary: `🤖 자동매매 중지${reason ? ` — ${reason}` : ""} (이미 낸 진입·조건주문은 그대로 있습니다. 필요하면 [주문현황]에서 직접 취소하세요.)`,
+    });
+    return this.getAutoTradeStatus();
+  }
+
+  getAutoTradeStatus(): AutoTradeStatus {
+    return {
+      enabled: this.autoTradeEnabled,
+      positions: this.autoTradePositions.map((p) => ({ ...p })),
+      realizedPnlUsd: Math.round(this.autoTradeRealizedPnlUsd * 100) / 100,
+      maxPositions: this.autoTradeMaxPositions,
+      maxLossPct: this.autoTradeMaxLossPct,
+      maxInvestPct: this.autoTradeMaxInvestPct,
+      lastCycleAt: this.autoTradeLastCycleAt,
+    };
+  }
+
+  /** 시드 기준 금액(달러) — orderCapacity와 동일 규칙: auto=매수가능금액, fixed=오너가 정한 고정 금액. */
+  private async resolveSeedUsd(): Promise<number | null> {
+    if (this.seedBasis === "fixed") return this.seedFixedUsd;
+    try {
+      const bp = await getBuyingPower("USD");
+      return Number.isFinite(bp.buyingPowerUsd) ? bp.buyingPowerUsd : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 미국 시장 수수료율(참고용, 실패하면 0으로 계산 — orderCapacity와 동일 로직). */
+  private async resolveCommissionRate(): Promise<number | null> {
+    try {
+      const raw = (await getCommissions()) as unknown;
+      const arr = Array.isArray(raw) ? raw : [];
+      const us = arr.find((x) => (x as Record<string, unknown>)?.marketCountry === "US") as Record<string, unknown> | undefined;
+      const v = us ? Number(us.commissionRate) : NaN;
+      return Number.isFinite(v) ? (v > 0.01 ? v / 100 : v) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private autoTradeExpireDate(): string {
+    return DateTime.now().setZone("Asia/Seoul").plus({ days: 30 }).toFormat("yyyy-MM-dd");
+  }
+
+  /**
+   * 기존 자동매매 포지션을 다시 확인한다("빈자리 채우기"가 늦지 않으려면 스캔보다 먼저 끝나야 함).
+   *   - watching(매수 체결 대기 중) 상태는 watchAndBracket 자체의 완료 콜백(onAutoBracketResolved)이
+   *     처리하므로 여기서는 건드리지 않는다.
+   *   - active(OCO 등록 완료) 상태만 조건주문이 "발동"됐는지 조회해, 발동됐으면 실현손익에 반영하고
+   *     자리를 비운다.
+   */
+  private async reconcileAutoPositions(): Promise<void> {
+    const active = this.autoTradePositions.filter((p) => p.status === "active" && p.conditionalOrderId);
+    for (const pos of active) {
+      let resp: ConditionalOrderResponse;
+      try {
+        resp = await getConditionalOrder(pos.conditionalOrderId as string);
+      } catch {
+        continue; // 조회 실패는 다음 사이클에 재시도(포지션을 잃어버리지 않음)
+      }
+      if (resp.status === "TRIGGERED" || resp.triggeredLeg) {
+        // 익절(first)/손절(second) 중 어느 쪽이 발동됐는지에 따라 우리가 등록해 둔 그 가격을 그대로 쓴다
+        // (실제 체결가 조회 없이도 정확 — 조건주문 지정가로 나가므로).
+        const exitPrice = resp.triggeredLeg === "second" ? pos.sl : pos.tp;
+        const pnlUsd = (exitPrice - pos.entry) * pos.quantity;
+        this.autoTradeRealizedPnlUsd += pnlUsd;
+        this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
+        const kindKo = resp.triggeredLeg === "second" ? "손절" : "익절";
+        this.addJournal({
+          kind: "info",
+          symbol: pos.symbol,
+          summary:
+            `🤖 자동매매 ${kindKo} 완료 ${pos.symbol}: 진입 $${pos.entry} → 청산 $${exitPrice} × ${pos.quantity}주 ` +
+            `(이번 실행 누적손익 $${this.autoTradeRealizedPnlUsd.toFixed(2)}) — 빈자리는 다음 확인 때 채웁니다.`,
+        });
+      } else if (resp.status === "CANCELED") {
+        // 사람이 [주문현황]에서 직접 취소한 경우 — 손익 반영 없이 자리만 비운다.
+        this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
+        this.addJournal({ kind: "info", symbol: pos.symbol, summary: `자동매매 포지션의 조건주문이 취소돼 있어 감시를 멈춥니다: ${pos.symbol}` });
+      }
+      // WAITING(그대로 감시 중)이면 할 일 없음.
+    }
+  }
+
+  /** watchAndBracket이 끝난 뒤(체결→OCO등록/타임아웃/취소/실패) 자동매매 포지션 상태를 갱신한다. */
+  private onAutoBracketResolved(symbol: string, entry: number, res: WatchAndBracketResult): void {
+    const idx = this.autoTradePositions.findIndex((p) => p.symbol === symbol && p.entry === entry && p.status === "watching");
+    if (idx === -1) return;
+    if (res.status === "oco_registered") {
+      this.autoTradePositions[idx] = { ...this.autoTradePositions[idx], status: "active", conditionalOrderId: res.conditionalOrderId };
+    } else {
+      // 타임아웃/취소/실패/OCO등록실패 → 이 자리를 비운다(다음 사이클에 다시 채워질 수 있음).
+      this.autoTradePositions.splice(idx, 1);
+    }
+  }
+
+  /**
+   * 자동매매 한 사이클(시작 즉시 1회 + 이후 5분마다).
+   *   [재진입 방지] 한 사이클이 오래 걸려도(스캔에 수십 초) 다음 타이머 틱과 겹치지 않게 막는다.
+   */
+  private async autoTradeTick(): Promise<void> {
+    if (!this.autoTradeEnabled || this.autoTradeTickBusy) return;
+    this.autoTradeTickBusy = true;
+    this.autoTradeLastCycleAt = DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss");
+    try {
+      await this.prepareBackend();
+      await this.reconcileAutoPositions(); // ①빈자리 먼저 확인(같은 사이클 안에 채우기 위해)
+
+      const seedUsd = await this.resolveSeedUsd();
+      if (isLossLimitBreached(this.autoTradeRealizedPnlUsd, seedUsd, this.autoTradeMaxLossPct)) {
+        this.stopAutoTrade(`최대손실 한도 도달 — 이번 실행 누적손익 $${this.autoTradeRealizedPnlUsd.toFixed(2)}(한도: 시드 대비 ${this.autoTradeMaxLossPct}%)`); // ②
+        return;
+      }
+
+      const freeSlots = this.autoTradeMaxPositions - this.autoTradePositions.length;
+      if (freeSlots <= 0) return; // 꽉 찼으면 이번 사이클은 스캔 생략
+
+      let run: ScreenRun;
+      try {
+        run = await this.scanScreener({}); // ③빈자리를 "현재 스크리닝으로 탐색된 다른 종목"으로 채움
+      } catch (e) {
+        this.addJournal({ kind: "info", symbol: "-", summary: `🤖 자동매매: 이번 사이클 스크리닝 실패 — ${String(e).replace(/^Error:\s*/, "")}` });
+        return;
+      }
+
+      const activeSymbols = new Set(this.autoTradePositions.map((p) => p.symbol));
+      const candidates = run.results.filter((r) => r.status === "confirmed" && !activeSymbols.has(r.symbol));
+      const commissionRate = await this.resolveCommissionRate();
+      const perSlotPct = perSlotInvestPct(this.autoTradeMaxInvestPct, this.autoTradeMaxPositions);
+
+      let placed = 0;
+      for (const cand of candidates) {
+        if (placed >= freeSlots) break;
+        if (cand.ema200 == null || cand.prevClose == null) continue; // 1분할 계산 불가(데이터 부족)
+
+        let level1: SplitOrder;
+        try {
+          // [오너 지시] 삼분할 매매기법의 "1분할" 타점만 쓴다 — 가장 얕게 눌렸을 때만 자동 진입.
+          level1 = calcSplit3(cand.prevClose, cand.ema200, this.defaultTpPct, this.defaultSlPct).splits[0];
+        } catch {
+          continue; // 진입 필터 불성립(전봉종가<=EMA200) — 이 종목은 건너뜀
+        }
+
+        const usedKey = `${cand.symbol}@${level1.entry}`;
+        if (this.autoTradeUsedKeys.has(usedKey)) continue; // [오너 지시] 동일종목 동일타점 재진입 방지
+
+        const qty = computeSeedQty(seedUsd, perSlotPct, level1.entry, commissionRate) ?? 0;
+        const gate = canAutoEnter({
+          limits: {
+            enabled: this.autoTradeEnabled,
+            maxPositions: this.autoTradeMaxPositions,
+            maxLossPct: this.autoTradeMaxLossPct,
+            maxInvestPct: this.autoTradeMaxInvestPct,
+          },
+          activePositionCount: this.autoTradePositions.length,
+          realizedPnlUsd: this.autoTradeRealizedPnlUsd,
+          seedUsd,
+          candidateQty: qty,
+        });
+        if (!gate.allow) {
+          // 종목 수·손실 한도처럼 "이 사이클 전체"에 적용되는 사유면 더 시도할 필요가 없다.
+          if (gate.reason?.includes("종목 수") || gate.reason?.includes("손실")) break;
+          continue; // 그 외(예: 예산으로 1주도 못 사는 경우)는 이 종목만 건너뛰고 다음 후보 시도
+        }
+
+        this.autoTradeUsedKeys.add(usedKey);
+        const posDraft: AutoPosition = {
+          symbol: cand.symbol,
+          entry: level1.entry,
+          tp: level1.tp,
+          sl: level1.sl,
+          quantity: qty,
+          enteredAtMs: Date.now(),
+          status: "watching",
+          conditionalOrderId: null,
+        };
+        this.autoTradePositions.push(posDraft);
+
+        try {
+          const { watchPromise } = await this.placeBracketCore({
+            symbol: cand.symbol,
+            price: level1.entry,
+            quantity: qty,
+            tpTrigger: level1.tp,
+            tpPrice: level1.tp,
+            slTrigger: level1.sl,
+            slPrice: roundPrice(level1.sl * 0.99), // OCO와 동일 규칙: 손절 지정가는 감시가 1% 아래
+            expireDate: this.autoTradeExpireDate(),
+            rationale: {
+              technique: "split3",
+              level: 1,
+              baseClose: cand.prevClose,
+              ema200: cand.ema200,
+              entry: level1.entry,
+              tp: level1.tp,
+              sl: level1.sl,
+              priceAtOrder: null, // placeBracketCore가 실제 현재가로 덮어씀(saveRationale 참고)
+            },
+          });
+          this.addJournal({
+            kind: "info",
+            symbol: cand.symbol,
+            summary: `🤖 자동매매 진입 ${cand.symbol} $${level1.entry} × ${qty}주(삼분할 1분할) — 체결되면 자동으로 익절 $${level1.tp} / 손절 $${level1.sl}을 등록합니다.`,
+          });
+          if (watchPromise) {
+            watchPromise
+              .then((res) => this.onAutoBracketResolved(cand.symbol, level1.entry, res))
+              .catch(() => this.onAutoBracketResolved(cand.symbol, level1.entry, { status: "oco_failed", error: "확인 실패" }));
+          } else {
+            // 드라이런(실주문 잠금 상태) — 실제 체결이 없어 자리를 계속 점유할 이유가 없다.
+            this.autoTradePositions = this.autoTradePositions.filter((p) => p !== posDraft);
+          }
+        } catch (e) {
+          this.autoTradePositions = this.autoTradePositions.filter((p) => p !== posDraft);
+          this.addJournal({ kind: "info", symbol: cand.symbol, summary: `🤖 자동매매 진입 실패 ${cand.symbol}: ${String(e).replace(/^Error:\s*/, "")}` });
+          continue;
+        }
+        placed++;
+      }
+    } catch (e) {
+      // [안전장치] 이 사이클 안에서 예상 못 한 오류가 나도(네트워크 순단 등) 자동매매 전체가
+      //   조용히 죽어버리면 안 된다(백그라운드 실행이라 사람이 못 봄 — void로 호출되므로 여기서
+      //   막지 않으면 처리되지 않은 프라미스 거부가 된다). 저널에 남기고 다음 5분 사이클에서
+      //   다시 시도한다 — 반복 실패는 지켜보다 사람이 직접 끄면 된다. 저널 기록 자체가 실패해도
+      //   (예: 저장 공간 문제) 이 사이클을 죽이지 않는다.
+      try {
+        this.addJournal({ kind: "info", symbol: "-", summary: `🤖 자동매매: 이번 사이클 중 예상 못 한 오류 — ${String(e).replace(/^Error:\s*/, "")}` });
+      } catch {
+        /* 저널 기록조차 실패 — 조용히 넘어간다(다음 사이클에서 재시도) */
+      }
+    } finally {
+      this.autoTradeTickBusy = false;
+    }
   }
 
   /**

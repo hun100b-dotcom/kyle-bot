@@ -51,6 +51,8 @@ interface MockConditional {
   status: "WAITING" | "TRIGGERED" | "CANCELED";
   first: { orderSide: "BUY" | "SELL"; triggerPrice: number; orderPrice?: number };
   second?: { orderSide: "BUY" | "SELL"; triggerPrice: number; orderPrice?: number } | null;
+  /** [v0.26.0] 발동된 다리(자동매매 종료 감지 테스트용). 발동 전엔 없음. */
+  triggeredLeg?: "first" | "second";
 }
 
 /** 목 서버 내부 상태(테스트에서 조작/검증 가능하게 노출) */
@@ -118,6 +120,26 @@ function toDetail(o: MockOrder) {
 /** 지정가 대기 주문의 체결 여부를 현재가로 판정 */
 function limitFill(side: "BUY" | "SELL", cur: number, price: number): boolean {
   return side === "BUY" ? cur <= price : cur >= price;
+}
+
+/**
+ * [v0.26.0] OCO(익절+손절) 재판정 — 대기 주문(limitFill)과 같은 원칙: 조회 시점의 현재가로
+ *   "발동 조건에 닿았는지"를 다시 확인한다. first=익절(위쪽 감시가, 가격이 올라야 발동),
+ *   second=손절(아래쪽 감시가, 가격이 내려야 발동) — placeOco/watchAndBracket이 항상 이 모양으로
+ *   등록하므로(OCO 규칙: 둘 다 SELL, first감시가>현재가>second감시가) 이 방향으로 고정해도 된다.
+ *   자동매매(startAutoTrade)가 "내 포지션이 익절/손절로 끝났는지"를 감지하는 유일한 방법이라
+ *   실제 체결처럼 조회할 때마다 다시 확인해 준다(TRIGGERED가 되면 더 이상 재판정하지 않음).
+ */
+function reevaluateOco(cond: MockConditional, prices: Record<string, number>): void {
+  if (cond.status !== "WAITING" || cond.type !== "OCO" || !cond.second) return;
+  const cur = priceOf(prices, cond.symbol);
+  if (cur >= cond.first.triggerPrice) {
+    cond.status = "TRIGGERED";
+    cond.triggeredLeg = "first";
+  } else if (cur <= cond.second.triggerPrice) {
+    cond.status = "TRIGGERED";
+    cond.triggeredLeg = "second";
+  }
 }
 
 export function createMockTossServer() {
@@ -391,6 +413,8 @@ export function createMockTossServer() {
       if (!url.searchParams.get("status")) {
         return sendJson(res, 400, { error: { code: "invalid-request", message: "status 필수", data: { field: "status" } } });
       }
+      // [v0.26.0] 대기 주문 재판정과 같은 원칙: 목록을 조회하는 시점에 OCO 발동 조건을 다시 확인.
+      for (const c of state.conditionals.values()) reevaluateOco(c, state.prices);
       // 실서버 형태({ conditionalOrders, nextCursor, hasNext })로 응답.
       return sendResult(res, 200, {
         conditionalOrders: [...state.conditionals.values()].map((c) => ({ ...c, quantity: String(c.quantity) })),
@@ -404,7 +428,10 @@ export function createMockTossServer() {
       if (!req.headers["x-tossinvest-account"]) return sendJson(res, 400, { error: "missing_account" });
       const cond = state.conditionals.get(decodeURIComponent(cm[1]));
       if (!cond) return sendJson(res, 404, { error: "not_found" });
-      if (method === "GET") return sendResult(res, 200, { ...cond, quantity: String(cond.quantity) });
+      if (method === "GET") {
+        reevaluateOco(cond, state.prices); // [v0.26.0] 단건 조회 시점에도 재판정
+        return sendResult(res, 200, { ...cond, quantity: String(cond.quantity) });
+      }
       if (method === "DELETE") {
         cond.status = "CANCELED";
         return sendResult(res, 200, { conditionalOrderId: cond.conditionalOrderId, status: cond.status });

@@ -13,6 +13,7 @@ import { createMockTossServer } from "../mocks/toss-mock";
 import {
   getExchangeRate,
   createConditionalOrder,
+  getConditionalOrder,
   listConditionalOrders,
   cancelConditionalOrder,
   createOrder,
@@ -116,5 +117,89 @@ describe("주문 직렬화(실스펙: 문자열)", () => {
     });
     expect(o.tossOrderId).toBeTruthy();
     expect(o.status === "filled" || o.status === "submitted").toBe(true);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// [v0.26.0] OCO 발동 감지(getConditionalOrder + triggeredLeg) — 자동매매가 "익절/손절로
+//   포지션이 끝났는지"를 아는 유일한 방법이라 정확해야 한다. 대기 주문 재판정(limitFill)과
+//   같은 원칙으로, 목 서버가 조회 시점의 현재가로 OCO 발동 여부를 다시 확인해 준다.
+// -----------------------------------------------------------------------------
+describe("OCO 발동 감지(getConditionalOrder, v0.26.0)", () => {
+  it("가격이 익절 감시가 위로 오르면 first가 발동(TRIGGERED, triggeredLeg=first)된다", async () => {
+    mock.setPrice("AAPL", 2.05);
+    const created = await createConditionalOrder({
+      symbol: "AAPL",
+      type: "OCO",
+      quantity: 1,
+      orderType: "LIMIT",
+      expireDate: "2026-12-30",
+      first: { orderSide: "SELL", triggerPrice: 2.15, orderPrice: 2.15 }, // 익절
+      second: { orderSide: "SELL", triggerPrice: 1.89, orderPrice: 1.88 }, // 손절
+    });
+    // 발동 전: 가격이 아직 구간 안 → WAITING 그대로
+    let got = await getConditionalOrder(created.conditionalOrderId);
+    expect(got.status).toBe("WAITING");
+    expect(got.triggeredLeg).toBeUndefined();
+
+    // 가격이 익절 감시가(2.15) 위로 오르면 다음 조회에서 first 발동
+    mock.setPrice("AAPL", 2.2);
+    got = await getConditionalOrder(created.conditionalOrderId);
+    expect(got.status).toBe("TRIGGERED");
+    expect(got.triggeredLeg).toBe("first");
+  });
+
+  it("가격이 손절 감시가 아래로 내려가면 second가 발동(triggeredLeg=second)된다", async () => {
+    mock.setPrice("AAPL", 2.05);
+    const created = await createConditionalOrder({
+      symbol: "AAPL",
+      type: "OCO",
+      quantity: 1,
+      orderType: "LIMIT",
+      expireDate: "2026-12-30",
+      first: { orderSide: "SELL", triggerPrice: 2.15, orderPrice: 2.15 },
+      second: { orderSide: "SELL", triggerPrice: 1.89, orderPrice: 1.88 },
+    });
+    mock.setPrice("AAPL", 1.8); // 손절 감시가(1.89) 아래로
+    const got = await getConditionalOrder(created.conditionalOrderId);
+    expect(got.status).toBe("TRIGGERED");
+    expect(got.triggeredLeg).toBe("second");
+  });
+
+  it("발동된 뒤에는 가격이 다시 구간 안으로 돌아와도 TRIGGERED 상태를 유지한다(재판정 안 함)", async () => {
+    mock.setPrice("AAPL", 2.05);
+    const created = await createConditionalOrder({
+      symbol: "AAPL",
+      type: "OCO",
+      quantity: 1,
+      orderType: "LIMIT",
+      expireDate: "2026-12-30",
+      first: { orderSide: "SELL", triggerPrice: 2.15, orderPrice: 2.15 },
+      second: { orderSide: "SELL", triggerPrice: 1.89, orderPrice: 1.88 },
+    });
+    mock.setPrice("AAPL", 2.2); // 발동
+    await getConditionalOrder(created.conditionalOrderId);
+    mock.setPrice("AAPL", 2.05); // 다시 구간 안으로
+    const got = await getConditionalOrder(created.conditionalOrderId);
+    expect(got.status).toBe("TRIGGERED"); // 여전히 발동 상태(포지션은 이미 끝났으므로)
+    expect(got.triggeredLeg).toBe("first");
+  });
+
+  it("목록 조회(listConditionalOrders)에서도 같은 방식으로 재판정된다", async () => {
+    mock.setPrice("AAPL", 2.05);
+    const created = await createConditionalOrder({
+      symbol: "AAPL",
+      type: "OCO",
+      quantity: 1,
+      orderType: "LIMIT",
+      expireDate: "2026-12-30",
+      first: { orderSide: "SELL", triggerPrice: 2.15, orderPrice: 2.15 },
+      second: { orderSide: "SELL", triggerPrice: 1.89, orderPrice: 1.88 },
+    });
+    mock.setPrice("AAPL", 1.5); // 손절 발동
+    const list = await listConditionalOrders("ALL");
+    const found = list.find((c) => c.conditionalOrderId === created.conditionalOrderId);
+    expect(found?.status).toBe("TRIGGERED");
+    expect(found?.triggeredLeg).toBe("second");
   });
 });

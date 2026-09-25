@@ -168,6 +168,8 @@ export interface ConditionalOrderResponse {
   first?: { orderSide?: string; triggerPrice?: number; orderPrice?: number };
   second?: { orderSide?: string; triggerPrice?: number; orderPrice?: number } | null;
   expireDate?: string;
+  /** [v0.26.0] OCO/OTO 중 어느 다리가 발동됐는지(목 서버·자동매매 종료 감지용). 발동 전엔 undefined. */
+  triggeredLeg?: "first" | "second";
 }
 
 /** 환율 응답: 1 baseCurrency = rate quoteCurrency (예: 1 USD = 1,390 KRW) */
@@ -882,6 +884,7 @@ function toConditionalResponse(raw: Record<string, unknown>): ConditionalOrderRe
     first: leg(raw.first),
     second: raw.second === null ? null : leg(raw.second),
     expireDate: raw.expireDate as string | undefined,
+    triggeredLeg: raw.triggeredLeg === "first" || raw.triggeredLeg === "second" ? raw.triggeredLeg : undefined,
   };
 }
 
@@ -923,6 +926,17 @@ export async function listConditionalOrders(status = "OPEN"): Promise<Conditiona
     ? raw
     : ((raw as Record<string, unknown>)?.conditionalOrders as unknown[]) ?? [];
   return arr.map((r) => toConditionalResponse(r as Record<string, unknown>));
+}
+
+/**
+ * getConditionalOrder — 조건주문 단건 조회. [v0.26.0] 자동매매가 등록해 둔 OCO(익절+손절)가
+ *   발동(TRIGGERED)됐는지, 발동됐다면 어느 다리(익절/손절)인지 주기적으로 확인하는 데 쓴다.
+ */
+export async function getConditionalOrder(conditionalOrderId: string): Promise<ConditionalOrderResponse> {
+  const raw = await tossFetch<Record<string, unknown>>(`${ENDPOINTS.conditionalOrders}/${encodeURIComponent(conditionalOrderId)}`, {
+    withAccount: true,
+  });
+  return toConditionalResponse(raw);
 }
 
 /** cancelConditionalOrder — 조건주문 취소(DELETE) */

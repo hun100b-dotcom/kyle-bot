@@ -180,6 +180,12 @@ export function installKyleTool(): ToolEngine {
     placeOco: (spec: Parameters<ToolEngine["placeOco"]>[0]) => e.placeOco(spec),
     placeOto: (spec: Parameters<ToolEngine["placeOto"]>[0]) => e.placeOto(spec),
     placeBracket: (spec: Parameters<ToolEngine["placeBracket"]>[0]) => e.placeBracket(spec), // [v0.25.0]
+
+    // [v0.26.0] 자동매매 — "앱이 켜져 있는 동안"은 웹에서는 "이 브라우저 탭이 열려 있는 동안"과 같다.
+    autoTradeStart: () => e.startAutoTrade(),
+    autoTradeStop: () => e.stopAutoTrade(),
+    autoTradeStatus: () => e.getAutoTradeStatus(),
+    saveAutoTradeSettings: (input: Parameters<ToolEngine["saveAutoTradeSettings"]>[0]) => e.saveAutoTradeSettings(input),
     placeSell: (spec: Parameters<ToolEngine["placeSell"]>[0]) => e.placeSell(spec),
     openOrders: () => e.openOrders(),
     conditionals: () => e.conditionals(),

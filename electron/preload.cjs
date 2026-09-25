@@ -51,6 +51,12 @@ contextBridge.exposeInMainWorld("kyletool", {
   placeOto: (spec) => ipcRenderer.invoke("tool:order:oto", spec), // [v0.3.2] 진입+익절(OTO)
   placeBracket: (spec) => ipcRenderer.invoke("tool:order:bracket", spec), // [v0.25.0] 매수+익절+손절 한번에
 
+  // [v0.26.0] 자동매매 — 시작/중지/현황 + 한도 설정
+  autoTradeStart: () => ipcRenderer.invoke("tool:autoTrade:start"),
+  autoTradeStop: () => ipcRenderer.invoke("tool:autoTrade:stop"),
+  autoTradeStatus: () => ipcRenderer.invoke("tool:autoTrade:status"),
+  saveAutoTradeSettings: (input) => ipcRenderer.invoke("tool:autoTrade:settings", input),
+
   // 주문 현황
   // [v0.2.10] 주문 근거(기법 스냅샷) 목록 / 보유 포지션 손익
   rationales: () => ipcRenderer.invoke("tool:rationales"),
