@@ -3101,6 +3101,12 @@ ${msg}
               {autoStatus && autoStatus.positions.length > 0 && (
                 <>
                   <h3>지금 감시 중인 자동매매 포지션</h3>
+                  <p className="hint">
+                    이 기기(PC/폰)에 저장돼 있어 앱을 껐다 켜거나 업데이트해도 그대로 남아요. 다만 이
+                    저장은 <b>지금 쓰고 있는 이 기기 안에서만</b> 유지됩니다 — 다른 기기에서 진입한
+                    주문은 여기 안 보일 수 있어요(실제 주문 여부는 항상 [현황 → 주문 현황]에서
+                    토스와 직접 확인하세요, 그 화면은 이 목록과 무관하게 항상 정확합니다).
+                  </p>
                   <table className="result-table">
                     <thead>
                       <tr><th>종목</th><th>진입가</th><th>익절가</th><th>손절가</th><th>수량</th><th>상태</th></tr>

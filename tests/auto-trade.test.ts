@@ -22,7 +22,25 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ToolEngine, computeSeedQty } from "../electron/tool-engine";
+import { ToolEngine, computeSeedQty, type AutoPosition, type JournalEntry } from "../electron/tool-engine";
+
+/** [v0.30.1] OCO 등록 저널이 뜰 때까지 기다린다(bracket.test.ts의 waitForJournal과 동일 패턴). */
+function waitForOcoJournal(eng: ToolEngine, timeoutMs = 5000): Promise<JournalEntry> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      eng.off("journal", onEntry);
+      reject(new Error(`시간 안에 OCO 저널이 나오지 않음(${timeoutMs}ms)`));
+    }, timeoutMs);
+    function onEntry(e: JournalEntry) {
+      if (e.kind === "oco") {
+        clearTimeout(timer);
+        eng.off("journal", onEntry);
+        resolve(e);
+      }
+    }
+    eng.on("journal", onEntry);
+  });
+}
 
 describe("자동매매 상태 관리 — v0.26.0", () => {
   it("엔진을 처음 만들면 자동매매는 꺼진 상태고 한도는 공장값(3종목/5%/30%)이다", () => {
@@ -277,6 +295,121 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
       expect(hist[1].symbol).toBe("AAPL");
       expect(hist[1].status).toBe("closed_win");
       expect(hist[1].pnlUsd).toBe(4);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // ===========================================================================
+  // [v0.30.1 긴급수정] 오너가 실제로 겪은 사고: "PC/폰을 껐다 켜거나 업데이트하면 자동매매로
+  //   감시 중이던 포지션·기록이 전부 사라지는데, 실제 토스엔 그 주문이 그대로 남아있다."
+  //   원인: autoTradePositions가 파일로 저장되지 않는 런타임 전용 값이었고, 게다가
+  //   startAutoTrade()가 "시작"을 누를 때마다 그마저 무조건 비웠다. 아래 테스트들이 그 두 가지를
+  //   구체적으로 고정한다 — "엔진 재시작 후에도 남아있는지" + "시작을 다시 눌러도 안 사라지는지".
+  // ===========================================================================
+  it("[v0.30.1] 자동매매 포지션(watching/active)은 파일에 저장돼 엔진을 재시작해도 그대로 남는다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const positionsPath = join(dir, "kylebot-auto-positions.json");
+      const seed = {
+        positions: [
+          { symbol: "AAPL", entry: 2.1, tp: 2.5, sl: 1.8, quantity: 10, enteredAtMs: 1000, status: "active", conditionalOrderId: "cond-1" },
+          { symbol: "TSLA", entry: 5.0, tp: 5.5, sl: 4.5, quantity: 5, enteredAtMs: 2000, status: "watching", conditionalOrderId: null, buyOrderId: "buy-1" },
+        ],
+        usedKeys: ["AAPL@2.1", "TSLA@5"],
+      };
+      writeFileSync(positionsPath, JSON.stringify(seed, null, 2), "utf8");
+
+      // [엔진 재시작 시뮬레이션] 같은 dir로 새 ToolEngine을 만드는 것 자체가 "앱을 껐다 켬"과
+      //   동일하다(생성자에서 loadAutoPositions를 부르므로).
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const s = eng.getAutoTradeStatus();
+      expect(s.positions.length).toBe(2);
+      const aapl = s.positions.find((p) => p.symbol === "AAPL");
+      const tsla = s.positions.find((p) => p.symbol === "TSLA");
+      expect(aapl?.status).toBe("active");
+      expect(aapl?.conditionalOrderId).toBe("cond-1");
+      expect(tsla?.status).toBe("watching");
+      expect(tsla?.buyOrderId).toBe("buy-1"); // [v0.30.1] 재확인용 매수 주문번호도 함께 복구돼야 함
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("[v0.30.1] startAutoTrade()는 더 이상 기존 포지션을 비우지 않는다(재시작 후 '시작'을 다시 눌러도 유지)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const positionsPath = join(dir, "kylebot-auto-positions.json");
+      const seed = {
+        positions: [
+          { symbol: "AAPL", entry: 2.1, tp: 2.5, sl: 1.8, quantity: 10, enteredAtMs: 1000, status: "active", conditionalOrderId: "cond-1" },
+        ],
+        usedKeys: ["AAPL@2.1"],
+      };
+      writeFileSync(positionsPath, JSON.stringify(seed, null, 2), "utf8");
+
+      const eng = new ToolEngine(dir, { forceMock: true });
+      // 재시작 직후(자동매매를 다시 켜기 전)에도 이미 보여야 한다 — 오너가 "시작"을 누르기 전에도
+      //   "아직 감시 중이던 종목이 있었지" 하고 화면에서 바로 확인할 수 있어야 하므로.
+      expect(eng.getAutoTradeStatus().positions.length).toBe(1);
+
+      // [주의] startAutoTrade는 백그라운드 스캔을 fire-and-forget으로 시작한다 — 기존 테스트와
+      //   같은 패턴으로 상태 전환만 확인하고 곧바로 정지시킨다.
+      const started = eng.startAutoTrade();
+      expect(started.positions.length).toBe(1); // 예전엔 여기서 0이 됐었다(버그) — 이제는 유지돼야 함
+      expect(started.positions[0].symbol).toBe("AAPL");
+      eng.stopAutoTrade();
+      await new Promise((r) => setTimeout(r, 50));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it("[v0.30.1] 재시작으로 감시가 끊긴 'watching' 포지션도 reconcileAutoPositions가 다시 체결을 확인해 보호주문(OCO)을 등록한다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      // 1) 실제 매수 주문을 하나 낸다(AAPL 목서버 초기가 2.05 → 2.10에 걸면 즉시 체결 — bracket.test.ts와 동일 규칙).
+      //    이걸로 "재시작 전에 이미 자동매매가 낸 매수 주문"을 재현한다.
+      const entry = await eng.placeEntry({ symbol: "AAPL", price: 2.1, quantity: 3 });
+      const buyOrderId = (entry.detail as { tossOrderId: string }).tossOrderId;
+
+      // 2) "재시작 직후 파일에서 막 복구된, 이 프로세스는 아직 한 번도 감시한 적 없는 watching
+      //    포지션"을 흉내낸다 — autoTradeActiveWatches에 없는 상태가 핵심(그래야 '고아' 취급됨).
+      //    [private 접근에 대해] addAutoTradeHistory/reconcileAutoPositions 둘 다 private이라
+      //    직접 부른다 — 이 흐름 자체가 "앱이 재시작된 뒤 5분 사이클이 도는 상황"을 그대로
+      //    재현하는 유일한 방법이다(목 서버가 엔진 인스턴스마다 독립적이라 진짜로 앱을 두 번
+      //    띄워서는 같은 주문을 재현할 수 없다).
+      const engAny = eng as unknown as {
+        autoTradePositions: AutoPosition[];
+        autoTradeActiveWatches: Set<string>;
+        reconcileAutoPositions: () => Promise<void>;
+      };
+      engAny.autoTradePositions.push({
+        symbol: "AAPL", entry: 2.1, tp: 2.5, sl: 1.8, quantity: 3,
+        enteredAtMs: Date.now(), status: "watching", conditionalOrderId: null, buyOrderId,
+      });
+      expect(engAny.autoTradeActiveWatches.has(`AAPL@2.1@${engAny.autoTradePositions[0].enteredAtMs}`)).toBe(false);
+
+      const ocoPromise = waitForOcoJournal(eng);
+      await engAny.reconcileAutoPositions();
+      await ocoPromise;
+
+      const pos = eng.getAutoTradeStatus().positions.find((p) => p.symbol === "AAPL");
+      expect(pos?.status).toBe("active"); // watching → active로 스스로 넘어갔어야 함
+      expect(pos?.conditionalOrderId).not.toBeNull(); // 보호주문(OCO)이 실제로 등록됐어야 함
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it("[v0.30.1] 자동매매 포지션 파일이 없거나 깨져 있어도 엔진 생성이 죽지 않고 빈 목록으로 시작한다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const positionsPath = join(dir, "kylebot-auto-positions.json");
+      writeFileSync(positionsPath, "{ 이건 유효한 JSON이 아님 ", "utf8");
+      const eng = new ToolEngine(dir, { forceMock: true });
+      expect(eng.getAutoTradeStatus().positions).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

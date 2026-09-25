@@ -690,6 +690,11 @@ export interface AutoPosition {
   status: "watching" | "active";
   /** OCO 등록 성공 후 채워짐(watching→active 전환 시). 이 번호로 발동 여부를 재조회한다. */
   conditionalOrderId: string | null;
+  /** [v0.30.1] 매수(진입) 주문의 토스 주문번호 — watching 상태에서 앱이 재시작돼도(예: PC 껐다 켬,
+   *  자동 업데이트) 이 번호로 실제 체결 여부를 다시 물어볼 수 있다(긴급수정, 오너 보고
+   *  2026-09-26: "껐다 키거나 업데이트하면 자동매매 기록이 사라짐 — 실제 토스엔 주문이 남아있는데").
+   *  이 필드가 생기기 전(v0.30.0 이전) 기록엔 없을 수 있어 optional로 둔다. */
+  buyOrderId?: string | null;
 }
 
 /** 자동매매 화면 현황판에 보여줄 요약. */
@@ -822,13 +827,26 @@ export class ToolEngine extends EventEmitter {
   private autoScanPriceMax = 9; //    현재가 상한($)
   private autoScanBodyRatio = 0.3; // 도지 몸통비율 상한(0.1~0.8)
 
-  // [v0.26.0] 자동매매 실행 상태(런타임 전용, 저장 안 함 — 앱 재시작하면 전부 초기화).
+  // [v0.26.0] 자동매매 켜짐 자체(스위치)는 절대 저장 안 함 — 앱을 새로 켤 때마다 오너가 직접
+  //   다시 켜야 한다(오너 결정, 안전 원칙). 그러나 "지금 감시 중인 포지션"은 다르다 — [v0.30.1
+  //   긴급수정] 예전엔 이것도 런타임 전용(저장 안 함)이었는데, 이게 "OCO는 토스 서버가 감시하니
+  //   앱이 꺼져도 안전하다"는 전제만 믿고 "watching(매수는 됐는데 아직 OCO 못 건) 상태에서 앱이
+  //   재시작되면 그 사이 체결됐어도 영원히 보호(OCO) 없이 방치된다"는 구멍과, "재시작하면
+  //   maxPositions 게이트가 실제 보유 종목 수를 몰라 한도보다 더 많이 진입할 수 있다"는 두
+  //   안전 구멍을 만들었다(오너가 실제로 겪음: "껐다 키거나 업데이트하면 기록이 사라짐 — 실제
+  //   토스엔 주문이 남아있는데"). 이제 포지션 목록은 파일로 저장하고 재시작해도 그대로 이어받는다.
   private autoTradeEnabled = false;
   private autoTradeTimer: ReturnType<typeof setInterval> | null = null;
   private autoTradeTickBusy = false; // 한 사이클이 겹쳐 실행되지 않게
   private autoTradeRealizedPnlUsd = 0; // 이번 자동매매 실행 동안 누적 실현손익(달러, 손실이면 음수)
-  private autoTradePositions: AutoPosition[] = []; // 지금 자동매매로 감시·보유 중인 포지션
-  private autoTradeUsedKeys = new Set<string>(); // `${symbol}@${entry}` — 같은 종목 같은 타점 재진입 방지
+  private autoTradePositions: AutoPosition[] = []; // 지금 자동매매로 감시·보유 중인 포지션(파일로 영속)
+  private autoTradeUsedKeys = new Set<string>(); // `${symbol}@${entry}` — 같은 종목 같은 타점 재진입 방지(파일로 영속)
+  private autoPositionsPath = ""; // [v0.30.1] autoTradePositions/autoTradeUsedKeys 저장 파일
+  /** [v0.30.1] 지금 이 프로세스 안에서 watchAndBracket이 실시간(1초~5초 간격)으로 직접 감시
+   *  중인 포지션의 키(`symbol@entry@enteredAtMs`) 집합 — **저장 안 함**(런타임 전용). 이 목록에
+   *  있으면 reconcileAutoPositions의 "재시작 후 복구" 경로가 같은 포지션을 이중으로 건드리지
+   *  않고 건너뛴다(빠른 경로가 이미 처리 중이므로 — 안 그러면 OCO가 두 번 등록될 위험이 있다). */
+  private autoTradeActiveWatches = new Set<string>();
   private autoTradeLastCycleAt: string | null = null; // 마지막 사이클 시각(KST, 화면 표시용)
   // [v0.27.0] 이번 사이클에서 스캔한 결과를 화면에 그대로 보여주기 위해 보관(엔진 안에서만 쓰이고
   //   버려지던 것을 "스크리닝 결과" 탭에 노출한다 — 오너 피드백: 사유 문자열 같은 별도 추적은
@@ -895,6 +913,7 @@ export class ToolEngine extends EventEmitter {
     this.tradesPath = join(userDataDir, "kylebot-trades.json"); // [v0.7.0] 자동 기록 트레이드
     this.fillsPath = join(userDataDir, "kylebot-fills.json"); // [v0.9.8] 매매(체결) 이력 — 연결 없이도 리포트를 그리기 위해 보관
     this.autoTradeHistoryPath = join(userDataDir, "kylebot-auto-history.json"); // [v0.30.0] 자동매매기록
+    this.autoPositionsPath = join(userDataDir, "kylebot-auto-positions.json"); // [v0.30.1] 감시 중 포지션(긴급수정)
     this.loadEnv();
     // [개발 검증용] E2E 등 자동 검증은 절대 실서버를 건드리면 안 되므로 연습 모드 강제.
     if (opts?.forceMock) this.mode = "mock";
@@ -905,6 +924,7 @@ export class ToolEngine extends EventEmitter {
     this.loadTrades();
     this.loadFills(); // [v0.9.8] 저장해 둔 매매 이력
     this.loadAutoTradeHistory(); // [v0.30.0] 자동매매기록
+    this.loadAutoPositions(); // [v0.30.1] 감시 중 포지션(긴급수정 — 재시작해도 이어받기)
   }
 
   // --------------------------------------------------------------------------
@@ -2970,6 +2990,37 @@ export class ToolEngine extends EventEmitter {
     return this.autoTradeHistory.slice(-300).reverse();
   }
 
+  // --------------------------------------------------------------------------
+  // [v0.30.1 긴급수정] 자동매매 "지금 감시 중" 포지션 영속화 — 오너 보고: 앱을 껐다 켜거나
+  //   업데이트하면 이 목록이 사라지는데, 실제 토스엔 그 주문이 그대로 남아있어 위험하다.
+  //   구조는 autoTradeHistory와 동일(파일 하나, 변경마다 원자적 저장) — usedKeys(중복진입 방지)도
+  //   같은 파일에 함께 저장한다(둘 다 "지금 감시 대상이 뭔지"를 나타내는 한 묶음 상태이므로).
+  // --------------------------------------------------------------------------
+  private loadAutoPositions(): void {
+    try {
+      if (!existsSync(this.autoPositionsPath)) return;
+      const raw = JSON.parse(readFileSync(this.autoPositionsPath, "utf8")) as { positions?: AutoPosition[]; usedKeys?: string[] };
+      this.autoTradePositions = Array.isArray(raw.positions) ? raw.positions : [];
+      this.autoTradeUsedKeys = new Set(Array.isArray(raw.usedKeys) ? raw.usedKeys : []);
+    } catch {
+      // 파일이 깨졌어도 앱이 죽으면 안 된다 — 빈 상태로 시작(실제 주문은 토스에 남아있으니
+      // 오너가 [주문현황]에서 직접 확인 가능, 최소한 새 진입이 막히진 않음).
+      this.autoTradePositions = [];
+      this.autoTradeUsedKeys = new Set();
+    }
+  }
+
+  private saveAutoPositions(): void {
+    try {
+      const payload = { positions: this.autoTradePositions, usedKeys: [...this.autoTradeUsedKeys] };
+      const tmp = this.autoPositionsPath + ".tmp";
+      writeFileSync(tmp, JSON.stringify(payload, null, 2), "utf8");
+      renameSync(tmp, this.autoPositionsPath);
+    } catch {
+      /* 저장 실패는 매매 흐름을 막지 않는다(다음 변경 때 다시 시도됨) */
+    }
+  }
+
   // ── [v0.9.8] 매매(체결) 이력 보관 ─────────────────────────────
   //   [왜 저장하나?] 리포트를 매번 토스에서 실시간으로 불러오게 했더니, 홈 PC에 연결되지 않은 곳
   //   (회사·이동 중)에서는 조회가 안 돼 **리포트가 통째로 비어** 보였다.
@@ -3788,9 +3839,13 @@ export class ToolEngine extends EventEmitter {
   startAutoTrade(): AutoTradeStatus {
     if (this.autoTradeEnabled) return this.getAutoTradeStatus();
     this.autoTradeEnabled = true;
-    this.autoTradeRealizedPnlUsd = 0;
-    this.autoTradePositions = [];
-    this.autoTradeUsedKeys = new Set();
+    this.autoTradeRealizedPnlUsd = 0; // "이번 실행" 누적손익만 초기화(손실한도 계산 기준)
+    // [v0.30.1 긴급수정] autoTradePositions/autoTradeUsedKeys는 더 이상 여기서 비우지 않는다.
+    //   예전엔 "시작"을 누를 때마다 무조건 빈 목록으로 시작했는데, 그러면 재시작 후 파일에서
+    //   복구해 온 "실제로 토스에 아직 살아있는 포지션"까지 함께 버려져 추적을 영영 잃어버렸다
+    //   (오너가 실제로 겪은 사고: 껐다 켜거나 업데이트하면 기록이 사라지는데 실제 주문은 남아있음).
+    //   이제 "시작"은 "이어서 감시"를 의미한다 — 아래에서 남아있던 포지션 수를 안내한다.
+    const carried = this.autoTradePositions.length;
     this.autoTradeLastScan = null; // 지난번 실행의 스캔 결과가 화면에 남아 헷갈리지 않게 초기화
     this.addJournal({
       kind: "info",
@@ -3798,9 +3853,10 @@ export class ToolEngine extends EventEmitter {
       summary:
         `🤖 자동매매 시작 — 최대 ${this.autoTradeMaxPositions}종목 · 최대손실 한도 시드대비 ${this.autoTradeMaxLossPct}% · ` +
         `종목당 투입 시드대비 ${this.autoTradeMaxInvestPct}%(최대 동시 투입 합계 최대 ${(this.autoTradeMaxInvestPct * this.autoTradeMaxPositions).toFixed(0)}%) · ` +
-        `5분마다 탐색(삼분할 1분할 타점만, 이 프로그램이 켜져 있는 동안만 작동)`,
+        `5분마다 탐색(삼분할 1분할 타점만, 이 프로그램이 켜져 있는 동안만 작동)` +
+        (carried > 0 ? ` · ⏪ 이전에 감시하던 ${carried}종목을 그대로 이어받아 감시합니다(재시작·업데이트에도 유지됨)` : ""),
     });
-    void this.autoTradeTick(); // 시작하자마자 한 번 즉시 돌리고
+    void this.autoTradeTick(); // 시작하자마자 한 번 즉시 돌리고(이어받은 포지션도 곧바로 재확인됨)
     this.autoTradeTimer = setInterval(() => void this.autoTradeTick(), ToolEngine.AUTO_TRADE_INTERVAL_MS); // 이후 5분마다
     return this.getAutoTradeStatus();
   }
@@ -3865,10 +3921,15 @@ export class ToolEngine extends EventEmitter {
 
   /**
    * 기존 자동매매 포지션을 다시 확인한다("빈자리 채우기"가 늦지 않으려면 스캔보다 먼저 끝나야 함).
-   *   - watching(매수 체결 대기 중) 상태는 watchAndBracket 자체의 완료 콜백(onAutoBracketResolved)이
-   *     처리하므로 여기서는 건드리지 않는다.
-   *   - active(OCO 등록 완료) 상태만 조건주문이 "발동"됐는지 조회해, 발동됐으면 실현손익에 반영하고
+   *   - active(OCO 등록 완료) 상태는 조건주문이 "발동"됐는지 조회해, 발동됐으면 실현손익에 반영하고
    *     자리를 비운다.
+   *   - [v0.30.1 긴급수정] watching(매수 체결 대기 중) 상태는 **보통은** watchAndBracket 자체의
+   *     완료 콜백(onAutoBracketResolved, 1초~5초 간격 빠른 폴링)이 처리한다. 그런데 앱이 재시작
+   *     되면(껐다 켬·자동 업데이트) 그 폴링 자체가 통째로 사라져 영영 아무도 확인 안 하게 된다
+   *     (오너가 실제로 겪은 사고 — "watching" 상태 그대로 남겨진 채 앱만 재시작되면, 그 사이 실제로
+   *     체결됐어도 보호주문(OCO)이 영원히 안 걸릴 수 있었다). 그래서 여기서도 **지금 이 프로세스가
+   *     직접 감시 중이 아닌**(=autoTradeActiveWatches에 없는) watching 포지션은 5분마다 함께
+   *     재확인한다 — 재시작 직후에도 최대 5분 안에 다시 붙잡힌다.
    */
   private async reconcileAutoPositions(): Promise<void> {
     const active = this.autoTradePositions.filter((p) => p.status === "active" && p.conditionalOrderId);
@@ -3887,6 +3948,7 @@ export class ToolEngine extends EventEmitter {
         const pnlPct = ((exitPrice - pos.entry) / pos.entry) * 100;
         this.autoTradeRealizedPnlUsd += pnlUsd;
         this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
+        this.saveAutoPositions(); // [v0.30.1] 자리 비움을 즉시 파일에도 반영(재시작해도 정확)
         const kindKo = resp.triggeredLeg === "second" ? "손절" : "익절";
         this.addJournal({
           kind: "info",
@@ -3906,6 +3968,7 @@ export class ToolEngine extends EventEmitter {
       } else if (resp.status === "CANCELED") {
         // 사람이 [주문현황]에서 직접 취소한 경우 — 손익 반영 없이 자리만 비운다.
         this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
+        this.saveAutoPositions();
         this.addJournal({ kind: "info", symbol: pos.symbol, summary: `자동매매 포지션의 조건주문이 취소돼 있어 감시를 멈춥니다: ${pos.symbol}` });
         this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
           status: "closed_manual",
@@ -3915,6 +3978,68 @@ export class ToolEngine extends EventEmitter {
       }
       // WAITING(그대로 감시 중)이면 할 일 없음.
     }
+
+    // [v0.30.1 긴급수정] "이 프로세스가 직접 감시 중이 아닌" watching 포지션을 재확인한다 — 앱
+    //   재시작 직후 복구된 포지션이 여기 해당한다(autoTradeActiveWatches에 없다는 게 그 신호).
+    const orphanedWatching = this.autoTradePositions.filter(
+      (p) => p.status === "watching" && !this.autoTradeActiveWatches.has(`${p.symbol}@${p.entry}@${p.enteredAtMs}`),
+    );
+    for (const pos of orphanedWatching) {
+      if (!pos.buyOrderId) {
+        // [v0.30.0 이전 기록처럼] 매수 주문번호가 없으면 체결 여부를 다시 물어볼 방법이 없다 —
+        //   최소한 한 번은 알려서 오너가 [주문현황]에서 직접 확인하게 한다(반복 알림 방지는
+        //   updateAutoTradeHistory의 note가 이미 같은 문구면 파일 쓰기만 반복될 뿐 큰 문제 없음).
+        continue;
+      }
+      let o: OrderResponse;
+      try {
+        o = await getOrder(pos.buyOrderId);
+      } catch {
+        continue; // 조회 실패는 다음 사이클에 재시도
+      }
+      if (o.status === "filled") {
+        const qty = o.filled_qty && o.filled_qty > 0 ? o.filled_qty : pos.quantity;
+        const result = await this.registerOcoForFilled(pos.symbol, qty, {
+          tpTrigger: pos.tp,
+          tpPrice: pos.tp,
+          slTrigger: pos.sl,
+          slPrice: roundPrice(pos.sl * 0.99), // 신규 진입 경로(autoTradeTick)와 동일 규칙
+          expireDate: this.autoTradeExpireDate(), // 재시작 시점 기준으로 새로 30일 계산
+          rationale: { technique: "split3", source: "auto", level: 1, entry: pos.entry, tp: pos.tp, sl: pos.sl, priceAtOrder: null },
+        });
+        const idx = this.autoTradePositions.findIndex((p) => p === pos);
+        if (result.status === "oco_registered") {
+          if (idx !== -1) this.autoTradePositions[idx] = { ...pos, status: "active", conditionalOrderId: result.conditionalOrderId };
+          this.saveAutoPositions();
+          this.addJournal({
+            kind: "info", symbol: pos.symbol,
+            summary: `🤖 재시작 후 감시 복구: ${pos.symbol}이 그 사이 체결된 걸 확인해 보호주문(익절/손절)을 지금 등록했습니다.`,
+          });
+          this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
+            status: "active", note: "재시작 후 재확인 — 매수 체결을 뒤늦게 확인해 보호주문 등록",
+          });
+        } else {
+          // OCO 등록 자체가 실패 — registerOcoForFilled가 이미 상세 사유를 저널에 남겼다.
+          this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
+            status: "oco_failed", exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
+            note: `재시작 후 재확인 — 체결은 됐지만 보호주문 등록 실패, 직접 확인 필요: ${result.status === "oco_failed" ? result.error : ""}`,
+          });
+        }
+      } else if (o.status === "cancelled" || o.status === "failed") {
+        this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
+        this.saveAutoPositions();
+        this.addJournal({
+          kind: "info", symbol: pos.symbol,
+          summary: `재시작 후 재확인: ${pos.symbol}의 매수 주문이 ${o.status === "cancelled" ? "취소" : "실패"} 상태로 확인돼 감시를 멈춥니다.`,
+        });
+        this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
+          status: "closed_manual",
+          exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
+          note: `재시작 후 재확인 — 매수 주문이 ${o.status === "cancelled" ? "취소" : "실패"}로 확인됨`,
+        });
+      }
+      // pending/partial/unknown이면 다음 사이클(최대 5분 뒤)에 다시 확인한다.
+    }
   }
 
   /** watchAndBracket이 끝난 뒤(체결→OCO등록/타임아웃/취소/실패) 자동매매 포지션 상태를 갱신한다. */
@@ -3922,12 +4047,17 @@ export class ToolEngine extends EventEmitter {
     const idx = this.autoTradePositions.findIndex((p) => p.symbol === symbol && p.entry === entry && p.status === "watching");
     if (idx === -1) return;
     const enteredAtMs = this.autoTradePositions[idx].enteredAtMs; // splice 전에 미리 꺼내 둔다(기록 갱신 키)
+    // [v0.30.1] 이 감시가 끝났으니(성공이든 실패든) "지금 이 프로세스가 직접 감시 중" 표시를 지운다
+    //   — reconcileAutoPositions의 재시작-복구 경로가 이미 끝난 걸 또 건드리지 않게(중복처리 방지).
+    this.autoTradeActiveWatches.delete(`${symbol}@${entry}@${enteredAtMs}`);
     if (res.status === "oco_registered") {
       this.autoTradePositions[idx] = { ...this.autoTradePositions[idx], status: "active", conditionalOrderId: res.conditionalOrderId };
+      this.saveAutoPositions();
       this.updateAutoTradeHistory(symbol, entry, enteredAtMs, { status: "active", note: "매수 체결 확인 — 익절/손절(조건주문) 등록됨" });
     } else {
       // 타임아웃/취소/실패/OCO등록실패 → 이 자리를 비운다(다음 사이클에 다시 채워질 수 있음).
       this.autoTradePositions.splice(idx, 1);
+      this.saveAutoPositions();
       const closedAt = DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss");
       if (res.status === "cancelled") {
         // [v0.29.0] watchAndBracket의 cancelOnTimeout 경로 — 장시간 미체결로 자동 취소됨.
@@ -4044,10 +4174,11 @@ export class ToolEngine extends EventEmitter {
           conditionalOrderId: null,
         };
         this.autoTradePositions.push(posDraft);
+        this.saveAutoPositions(); // [v0.30.1] 재시작해도 이 포지션을 잃어버리지 않게 즉시 저장
         this.addAutoTradeHistory(posDraft); // [v0.30.0] 자동매매기록 — 접수 즉시 한 줄 남김
 
         try {
-          const { watchPromise } = await this.placeBracketCore({
+          const { entryJournal, watchPromise } = await this.placeBracketCore({
             symbol: cand.symbol,
             price: level1.entry,
             quantity: qty,
@@ -4078,12 +4209,20 @@ export class ToolEngine extends EventEmitter {
             summary: `🤖 자동매매 진입 ${cand.symbol} $${level1.entry} × ${qty}주(삼분할 1분할) — 체결되면 자동으로 익절 $${level1.tp} / 손절 $${level1.sl}을 등록합니다.`,
           });
           if (watchPromise) {
+            // [v0.30.1] 매수 주문번호를 기록해 둔다 — 앱이 재시작돼 이 감시(watchPromise)가
+            //   끊겨도, 이 번호로 reconcileAutoPositions가 나중에 다시 체결 여부를 물어볼 수 있다.
+            const buyOrderId = (entryJournal.detail as { tossOrderId?: string } | undefined)?.tossOrderId ?? null;
+            posDraft.buyOrderId = buyOrderId;
+            this.saveAutoPositions();
+            const watchKey = `${cand.symbol}@${level1.entry}@${posDraft.enteredAtMs}`;
+            this.autoTradeActiveWatches.add(watchKey); // 이 프로세스가 지금 직접(빠른 폴링으로) 감시 중임을 표시
             watchPromise
               .then((res) => this.onAutoBracketResolved(cand.symbol, level1.entry, res))
               .catch(() => this.onAutoBracketResolved(cand.symbol, level1.entry, { status: "oco_failed", error: "확인 실패" }));
           } else {
             // 드라이런(실주문 잠금 상태) — 실제 체결이 없어 자리를 계속 점유할 이유가 없다.
             this.autoTradePositions = this.autoTradePositions.filter((p) => p !== posDraft);
+            this.saveAutoPositions();
             this.updateAutoTradeHistory(cand.symbol, level1.entry, posDraft.enteredAtMs, {
               status: "dryrun",
               exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
@@ -4092,6 +4231,7 @@ export class ToolEngine extends EventEmitter {
           }
         } catch (e) {
           this.autoTradePositions = this.autoTradePositions.filter((p) => p !== posDraft);
+          this.saveAutoPositions();
           const errMsg = String(e).replace(/^Error:\s*/, "");
           this.addJournal({ kind: "info", symbol: cand.symbol, summary: `🤖 자동매매 진입 실패 ${cand.symbol}: ${errMsg}` });
           this.updateAutoTradeHistory(cand.symbol, level1.entry, posDraft.enteredAtMs, {
