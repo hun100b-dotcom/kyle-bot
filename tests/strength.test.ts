@@ -14,7 +14,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { classifyTicks, computeStrength, strengthFromTicks, type Tick } from "../lib/strength";
+import { classifyTicks, computeStrength, strengthFromTicks, updateStrengthWindow, isWindowCapped, type Tick, type WindowBufferEntry } from "../lib/strength";
 import { ToolEngine, type StrengthState } from "../electron/tool-engine";
 
 // 시각 문자열 도우미(오름차순 보장용)
@@ -108,6 +108,69 @@ describe("strengthFromTicks — 분류+계산 묶음", () => {
     // buy=20, sell=10 → 200
     const { result } = strengthFromTicks(ticks);
     expect(result.strength).toBe(200);
+  });
+});
+
+describe("updateStrengthWindow — [v0.27.0] 틱개수창→시간창(최근 N분) 전환", () => {
+  const WINDOW_MS = 5 * 60_000; // 5분
+  const cls = (side: "buy" | "sell", volume: number, timestamp: string) => ({ price: 1, volume, timestamp, side }) as const;
+
+  it("(a) 창 안(5분 이내)의 신규 틱만 강도 계산에 반영된다", () => {
+    const now = Date.UTC(2026, 0, 1, 12, 0, 0); // 12:00:00
+    const t1 = new Date(now - 60_000).toISOString(); // 11:59:00 (1분 전, 창 안)
+    const r = updateStrengthWindow([], [cls("buy", 100, t1)], now, WINDOW_MS);
+    expect(r.nTicks).toBe(1);
+    expect(r.buyVol).toBe(100);
+    expect(r.sellVol).toBe(0);
+    expect(r.strength).toBeNull(); // 매도 0 → "매수 일방"
+  });
+
+  it("(b) 5분 넘은 과거 틱은 다음 폴링에서 버퍼에서 잘려나간다", () => {
+    const t0 = Date.UTC(2026, 0, 1, 12, 0, 0);
+    // 1차 폴링: t0 시각에 매도 100 하나를 버퍼에 넣는다.
+    const first = updateStrengthWindow([], [cls("sell", 100, new Date(t0).toISOString())], t0, WINDOW_MS);
+    expect(first.nTicks).toBe(1);
+    expect(first.sellVol).toBe(100);
+
+    // 2차 폴링: 5분 10초 후, 신규 틱 없이(빈 배열) 다시 계산하면 옛 틱이 창 밖으로 밀려난다.
+    const t1 = t0 + 5 * 60_000 + 10_000;
+    const second = updateStrengthWindow(first.buffer, [], t1, WINDOW_MS);
+    expect(second.nTicks).toBe(0);
+    expect(second.sellVol).toBe(0);
+    expect(second.buffer).toEqual([]);
+  });
+
+  it("버퍼는 여러 폴링에 걸쳐 창 안에서는 계속 누적된다(순수 롤링, 진짜 무한누적 아님)", () => {
+    const t0 = Date.UTC(2026, 0, 1, 12, 0, 0);
+    const first = updateStrengthWindow([], [cls("buy", 60, new Date(t0).toISOString())], t0, WINDOW_MS);
+    // 1분 뒤 폴링: 매도 40 추가 — 아직 5분 안 지났으니 첫 틱도 유지된다.
+    const t1 = t0 + 60_000;
+    const second = updateStrengthWindow(first.buffer, [cls("sell", 40, new Date(t1).toISOString())], t1, WINDOW_MS);
+    expect(second.nTicks).toBe(2);
+    expect(second.buyVol).toBe(60);
+    expect(second.sellVol).toBe(40);
+    expect(second.strength).toBe(150); // (60/40)*100
+  });
+
+  it("이번 폴링에서 새로 넣은 틱은 오래된 순으로 정렬되어 버퍼에 쌓인다(시각 뒤섞여 들어와도)", () => {
+    const t0 = Date.UTC(2026, 0, 1, 12, 0, 0);
+    const prev: WindowBufferEntry[] = [{ tsMs: t0 - 30_000, volume: 10, side: "buy" }];
+    // 신규 틱이 시간 역순으로 들어와도(정렬 안 된 상태) 결과 버퍼는 오름차순이어야 한다.
+    const unordered = [cls("sell", 5, new Date(t0).toISOString()), cls("buy", 3, new Date(t0 - 10_000).toISOString())];
+    const r = updateStrengthWindow(prev, unordered, t0, WINDOW_MS);
+    expect(r.buffer.map((b) => b.tsMs)).toEqual([t0 - 30_000, t0 - 10_000, t0]);
+  });
+});
+
+describe("isWindowCapped — (c) 서버 50건 상한 도달 시 '일부 놓쳤을 수 있음' 플래그", () => {
+  it("50건 받았고 전부 신규(직전 폴링과 하나도 안 겹침)면 상한도달로 본다", () => {
+    expect(isWindowCapped(50, 50)).toBe(true);
+  });
+  it("50건 받았어도 일부가 직전 폴링과 겹치면(신규가 50건보다 적으면) 상한도달 아님", () => {
+    expect(isWindowCapped(50, 12)).toBe(false);
+  });
+  it("애초에 50건 미만만 받았으면(유동성이 낮아 상한에 안 닿음) 상한도달 아님", () => {
+    expect(isWindowCapped(9, 9)).toBe(false);
   });
 });
 

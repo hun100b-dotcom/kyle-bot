@@ -25,7 +25,9 @@ export interface AutoTradeLimits {
   maxPositions: number;
   /** 최대손실 한도(시드 대비 %). 이 자동매매 실행 동안의 누적 실현손실이 이 비율을 넘으면 중단. */
   maxLossPct: number;
-  /** 시드 대비 총 투입 비율 한도(%). 종목 수만큼 나눠서 슬롯당 예산을 정한다. */
+  /** 종목 1개당 배정하는 시드 대비 투입 비율(%). 종목 수로 나누지 않는다 —
+   *  [오너 지시 2026-09-25] "시드의 30%는 한 종목당 투입 배분시드"이므로, 3종목 설정 시
+   *  최대 동시 투입 합계는 이 값 × maxPositions까지 커질 수 있다(예: 30% × 3종목 = 최대 90%). */
   maxInvestPct: number;
 }
 
@@ -84,16 +86,4 @@ export function canAutoEnter(input: AutoRiskInput): AutoRiskResult {
     return { allow: false, reason: "배정된 예산으로 1주도 살 수 없어 건너뜁니다." };
   }
   return { allow: true };
-}
-
-/**
- * perSlotInvestPct — "시드 대비 총 투입 비율 한도"를 종목 수만큼 균등 분배해 슬롯 하나의
- *   투입 비율(%)을 구한다. 예: 총 한도 30%, 최대 3종목 → 슬롯당 10%.
- *   [왜 균등 분배인가?] 오너가 더 세밀한 기준(예: 종목마다 비중 다르게)을 요청하기 전까지는
- *   "간단하고 확실하게"가 원칙이라, 가장 이해하기 쉬운 규칙을 쓴다.
- */
-export function perSlotInvestPct(maxInvestPct: number, maxPositions: number): number {
-  if (!Number.isFinite(maxInvestPct) || maxInvestPct <= 0) return 0;
-  if (!Number.isFinite(maxPositions) || maxPositions <= 0) return 0;
-  return maxInvestPct / maxPositions;
 }

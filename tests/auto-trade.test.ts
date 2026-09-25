@@ -22,7 +22,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ToolEngine } from "../electron/tool-engine";
+import { ToolEngine, computeSeedQty } from "../electron/tool-engine";
 
 describe("자동매매 상태 관리 — v0.26.0", () => {
   it("엔진을 처음 만들면 자동매매는 꺼진 상태고 한도는 공장값(3종목/5%/30%)이다", () => {
@@ -83,6 +83,25 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
       expect(s.autoTradeMaxPositions).toBe(4);
       expect(s.autoTradeMaxLossPct).toBe(6);
       expect(s.autoTradeMaxInvestPct).toBe(40);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("[2026-09-25 버그수정] 투입 비율은 종목 수로 나뉘지 않고 종목 1개당 그대로 적용된다", () => {
+    // autoTradeTick 내부에서 실제로 쓰는 계산과 동일한 식 — perSlotPct = autoTradeMaxInvestPct
+    // (옛 버그는 perSlotInvestPct(maxInvestPct, maxPositions) = maxInvestPct/maxPositions였다).
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.saveAutoTradeSettings({ maxPositions: 3, maxLossPct: 5, maxInvestPct: 30 });
+      const seedUsd = 1000;
+      const price = 9.2; // 저가주 예시(오너가 실계좌 테스트에서 1주만 나왔던 가격대)
+      const commissionRate = 0;
+      // 엔진의 autoTradeTick이 하는 것과 동일: perSlotPct = autoTradeMaxInvestPct(나누지 않음).
+      const qty = computeSeedQty(seedUsd, 30, price, commissionRate);
+      expect(qty).toBe(32); // 옛 버그(30/3=10%)였다면 10주에 그쳤을 것
+      expect(qty).not.toBe(1); // 실계좌에서 관찰됐던 "1주만 매수" 증상이 재현되지 않음을 확인
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

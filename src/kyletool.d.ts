@@ -245,7 +245,8 @@ interface StrengthSample {
   buyVol: number;
   sellVol: number;
   strength: number | null; // (매수/매도)×100. 매도 0이면 null("매수 일방")
-  nTicks: number;
+  nTicks: number; // [v0.27.0] "최근 5분 시간창" 안의 표본 수(틱개수창 아님)
+  windowCapped: boolean; // [v0.27.0] 서버 50건 상한에 걸려 일부 체결을 놓쳤을 가능성
   session: string;
 }
 /** [v0.5.0] 체결강도 상태(현재값 + 최근 시계열) */
@@ -286,6 +287,7 @@ interface StrengthState {
   symbol: string;
   running: boolean;
   intervalSec: number;
+  windowSec: number; // [v0.27.0] 체결강도 시간창 길이(초) — 지금은 고정 300(5분)
   latest: StrengthSample | null;
   samples: StrengthSample[];
   lastError: string | null;

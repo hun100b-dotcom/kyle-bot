@@ -2557,9 +2557,18 @@ ${msg}
                   <div className="str-meta">
                     <div>매수량 <b className="ok">{latest ? latest.buyVol.toLocaleString() : "—"}</b> · 매도량 <b className="danger">{latest ? latest.sellVol.toLocaleString() : "—"}</b></div>
                     <div className="hint">
-                      {latest ? `표본 ${latest.nTicks}틱 · ${latest.session} · ${latest.ts}` : "아직 표본이 없어요 — 집 PC에 연결돼 있으면 잠시 뒤 자동으로 채워집니다."}
+                      {/* [v0.27.0] "틱개수 창"이 아니라 "최근 5분" 시간창 기준임을 항상 숫자 옆에 병기 —
+                          종목마다 창의 실제 시간폭이 다르면 숫자를 비교할 수 없기 때문(체결강도 재설계 참고). */}
+                      {latest
+                        ? `최근 ${Math.round((strState?.windowSec ?? 300) / 60)}분 기준 (${latest.nTicks}건${latest.windowCapped ? "+, 상한도달" : ""}) · ${latest.session} · ${latest.ts}`
+                        : "아직 표본이 없어요 — 집 PC에 연결돼 있으면 잠시 뒤 자동으로 채워집니다."}
                       {latest?.price != null && ` · 체결가 ${usdKrw(latest.price, fx)}`}
                     </div>
+                    {latest?.windowCapped && (
+                      <div className="hint" style={{ color: "var(--warn, #f59e0b)" }}>
+                        ⚠️ 체결이 너무 잦아 서버 조회 상한(50건)에 걸렸어요 — 창 안 일부 체결을 놓쳤을 수 있어요(참고용 신뢰도 안내).
+                      </div>
+                    )}
                   </div>
                 </div>
               );
@@ -2589,7 +2598,7 @@ ${msg}
             {heldSyms.length > 0 && strState && strState.samples.length > 0 && (
               <table className="result-table str-table">
                 <thead>
-                  <tr><th>시각</th><th>체결강도</th><th>매수량</th><th>매도량</th><th>표본</th></tr>
+                  <tr><th>시각</th><th>체결강도</th><th>매수량</th><th>매도량</th><th>최근 5분 표본</th></tr>
                 </thead>
                 <tbody>
                   {[...strState.samples].slice(-12).reverse().map((s, i) => (
@@ -2600,7 +2609,7 @@ ${msg}
                       </td>
                       <td>{s.buyVol.toLocaleString()}</td>
                       <td>{s.sellVol.toLocaleString()}</td>
-                      <td>{s.nTicks}</td>
+                      <td>{s.nTicks}{s.windowCapped ? "+" : ""}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -3306,15 +3315,16 @@ ${msg}
                 <label>최대손실 한도 (시드 대비 %)
                   <input type="text" inputMode="decimal" value={autoForm.maxLossPct} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxLossPct: e.target.value })} placeholder="5" />
                 </label>
-                <label>최대 투입 비율 (시드 대비 %, 종목수만큼 균등 분배)
+                <label>최대 투입 비율 (시드 대비 %, 종목 1개당 배정 비율)
                   <input type="text" inputMode="decimal" value={autoForm.maxInvestPct} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxInvestPct: e.target.value })} placeholder="30" />
                 </label>
                 <button className="btn btn-start" onClick={saveAutoSettings}>한도 저장</button>
                 {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
               </div>
               <p className="hint small">
-                예) 최대 투입 30% · 3종목 → 종목당 예산은 시드의 10%. 손실 한도는 이번 자동매매 실행 동안 누적된
-                실현손익(달러) 기준으로, 시드 대비 %를 넘으면 자동매매가 스스로 멈춥니다.
+                예) 최대 투입 30% → 종목 1개당 예산은 시드의 30%(종목 수로 나누지 않습니다 — 3종목이면 최대
+                동시 투입 합계는 시드의 최대 90%까지 커질 수 있습니다). 손실 한도는 이번 자동매매 실행 동안
+                누적된 실현손익(달러) 기준으로, 시드 대비 %를 넘으면 자동매매가 스스로 멈춥니다.
               </p>
 
               {autoStatus && autoStatus.positions.length > 0 && (

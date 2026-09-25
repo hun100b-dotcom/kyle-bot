@@ -98,9 +98,18 @@ export function computeStrength(classified: ClassifiedTick[]): StrengthResult {
     if (t.side === "buy") buyVol += t.volume;
     else sellVol += t.volume;
   }
-  const strength = sellVol > 0 ? round1((buyVol / sellVol) * 100) : buyVol > 0 ? null : round1(100);
-  // (틱이 하나도 없으면 buy=sell=0 → 균형 100으로 둔다. 아래 nZeroLike는 신뢰도 참고용.)
-  return { buyVol, sellVol, strength, nTicks: classified.length, nZeroLike: 0 };
+  return { buyVol, sellVol, strength: strengthFromVolumes(buyVol, sellVol), nTicks: classified.length, nZeroLike: 0 };
+}
+
+/**
+ * strengthFromVolumes — 이미 매수/매도로 합산된 거래량으로 체결강도 숫자만 계산한다.
+ *   [왜 따로 뺐나?] computeStrength는 "분류된 틱 배열"을 받아야 하는데, 시간창(5분 슬라이딩
+ *   버퍼) 방식으로 바뀐 engine(sampleStrengthOnce)은 매 폴링마다 버퍼 전체를 다시 분류하지
+ *   않고 "이미 누적해 둔 buy/sell 거래량"만 갖고 있다 — 그 경우에도 계산 공식(로직 중복 없이)을
+ *   그대로 재사용하기 위한 순수 함수.
+ */
+export function strengthFromVolumes(buyVol: number, sellVol: number): number | null {
+  return sellVol > 0 ? round1((buyVol / sellVol) * 100) : buyVol > 0 ? null : round1(100);
 }
 
 /**
@@ -115,6 +124,79 @@ export function strengthFromTicks(
   const { classified, lastPrice, lastSide } = classifyTicks(ticks, prevPrice, prevSide);
   const result = computeStrength(classified);
   return { result, lastPrice, lastSide };
+}
+
+// =============================================================================
+// [v0.27.0] "최근 5분" 슬라이딩 시간창 — 틱개수(최근 50틱) 대신 시간(최근 N분)으로 강도를 낸다.
+// -----------------------------------------------------------------------------
+// [왜 시간창인가 — 정본은 docs/체결강도_분석_2026-07-24.html이 아니라 이번 오너 피드백]
+//   틱개수 창(최근 50틱)은 종목 유동성마다 실제로 커버하는 시간 폭이 천차만별이라(활발한
+//   종목은 몇 초, 뜸한 종목은 십수 분), 화면 숫자가 서로 다른 걸 재는 자가 된다. 시간창은
+//   모든 종목·모든 거래에서 "최근 N분"이라는 동일한 정의를 쓰므로 (1) 라이브 타이밍 판단에서
+//   오래된 반응이 "지금"처럼 보이는 문제가 줄고, (2) 매매분석에서 여러 거래의 진입시점 강도를
+//   모아 비교(승률 상관관계 등)해도 비교 가능한 통계가 된다.
+// =============================================================================
+
+/** 시간창 버퍼 한 항목 — 방향분류된 틱에서 "가격"은 필요없고(창 전체 강도만 계산) 시각·거래량·방향만 남긴다. */
+export interface WindowBufferEntry {
+  tsMs: number;
+  volume: number;
+  side: Side;
+}
+
+/** updateStrengthWindow의 결과. */
+export interface WindowUpdateResult {
+  /** 정리(prune)된 새 버퍼 — 시각 오름차순, "지금-windowMs"보다 오래된 항목은 제거됨. */
+  buffer: WindowBufferEntry[];
+  buyVol: number;
+  sellVol: number;
+  strength: number | null;
+  /** 지금 이 시간창 안에 있는 표본(체결) 수. */
+  nTicks: number;
+}
+
+/**
+ * updateStrengthWindow — 기존 시간창 버퍼에 "이번에 새로 분류된 틱"을 더하고, 창 밖으로
+ *   밀려난(오래된) 항목을 잘라낸 뒤, 창 전체로 체결강도를 다시 계산한다(순수 함수 — 엔진의
+ *   sampleStrengthOnce가 이 결과를 그대로 저장·표시한다).
+ *
+ *   @param prevBuffer   직전까지 쌓아 둔 시간창 버퍼(시각 오름차순이라고 가정).
+ *   @param newClassified 이번 폴링에서 새로 틱룰 분류된 틱들(신규분만 — 중복 제거는 호출부 책임).
+ *   @param nowMs        지금 시각(밀리초) — 이 값 기준으로 "windowMs 이전"을 잘라낸다.
+ *   @param windowMs     시간창 길이(밀리초). 예: 5분 = 5*60_000.
+ */
+export function updateStrengthWindow(
+  prevBuffer: WindowBufferEntry[],
+  newClassified: ClassifiedTick[],
+  nowMs: number,
+  windowMs: number,
+): WindowUpdateResult {
+  const merged: WindowBufferEntry[] = [...prevBuffer];
+  for (const c of newClassified) {
+    const tsMs = Date.parse(c.timestamp);
+    merged.push({ tsMs: Number.isFinite(tsMs) ? tsMs : nowMs, volume: c.volume, side: c.side });
+  }
+  const cutoffMs = nowMs - windowMs;
+  const buffer = merged.filter((b) => b.tsMs >= cutoffMs).sort((a, b) => a.tsMs - b.tsMs);
+
+  let buyVol = 0;
+  let sellVol = 0;
+  for (const b of buffer) {
+    if (b.side === "buy") buyVol += b.volume;
+    else sellVol += b.volume;
+  }
+  return { buffer, buyVol, sellVol, strength: strengthFromVolumes(buyVol, sellVol), nTicks: buffer.length };
+}
+
+/**
+ * isWindowCapped — 이번 폴링이 서버 조회 상한(기본 50건, 커서 없음)에 걸려 시간창 안의 일부
+ *   체결을 놓쳤을 가능성이 있는지 판정한다(engine의 sampleStrengthOnce에서 호출).
+ *   [판단 근거] 이번에 받아온 건수가 상한에 딱 닿았고(fetchedCount>=cap), 그마저 전부 신규라면
+ *   (freshCount>=fetchedCount, 즉 직전 폴링과 하나도 안 겹침) — 두 폴링 사이에 창을 벗어나
+ *   놓친 체결이 있었을 가능성이 크다(그 이상은 서버가 과거 이력을 안 줘서 확인 불가).
+ */
+export function isWindowCapped(fetchedCount: number, freshCount: number, cap = 50): boolean {
+  return fetchedCount >= cap && freshCount >= fetchedCount;
 }
 
 /** 소수 첫째 자리 반올림(체결강도는 150.0 처럼 한 자리면 충분). */
