@@ -689,6 +689,8 @@ export interface AutoTradeStatus {
   maxLossPct: number;
   maxInvestPct: number;
   lastCycleAt: string | null;
+  /** [v0.27.0] 이번 사이클에서 스캔한 결과(스크리닝 결과 탭이 그대로 보여줌) — 아직 한 번도 안 돌았으면 null. */
+  lastScan: ScreenRun | null;
 }
 
 // -----------------------------------------------------------------------------
@@ -781,6 +783,10 @@ export class ToolEngine extends EventEmitter {
   private autoTradePositions: AutoPosition[] = []; // 지금 자동매매로 감시·보유 중인 포지션
   private autoTradeUsedKeys = new Set<string>(); // `${symbol}@${entry}` — 같은 종목 같은 타점 재진입 방지
   private autoTradeLastCycleAt: string | null = null; // 마지막 사이클 시각(KST, 화면 표시용)
+  // [v0.27.0] 이번 사이클에서 스캔한 결과를 화면에 그대로 보여주기 위해 보관(엔진 안에서만 쓰이고
+  //   버려지던 것을 "스크리닝 결과" 탭에 노출한다 — 오너 피드백: 사유 문자열 같은 별도 추적은
+  //   불필요, lastScan만 있으면 화면(프론트)이 positions와 대조해 진입여부를 계산할 수 있다).
+  private autoTradeLastScan: ScreenRun | null = null;
   private static readonly AUTO_TRADE_INTERVAL_MS = 5 * 60_000; // "기본적으로 5분마다"(오너 지시)
 
   // [v0.8.1] 로그인 세션(Supabase Auth). refresh 토큰만 로컬 저장, access 는 메모리+필요시 갱신.
@@ -3520,6 +3526,7 @@ export class ToolEngine extends EventEmitter {
     this.autoTradeRealizedPnlUsd = 0;
     this.autoTradePositions = [];
     this.autoTradeUsedKeys = new Set();
+    this.autoTradeLastScan = null; // 지난번 실행의 스캔 결과가 화면에 남아 헷갈리지 않게 초기화
     this.addJournal({
       kind: "info",
       symbol: "-",
@@ -3557,6 +3564,7 @@ export class ToolEngine extends EventEmitter {
       maxLossPct: this.autoTradeMaxLossPct,
       maxInvestPct: this.autoTradeMaxInvestPct,
       lastCycleAt: this.autoTradeLastCycleAt,
+      lastScan: this.autoTradeLastScan,
     };
   }
 
@@ -3664,6 +3672,7 @@ export class ToolEngine extends EventEmitter {
       let run: ScreenRun;
       try {
         run = await this.scanScreener({}); // ③빈자리를 "현재 스크리닝으로 탐색된 다른 종목"으로 채움
+        this.autoTradeLastScan = run; // [v0.27.0] 버리지 않고 보관 → "스크리닝 결과" 탭이 그대로 보여줌
       } catch (e) {
         this.addJournal({ kind: "info", symbol: "-", summary: `🤖 자동매매: 이번 사이클 스크리닝 실패 — ${String(e).replace(/^Error:\s*/, "")}` });
         return;

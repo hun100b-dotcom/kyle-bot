@@ -133,6 +133,8 @@ interface AutoTradeStatus {
   maxLossPct: number;
   maxInvestPct: number;
   lastCycleAt: string | null;
+  /** [v0.27.0] 이번 사이클에서 스캔한 결과("스크리닝 결과" 탭이 그대로 보여줌). 아직 안 돌았으면 null. */
+  lastScan: ScreenRun | null;
 }
 
 /** [v0.3.0] orderCapacity(capacity) 응답 — 주문가능/보유 + 세션 시드 제안 */

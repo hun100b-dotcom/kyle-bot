@@ -19,22 +19,42 @@ import TodayReport from "./TodayReport"; // [v0.9.1] 오늘의 매매 리포트 
 import { useTabOrder } from "./useTabOrder"; // [v0.9.2] 탭 순서 드래그로 변경
 import { restoreInputsFromSaved } from "../lib/split-restore"; // [v0.9.3] 옛 기록도 계산기로 불러오기
 
-/** 앱이 가진 모든 탭(기본 순서). 순서는 사장님이 드래그로 바꿀 수 있다. */
+/** 앱이 가진 모든 탭(리프 단위 — 실제 콘텐츠를 가리키는 값. paneTab 렌더 가드는 전부 이 id 기준). */
 // [v0.12.0] 탭 통폐합 9→7: '매매분석'은 체결강도 탭 하위로, '기록(journal)'은 설정 탭 하위(고급/진단)로 이동.
-//   두 항목은 여전히 코드로 존재하되(TabId), 상단 탭 버튼에서만 빠진다(TOP_TABS).
-const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "trades", "orders", "journal", "settings"] as const;
+// [v0.27.0] 상단 탭을 2단(그룹→서브탭) 구조로 재편 — 죽은 'trades' id 제거, 자동매매 컨트롤을
+//   설정 탭에서 분리해 'autoControl'로, 자동매매 스크리닝 결과를 신설해 'autoScan'으로 뺐다.
+//   리프 id 자체는 그대로라 paneTab 렌더 가드·activateTab·goToTab·isTabVisible은 손댈 필요 없다.
+const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "autoControl", "autoScan", "orders", "journal", "settings"] as const;
 type TabId = (typeof ALL_TABS)[number];
-/** 상단에 실제로 보이는 탭(7개) — trades·journal 은 다른 탭에 흡수돼 상단에서 뺀다. */
-const TOP_TABS: TabId[] = ["calc", "report", "screener", "splits", "strength", "orders", "settings"];
+
+/** [v0.27.0] 상단 1단 — 매매방식·성격으로 묶은 그룹. 그룹 버튼을 누르면 하위 탭(2단)이 펼쳐진다. */
+type TopGroupId = "manual" | "auto" | "status" | "settings";
+const TOP_GROUP_LABEL: Record<TopGroupId, string> = { manual: "메뉴얼", auto: "🤖 자동매매", status: "현황", settings: "설정" };
+/** 그룹 순서(드래그로 바뀔 수 있는 기본값) + 그룹별 하위 탭 목록(이 순서로 서브탭이 뜬다). */
+const GROUP_CHILDREN: Record<TopGroupId, TabId[]> = {
+  manual: ["calc", "screener", "splits"],
+  auto: ["autoControl", "autoScan"],
+  status: ["report", "strength", "orders"],
+  settings: ["settings"],
+};
+const TOP_GROUPS: TopGroupId[] = ["manual", "auto", "status", "settings"];
+/** 리프 탭 → 소속 그룹(역방향 조회용. journal은 화면에 독립 탭으로 없지만 설정 하위 콘텐츠라 settings로 매핑). */
+const TAB_GROUP: Record<TabId, TopGroupId> = {
+  calc: "manual", screener: "manual", splits: "manual",
+  autoControl: "auto", autoScan: "auto",
+  report: "status", strength: "status", orders: "status",
+  journal: "settings", settings: "settings",
+};
 
 /** 탭에 보여 줄 이름 */
 const TAB_LABEL: Record<TabId, string> = {
   calc: "계산기",
   report: "📊 매매 리포트",
-  screener: "탐색",
+  screener: "스크리너",
   splits: "내 삼분할 기록",
   strength: "매매분석",
-  trades: "매매분석(구)",
+  autoControl: "자동매매 현황",
+  autoScan: "스크리닝 결과",
   orders: "주문 현황",
   journal: "기록",
   settings: "설정",
@@ -396,7 +416,8 @@ function App() {
   /** 웹앱(폰)인가? — 데스크톱에만 있는 '폰 연결' 기능 유무로 구분한다 */
   const isWebApp = !window.kyletool.phoneStart;
   // [v0.9.2] 탭 순서(드래그로 변경, 이 기기에 저장)
-  const { order: tabOrder, dragProps, isDragging } = useTabOrder(TOP_TABS); // [v0.12.0] 상단은 7개만(trades·journal 흡수)
+  // [v0.27.0] 이제 드래그로 순서를 바꾸는 건 '그룹'(4개) — 리프 탭은 그룹 안에서 고정 순서.
+  const { order: groupOrder, dragProps, isDragging } = useTabOrder(TOP_GROUPS);
   // [v0.9.1] 매매 리포트 + [v0.9.2] 기간 선택(오늘/1주일/1개월/날짜)
   const [report, setReport] = useState<DailyReport | null>(null);
   const [reportBusy, setReportBusy] = useState(false);
@@ -694,6 +715,8 @@ function App() {
     else if (t === "splits") refreshSplits();
     else if (t === "strength") { void loadHoldingsStrength(); void loadAnalysis(); }
     else if (t === "report") void loadReport();
+    // [v0.27.0] 자동매매 현황/스크리닝 결과 탭을 열 때 최신 상태를 바로 받아온다(20초 폴링을 기다리지 않게).
+    else if (t === "autoControl" || t === "autoScan") void window.kyletool.autoTradeStatus().then(setAutoStatus);
   };
   // [v0.15.0] 2컬럼이 켜지거나 좌/우 패널 탭이 바뀌면 그 탭들의 데이터를 로드한다(1컬럼과 동일한 지연 로딩).
   useEffect(() => {
@@ -1864,28 +1887,46 @@ ${msg}
         </div>
       </header>
 
-      {/* ===== 탭 (2컬럼일 땐 숨김 — 각 패널의 드롭다운으로 탭을 고른다) ===== */}
+      {/* ===== 탭 2단(2컬럼일 땐 숨김 — 각 패널의 드롭다운으로 탭을 고른다) =====
+          [v0.27.0] 1단: 매매방식·성격으로 묶은 그룹 4개(메뉴얼/자동매매/현황/설정) — 드래그로 순서 변경.
+          2단(서브탭): 지금 tab이 속한 그룹의 하위 탭이 2개 이상일 때만 뜬다(설정처럼 1개면 안 뜸). */}
       {!showTwoCol && (
+      <>
       <nav className="tabs">
-        {tabOrder.map((t) => (
+        {groupOrder.map((g) => (
           <button
-            key={t}
-            className={tab === t ? "tab active" : "tab"}
-            title="좌우로 끌면 탭 순서를 바꿀 수 있어요"
-            {...dragProps(t)}
+            key={g}
+            className={TAB_GROUP[tab] === g ? "tab active" : "tab"}
+            title="좌우로 끌면 그룹 순서를 바꿀 수 있어요"
+            {...dragProps(g)}
             onClick={() => {
               // 끌어서 순서를 바꾼 직후에는 탭 이동이 되지 않게 한다(의도치 않은 화면 전환 방지).
               if (isDragging()) return;
-              setTab(t);
-              if (t === "orders") refreshStatusTab();
-              if (t === "splits") refreshSplits(); // 탭 열 때 최신 목록 다시 읽기
-              if (t === "strength") { void loadHoldingsStrength(); void loadAnalysis(); } // [v0.23.0] 매매분석 탭: 보유 종목 체결강도 자동표시 + 진입/청산 분석
+              const children = GROUP_CHILDREN[g];
+              // 자식이 1개(설정)면 곧장 그리로, 2개 이상이면 이미 그 그룹 안에 있으면 유지(서브탭만 펼침),
+              // 아니면 첫 자식으로 이동(그룹 버튼을 눌렀는데 아무 하위 탭도 안 보이는 상태 방지).
+              if (children.length === 1) { setTab(children[0]); activateTab(children[0]); return; }
+              if (TAB_GROUP[tab] !== g) { setTab(children[0]); activateTab(children[0]); }
             }}
           >
-            {TAB_LABEL[t]}
+            {TOP_GROUP_LABEL[g]}
           </button>
         ))}
       </nav>
+      {GROUP_CHILDREN[TAB_GROUP[tab]].length > 1 && (
+        <nav className="subtabs">
+          {GROUP_CHILDREN[TAB_GROUP[tab]].map((t) => (
+            <button
+              key={t}
+              className={tab === t ? "subtab active" : "subtab"}
+              onClick={() => { setTab(t); activateTab(t); }}
+            >
+              {TAB_LABEL[t]}
+            </button>
+          ))}
+        </nav>
+      )}
+      </>
       )}
 
       {/* [v0.15.0] 본문: 1컬럼이면 현재 탭 1개, 2컬럼이면 좌/우 탭 2개를 나란히.
@@ -1901,7 +1942,13 @@ ${msg}
                   value={paneTab}
                   onChange={(e) => { const nt = e.target.value as TabId; (paneIdx === 0 ? setTabL : setTabR)(nt); /* 데이터 로드는 [tabL,tabR] effect가 처리(중복 호출 방지) */ }}
                 >
-                  {TOP_TABS.map((t) => <option key={t} value={t}>{TAB_LABEL[t]}</option>)}
+                  {/* [v0.27.0] 2컬럼은 그룹 개념 없이 9개 리프 탭 중 아무거나 바로 고르되, optgroup으로
+                      그룹별로 묶어 보여준다(1단 탭바와 같은 분류 — 찾기 쉽게). */}
+                  {TOP_GROUPS.map((g) => (
+                    <optgroup key={g} label={TOP_GROUP_LABEL[g]}>
+                      {GROUP_CHILDREN[g].map((t) => <option key={t} value={t}>{TAB_LABEL[t]}</option>)}
+                    </optgroup>
+                  ))}
                 </select>
               </div>
             )}
@@ -2701,6 +2748,177 @@ ${msg}
         </main>
       )}
 
+      {/* ===== 🤖 자동매매 현황 (v0.26.0 설정탭에서 이동, v0.27.0) — 오너가 명시적으로 켰을 때만,
+          이 앱이 켜져 있는 동안만 작동 ===== */}
+      {paneTab === "autoControl" && (
+        <main className="grid">
+          <section className="card wide">
+            <h2>🤖 자동매매</h2>
+            <p className="hint">
+              5분마다 스스로 탐색해 <b>합격 종목을 삼분할 '1분할' 타점으로 자동 매수</b>하고, 체결되면 익절·손절까지
+              자동으로 겁니다. <b>이 프로그램이 켜져 있는 동안만</b> 작동하고, 앱을 끄면 자동매매도 함께 멈춥니다
+              (이미 낸 주문·조건주문은 토스에 그대로 남아 있어요 — 토스 서버가 계속 감시합니다).
+              무엇을 스캔했는지는 <b>[🤖 자동매매 → 스크리닝 결과]</b> 탭에서 자세히 볼 수 있어요.
+            </p>
+
+            <div className="settings-block">
+              <div className="form-row">
+                <button
+                  className={`btn ${autoStatus?.enabled ? "btn-kill kill-on" : "btn-start"}`}
+                  disabled={autoBusy || status?.killSwitch}
+                  onClick={toggleAutoTrade}
+                >
+                  {autoStatus?.enabled ? "🔴 자동매매 중지" : "▶ 자동매매 시작"}
+                </button>
+                <span className="hint">
+                  상태: <b>{autoStatus?.enabled ? "켜짐" : "꺼짐"}</b>
+                  {autoStatus?.lastCycleAt && <> · 마지막 확인 {autoStatus.lastCycleAt}</>}
+                  {autoStatus && <> · 이번 실행 누적손익 <b className={autoStatus.realizedPnlUsd < 0 ? "pnl-down" : "pnl-up"}>${autoStatus.realizedPnlUsd.toFixed(2)}</b></>}
+                </span>
+              </div>
+              {status?.killSwitch && <p className="hint small danger">킬 스위치(🛑 비상 정지)가 켜져 있어 자동매매를 시작할 수 없습니다.</p>}
+
+              <h3>한도 설정 (전부 직접 수정 가능)</h3>
+              <div className="form-row">
+                <label>최대 보유 종목 수
+                  <input type="text" inputMode="numeric" value={autoForm.maxPositions} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxPositions: e.target.value })} placeholder="3" />
+                </label>
+                <label>최대손실 한도 (시드 대비 %)
+                  <input type="text" inputMode="decimal" value={autoForm.maxLossPct} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxLossPct: e.target.value })} placeholder="5" />
+                </label>
+                <label>최대 투입 비율 (시드 대비 %, 종목 1개당 배정 비율)
+                  <input type="text" inputMode="decimal" value={autoForm.maxInvestPct} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxInvestPct: e.target.value })} placeholder="30" />
+                </label>
+                <button className="btn btn-start" onClick={saveAutoSettings}>한도 저장</button>
+                {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
+              </div>
+              <p className="hint small">
+                예) 최대 투입 30% → 종목 1개당 예산은 시드의 30%(종목 수로 나누지 않습니다 — 3종목이면 최대
+                동시 투입 합계는 시드의 최대 90%까지 커질 수 있습니다). 손실 한도는 이번 자동매매 실행 동안
+                누적된 실현손익(달러) 기준으로, 시드 대비 %를 넘으면 자동매매가 스스로 멈춥니다.
+              </p>
+
+              {autoStatus && autoStatus.positions.length > 0 && (
+                <>
+                  <h3>지금 감시 중인 자동매매 포지션</h3>
+                  <table className="result-table">
+                    <thead>
+                      <tr><th>종목</th><th>진입가</th><th>익절가</th><th>손절가</th><th>수량</th><th>상태</th></tr>
+                    </thead>
+                    <tbody>
+                      {autoStatus.positions.map((p) => (
+                        <tr key={`${p.symbol}@${p.entry}`}>
+                          <td>{p.symbol}</td>
+                          <td>${p.entry}</td>
+                          <td>${p.tp}</td>
+                          <td>${p.sl}</td>
+                          <td>{p.quantity}</td>
+                          <td>{p.status === "active" ? "익절/손절 등록됨" : "매수 체결 대기중"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
+              )}
+            </div>
+          </section>
+        </main>
+      )}
+
+      {/* ===== 🤖 자동매매 → 스크리닝 결과 (v0.27.0 신규, 읽기 전용) =====
+          [오너 지시] 자동매매를 켜면 스크리너에서 스크리닝을 진행하고, 그 결과를 여기서 볼 수 있어야
+          한다 — 설정 탭에 컨트롤만 있고 "탐색→진입" 과정이 안 보이던 문제를 고친다. 이 화면은
+          모니터링 전용(분리형 스크리너 — 수동 스캔은 [메뉴얼 → 스크리너] 탭에 따로 있음): "계산기로
+          불러오기" 같은 수동 액션은 없다(자동매매가 이미 판단을 마쳤으므로). */}
+      {paneTab === "autoScan" && (
+        <main className="grid">
+          <section className="card wide">
+            <h2>스크리닝 결과 <span className="hint">(자동매매가 5분마다 훑은 종목 — 읽기 전용)</span></h2>
+            <p className="hint">
+              자동매매가 켜져 있는 동안 5분마다 자동으로 스캔한 결과예요. 여기 뜨는 후보 중 <b>진입 조건(빈
+              자리·중복 방지·안전 한도)</b>을 통과한 것만 실제로 매수됩니다 — 아래 배지로 진입 여부를 바로
+              확인할 수 있어요.
+            </p>
+
+            {!autoStatus?.lastScan && (
+              <div className="result-empty hint">
+                {autoStatus?.enabled
+                  ? "자동매매가 켜져 있어요 — 첫 스캔 결과가 곧 여기 뜹니다(최대 5분)."
+                  : "자동매매를 시작하면 여기에 스캔 결과가 자동으로 뜹니다. [🤖 자동매매 → 자동매매 현황]에서 켤 수 있어요."}
+              </div>
+            )}
+
+            {autoStatus?.lastScan && (() => {
+              const run = autoStatus.lastScan;
+              const activeSymbols = new Set(autoStatus.positions.map((p) => p.symbol));
+              const cand = run.results.filter((r) => r.status === "confirmed" || r.status === "watch");
+              return (
+                <>
+                  <p className="hint">
+                    {run.scannedAt} 스캔 · {run.total}종목(${run.priceMin}~${run.priceMax}) 중 <b className="ok">후보 {cand.length}개</b>
+                    {run.excludedEtf > 0 && <span> · ETF/레버리지 {run.excludedEtf}개 제외</span>}
+                  </p>
+                  {cand.length === 0 ? (
+                    <div className="result-empty hint">이번 스캔에서는 조건에 맞는 후보가 없었어요(다음 사이클에 다시 훑습니다).</div>
+                  ) : (
+                    <table className="result-table screen-table">
+                      <thead>
+                        <tr><th>근거</th><th>상태</th><th>종목</th><th>현재가</th><th>자동매매</th></tr>
+                      </thead>
+                      <tbody>
+                        {cand.map((r) => {
+                          const open = openEvid.has(r.symbol);
+                          const chartOpen = openChart.has(r.symbol);
+                          const entered = activeSymbols.has(r.symbol);
+                          return (
+                            <Fragment key={r.symbol}>
+                              <tr className="screen-row">
+                                <td>
+                                  <button className="mini btn-evid" onClick={() => toggleEvid(r.symbol)} title="판정 근거 펼치기/접기">
+                                    {open ? "▾ 근거" : "▸ 근거"}
+                                  </button>
+                                  {" "}
+                                  <button className="mini btn-evid" onClick={() => toggleChart(r.symbol)} title="이 종목의 캔들차트 불러오기">
+                                    {chartOpen ? "▾ 📈" : "▸ 📈"}
+                                  </button>
+                                </td>
+                                <td>{r.status === "confirmed" ? "🔴 확정" : "🟡 관찰"}</td>
+                                <td><b>{r.symbol}</b></td>
+                                <td>{r.price != null ? usdKrw(r.price, fx) : "—"}</td>
+                                <td>{entered ? <span className="ok">✅ 진입됨</span> : <span className="hint">— 미진입</span>}</td>
+                              </tr>
+                              {open && r.evidence && (
+                                <tr className="evid-row">
+                                  <td colSpan={5}><ScreenEvidenceView ev={r.evidence} price={r.price} /></td>
+                                </tr>
+                              )}
+                              {chartOpen && (
+                                <tr className="evid-row">
+                                  <td colSpan={5}>
+                                    {chartBusy.has(r.symbol) && <p className="hint">차트 불러오는 중…</p>}
+                                    {chartErr[r.symbol] && (
+                                      <p className="hint">
+                                        ⚠️ 차트를 못 불러왔습니다: {chartErr[r.symbol]}
+                                        {" "}<button className="mini" onClick={() => void loadScreenChart(r.symbol)}>다시 시도</button>
+                                      </p>
+                                    )}
+                                    {chartCache[r.symbol] && <ScreenCandleChart chart={chartCache[r.symbol]} />}
+                                  </td>
+                                </tr>
+                              )}
+                            </Fragment>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  )}
+                </>
+              );
+            })()}
+          </section>
+        </main>
+      )}
+
       {/* ===== ② 주문 현황 (v0.3.3 토스 스타일) ===== */}
       {paneTab === "orders" && (
         <main className="statusmain">
@@ -3278,77 +3496,6 @@ ${msg}
                 />
                 <b>주문 확인 팝업 건너뛰기</b> — 버튼을 누르면 <b>바로 전송</b>(실수 주문 위험 ↑, 권장 안 함)
               </label>
-            </div>
-          </section>
-
-          {/* ── ⑤.5 [v0.26.0] 자동매매 — 오너가 명시적으로 켰을 때만, 이 앱이 켜져 있는 동안만 작동 ── */}
-          <section className="card wide">
-            <h2>🤖 자동매매</h2>
-            <p className="hint">
-              5분마다 스스로 탐색해 <b>합격 종목을 삼분할 '1분할' 타점으로 자동 매수</b>하고, 체결되면 익절·손절까지
-              자동으로 겁니다. <b>이 프로그램이 켜져 있는 동안만</b> 작동하고, 앱을 끄면 자동매매도 함께 멈춥니다
-              (이미 낸 주문·조건주문은 토스에 그대로 남아 있어요 — 토스 서버가 계속 감시합니다).
-            </p>
-
-            <div className="settings-block">
-              <div className="form-row">
-                <button
-                  className={`btn ${autoStatus?.enabled ? "btn-kill kill-on" : "btn-start"}`}
-                  disabled={autoBusy || status?.killSwitch}
-                  onClick={toggleAutoTrade}
-                >
-                  {autoStatus?.enabled ? "🔴 자동매매 중지" : "▶ 자동매매 시작"}
-                </button>
-                <span className="hint">
-                  상태: <b>{autoStatus?.enabled ? "켜짐" : "꺼짐"}</b>
-                  {autoStatus?.lastCycleAt && <> · 마지막 확인 {autoStatus.lastCycleAt}</>}
-                  {autoStatus && <> · 이번 실행 누적손익 <b className={autoStatus.realizedPnlUsd < 0 ? "pnl-down" : "pnl-up"}>${autoStatus.realizedPnlUsd.toFixed(2)}</b></>}
-                </span>
-              </div>
-              {status?.killSwitch && <p className="hint small danger">킬 스위치(🛑 비상 정지)가 켜져 있어 자동매매를 시작할 수 없습니다.</p>}
-
-              <h3>한도 설정 (전부 직접 수정 가능)</h3>
-              <div className="form-row">
-                <label>최대 보유 종목 수
-                  <input type="text" inputMode="numeric" value={autoForm.maxPositions} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxPositions: e.target.value })} placeholder="3" />
-                </label>
-                <label>최대손실 한도 (시드 대비 %)
-                  <input type="text" inputMode="decimal" value={autoForm.maxLossPct} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxLossPct: e.target.value })} placeholder="5" />
-                </label>
-                <label>최대 투입 비율 (시드 대비 %, 종목 1개당 배정 비율)
-                  <input type="text" inputMode="decimal" value={autoForm.maxInvestPct} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxInvestPct: e.target.value })} placeholder="30" />
-                </label>
-                <button className="btn btn-start" onClick={saveAutoSettings}>한도 저장</button>
-                {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
-              </div>
-              <p className="hint small">
-                예) 최대 투입 30% → 종목 1개당 예산은 시드의 30%(종목 수로 나누지 않습니다 — 3종목이면 최대
-                동시 투입 합계는 시드의 최대 90%까지 커질 수 있습니다). 손실 한도는 이번 자동매매 실행 동안
-                누적된 실현손익(달러) 기준으로, 시드 대비 %를 넘으면 자동매매가 스스로 멈춥니다.
-              </p>
-
-              {autoStatus && autoStatus.positions.length > 0 && (
-                <>
-                  <h3>지금 감시 중인 자동매매 포지션</h3>
-                  <table className="result-table">
-                    <thead>
-                      <tr><th>종목</th><th>진입가</th><th>익절가</th><th>손절가</th><th>수량</th><th>상태</th></tr>
-                    </thead>
-                    <tbody>
-                      {autoStatus.positions.map((p) => (
-                        <tr key={`${p.symbol}@${p.entry}`}>
-                          <td>{p.symbol}</td>
-                          <td>${p.entry}</td>
-                          <td>${p.tp}</td>
-                          <td>${p.sl}</td>
-                          <td>{p.quantity}</td>
-                          <td>{p.status === "active" ? "익절/손절 등록됨" : "매수 체결 대기중"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </>
-              )}
             </div>
           </section>
 
