@@ -126,6 +126,71 @@ describe("매수+익절+손절 동시 주문(브라켓) — v0.25.0", () => {
     }
   }, 10_000);
 
+  it("[v0.30.0] rationale.source — 안 보내면 manual로 저장되고, 명시적으로 auto를 보내면 그대로 저장된다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-brk-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      // getRationales()는 최신이 앞에 오게 뒤집어 준다 — 매번 "가장 최근 entry"를 보면 되므로
+      // 같은 심볼(AAPL, 즉시체결 보장된 가격)을 두 번 써도 순서로 구분할 수 있다.
+      const oco1 = waitForJournal(eng, (e) => e.kind === "oco");
+      await eng.placeBracket({
+        symbol: "AAPL", price: 2.1, quantity: 1, tpTrigger: 2.5, tpPrice: 2.5,
+        slTrigger: 1.8, slPrice: 1.79, expireDate: "2026-12-30", watchMinutes: 1, pollMs: 20,
+        // rationale 자체를 안 보냄 — 수동 버튼 대부분이 이렇게 부른다.
+      });
+      await oco1;
+      const manualEntry = eng.getRationales().find((r) => r.kind === "entry");
+      expect(manualEntry?.source).toBe("manual"); // [오너 요청] 자동매매가 아니면 식별 안 되게(수동 = manual)
+
+      const oco2 = waitForJournal(eng, (e) => e.kind === "oco");
+      await eng.placeBracket({
+        symbol: "AAPL", price: 2.1, quantity: 1, tpTrigger: 2.5, tpPrice: 2.5,
+        slTrigger: 1.8, slPrice: 1.79, expireDate: "2026-12-30", watchMinutes: 1, pollMs: 20,
+        rationale: { technique: "split3", source: "auto", level: 1 }, // 자동매매가 부르는 방식
+      });
+      await oco2;
+      const autoEntry = eng.getRationales().find((r) => r.kind === "entry");
+      expect(autoEntry?.source).toBe("auto");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it("[v0.29.0] cancelOnTimeout이 켜져 있으면(자동매매 경로) 시간초과 시 미체결 주문을 자동 취소한다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-brk-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      // 절대 체결 안 되는 가격 + cancelOnTimeout:true → 타임아웃 때 "자동 취소했습니다" 안내가 떠야 한다
+      // (기존 "직접 [주문현황]에서 확인해 주세요" 안내가 아니라 — 오너 요청 "장시간 미체결 대책").
+      const cancelledPromise = waitForJournal(eng, (e) => e.kind === "info" && e.summary.includes("자동 취소했습니다"));
+      const entry = await eng.placeBracket({
+        symbol: "AAPL",
+        price: 1.0,
+        quantity: 1,
+        tpTrigger: 2.5,
+        tpPrice: 2.5,
+        slTrigger: 1.8,
+        slPrice: 1.79,
+        expireDate: "2026-12-30",
+        watchMinutes: 0.002, // 테스트 전용 초단시간 감시(약 120ms)
+        pollMs: 20,
+        cancelOnTimeout: true,
+      });
+      const info = await cancelledPromise;
+      expect(info.summary).toContain("다음 자동매매 사이클");
+
+      const journal = eng.getJournal();
+      expect(journal.some((j) => j.kind === "oco")).toBe(false);
+
+      // 실제로 주문이 취소돼 더 이상 미체결(OPEN) 목록에 남아있지 않아야 한다(자리가 정말 비워짐).
+      const tossOrderId = (entry.detail as { tossOrderId: string }).tossOrderId;
+      const open = await eng.openOrders();
+      expect(open.some((o) => o.tossOrderId === tossOrderId)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
   it("감시 중 진입 주문이 취소되면 OCO 등록 없이 감시를 멈춘다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-brk-"));
     try {

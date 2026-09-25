@@ -272,6 +272,8 @@ function registerIpc(e: ToolEngine): void {
   // [v0.28.0] 자동매매용 스크리너 조건 저장 + 수동 새로고침(5분 기다리지 않고 지금 훑기)
   ipcMain.handle("tool:autoTrade:scanSettings", (_ev, input) => e.saveAutoScanSettings(input));
   ipcMain.handle("tool:autoTrade:scanNow", () => e.autoScanNow());
+  // [v0.30.0] 자동매매기록 — 자동매매가 낸 매매의 전체 생애주기 로그(읽기 전용)
+  ipcMain.handle("tool:autoTrade:history", () => e.getAutoTradeHistory());
   // [v0.2.10] 매매 근거 목록 / 보유 포지션(손익 포함) — 둘 다 읽기 전용이라 안전하다.
   ipcMain.handle("tool:rationales", () => e.getRationales());
   // [v0.4.0] 삼분할 타점 기록(여러 종목 동시 운용) — 저장/조회/삭제/진입완료 체크

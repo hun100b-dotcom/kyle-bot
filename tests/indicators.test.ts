@@ -13,7 +13,7 @@ import { DateTime } from "luxon";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, isBearishDoji, scanSessionPattern, WICK_MIN_RATIO, type Candle } from "../lib/indicators";
+import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, isBearishDoji, scanSessionPattern, WICK_MIN_RATIO, DOJI_MAX_AGE_MINUTES, type Candle } from "../lib/indicators";
 import { getSessionStart, getSession } from "../lib/session";
 import { ToolEngine } from "../electron/tool-engine";
 
@@ -134,7 +134,7 @@ describe("세션 패턴(scanSessionPattern)", () => {
   });
 });
 
-describe("[v0.25.0] 도지 신선도(20분 초과 시 불합격)", () => {
+describe(`[v0.25.0/v0.29.0] 도지 신선도(기본 ${DOJI_MAX_AGE_MINUTES}분 초과 시 불합격)`, () => {
   // c0=최고점(0분), c1=도지(1분), c2=도지 다음 음봉(2분) — 위 describe와 동일한 시나리오.
   const highC = c(0, 98, 100, 97, 99);
   const dojiC = c(1 * MIN, 99, 99.5, 98.5, 98.9); // 도지 시각 = 1분
@@ -146,16 +146,16 @@ describe("[v0.25.0] 도지 신선도(20분 초과 시 불합격)", () => {
     expect(r.tooOld).toBe(false);
   });
 
-  it("도지 시각이 지금으로부터 20분 이내면 그대로 confirmed", () => {
-    // 도지=1분, now=1분+19분=20분 → 경과 19분 < 20분
-    const r = scanSessionPattern([highC, dojiC, bearC], 0, 0.3, undefined, 20 * MIN + 1 * MIN);
+  it(`도지 시각이 지금으로부터 ${DOJI_MAX_AGE_MINUTES}분 이내면 그대로 confirmed`, () => {
+    // 도지=1분, now=1분+(기준-1)분 → 경과가 기준보다 1분 적음
+    const r = scanSessionPattern([highC, dojiC, bearC], 0, 0.3, undefined, 1 * MIN + (DOJI_MAX_AGE_MINUTES - 1) * MIN);
     expect(r.tooOld).toBe(false);
     expect(r.status).toBe("confirmed");
   });
 
-  it("도지 시각이 지금으로부터 20분 넘게 지났으면 confirmed였어도 강제로 none", () => {
-    // 도지=1분, now=1분+21분=22분 → 경과 21분 > 20분
-    const now = 1 * MIN + 21 * MIN;
+  it(`도지 시각이 지금으로부터 ${DOJI_MAX_AGE_MINUTES}분 넘게 지났으면 confirmed였어도 강제로 none`, () => {
+    // 도지=1분, now=1분+(기준+1)분 → 경과가 기준보다 1분 많음
+    const now = 1 * MIN + (DOJI_MAX_AGE_MINUTES + 1) * MIN;
     const r = scanSessionPattern([highC, dojiC, bearC], 0, 0.3, WICK_MIN_RATIO, now);
     expect(r.tooOld).toBe(true);
     expect(r.status).toBe("none");
@@ -164,7 +164,7 @@ describe("[v0.25.0] 도지 신선도(20분 초과 시 불합격)", () => {
   });
 
   it("watch 상태(다음 봉 아직 없음)여도 도지가 오래됐으면 none", () => {
-    const now = 1 * MIN + 21 * MIN;
+    const now = 1 * MIN + (DOJI_MAX_AGE_MINUTES + 1) * MIN;
     const r = scanSessionPattern([highC, dojiC], 0, 0.3, WICK_MIN_RATIO, now);
     expect(r.tooOld).toBe(true);
     expect(r.status).toBe("none");

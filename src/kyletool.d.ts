@@ -140,6 +140,25 @@ interface AutoTradeStatus {
   lastCycleAt: string | null;
   /** [v0.27.0] 이번 사이클에서 스캔한 결과("스크리닝 결과" 탭이 그대로 보여줌). 아직 안 돌았으면 null. */
   lastScan: ScreenRun | null;
+  /** [v0.29.0] 다음 사이클 예정 시각(ms, epoch) — "다음 스캔까지 N분 N초" 카운트다운용. 꺼져 있으면 null. */
+  nextCycleAtMs: number | null;
+}
+
+/** [v0.30.0] 자동매매기록 한 줄 — "자동매매기록" 탭이 그대로 보여준다. */
+interface AutoTradeHistoryEntry {
+  id: string;
+  symbol: string;
+  entry: number;
+  tp: number;
+  sl: number;
+  quantity: number;
+  enteredAt: string;
+  status: "watching" | "active" | "closed_win" | "closed_loss" | "closed_manual" | "cancelled" | "oco_failed" | "dryrun";
+  exitedAt: string | null;
+  exitPrice: number | null;
+  pnlUsd: number | null;
+  pnlPct: number | null;
+  note: string;
 }
 
 /** [v0.3.0] orderCapacity(capacity) 응답 — 주문가능/보유 + 세션 시드 제안 */
@@ -179,6 +198,8 @@ interface CondOrder {
 /** [v0.2.10] 주문 시점에 함께 보내는 "매매기법 근거" (왜 이 가격에 샀는가) */
 interface RationaleInput {
   technique: Technique;
+  /** [v0.30.0] 자동매매가 낸 주문인지 사람이 버튼을 눌렀는지. 안 보내면 "manual"로 간주. */
+  source?: "auto" | "manual";
   level?: number; //     삼분할 몇 분할 타점인지
   baseClose?: number; // [삼분할] 전봉 종가
   ema200?: number; //    [삼분할] EMA200
@@ -601,6 +622,8 @@ interface KyletoolBridge {
   // [v0.28.0] 자동매매용 스크리너 조건 저장 + 수동 새로고침(5분 기다리지 않고 지금 훑기)
   saveAutoScanSettings(input: { count?: number; priceMin?: number; priceMax?: number; bodyRatio?: number }): Promise<ToolSettings>;
   autoScanNow(): Promise<AutoTradeStatus>;
+  /** [v0.30.0] 자동매매기록 — 자동매매가 낸 매매의 전체 생애주기 로그(읽기 전용, 최신순). */
+  autoTradeHistory(): Promise<AutoTradeHistoryEntry[]>;
   rationales(): Promise<TradeRationale[]>;
   // [v0.4.0] 삼분할 타점 기록(여러 종목 동시 운용)
   splitsList(): Promise<SavedSplit[]>;

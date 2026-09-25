@@ -24,7 +24,9 @@ import { restoreInputsFromSaved } from "../lib/split-restore"; // [v0.9.3] 옛 �
 // [v0.27.0] 상단 탭을 2단(그룹→서브탭) 구조로 재편 — 죽은 'trades' id 제거, 자동매매 컨트롤을
 //   설정 탭에서 분리해 'autoControl'로, 자동매매 스크리닝 결과를 신설해 'autoScan'으로 뺐다.
 //   리프 id 자체는 그대로라 paneTab 렌더 가드·activateTab·goToTab·isTabVisible은 손댈 필요 없다.
-const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "autoControl", "autoScan", "orders", "journal", "settings"] as const;
+// [v0.30.0] 자동매매 그룹에 "자동매매기록"(autoHistory) 서브탭 신설 — 오너 요청: 자동매매가 낸
+//   매매의 전체 이력(영속 로그)을 따로 볼 수 있게.
+const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "autoControl", "autoScan", "autoHistory", "orders", "journal", "settings"] as const;
 type TabId = (typeof ALL_TABS)[number];
 
 /** [v0.27.0] 상단 1단 — 매매방식·성격으로 묶은 그룹. 그룹 버튼을 누르면 하위 탭(2단)이 펼쳐진다. */
@@ -33,7 +35,7 @@ const TOP_GROUP_LABEL: Record<TopGroupId, string> = { manual: "메뉴얼", auto:
 /** 그룹 순서(드래그로 바뀔 수 있는 기본값) + 그룹별 하위 탭 목록(이 순서로 서브탭이 뜬다). */
 const GROUP_CHILDREN: Record<TopGroupId, TabId[]> = {
   manual: ["calc", "screener", "splits"],
-  auto: ["autoControl", "autoScan"],
+  auto: ["autoControl", "autoScan", "autoHistory"],
   status: ["report", "strength", "orders"],
   settings: ["settings"],
 };
@@ -41,7 +43,7 @@ const TOP_GROUPS: TopGroupId[] = ["manual", "auto", "status", "settings"];
 /** 리프 탭 → 소속 그룹(역방향 조회용. journal은 화면에 독립 탭으로 없지만 설정 하위 콘텐츠라 settings로 매핑). */
 const TAB_GROUP: Record<TabId, TopGroupId> = {
   calc: "manual", screener: "manual", splits: "manual",
-  autoControl: "auto", autoScan: "auto",
+  autoControl: "auto", autoScan: "auto", autoHistory: "auto",
   report: "status", strength: "status", orders: "status",
   journal: "settings", settings: "settings",
 };
@@ -55,6 +57,7 @@ const TAB_LABEL: Record<TabId, string> = {
   strength: "매매분석",
   autoControl: "자동매매 현황",
   autoScan: "자동 스크리너",
+  autoHistory: "자동매매기록",
   orders: "주문 현황",
   journal: "기록",
   settings: "설정",
@@ -73,6 +76,18 @@ const TECH_LABEL: Record<string, string> = {
   orderbook: "호가창 (매수벽+1틱)",
   candle: "캔들 (시가−3틱)",
   manual: "수동 입력",
+};
+
+/** [v0.30.0] "자동매매기록" 탭의 상태 배지 라벨. */
+const AUTO_HIST_STATUS_LABEL: Record<AutoTradeHistoryEntry["status"], string> = {
+  watching: "매수 체결 대기중",
+  active: "보유 중(익절·손절 등록됨)",
+  closed_win: "🟢 익절 종료",
+  closed_loss: "🔴 손절 종료",
+  closed_manual: "취소/실패",
+  cancelled: "⏱ 장시간 미체결 자동취소",
+  oco_failed: "⚠️ 보호주문 등록 실패",
+  dryrun: "🧪 드라이런(연습)",
 };
 
 /**
@@ -107,6 +122,8 @@ function toNum(v: string): number | null {
  */
 function rationaleLine(r: TradeRationale): string {
   const p: string[] = [];
+  // [v0.30.0] 오너 요청 — 자동매매로 낸 주문은 근거 설명에도 식별 표시를 남긴다.
+  if (r.source === "auto") p.push("🤖 자동매매");
   const t = TECH_LABEL[r.technique] ?? r.technique;
   p.push(r.technique === "split3" && r.level ? `${t.replace(/\s*\(.*\)/, "")} ${r.level}분할` : t.replace(/\s*\(.*\)/, ""));
   if (r.baseClose != null) p.push(`전봉종가 $${r.baseClose}`);
@@ -152,6 +169,13 @@ function fmtHoldMin(min: number): string {
   if (h < 24) return m ? `${h}시간 ${m}분` : `${h}시간`;
   const d = Math.floor(h / 24), rh = h % 24;
   return rh ? `${d}일 ${rh}시간` : `${d}일`;
+}
+
+/** [v0.29.0] 밀리초 → "N분 N초"(자동 스크리너 탭의 "다음 스캔까지" 카운트다운 표시용). */
+function formatCountdown(ms: number): string {
+  const totalSec = Math.max(0, Math.round(ms / 1000));
+  const m = Math.floor(totalSec / 60), s = totalSec % 60;
+  return `${m}분 ${String(s).padStart(2, "0")}초`;
 }
 
 /** [v0.3.3] 달러 금액 + (원화) 병기 — holdings가 준 실제 원화값이 있으면 그걸 쓰고, 없으면 fx로 환산 안 함. */
@@ -715,6 +739,25 @@ function App() {
   const [autoScanBodyRatio, setAutoScanBodyRatio] = useState(0.3);
   const [autoScanBusy, setAutoScanBusy] = useState(false); // "지금 새로고침" 버튼 눌러 응답 기다리는 중
   const [autoScanProg, setAutoScanProg] = useState<ScreenProgress | null>(null); // 스캔 진행률(수동/자동 사이클 공용)
+  // [v0.29.0] "다음 스캔까지 N분 N초" 카운트다운 표시용 — 1초마다 흘러가는 현재시각(서버 재조회 없이
+  //   화면에서만 초 단위로 줄어들게 보여준다. 실제 값(nextCycleAtMs)은 20초 폴링으로 서버와 맞춘다).
+  const [nowTick, setNowTick] = useState(Date.now());
+  // [v0.30.0] 오너 요청 — "어떤 탭에서든" 자동매매 보유종목을 로테이션으로 보여주는 상단 고정
+  //   위젯용. 수익률·평가손익은 보유(holdingsView)에서 가져온다(자동매매 엔진 자체는 진입가만
+  //   알고 실시간 시세·손익 계산은 안 하므로 — 이미 있는 API를 재사용, 새 엔진 로직 불필요).
+  const [autoPosHold, setAutoPosHold] = useState<HoldingRow[]>([]);
+  const [tickerIdx, setTickerIdx] = useState(0);
+  // [v0.30.0] "자동매매기록" 탭 — 자동매매가 낸 매매 전체 이력(영속 로그).
+  const [autoHistory, setAutoHistory] = useState<AutoTradeHistoryEntry[]>([]);
+  const [autoHistoryBusy, setAutoHistoryBusy] = useState(false);
+  async function loadAutoHistory() {
+    setAutoHistoryBusy(true);
+    try {
+      setAutoHistory(await window.kyletool.autoTradeHistory());
+    } finally {
+      setAutoHistoryBusy(false);
+    }
+  }
   // [v0.2.8] 조건주문 편집 창 — 계산값에 묶이지 않고 오너가 직접 고칠 수 있게 한다.
   const [ocoEdit, setOcoEdit] = useState<{ tp: string; sl: string; qty: string } | null>(null);
   // [v0.2.9] 토스에서 받아온 수량 정보(주문가능 최대 / 보유 / 매도가능). 표시용 참고값.
@@ -840,6 +883,8 @@ function App() {
     else if (t === "report") void loadReport();
     // [v0.27.0] 자동매매 현황/스크리닝 결과 탭을 열 때 최신 상태를 바로 받아온다(20초 폴링을 기다리지 않게).
     else if (t === "autoControl" || t === "autoScan") void window.kyletool.autoTradeStatus().then(setAutoStatus);
+    // [v0.30.0] 자동매매기록 탭을 열 때 최신 기록을 불러온다.
+    else if (t === "autoHistory") void loadAutoHistory();
   };
   // [v0.15.0] 2컬럼이 켜지거나 좌/우 패널 탭이 바뀌면 그 탭들의 데이터를 로드한다(1컬럼과 동일한 지연 로딩).
   useEffect(() => {
@@ -876,6 +921,32 @@ function App() {
     const id = setInterval(() => void window.kyletool.autoTradeStatus().then(setAutoStatus), 20_000);
     return () => clearInterval(id);
   }, [autoStatus?.enabled]);
+
+  // [v0.29.0] 자동 스크리너 탭의 카운트다운용 — 자동매매가 켜져 있는 동안만 1초마다 화면을 흘려보낸다
+  //   (오너 요청: "몇 분 후 스크리닝 진행 표시 필요" — 언제 다음 스캔이 도는지 눈에 보이게).
+  useEffect(() => {
+    if (!autoStatus?.enabled) return;
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [autoStatus?.enabled]);
+
+  // [v0.30.0] 상단 고정 로테이션 위젯용 보유현황 — 자동매매 포지션이 하나라도 있는 동안만,
+  //   탭과 무관하게(이 효과는 어떤 tab이 보이는지 전혀 안 본다) 15초마다 손익을 새로 가져온다.
+  useEffect(() => {
+    if (!autoStatus?.enabled || autoStatus.positions.length === 0) { setAutoPosHold([]); return; }
+    const poll = () => void window.kyletool.holdingsView().then((hv) => setAutoPosHold(hv.items)).catch(() => {});
+    poll();
+    const id = setInterval(poll, 15_000);
+    return () => clearInterval(id);
+  }, [autoStatus?.enabled, autoStatus?.positions.length]);
+
+  // [v0.30.0] 로테이션 전환 — 포지션이 2개 이상일 때만 3.5초마다 다음 종목으로 넘긴다.
+  useEffect(() => {
+    const n = autoStatus?.positions.length ?? 0;
+    if (n <= 1) { setTickerIdx(0); return; }
+    const id = setInterval(() => setTickerIdx((i) => (i + 1) % n), 3500);
+    return () => clearInterval(id);
+  }, [autoStatus?.positions.length]);
 
   // [v0.3.0] 자동 계산 — 재료·익절/손절%·기법이 바뀌면 0.35초 뒤 조용히 다시 계산한다.
   //   [계산하기] 버튼을 없앤 대신 이 효과가 대신한다. 타이핑 중 잠깐 멈추면 결과가 갱신된다.
@@ -1572,6 +1643,34 @@ ${msg}
     return { passed, reasons };
   }
 
+  /**
+   * [v0.29.0] 스캔 전체에서 "none"(탈락) 종목들이 어느 조건에서 가장 많이 걸리는지 집계.
+   *   [오너 지시 2026-09-25] "스크리닝 후보가 너무 안 나오는데 기준 재점검해보자 — 너무 엄격하면
+   *   아예 거래가 없어". 감(느낌)으로 기준을 바꾸는 대신, 실제 스캔에서 어느 게이트가 병목인지
+   *   숫자로 보여줘야 다음에 무엇을 완화할지 근거 있게 판단할 수 있다. missReasons()와 같은 판정
+   *   순서(하드게이트는 각각 독립 집계, 패턴은 우선순위대로 하나만)를 그대로 재사용한다.
+   */
+  function tallyMissReasons(results: ScreenResult[]): { label: string; count: number }[] {
+    const counts: Record<string, number> = {};
+    const bump = (k: string) => { counts[k] = (counts[k] ?? 0) + 1; };
+    for (const r of results) {
+      if (r.status !== "none") continue;
+      if (!r.priceInBand) bump("가격대 벗어남");
+      if (!r.aboveEma) bump("EMA200 아래");
+      if (!r.aboveCloud) bump("이치모쿠 구름 아래/속");
+      if (r.evidence) {
+        const f = r.evidence.filters;
+        if (!f.firstDoji) bump("최고점 이후 음봉 도지 없음");
+        else if (!f.bothWicks) bump("도지 꼬리 한쪽만(망치형 등)");
+        else if (!f.recentDoji) bump("도지 발생 20분 초과(신선도 불합격)");
+        else if (!f.nextBearish) bump("도지 다음 봉이 음봉 아님(패턴 미완성)");
+      }
+    }
+    return Object.entries(counts)
+      .map(([label, count]) => ({ label, count }))
+      .sort((a, b) => b.count - a.count);
+  }
+
   // -------------------------------------------------------------------------
   // [v0.7.0] 체결강도 자동 기록(매매 연동) — 목록/요약/수동청산/삭제
   // -------------------------------------------------------------------------
@@ -2003,6 +2102,37 @@ ${msg}
             </span>
           )}
         </div>
+
+        {/* [v0.30.0] 오너 요청 — "어떤 탭에서든" 자동매매 보유종목의 수익률·금액·현황을 로테이션으로.
+            상단바는 paneTab과 무관하게(탭 콘텐츠 밖에서) 항상 렌더되므로 여기 두면 저절로 고정된다. */}
+        {autoStatus?.enabled && autoStatus.positions.length > 0 && (() => {
+          const positions = autoStatus.positions;
+          const idx = tickerIdx % positions.length;
+          const p = positions[idx];
+          const hRow = autoPosHold.find((h) => h.symbol === p.symbol);
+          const statusLabel = p.status === "active" ? "익절/손절 등록됨" : "매수 체결 대기중";
+          return (
+            <div className="topbar-ticker" title="자동매매로 보유 중인 종목을 돌아가며 보여줍니다(수익률·평가손익·상태)">
+              <span className="tk-bot">🤖</span>
+              <span className="tk-sym" key={p.symbol}>{p.symbol}</span>
+              {hRow?.pnlRate != null ? (
+                <span className={`tk-pnl ${pnlClass(hRow.pnlRate)}`}>
+                  {hRow.pnlRate >= 0 ? "+" : ""}{hRow.pnlRate.toFixed(2)}%
+                  {hRow.pnlAmt != null && <span className="tk-amt"> ({hRow.pnlAmt >= 0 ? "+" : ""}${hRow.pnlAmt.toFixed(2)})</span>}
+                </span>
+              ) : (
+                <span className="tk-pnl hint">—</span>
+              )}
+              <span className="tk-status">{statusLabel}</span>
+              {positions.length > 1 && (
+                <span className="tk-dots">
+                  {positions.map((_, i) => <i key={i} className={i === idx ? "on" : ""} />)}
+                </span>
+              )}
+            </div>
+          );
+        })()}
+
         <div className="controls">
           {/* [v0.15.0] 2컬럼 토글 — 넓은 화면에서만 보인다. 켜면 좌/우 두 탭을 나란히 본다. */}
           {isWide && (
@@ -2462,6 +2592,22 @@ ${msg}
                     {screenRun.excludedEtf > 0 && <span> · ETF/레버리지 {screenRun.excludedEtf}개 제외</span>}
                     {insufficient > 0 && <span> · 데이터 부족 {insufficient}개 제외</span>}
                   </p>
+                  {/* [v0.29.0] 탈락 사유 통계 — 어느 조건이 병목인지 숫자로(오너 요청: "기준 재점검") */}
+                  {(() => {
+                    const stats = tallyMissReasons(screenRun.results);
+                    if (stats.length === 0) return null;
+                    return (
+                      <p className="hint miss-stats">
+                        탈락 사유 통계(참고용 — 후보가 안 나올 때 어느 조건을 완화할지 판단 근거):{" "}
+                        {stats.map((s, i) => (
+                          <Fragment key={s.label}>
+                            {i > 0 && " · "}
+                            {s.label} <b>{s.count}</b>
+                          </Fragment>
+                        ))}
+                      </p>
+                    );
+                  })()}
                   {cand.length === 0 ? (
                     <div className="result-empty hint">조건에 맞는 후보가 없어요. (위 '몸통 크기 상한'을 조금 올리거나, 장이 열린 시간에 다시 눌러 보세요.)</div>
                   ) : (
@@ -2997,6 +3143,14 @@ ${msg}
               <b>[지금 새로고침]</b>으로 바로 적용됩니다.
             </p>
 
+            {/* [v0.29.0] 다음 스캔까지 카운트다운 — 오너 요청("몇분 후 스크리닝 진행 표시 필요") */}
+            {autoStatus?.enabled && autoStatus.nextCycleAtMs != null && (
+              <p className="hint">
+                ⏱ 다음 자동 스캔까지 <b>{formatCountdown(Math.max(0, autoStatus.nextCycleAtMs - nowTick))}</b>
+                {" "}(자동매매가 켜져 있는 동안 5분마다 자동으로 돕니다 — [🔄 지금 새로고침]으로 바로 당겨올 수도 있어요)
+              </p>
+            )}
+
             {/* [v0.28.0] 자동매매용 스크리너 조건 — 메뉴얼 스크리너와 같은 4항목, 도지 몸통비율만 80%까지 확대 */}
             <div className="screen-controls">
               <label className="str-field" style={{ flex: 1, maxWidth: 360 }}>
@@ -3061,6 +3215,22 @@ ${msg}
                     {run.scannedAt} 스캔 · {run.total}종목(${run.priceMin}~${run.priceMax}) 중 <b className="ok">후보 {cand.length}개</b>
                     {run.excludedEtf > 0 && <span> · ETF/레버리지 {run.excludedEtf}개 제외</span>}
                   </p>
+                  {/* [v0.29.0] 탈락 사유 통계 — 어느 조건이 병목인지 숫자로(오너 요청: "기준 재점검") */}
+                  {(() => {
+                    const stats = tallyMissReasons(run.results);
+                    if (stats.length === 0) return null;
+                    return (
+                      <p className="hint miss-stats">
+                        탈락 사유 통계(참고용):{" "}
+                        {stats.map((s, i) => (
+                          <Fragment key={s.label}>
+                            {i > 0 && " · "}
+                            {s.label} <b>{s.count}</b>
+                          </Fragment>
+                        ))}
+                      </p>
+                    );
+                  })()}
                   {cand.length === 0 ? (
                     <div className="result-empty hint">이번 스캔에서는 조건에 맞는 후보가 없었어요(다음 사이클에 다시 훑습니다).</div>
                   ) : (
@@ -3115,6 +3285,87 @@ ${msg}
                       </tbody>
                     </table>
                   )}
+                </>
+              );
+            })()}
+          </section>
+        </main>
+      )}
+
+      {/* ===== 🤖 자동매매 → 자동매매기록 (v0.30.0 신규) =====
+          [오너 지시 2026-09-26] "자동매매 탭에 자동매매기록 하위탭도 추가" — 자동매매가 낸 매매를
+          전부 영속 로그로 남겨(엔진의 autoTradeHistory), 진입→체결확인→청산/취소까지 전체
+          생애주기를 한 화면에서 복기할 수 있게 한다(엔진 재시작해도, 포지션이 이미 청산돼
+          '지금 감시 중' 목록에서 사라져도 여기 기록은 남는다). */}
+      {paneTab === "autoHistory" && (
+        <main className="grid">
+          <section className="card wide">
+            <h2>자동매매기록 <span className="hint">(자동매매가 낸 매매의 전체 이력 — 청산돼도 여기 남습니다)</span></h2>
+            <p className="hint">
+              진입 접수부터 체결 확인·익절/손절·취소까지, 자동매매가 스스로 낸 매매를 전부 기록해
+              둡니다. 위 [자동매매 현황]의 "지금 감시 중" 목록은 끝나면 지워지지만, 여기는 지워지지
+              않아요 — 나중에 복기·통계에 쓰세요.
+            </p>
+            <div className="form-row">
+              <button className="mini" disabled={autoHistoryBusy} onClick={() => void loadAutoHistory()}>
+                {autoHistoryBusy ? "불러오는 중…" : "↻ 새로고침"}
+              </button>
+            </div>
+
+            {autoHistory.length === 0 ? (
+              <div className="result-empty hint">
+                {autoHistoryBusy ? "불러오는 중…" : "아직 기록이 없어요. 자동매매를 한 번이라도 켜서 진입이 나가면 여기 쌓입니다."}
+              </div>
+            ) : (() => {
+              const closed = autoHistory.filter((h) => h.status === "closed_win" || h.status === "closed_loss");
+              const wins = closed.filter((h) => h.status === "closed_win");
+              const winRate = closed.length ? (wins.length / closed.length) * 100 : null;
+              const realizedUsd = closed.reduce((sum, h) => sum + (h.pnlUsd ?? 0), 0);
+              const cancelled = autoHistory.filter((h) => h.status === "cancelled" || h.status === "closed_manual" || h.status === "oco_failed").length;
+              const dryrun = autoHistory.filter((h) => h.status === "dryrun").length;
+              return (
+                <>
+                  {/* [v0.30.0] 요약 통계 — 표를 하나하나 세지 않아도 한눈에. */}
+                  <div className="sum-cards">
+                    <div className="sum-card">
+                      <span className="sum-k">총 기록</span>
+                      <b className="sum-v">{autoHistory.length}건</b>
+                      <span className="sum-sub">청산완료 {closed.length} · 취소/실패 {cancelled}{dryrun > 0 ? ` · 드라이런 ${dryrun}` : ""}</span>
+                    </div>
+                    <div className="sum-card">
+                      <span className="sum-k">승률(청산완료 기준)</span>
+                      <b className="sum-v">{winRate != null ? `${winRate.toFixed(1)}%` : "—"}</b>
+                      <span className="sum-sub">익절 {wins.length} · 손절 {closed.length - wins.length}</span>
+                    </div>
+                    <div className={`sum-card ${pnlClass(closed.length ? realizedUsd : null)}`}>
+                      <span className="sum-k">누적 실현손익</span>
+                      <b className="sum-v">{closed.length ? `${realizedUsd >= 0 ? "+" : ""}$${realizedUsd.toFixed(2)}` : "—"}</b>
+                      <span className="sum-sub">익절/손절로 청산된 것만 합산(취소·드라이런 제외)</span>
+                    </div>
+                  </div>
+
+                  <table className="result-table screen-table">
+                    <thead>
+                      <tr><th>진입시각</th><th>종목</th><th>진입가→청산가</th><th>수량</th><th>손익</th><th>상태</th><th>사유</th></tr>
+                    </thead>
+                    <tbody>
+                      {autoHistory.map((h) => (
+                        <tr key={h.id} className="screen-row">
+                          <td>{h.enteredAt}{h.exitedAt && <><br /><span className="hint">→ {h.exitedAt}</span></>}</td>
+                          <td><b>{h.symbol}</b></td>
+                          <td>${h.entry}{h.exitPrice != null && ` → $${h.exitPrice}`}</td>
+                          <td>{h.quantity}</td>
+                          <td className={pnlClass(h.pnlUsd)}>
+                            {h.pnlUsd != null
+                              ? `${h.pnlUsd >= 0 ? "+" : ""}$${h.pnlUsd.toFixed(2)}${h.pnlPct != null ? ` (${h.pnlPct >= 0 ? "+" : ""}${h.pnlPct.toFixed(2)}%)` : ""}`
+                              : "—"}
+                          </td>
+                          <td>{AUTO_HIST_STATUS_LABEL[h.status]}</td>
+                          <td className="hint">{h.note}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </>
               );
             })()}
@@ -3179,7 +3430,11 @@ ${msg}
                       {/* 1행: 종목명 ... 손익%(큼) */}
                       <div className="hcard-r1">
                         <div className="hcard-name min0">
-                          <b className="hcard-title">{h.name ?? h.symbol}</b>
+                          <b className="hcard-title">
+                            {h.name ?? h.symbol}
+                            {/* [v0.30.0] 오너 요청 — 자동매매로 진입된 종목은 접힌 상태에서도 바로 식별되게 */}
+                            {h.rationale?.source === "auto" && <span className="badge-auto" title="자동매매가 낸 주문입니다">🤖 자동</span>}
+                          </b>
                           <span className="hcard-sub">{h.symbol} · {h.marketCountry === "KR" ? "🇰🇷" : "🇺🇸"}</span>
                         </div>
                         <b className={`hcard-pct ${pnlClass(h.pnlRate)}`}>

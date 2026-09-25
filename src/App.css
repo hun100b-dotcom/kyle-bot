@@ -123,6 +123,21 @@ body {
 
 .controls { display: flex; gap: 8px; }
 
+/* [v0.30.0] 오너 요청 — 자동매매 보유종목 로테이션 위젯(상단바에 고정, 모든 탭에서 보임) */
+.topbar-ticker {
+  display: flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 999px;
+  border: 1px solid var(--blue); background: color-mix(in srgb, var(--blue) 12%, transparent);
+  font-size: 13px; white-space: nowrap; overflow: hidden; max-width: 320px; flex: 0 1 auto;
+}
+.tk-bot { font-size: 14px; }
+.tk-sym { font-weight: 800; }
+.tk-pnl { font-weight: 700; }
+.tk-amt { font-weight: 500; opacity: 0.85; }
+.tk-status { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+.tk-dots { display: flex; gap: 4px; margin-left: 2px; }
+.tk-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--border); display: block; }
+.tk-dots i.on { background: var(--blue); }
+
 /* ===== 버튼 ===== */
 .btn {
   padding: 10px 16px; border-radius: var(--r-sm); border: 1px solid var(--border);
@@ -497,6 +512,11 @@ ul.hint { padding-left: 18px; }
 .hcard-r1 { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-width: 0; }
 .hcard-name { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .hcard-title { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
+/* [v0.30.0] 자동매매로 낸 주문 식별 배지 — 오너 요청("자동매매로 진행된 모든 매매는 표기") */
+.badge-auto {
+  display: inline-block; margin-left: 6px; font-size: 10px; padding: 1px 6px; border-radius: 8px;
+  color: var(--blue); border: 1px solid var(--blue); vertical-align: middle; font-weight: 700;
+}
 .hcard-sub { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .hcard-pct { font-size: 22px; font-weight: 800; white-space: nowrap; }         /* 제일 큼 */
 .hcard-r2 { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: 4px; }
@@ -901,6 +921,8 @@ html, body { overflow-x: hidden; }
   }
   .topbar .brand::-webkit-scrollbar { display: none; }
   .topbar .badge { font-size: 10px; flex: 0 0 auto; white-space: nowrap; }
+  /* [v0.30.0] 좁은 화면에서는 브랜드/컨트롤 줄과 겹치지 않게 로테이션 위젯을 자기 줄로 내린다. */
+  .topbar-ticker { flex: 1 1 100%; max-width: none; order: 3; }
   .controls { flex: 0 0 auto; margin-left: auto; }
   .controls { gap: 6px; }
   .controls .btn { min-height: 40px; }

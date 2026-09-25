@@ -19,7 +19,7 @@
 // =============================================================================
 
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ToolEngine, computeSeedQty } from "../electron/tool-engine";
@@ -210,4 +210,75 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 15_000);
+
+  it("[v0.29.0] nextCycleAtMs는 꺼져 있으면 null, 켜면 약 5분 뒤 시각이 채워지고, 끄면 다시 null이 된다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      // [오너 요청 2026-09-25] "자동 스크리너 탭에 몇분 후 스크리닝 진행 표시 필요" — 화면의
+      //   카운트다운이 읽는 필드가 상태 전환에 맞춰 정확히 채워지고/비워지는지 확인한다.
+      expect(eng.getAutoTradeStatus().nextCycleAtMs).toBeNull();
+
+      const before = Date.now();
+      eng.startAutoTrade(); // fire-and-forget 백그라운드 스캔 — 상태 전환만 본다(위 테스트와 동일 패턴)
+      const s = eng.getAutoTradeStatus();
+      expect(s.nextCycleAtMs).not.toBeNull();
+      // AUTO_TRADE_INTERVAL_MS(5분) 근방이어야 한다(오차 여유를 넉넉히 둠 — 테스트 실행 지연 대비).
+      expect(s.nextCycleAtMs as number).toBeGreaterThan(before + 4 * 60_000);
+      expect(s.nextCycleAtMs as number).toBeLessThan(before + 6 * 60_000);
+
+      const stopped = eng.stopAutoTrade();
+      expect(stopped.nextCycleAtMs).toBeNull();
+      await new Promise((r) => setTimeout(r, 50)); // 백그라운드 스캔 잔여분 안전하게 흘려보냄
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it("[v0.30.0] 자동매매기록(getAutoTradeHistory)은 처음엔 빈 배열이다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      expect(eng.getAutoTradeHistory()).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("[v0.30.0] 자동매매기록은 파일에 저장돼 재시작(새 엔진)해도 남아있고, 최신순으로 돌려준다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      // [왜 엔진 API로 안 쓰고 파일을 직접 쓰나?] addAutoTradeHistory/updateAutoTradeHistory는
+      //   autoTradeTick 안에서만 호출되는 사설(private) 메서드이고, 실제 진입까지 가려면 목
+      //   서버의 스크리닝 결과가 "합격"이어야 하는데 이 파일 맨 위 설명대로 그건 비결정적이라
+      //   테스트로 못 쓴다. 대신 persistAutoTradeHistory가 실제로 만드는 것과 같은 모양의
+      //   파일을 직접 써서, "저장된 걸 다시 읽어오는" 절반(load 쪽)을 확실히 검증한다.
+      const historyPath = join(dir, "kylebot-auto-history.json");
+      const seed = [
+        {
+          id: "AAPL@2.1@1000", symbol: "AAPL", entry: 2.1, tp: 2.5, sl: 1.8, quantity: 10,
+          enteredAt: "09-26 10:00:00", status: "closed_win", exitedAt: "09-26 10:20:00",
+          exitPrice: 2.5, pnlUsd: 4, pnlPct: 19.05, note: "익절 발동으로 자동 청산",
+        },
+        {
+          id: "TSLA@5.0@2000", symbol: "TSLA", entry: 5.0, tp: 5.5, sl: 4.5, quantity: 5,
+          enteredAt: "09-26 10:05:00", status: "watching", exitedAt: null,
+          exitPrice: null, pnlUsd: null, pnlPct: null, note: "매수 주문 접수 — 체결 대기 중",
+        },
+      ];
+      writeFileSync(historyPath, JSON.stringify(seed, null, 2), "utf8");
+
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const hist = eng.getAutoTradeHistory();
+      expect(hist.length).toBe(2);
+      // getAutoTradeHistory는 최신(배열 뒤쪽)이 위로 오게 뒤집어 준다 — TSLA가 나중에 추가됐으므로 먼저 나와야 함.
+      expect(hist[0].symbol).toBe("TSLA");
+      expect(hist[0].status).toBe("watching");
+      expect(hist[1].symbol).toBe("AAPL");
+      expect(hist[1].status).toBe("closed_win");
+      expect(hist[1].pnlUsd).toBe(4);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

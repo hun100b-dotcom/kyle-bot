@@ -144,6 +144,13 @@ export interface TradeRationale {
   priceAtOrder: number | null; // 주문 낼 때의 현재가
   tossOrderId?: string; //   토스가 준 주문번호(성공 시)
   dryRun: boolean; //        모의 전송이었는지(실제로 안 나간 주문)
+  /** [v0.30.0] 이 주문을 누가 냈는지 — 자동매매인지 사람이 버튼을 눌렀는지.
+   *  [오너 지시 2026-09-26] "자동매매로 진행된 모든 매매는 식별할 수 있도록 표기". technique은
+   *  "어떤 계산식을 썼는지"만 구분해(자동매매도 수동 삼분할과 똑같이 technique:"split3"을 씀) 이
+   *  용도로는 못 쓰므로 별도 필드로 둔다. optional인 이유: 기존 수동 버튼 호출부 전부를 건드리지
+   *  않기 위해(technique와 달리 명시적으로 안 보내도 되게) — saveRationale이 "manual"로 기본
+   *  채운다. 자동매매(autoTradeTick)만 명시적으로 "auto"를 보낸다. */
+  source?: "auto" | "manual";
 }
 
 /** 화면이 주문할 때 함께 보내는 근거 입력(위 타입에서 자동 채워지는 항목 제외) */
@@ -646,6 +653,11 @@ export interface BracketSpec {
   watchMinutes?: number; // 체결 감시 최대 시간(기본 15분)
   pollMs?: number; // [테스트 전용] 체결 확인 주기(기본 5000ms) — 자동 테스트를 빠르게 돌리기 위한 값
   rationale?: RationaleInput;
+  /** [v0.29.0] 체결 감시가 시간초과로 끝날 때 미체결(또는 부분체결 잔량) 주문을 자동으로 취소할지.
+   *  기본 false(수동 버튼 경로는 기존처럼 "체결되면 직접 조건주문을 걸어주세요"로 남겨 둠 —
+   *  사람이 지켜보다 판단할 여지를 유지). 자동매매 경로만 true로 켜서, 장시간 안 팔리는 주문이
+   *  다음 스크리닝 후보에게 자리를 내주도록 한다(오너 요청 2026-09-25: "장시간 미체결 대책"). */
+  cancelOnTimeout?: boolean;
 }
 
 /**
@@ -691,6 +703,35 @@ export interface AutoTradeStatus {
   lastCycleAt: string | null;
   /** [v0.27.0] 이번 사이클에서 스캔한 결과(스크리닝 결과 탭이 그대로 보여줌) — 아직 한 번도 안 돌았으면 null. */
   lastScan: ScreenRun | null;
+  /** [v0.29.0] 다음 사이클 예정 시각(ms, epoch) — 화면의 "다음 스캔까지 N분 N초" 카운트다운용.
+   *  자동매매가 꺼져 있거나 아직 한 번도 안 돌았으면 null. */
+  nextCycleAtMs: number | null;
+}
+
+/**
+ * [v0.30.0] 자동매매 전체 생애주기 기록 — "자동매매기록" 탭용.
+ *   [왜 따로 두나? autoTradePositions/getAutoTradeStatus로는 안 되나?]
+ *   `autoTradePositions`는 "지금 감시 중인 것"만 담는 살아있는 목록이라 청산되는 순간
+ *   배열에서 지워진다(reconcileAutoPositions). 저널(journal)에도 글로 남지만, 저널은 최근
+ *   100건짜리 전체 활동 로그라 킬스위치·설정저장 같은 무관한 항목에 금방 밀려난다. 그래서
+ *   "자동매매가 낸 매매만" 모아 별도 파일에 영구 보관하고, 진입→(체결확인/취소)→(청산) 상태
+ *   전이마다 같은 레코드를 id로 찾아 갱신한다(새 레코드를 또 만들지 않음).
+ */
+export interface AutoTradeHistoryEntry {
+  /** `${symbol}@${entry}@${enteredAtMs}` — 같은 사이클에 같은 값으로 재진입해도 겹치지 않는다. */
+  id: string;
+  symbol: string;
+  entry: number;
+  tp: number;
+  sl: number;
+  quantity: number;
+  enteredAt: string; // KST 문자열(진입 접수 시각)
+  status: "watching" | "active" | "closed_win" | "closed_loss" | "closed_manual" | "cancelled" | "oco_failed" | "dryrun";
+  exitedAt: string | null; // KST 문자열(청산/취소 확정 시각)
+  exitPrice: number | null;
+  pnlUsd: number | null;
+  pnlPct: number | null;
+  note: string; // 사람이 읽을 한 줄 요약(결과 사유)
 }
 
 // -----------------------------------------------------------------------------
@@ -794,6 +835,13 @@ export class ToolEngine extends EventEmitter {
   //   불필요, lastScan만 있으면 화면(프론트)이 positions와 대조해 진입여부를 계산할 수 있다).
   private autoTradeLastScan: ScreenRun | null = null;
   private static readonly AUTO_TRADE_INTERVAL_MS = 5 * 60_000; // "기본적으로 5분마다"(오너 지시)
+  /** [v0.29.0] 자동매매 진입 주문의 체결 감시 최대 시간 — 오너 요청(2026-09-25) "장시간 미체결 대책":
+   *  수동 버튼(기본 15분, 사람이 지켜보며 직접 판단)보다 짧게 잡아, 5분 사이클 기준 최대 2회 안에
+   *  포기 여부가 결정되게 한다. 시간초과 시 watchAndBracket이 자동으로 취소하고(cancelOnTimeout),
+   *  빈 자리는 다음 사이클 스크리닝이 새 후보로 채운다. */
+  private static readonly AUTO_TRADE_WATCH_MINUTES = 10;
+  /** [v0.29.0] 사이클 시작 시각(ms) — 자동 스크리너 탭의 "다음 스캔까지" 카운트다운 계산용. */
+  private autoTradeLastCycleAtMs: number | null = null;
 
   // [v0.8.1] 로그인 세션(Supabase Auth). refresh 토큰만 로컬 저장, access 는 메모리+필요시 갱신.
   private authAccessToken: string | null = null;
@@ -828,6 +876,11 @@ export class ToolEngine extends EventEmitter {
   private fxCache: { rate: number; atMs: number; source: "toss" | "manual" } | null = null;
   private buyingPowerUsd: number | null = null;
 
+  /** [v0.30.0] "자동매매기록" 탭용 영구 로그 — 생성자에서 로드, 상태 전이마다 파일로 저장. */
+  private autoTradeHistoryPath = "";
+  private autoTradeHistory: AutoTradeHistoryEntry[] = [];
+  private static readonly AUTO_TRADE_HISTORY_MAX = 500; // 오래된 것부터 정리(무한 증식 방지)
+
   constructor(
     private userDataDir: string,
     opts?: { forceMock?: boolean },
@@ -841,6 +894,7 @@ export class ToolEngine extends EventEmitter {
     this.strengthPath = join(userDataDir, "kylebot-strength.json"); // [v0.5.0] 체결강도 시계열
     this.tradesPath = join(userDataDir, "kylebot-trades.json"); // [v0.7.0] 자동 기록 트레이드
     this.fillsPath = join(userDataDir, "kylebot-fills.json"); // [v0.9.8] 매매(체결) 이력 — 연결 없이도 리포트를 그리기 위해 보관
+    this.autoTradeHistoryPath = join(userDataDir, "kylebot-auto-history.json"); // [v0.30.0] 자동매매기록
     this.loadEnv();
     // [개발 검증용] E2E 등 자동 검증은 절대 실서버를 건드리면 안 되므로 연습 모드 강제.
     if (opts?.forceMock) this.mode = "mock";
@@ -850,6 +904,7 @@ export class ToolEngine extends EventEmitter {
     this.loadStrength();
     this.loadTrades();
     this.loadFills(); // [v0.9.8] 저장해 둔 매매 이력
+    this.loadAutoTradeHistory(); // [v0.30.0] 자동매매기록
   }
 
   // --------------------------------------------------------------------------
@@ -2307,6 +2362,41 @@ export class ToolEngine extends EventEmitter {
   private static readonly BRACKET_FAST_WINDOW_MS = 60_000; // "진입 직후"로 볼 구간(1분)
   private static readonly BRACKET_SLOW_POLL_MS = 5000; // 그 이후엔 5초 간격(API 부담 완화)
 
+  /** filled 수량만큼 OCO(익절+손절)를 걸고 결과를 WatchAndBracketResult로 돌려주는 공용 내부 로직
+   *  (정상 체결 경로·타임아웃 시 부분체결 보호 경로가 함께 쓴다 — 로직 중복 방지). */
+  private async registerOcoForFilled(
+    symbol: string,
+    quantity: number,
+    spec: { tpTrigger: number; tpPrice: number; slTrigger: number; slPrice: number; expireDate: string; rationale?: RationaleInput },
+  ): Promise<WatchAndBracketResult> {
+    try {
+      const ocoJournal = await this.placeOco({
+        symbol,
+        quantity,
+        tpTrigger: spec.tpTrigger,
+        tpPrice: spec.tpPrice,
+        slTrigger: spec.slTrigger,
+        slPrice: spec.slPrice,
+        expireDate: spec.expireDate,
+        rationale: spec.rationale,
+      });
+      // [v0.26.0] 자동매매가 이 OCO를 추적할 수 있게 조건주문 번호를 결과로 돌려준다.
+      const conditionalOrderId = (ocoJournal.detail as { conditionalOrderId?: string } | undefined)?.conditionalOrderId;
+      if (conditionalOrderId) return { status: "oco_registered", conditionalOrderId };
+      // 드라이런처럼 conditionalOrderId가 없는 경우(이론상 이 분기는 isDryRun()이 이미
+      // placeBracketCore에서 걸러내 도달하지 않지만, 안전하게 실패로 취급한다).
+      return { status: "oco_failed", error: "조건주문 번호를 확인할 수 없습니다." };
+    } catch (e) {
+      const error = String(e).replace(/^Error:\s*/, "");
+      this.addJournal({
+        kind: "info",
+        symbol,
+        summary: `⚠️ 체결을 확인했지만 조건주문(익절+손절) 자동 등록에 실패했습니다 — 직접 걸어 주세요: ${error}`,
+      });
+      return { status: "oco_failed", error };
+    }
+  }
+
   private async watchAndBracket(
     symbol: string,
     tossOrderId: string,
@@ -2320,11 +2410,13 @@ export class ToolEngine extends EventEmitter {
       watchMinutes?: number;
       pollMs?: number;
       rationale?: RationaleInput;
+      cancelOnTimeout?: boolean;
     },
   ): Promise<WatchAndBracketResult> {
     const watchMinutes = spec.watchMinutes ?? 15;
     const startedAt = Date.now();
     const deadline = startedAt + watchMinutes * 60_000;
+    let lastOrder: OrderResponse | null = null; // [v0.29.0] 타임아웃 시 "막판 체결/부분체결" 판단용
 
     while (Date.now() < deadline) {
       // spec.pollMs가 있으면(테스트 전용) 처음부터 끝까지 그 값 하나로 고정. 없으면(실사용)
@@ -2336,36 +2428,12 @@ export class ToolEngine extends EventEmitter {
       let o: OrderResponse;
       try {
         o = await getOrder(tossOrderId);
+        lastOrder = o;
       } catch {
         continue; // 조회 실패는 다음 폴링에서 재시도(막지 않음)
       }
       if (o.status === "filled") {
-        try {
-          const ocoJournal = await this.placeOco({
-            symbol,
-            quantity: o.filled_qty && o.filled_qty > 0 ? o.filled_qty : spec.quantity,
-            tpTrigger: spec.tpTrigger,
-            tpPrice: spec.tpPrice,
-            slTrigger: spec.slTrigger,
-            slPrice: spec.slPrice,
-            expireDate: spec.expireDate,
-            rationale: spec.rationale,
-          });
-          // [v0.26.0] 자동매매가 이 OCO를 추적할 수 있게 조건주문 번호를 결과로 돌려준다.
-          const conditionalOrderId = (ocoJournal.detail as { conditionalOrderId?: string } | undefined)?.conditionalOrderId;
-          if (conditionalOrderId) return { status: "oco_registered", conditionalOrderId };
-          // 드라이런처럼 conditionalOrderId가 없는 경우(이론상 이 분기는 isDryRun()이 이미
-          // placeBracketCore에서 걸러내 도달하지 않지만, 안전하게 실패로 취급한다).
-          return { status: "oco_failed", error: "조건주문 번호를 확인할 수 없습니다." };
-        } catch (e) {
-          const error = String(e).replace(/^Error:\s*/, "");
-          this.addJournal({
-            kind: "info",
-            symbol,
-            summary: `⚠️ 진입 체결을 확인했지만 조건주문(익절+손절) 자동 등록에 실패했습니다 — 직접 걸어 주세요: ${error}`,
-          });
-          return { status: "oco_failed", error };
-        }
+        return this.registerOcoForFilled(symbol, o.filled_qty && o.filled_qty > 0 ? o.filled_qty : spec.quantity, spec);
       }
       if (o.status === "cancelled" || o.status === "failed") {
         this.addJournal({ kind: "info", symbol, summary: `진입 주문이 ${o.status === "cancelled" ? "취소" : "실패"}돼 자동 감시를 멈췄습니다.` });
@@ -2373,12 +2441,57 @@ export class ToolEngine extends EventEmitter {
       }
       // pending/partial/unknown이면 계속 기다린다.
     }
+
+    // [v0.29.0] 시간초과 — cancelOnTimeout이 꺼져 있으면(수동 버튼 경로) 예전처럼 감시만 멈추고
+    //   주문은 그대로 둔다(사람이 지켜보다 직접 판단하도록).
+    if (!spec.cancelOnTimeout) {
+      this.addJournal({
+        kind: "info",
+        symbol,
+        summary: `⏱ ${watchMinutes}분 동안 체결을 기다렸지만 되지 않아 자동 감시를 멈췄습니다. 진입 주문은 그대로 있으니, 체결되면 [주문현황]에서 직접 조건주문(익절+손절)을 걸어 주세요.`,
+      });
+      return { status: "timeout" };
+    }
+
+    // [v0.29.0 — 오너 요청: "장시간 미체결 대책"] 자동매매 경로는 여기서 끝내지 않는다:
+    //   막판에 체결됐을 수 있으니 한 번 더 확인 → 다 체결됐으면 정상 OCO 등록, 일부만 체결됐으면
+    //   그 수량만큼 OCO로 보호하고 나머지는 취소, 전혀 안 됐으면 그냥 취소. 취소로 비운 자리는
+    //   다음 5분 사이클의 스크리닝이 자동으로 새 후보로 채운다(autoTradeTick의 freeSlots 계산).
+    let finalOrder: OrderResponse | null = lastOrder;
+    try {
+      finalOrder = await getOrder(tossOrderId);
+    } catch {
+      // 재조회 실패 — 마지막으로 알던 상태(lastOrder)로 대체 판단.
+    }
+    if (finalOrder?.status === "filled") {
+      return this.registerOcoForFilled(symbol, finalOrder.filled_qty && finalOrder.filled_qty > 0 ? finalOrder.filled_qty : spec.quantity, spec);
+    }
+    const filledQty = finalOrder?.filled_qty ?? 0;
+    try {
+      await cancelOrder(tossOrderId);
+    } catch (e) {
+      this.addJournal({
+        kind: "info",
+        symbol,
+        summary: `⚠️ ${watchMinutes}분 동안 체결되지 않아 자동 취소를 시도했지만 실패했습니다 — [주문현황]에서 직접 확인해 주세요: ${String(e).replace(/^Error:\s*/, "")}`,
+      });
+      return { status: "timeout" };
+    }
+    if (filledQty > 0) {
+      // 일부만 체결된 채로 취소된 경우 — 그 수량은 보호(OCO) 없이 남겨두면 위험하니 반드시 걸어준다.
+      this.addJournal({
+        kind: "info",
+        symbol,
+        summary: `⏱ ${watchMinutes}분 동안 전량 체결되지 않아 나머지 주문은 자동 취소했습니다. 이미 부분 체결된 ${filledQty}주는 보호를 위해 익절/손절(조건주문)을 걸었습니다.`,
+      });
+      return this.registerOcoForFilled(symbol, filledQty, spec);
+    }
     this.addJournal({
       kind: "info",
       symbol,
-      summary: `⏱ ${watchMinutes}분 동안 체결을 기다렸지만 되지 않아 자동 감시를 멈췄습니다. 진입 주문은 그대로 있으니, 체결되면 [주문현황]에서 직접 조건주문(익절+손절)을 걸어 주세요.`,
+      summary: `⏱ ${watchMinutes}분 동안 체결되지 않아 미체결 주문을 자동 취소했습니다(다음 자동매매 사이클에서 새 후보로 대체됩니다).`,
     });
-    return { status: "timeout" };
+    return { status: "cancelled" };
   }
 
   // --------------------------------------------------------------------------
@@ -2482,6 +2595,7 @@ export class ToolEngine extends EventEmitter {
       const rec: TradeRationale = {
         ts: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
         technique: input?.technique ?? "manual", // 화면이 안 보냈으면 '수동'으로 간주
+        source: input?.source ?? "manual", // [v0.30.0] 마찬가지로 안 보내면(수동 버튼 전부) '수동'
         ...input,
         ...fixed,
       };
@@ -2782,6 +2896,78 @@ export class ToolEngine extends EventEmitter {
     const tmp = this.tradesPath + ".tmp";
     writeFileSync(tmp, JSON.stringify(this.trades, null, 2), "utf8");
     renameSync(tmp, this.tradesPath);
+  }
+
+  // --------------------------------------------------------------------------
+  // [v0.30.0] 자동매매기록 — 자동매매가 낸 매매의 전체 생애주기를 영구 보관한다.
+  //   진입 접수 시 한 줄 만들고(watching), 이후 체결확인/청산/취소 시점마다 같은 줄을 id로
+  //   찾아 갱신한다. ⚠️ 전부 주문 흐름 밖에서 fire-and-forget + try/catch(기록 실패가 매매를
+  //   막으면 안 된다 — saveRationale과 같은 원칙).
+  // --------------------------------------------------------------------------
+
+  private loadAutoTradeHistory(): void {
+    try {
+      this.autoTradeHistory = existsSync(this.autoTradeHistoryPath)
+        ? (JSON.parse(readFileSync(this.autoTradeHistoryPath, "utf8")) as AutoTradeHistoryEntry[])
+        : [];
+    } catch {
+      this.autoTradeHistory = [];
+    }
+  }
+
+  private persistAutoTradeHistory(): void {
+    try {
+      if (this.autoTradeHistory.length > ToolEngine.AUTO_TRADE_HISTORY_MAX) {
+        this.autoTradeHistory = this.autoTradeHistory.slice(-ToolEngine.AUTO_TRADE_HISTORY_MAX);
+      }
+      const tmp = this.autoTradeHistoryPath + ".tmp";
+      writeFileSync(tmp, JSON.stringify(this.autoTradeHistory, null, 2), "utf8");
+      renameSync(tmp, this.autoTradeHistoryPath);
+    } catch {
+      /* 기록 실패는 자동매매 진행을 막지 않는다 */
+    }
+  }
+
+  /** 새 진입이 접수될 때 한 줄 추가("watching" 상태). */
+  private addAutoTradeHistory(pos: AutoPosition): void {
+    try {
+      this.autoTradeHistory.push({
+        id: `${pos.symbol}@${pos.entry}@${pos.enteredAtMs}`,
+        symbol: pos.symbol,
+        entry: pos.entry,
+        tp: pos.tp,
+        sl: pos.sl,
+        quantity: pos.quantity,
+        enteredAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
+        status: "watching",
+        exitedAt: null,
+        exitPrice: null,
+        pnlUsd: null,
+        pnlPct: null,
+        note: "매수 주문 접수 — 체결 대기 중",
+      });
+      this.persistAutoTradeHistory();
+    } catch {
+      /* 위와 동일 */
+    }
+  }
+
+  /** 이후 상태 전이(체결확인/청산/취소) 때 같은 줄을 id로 찾아 갱신. */
+  private updateAutoTradeHistory(symbol: string, entry: number, enteredAtMs: number, patch: Partial<AutoTradeHistoryEntry>): void {
+    try {
+      const id = `${symbol}@${entry}@${enteredAtMs}`;
+      const idx = this.autoTradeHistory.findIndex((h) => h.id === id);
+      if (idx === -1) return; // 기록 자체가 없으면(예: 구버전 데이터) 조용히 무시
+      this.autoTradeHistory[idx] = { ...this.autoTradeHistory[idx], ...patch };
+      this.persistAutoTradeHistory();
+    } catch {
+      /* 위와 동일 */
+    }
+  }
+
+  /** "자동매매기록" 탭이 읽는 목록 — 최신이 위로 오게 뒤집어 준다(rationale 목록과 같은 관례). */
+  getAutoTradeHistory(): AutoTradeHistoryEntry[] {
+    return this.autoTradeHistory.slice(-300).reverse();
   }
 
   // ── [v0.9.8] 매매(체결) 이력 보관 ─────────────────────────────
@@ -3644,6 +3830,8 @@ export class ToolEngine extends EventEmitter {
       maxInvestPct: this.autoTradeMaxInvestPct,
       lastCycleAt: this.autoTradeLastCycleAt,
       lastScan: this.autoTradeLastScan,
+      nextCycleAtMs:
+        this.autoTradeEnabled && this.autoTradeLastCycleAtMs != null ? this.autoTradeLastCycleAtMs + ToolEngine.AUTO_TRADE_INTERVAL_MS : null,
     };
   }
 
@@ -3696,6 +3884,7 @@ export class ToolEngine extends EventEmitter {
         // (실제 체결가 조회 없이도 정확 — 조건주문 지정가로 나가므로).
         const exitPrice = resp.triggeredLeg === "second" ? pos.sl : pos.tp;
         const pnlUsd = (exitPrice - pos.entry) * pos.quantity;
+        const pnlPct = ((exitPrice - pos.entry) / pos.entry) * 100;
         this.autoTradeRealizedPnlUsd += pnlUsd;
         this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
         const kindKo = resp.triggeredLeg === "second" ? "손절" : "익절";
@@ -3706,10 +3895,23 @@ export class ToolEngine extends EventEmitter {
             `🤖 자동매매 ${kindKo} 완료 ${pos.symbol}: 진입 $${pos.entry} → 청산 $${exitPrice} × ${pos.quantity}주 ` +
             `(이번 실행 누적손익 $${this.autoTradeRealizedPnlUsd.toFixed(2)}) — 빈자리는 다음 확인 때 채웁니다.`,
         });
+        this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
+          status: resp.triggeredLeg === "second" ? "closed_loss" : "closed_win",
+          exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
+          exitPrice,
+          pnlUsd: Math.round(pnlUsd * 100) / 100,
+          pnlPct: Math.round(pnlPct * 100) / 100,
+          note: `${kindKo} 발동으로 자동 청산`,
+        });
       } else if (resp.status === "CANCELED") {
         // 사람이 [주문현황]에서 직접 취소한 경우 — 손익 반영 없이 자리만 비운다.
         this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
         this.addJournal({ kind: "info", symbol: pos.symbol, summary: `자동매매 포지션의 조건주문이 취소돼 있어 감시를 멈춥니다: ${pos.symbol}` });
+        this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
+          status: "closed_manual",
+          exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
+          note: "사람이 [주문현황]에서 조건주문을 직접 취소함(손익 미확정)",
+        });
       }
       // WAITING(그대로 감시 중)이면 할 일 없음.
     }
@@ -3719,11 +3921,34 @@ export class ToolEngine extends EventEmitter {
   private onAutoBracketResolved(symbol: string, entry: number, res: WatchAndBracketResult): void {
     const idx = this.autoTradePositions.findIndex((p) => p.symbol === symbol && p.entry === entry && p.status === "watching");
     if (idx === -1) return;
+    const enteredAtMs = this.autoTradePositions[idx].enteredAtMs; // splice 전에 미리 꺼내 둔다(기록 갱신 키)
     if (res.status === "oco_registered") {
       this.autoTradePositions[idx] = { ...this.autoTradePositions[idx], status: "active", conditionalOrderId: res.conditionalOrderId };
+      this.updateAutoTradeHistory(symbol, entry, enteredAtMs, { status: "active", note: "매수 체결 확인 — 익절/손절(조건주문) 등록됨" });
     } else {
       // 타임아웃/취소/실패/OCO등록실패 → 이 자리를 비운다(다음 사이클에 다시 채워질 수 있음).
       this.autoTradePositions.splice(idx, 1);
+      const closedAt = DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss");
+      if (res.status === "cancelled") {
+        // [v0.29.0] watchAndBracket의 cancelOnTimeout 경로 — 장시간 미체결로 자동 취소됨.
+        this.updateAutoTradeHistory(symbol, entry, enteredAtMs, {
+          status: "cancelled", exitedAt: closedAt, note: "장시간 미체결로 자동 취소(다음 사이클에 새 후보로 대체)",
+        });
+      } else if (res.status === "oco_failed") {
+        this.updateAutoTradeHistory(symbol, entry, enteredAtMs, {
+          status: "oco_failed", exitedAt: closedAt, note: `체결됐지만 보호주문 등록 실패 — 직접 확인 필요: ${res.error}`,
+        });
+      } else if (res.status === "timeout") {
+        // cancelOnTimeout이 켜져 있었는데도(자동매매 경로) 취소 API 호출 자체가 실패한 드문 경우.
+        this.updateAutoTradeHistory(symbol, entry, enteredAtMs, {
+          status: "oco_failed", exitedAt: closedAt, note: "자동 취소 시도 실패 — [주문현황]에서 직접 확인 필요",
+        });
+      } else {
+        // "failed"(주문 자체가 거부됨) — 사람이 취소한 건 아니지만 CANCELED와 성격이 같아(손익 미확정) closed_manual로 묶는다.
+        this.updateAutoTradeHistory(symbol, entry, enteredAtMs, {
+          status: "closed_manual", exitedAt: closedAt, note: "진입 주문이 실패로 처리됨",
+        });
+      }
     }
   }
 
@@ -3735,6 +3960,7 @@ export class ToolEngine extends EventEmitter {
     if (!this.autoTradeEnabled || this.autoTradeTickBusy) return;
     this.autoTradeTickBusy = true;
     this.autoTradeLastCycleAt = DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss");
+    this.autoTradeLastCycleAtMs = Date.now(); // [v0.29.0] 카운트다운은 문자열이 아니라 ms 기준으로 계산해야 정확함
     try {
       await this.prepareBackend();
       await this.reconcileAutoPositions(); // ①빈자리 먼저 확인(같은 사이클 안에 채우기 위해)
@@ -3818,6 +4044,7 @@ export class ToolEngine extends EventEmitter {
           conditionalOrderId: null,
         };
         this.autoTradePositions.push(posDraft);
+        this.addAutoTradeHistory(posDraft); // [v0.30.0] 자동매매기록 — 접수 즉시 한 줄 남김
 
         try {
           const { watchPromise } = await this.placeBracketCore({
@@ -3829,8 +4056,13 @@ export class ToolEngine extends EventEmitter {
             slTrigger: level1.sl,
             slPrice: roundPrice(level1.sl * 0.99), // OCO와 동일 규칙: 손절 지정가는 감시가 1% 아래
             expireDate: this.autoTradeExpireDate(),
+            // [v0.29.0 — 오너 요청 "장시간 미체결 대책"] 자동매매만 짧은 감시시간+자동취소를 쓴다
+            //  (수동 버튼은 기존 그대로 15분+취소안함 — 위 BracketSpec.cancelOnTimeout 주석 참고).
+            watchMinutes: ToolEngine.AUTO_TRADE_WATCH_MINUTES,
+            cancelOnTimeout: true,
             rationale: {
               technique: "split3",
+              source: "auto", // [v0.30.0] 오너 요청 — 자동매매로 낸 주문임을 근거에도 남긴다
               level: 1,
               baseClose: cand.prevClose,
               ema200: cand.ema200,
@@ -3852,10 +4084,21 @@ export class ToolEngine extends EventEmitter {
           } else {
             // 드라이런(실주문 잠금 상태) — 실제 체결이 없어 자리를 계속 점유할 이유가 없다.
             this.autoTradePositions = this.autoTradePositions.filter((p) => p !== posDraft);
+            this.updateAutoTradeHistory(cand.symbol, level1.entry, posDraft.enteredAtMs, {
+              status: "dryrun",
+              exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
+              note: "[드라이런] 실제 주문 아님(연습) — 매수+익절+손절을 한 번에 시뮬레이션",
+            });
           }
         } catch (e) {
           this.autoTradePositions = this.autoTradePositions.filter((p) => p !== posDraft);
-          this.addJournal({ kind: "info", symbol: cand.symbol, summary: `🤖 자동매매 진입 실패 ${cand.symbol}: ${String(e).replace(/^Error:\s*/, "")}` });
+          const errMsg = String(e).replace(/^Error:\s*/, "");
+          this.addJournal({ kind: "info", symbol: cand.symbol, summary: `🤖 자동매매 진입 실패 ${cand.symbol}: ${errMsg}` });
+          this.updateAutoTradeHistory(cand.symbol, level1.entry, posDraft.enteredAtMs, {
+            status: "closed_manual",
+            exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
+            note: `주문 접수 자체가 실패: ${errMsg}`,
+          });
           continue;
         }
         placed++;
