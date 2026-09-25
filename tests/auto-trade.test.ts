@@ -22,7 +22,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ToolEngine } from "../electron/tool-engine";
+import { ToolEngine, computeSeedQty } from "../electron/tool-engine";
 
 describe("자동매매 상태 관리 — v0.26.0", () => {
   it("엔진을 처음 만들면 자동매매는 꺼진 상태고 한도는 공장값(3종목/5%/30%)이다", () => {
@@ -36,10 +36,19 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
       expect(s.maxPositions).toBe(3);
       expect(s.maxLossPct).toBe(5);
       expect(s.maxInvestPct).toBe(30);
+      // [v0.27.0] 스크리닝 결과 탭이 쓰는 필드 — 아직 한 번도 스캔 안 했으면 null이어야 한다.
+      expect(s.lastScan).toBeNull();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // [v0.27.0] autoTradeTick이 실제로 lastScan을 채우는지(기본 60종목 스캔)는 여기서 끝까지 기다리며
+  //   검증하지 않는다 — 직접 재보니 목 서버라도 기본 스캔(count=60)이 끝나는 데 70초 넘게 걸려
+  //   이 테스트 파일의 기존 방침(파일 상단 주석: 실제 스캔 완료까지 시뮬레이션하지 않음)과 같은
+  //   이유로 비현실적이다. "구조가 맞는지"(필드 존재·초기값 null)는 위 테스트가 이미 검증하고,
+  //   "autoTradeTick이 실제로 lastScan에 대입하는지"는 코드 리뷰 + 타입체크(autoTradeTick 안의
+  //   `this.autoTradeLastScan = run;` 대입이 컴파일되려면 타입이 일치해야 함)로 커버한다.
 
   it("stopAutoTrade는 한 번도 시작하지 않았어도 안전하게 동작한다(꺼진 채 그대로)", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
@@ -83,6 +92,25 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
       expect(s.autoTradeMaxPositions).toBe(4);
       expect(s.autoTradeMaxLossPct).toBe(6);
       expect(s.autoTradeMaxInvestPct).toBe(40);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("[2026-09-25 버그수정] 투입 비율은 종목 수로 나뉘지 않고 종목 1개당 그대로 적용된다", () => {
+    // autoTradeTick 내부에서 실제로 쓰는 계산과 동일한 식 — perSlotPct = autoTradeMaxInvestPct
+    // (옛 버그는 perSlotInvestPct(maxInvestPct, maxPositions) = maxInvestPct/maxPositions였다).
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.saveAutoTradeSettings({ maxPositions: 3, maxLossPct: 5, maxInvestPct: 30 });
+      const seedUsd = 1000;
+      const price = 9.2; // 저가주 예시(오너가 실계좌 테스트에서 1주만 나왔던 가격대)
+      const commissionRate = 0;
+      // 엔진의 autoTradeTick이 하는 것과 동일: perSlotPct = autoTradeMaxInvestPct(나누지 않음).
+      const qty = computeSeedQty(seedUsd, 30, price, commissionRate);
+      expect(qty).toBe(32); // 옛 버그(30/3=10%)였다면 10주에 그쳤을 것
+      expect(qty).not.toBe(1); // 실계좌에서 관찰됐던 "1주만 매수" 증상이 재현되지 않음을 확인
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

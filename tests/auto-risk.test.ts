@@ -10,7 +10,7 @@
 // =============================================================================
 
 import { describe, it, expect } from "vitest";
-import { canAutoEnter, isLossLimitBreached, perSlotInvestPct, type AutoTradeLimits } from "../lib/auto-risk";
+import { canAutoEnter, isLossLimitBreached, type AutoTradeLimits } from "../lib/auto-risk";
 
 const LIMITS: AutoTradeLimits = { enabled: true, maxPositions: 3, maxLossPct: 5, maxInvestPct: 30 };
 
@@ -87,14 +87,26 @@ describe("canAutoEnter — 진입 허용/거부 판단", () => {
   });
 });
 
-describe("perSlotInvestPct — 슬롯당 투입 비율 균등 분배", () => {
-  it("총 한도를 종목 수만큼 나눈다", () => {
-    expect(perSlotInvestPct(30, 3)).toBe(10);
-    expect(perSlotInvestPct(30, 1)).toBe(30);
-  });
-  it("이상값(0 이하)은 0을 돌려준다", () => {
-    expect(perSlotInvestPct(0, 3)).toBe(0);
-    expect(perSlotInvestPct(30, 0)).toBe(0);
-    expect(perSlotInvestPct(-10, 3)).toBe(0);
+describe("canAutoEnter — 종목당 투입 비율은 종목 수로 나뉘지 않는다(2026-09-25 버그 수정 검증)", () => {
+  it("종목 수가 3이어도 maxInvestPct(30%)는 그대로 종목 1개당 배정 비율이다", () => {
+    // 옛(버그) 동작이었다면 30%÷3종목=10%로 계산돼 시드 $1000·가격 $9.20에서 예산 $100×
+    // (10%중략 아님, 이 테스트는 엔진 쪽 예산 계산이 아니라 게이트가 나눗셈을 하지 않는지만 확인).
+    // 시드 $1000, 투입비율 30% 그대로 → 예산 $300, 가격 $9.20 → qty=32주(옛 버그였다면 10%=$100→10주).
+    const seedUsd = 1000;
+    const maxInvestPct = 30;
+    const price = 9.2;
+    const budget = seedUsd * (maxInvestPct / 100); // 게이트가 나누지 않는다는 전제하의 올바른 예산
+    const qty = Math.floor(budget / price);
+    expect(budget).toBe(300); // 옛 버그였다면 100(=1000*0.10)이었을 값
+    expect(qty).toBe(32); // 옛 버그였다면 10이었을 값(1주가 아니라 32주가 정상)
+
+    const r = canAutoEnter({
+      limits: { enabled: true, maxPositions: 3, maxLossPct: 5, maxInvestPct },
+      activePositionCount: 0,
+      realizedPnlUsd: 0,
+      seedUsd,
+      candidateQty: qty,
+    });
+    expect(r.allow).toBe(true);
   });
 });

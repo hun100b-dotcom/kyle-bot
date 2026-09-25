@@ -23,7 +23,7 @@ import { DateTime } from "luxon";
 import { getSession, getSessionStart, getMarketStatus, isOrderFrozen, type Session } from "../lib/session";
 import { calcSplit3, calcOrderbook, calcCandle, roundPrice, getTick, type SplitOrder } from "../lib/calc";
 import { encryptSecret, decryptSecret, encryptJson, decryptJson } from "../lib/keysync"; // [v0.8.0] 키 기기 간 동기화(클라이언트 암호화) + [v0.10.0] 매매 이력용
-import { strengthFromTicks, analyzeStrengthSeries, type Side, type StrengthSignals } from "../lib/strength";
+import { classifyTicks, strengthFromTicks, strengthFromVolumes, updateStrengthWindow, isWindowCapped, analyzeStrengthSeries, type Side, type StrengthSignals, type WindowBufferEntry } from "../lib/strength";
 import { buildReport, buildReportFromRealized, makePeriod, type DailyReport, type PeriodKind } from "../lib/report"; // [v0.9.1] 매매 리포트
 import { matchFifo, mergeFills, coveredSince, shouldReuseCache, type Fill, type RealizedTrade } from "../lib/fills"; // [v0.9.6] 토스 실제 체결내역으로 손익 계산 (+v0.10.1 기간 커버리지 헬퍼)
 import { buildCycles, analyzeTrades, type TradeCycle, type TradeInsights } from "../lib/trade-analysis"; // [v0.19.0] 매매 사이클 자동추적·분석
@@ -58,7 +58,7 @@ import {
   type OrderResponse,
 } from "../lib/toss";
 import { createMockTossServer } from "../mocks/toss-mock";
-import { canAutoEnter, isLossLimitBreached, perSlotInvestPct, type AutoTradeLimits } from "../lib/auto-risk";
+import { canAutoEnter, isLossLimitBreached, type AutoTradeLimits } from "../lib/auto-risk";
 
 // -----------------------------------------------------------------------------
 // 타입: 화면과 주고받는 모양
@@ -416,10 +416,14 @@ export interface StrengthSample {
   ts: string; //             수집 시각(KST, 사람이 읽는 형식)
   tsMs: number; //           수집 시각(밀리초 — 스파크라인 정렬용)
   price: number | null; //   그 순간 마지막 체결가
-  buyVol: number; //         이 창에서 매수로 분류된 체결량
-  sellVol: number; //        이 창에서 매도로 분류된 체결량
+  buyVol: number; //         "최근 5분 창" 안에서 매수로 분류된 체결량 누적(틱개수창 아님, 아래 참고)
+  sellVol: number; //        "최근 5분 창" 안에서 매도로 분류된 체결량 누적
   strength: number | null; // (매수/매도)×100. 매도 0이면 null("매수 일방")
-  nTicks: number; //         표본 틱 수(신뢰도 참고)
+  // [v0.27.0] "최근 50틱"(종목 유동성마다 실제 시간폭이 들쭉날쭉) 대신 "최근 5분"(모든 종목에서
+  //   동일한 시간 정의)으로 바꿔, 라이브 반응성과 매매분석 승률비교 양쪽에 다 쓸 수 있게 했다.
+  //   자세한 이유는 sampleStrengthOnce 주석 참고.
+  nTicks: number; //         지금 이 "최근 5분 창" 안에 있는 체결 건수(표본 크기, 신뢰도 참고)
+  windowCapped: boolean; //  서버 조회 상한(50건·커서없음) 때문에 창 안 일부 체결을 놓쳤을 가능성
   session: string; //        데이/프리/본장 등(국면 표시)
 }
 
@@ -428,6 +432,7 @@ export interface StrengthState {
   symbol: string;
   running: boolean; //       지금 기록 중인가
   intervalSec: number; //    폴링 간격(초)
+  windowSec: number; //      [v0.27.0] 체결강도 계산에 쓰는 시간창 길이(초) — 지금은 고정 300(5분)
   latest: StrengthSample | null; // 가장 최근 샘플
   samples: StrengthSample[]; //     최근 시계열(오래된→최신)
   lastError: string | null; //      마지막 샘플링 오류(있으면 화면에 안내)
@@ -684,6 +689,8 @@ export interface AutoTradeStatus {
   maxLossPct: number;
   maxInvestPct: number;
   lastCycleAt: string | null;
+  /** [v0.27.0] 이번 사이클에서 스캔한 결과(스크리닝 결과 탭이 그대로 보여줌) — 아직 한 번도 안 돌았으면 null. */
+  lastScan: ScreenRun | null;
 }
 
 // -----------------------------------------------------------------------------
@@ -712,9 +719,15 @@ export class ToolEngine extends EventEmitter {
       timer: ReturnType<typeof setInterval>; intervalSec: number; lastPrice?: number; lastSide: Side; seen: Set<string>; lastError: string | null;
       // [v0.22.0] 매매로 '자동 시작'된 기록만 수명을 제한한다(사용자가 직접 켠 건 손대지 않음).
       auto?: boolean; startedAtMs?: number; failCount?: number;
+      // [v0.27.0] "최근 5분" 슬라이딩 시간창 버퍼 — 새로 분류된 틱을 여기 쌓고, 오래된 것은
+      //   매 폴링마다 잘라낸다(sampleStrengthOnce 참고). 시각순 오름차순을 유지한다.
+      buffer: WindowBufferEntry[];
     }
   >();
   private static readonly STRENGTH_MAX_SAMPLES = 500; // 종목당 보관 상한(오래된 것부터 정리)
+  /** [v0.27.0] 체결강도를 계산하는 시간창 길이 — "최근 50틱"(종목마다 실제 시간폭이 들쭉날쭉) 대신
+   *  고정된 시간(5분)으로 바꿔, 라이브 반응성과 매매분석 비교가능성을 동시에 만족시킨다. */
+  private static readonly STRENGTH_WINDOW_MS = 5 * 60_000;
   /** [v0.22.0] 자동 기록 수명 한도: 연속 실패 N회(연결 없음) 또는 최대 시간 초과 시 스스로 끈다(무한 폴링 방지). */
   private static readonly AUTO_FAIL_STOP = 5;
   private static readonly AUTO_MAX_MS = 6 * 3_600_000; // 6시간(한 세션 충분히 커버)
@@ -760,7 +773,7 @@ export class ToolEngine extends EventEmitter {
   // -----------------------------------------------------------------------------
   private autoTradeMaxPositions = 3; //  동시 보유 최대 종목 수(오너 기본값)
   private autoTradeMaxLossPct = 5; //    최대손실 한도(시드 대비 %) — 넘으면 자동매매 자동 중단
-  private autoTradeMaxInvestPct = 30; // 시드 대비 총 투입 비율 한도(%) — 종목 수만큼 균등 분배
+  private autoTradeMaxInvestPct = 30; // 종목 1개당 배정하는 시드 대비 투입 비율(%) — 종목 수로 나누지 않음
 
   // [v0.26.0] 자동매매 실행 상태(런타임 전용, 저장 안 함 — 앱 재시작하면 전부 초기화).
   private autoTradeEnabled = false;
@@ -770,6 +783,10 @@ export class ToolEngine extends EventEmitter {
   private autoTradePositions: AutoPosition[] = []; // 지금 자동매매로 감시·보유 중인 포지션
   private autoTradeUsedKeys = new Set<string>(); // `${symbol}@${entry}` — 같은 종목 같은 타점 재진입 방지
   private autoTradeLastCycleAt: string | null = null; // 마지막 사이클 시각(KST, 화면 표시용)
+  // [v0.27.0] 이번 사이클에서 스캔한 결과를 화면에 그대로 보여주기 위해 보관(엔진 안에서만 쓰이고
+  //   버려지던 것을 "스크리닝 결과" 탭에 노출한다 — 오너 피드백: 사유 문자열 같은 별도 추적은
+  //   불필요, lastScan만 있으면 화면(프론트)이 positions와 대조해 진입여부를 계산할 수 있다).
+  private autoTradeLastScan: ScreenRun | null = null;
   private static readonly AUTO_TRADE_INTERVAL_MS = 5 * 60_000; // "기본적으로 5분마다"(오너 지시)
 
   // [v0.8.1] 로그인 세션(Supabase Auth). refresh 토큰만 로컬 저장, access 는 메모리+필요시 갱신.
@@ -2535,7 +2552,7 @@ export class ToolEngine extends EventEmitter {
 
     // 연속 상태 초기화: 틱룰 seed(직전가/방향)와 중복제거 집합.
     // [v0.22.0] auto=true(매매로 자동 시작)면 수명 제한 필드(startedAtMs/failCount)를 심는다.
-    const run = { timer: setInterval(() => void this.sampleStrengthOnce(sym), iv * 1000), intervalSec: iv, lastSide: "buy" as Side, seen: new Set<string>(), lastError: null as string | null, auto, startedAtMs: Date.now(), failCount: 0 };
+    const run = { timer: setInterval(() => void this.sampleStrengthOnce(sym), iv * 1000), intervalSec: iv, lastSide: "buy" as Side, seen: new Set<string>(), lastError: null as string | null, auto, startedAtMs: Date.now(), failCount: 0, buffer: [] as WindowBufferEntry[] };
     this.strengthRuns.set(sym, run);
     void this.sampleStrengthOnce(sym); // 시작 즉시 1회(기다리지 않게)
     this.addJournal({ kind: "info", symbol: sym, summary: auto ? `체결강도 자동 기록 시작 (매매 감지 · ${iv}초 간격)` : `체결강도 기록 시작 (${iv}초 간격)` });
@@ -2569,6 +2586,7 @@ export class ToolEngine extends EventEmitter {
       symbol: sym,
       running: !!run,
       intervalSec: run?.intervalSec ?? 10,
+      windowSec: ToolEngine.STRENGTH_WINDOW_MS / 1000,
       latest: samples.length ? samples[samples.length - 1] : null,
       samples: samples.slice(-120), // 최근 120개만 화면으로(스파크라인·표에 충분)
       lastError: run?.lastError ?? null,
@@ -2579,8 +2597,20 @@ export class ToolEngine extends EventEmitter {
 
   /**
    * sampleStrengthOnce — 체결강도 한 점을 수집한다(타이머가 부르는 실제 작업).
-   *   ① trades(최근 ~50틱) 조회 → ② 숫자로 정규화 + 중복 제거 → ③ 틱룰 분류·강도 계산
-   *   → ④ 샘플 한 줄 저장 → ⑤ 화면에 이벤트로 알림. 오류는 삼켜서(다음 주기 재시도) 앱을 지킨다.
+   *
+   *   [v0.27.0 — "최근 50틱" → "최근 5분" 시간창으로 변경한 이유]
+   *   예전엔 폴링마다 getTrades(sym,50)로 받은 "최근 50틱"을 통째로 다시 분류해 강도를 계산했다.
+   *   문제는 "최근 50틱"이 가리키는 실제 시간 범위가 종목 유동성마다 완전히 다르다는 것 —
+   *   활발한 종목은 몇 초, 뜸한 종목은 십수 분. 그래서 화면에 뜨는 "142" 같은 숫자가 종목마다
+   *   서로 다른 자로 잰 값이라 (a) 라이브 타이밍 판단에서 오래된 반응을 "지금"처럼 보여주거나
+   *   (b) 매매분석에서 진입시점 강도들을 모아 승률 비교를 해도 비교 자체가 무의미했다.
+   *   지금은 "최근 5분"이라는 고정 시간창(모든 종목에 동일 정의)으로 바꿔 반응성과 비교가능성을
+   *   둘 다 만족시킨다(감시 시작부터 무한정 누적하지 않는 이유: 시간이 지날수록 창이 계속 커져
+   *   방금 일어난 변화가 과거 흐름에 묻혀버리면 라이브 타이밍 용도에 안 맞기 때문).
+   *
+   *   ① trades(최근 ~50틱) 조회 → ② 숫자 정규화 → ③ 신규 틱만 골라(dedup) 틱룰로 분류 →
+   *   ④ 분류된 신규 틱을 시간창 버퍼에 더하고 5분 넘은 옛 것은 버림 → ⑤ 버퍼 전체로 강도 계산
+   *   → ⑥ 샘플 한 줄 저장 → ⑦ 화면에 이벤트로 알림. 오류는 삼켜서(다음 주기 재시도) 앱을 지킨다.
    */
   private async sampleStrengthOnce(sym: string): Promise<void> {
     const run = this.strengthRuns.get(sym);
@@ -2595,31 +2625,42 @@ export class ToolEngine extends EventEmitter {
 
       // [중복 제거] trades는 커서가 없어 폴링 사이 같은 틱이 겹친다.
       //   (timestamp|price|volume)를 열쇠로, 이번 창에서 '처음 보는' 틱만 남긴다.
-      //   단, 창 전체가 이미 다 본 틱이면(=신규 0) 강도는 직전 값을 유지하는 셈이 되므로,
-      //   표시용으로는 '이번 창 전체'로 계산하되 seed 연속성은 유지한다(HTS식 롤링 강도).
+      //   [v0.27.0] 이 신규(fresh) 틱만 시간창 버퍼에 더한다 — 예전엔 계산돼 있었는데 실제로는
+      //   버려지고 있던 값을 이제 진짜로 쓴다.
       const fresh = ticks.filter((t) => !run.seen.has(`${t.timestamp}|${t.price}|${t.volume}`));
       for (const t of ticks) run.seen.add(`${t.timestamp}|${t.price}|${t.volume}`);
       if (run.seen.size > 5000) run.seen = new Set([...run.seen].slice(-2000)); // 메모리 상한
 
-      // 강도 계산: '이번에 받은 창(최근 50틱)' 기준(롤링). seed로 직전가·방향을 이어 붙인다.
-      const { result, lastPrice, lastSide } = strengthFromTicks(ticks, run.lastPrice, run.lastSide);
+      // 신규 틱만 틱룰로 분류(이전 폴링의 마지막 가격·방향을 이어받아 연속성 유지).
+      const { classified, lastPrice, lastSide } = classifyTicks(fresh, run.lastPrice, run.lastSide);
       run.lastPrice = lastPrice;
       run.lastSide = lastSide;
       run.lastError = null;
       run.failCount = 0; // [v0.22.0] 성공했으니 연속 실패 카운터 리셋
 
+      // 시간창 버퍼에 신규 분류 결과를 더하고, "지금-5분"보다 오래된 것은 잘라낸다(슬라이딩 윈도).
       const now = DateTime.now().setZone("Asia/Seoul");
+      const nowMs = now.toMillis();
+      const win = updateStrengthWindow(run.buffer, classified, nowMs, ToolEngine.STRENGTH_WINDOW_MS);
+      run.buffer = win.buffer;
+      const { buyVol, sellVol, strength } = win;
+
+      // [상한도달 표시] 이번 폴링이 서버 상한(50건)을 다 채웠고, 그마저 전부 신규(직전 폴링과
+      //   하나도 안 겹침)라면 — 두 폴링 사이에 창을 벗어나 놓친 체결이 있었을 가능성이 크다는
+      //   신호다(커서가 없어 그 이상은 확인 불가 — 화면에 정직하게 알린다).
+      const windowCapped = isWindowCapped(ticks.length, fresh.length);
+
       const sample: StrengthSample = {
         ts: now.toFormat("MM-dd HH:mm:ss"),
-        tsMs: now.toMillis(),
+        tsMs: nowMs,
         price: lastPrice ?? null,
-        buyVol: result.buyVol,
-        sellVol: result.sellVol,
-        strength: result.strength,
-        nTicks: result.nTicks,
+        buyVol,
+        sellVol,
+        strength,
+        nTicks: win.nTicks,
+        windowCapped,
         session: getSession(now),
       };
-      void fresh; // (참고: 신규 틱 수는 향후 연구용. MVP 표시는 롤링 창 기준.)
 
       const arr = this.strengthSeries[sym] ?? (this.strengthSeries[sym] = []);
       arr.push(sample);
@@ -2818,8 +2859,22 @@ export class ToolEngine extends EventEmitter {
     return best != null && bestGap <= toleranceMs ? best.strength : null;
   }
 
-  /** 체결강도 스냅샷(읽기 전용). 실패해도 null만 돌려주고 절대 예외를 위로 던지지 않는다. */
+  /**
+   * 체결강도 스냅샷(읽기 전용). 실패해도 null만 돌려주고 절대 예외를 위로 던지지 않는다.
+   *   [v0.27.0] 이 심볼에 이미 돌고 있는 체결강도 기록(run)이 있으면 그 "최근 5분" 시간창
+   *   버퍼를 그대로 읽어 계산한다 — 화면(매매분석)에 보이는 실시간 값과 저널에 찍히는 진입/
+   *   청산 스냅샷이 항상 같은 정의(최근 5분)로 일치하게 된다. run이 없으면(기록을 안 켰거나
+   *   이미 멈췄으면) 예전처럼 그 순간 1회성으로 최근 50틱을 받아 독립 계산(최선 추정치)한다.
+   */
   private async snapshotStrength(symbol: string): Promise<TradeSnapshot | null> {
+    const sym = (symbol || "").toUpperCase().trim();
+    const run = this.strengthRuns.get(sym);
+    if (run) {
+      let buyVol = 0;
+      let sellVol = 0;
+      for (const b of run.buffer) { if (b.side === "buy") buyVol += b.volume; else sellVol += b.volume; }
+      return { strength: strengthFromVolumes(buyVol, sellVol), buyVol, sellVol, rising: null };
+    }
     try {
       const raw = await getTrades(symbol, 50);
       const ticks = raw
@@ -3471,12 +3526,14 @@ export class ToolEngine extends EventEmitter {
     this.autoTradeRealizedPnlUsd = 0;
     this.autoTradePositions = [];
     this.autoTradeUsedKeys = new Set();
+    this.autoTradeLastScan = null; // 지난번 실행의 스캔 결과가 화면에 남아 헷갈리지 않게 초기화
     this.addJournal({
       kind: "info",
       symbol: "-",
       summary:
         `🤖 자동매매 시작 — 최대 ${this.autoTradeMaxPositions}종목 · 최대손실 한도 시드대비 ${this.autoTradeMaxLossPct}% · ` +
-        `총 투입한도 시드대비 ${this.autoTradeMaxInvestPct}% · 5분마다 탐색(삼분할 1분할 타점만, 이 프로그램이 켜져 있는 동안만 작동)`,
+        `종목당 투입 시드대비 ${this.autoTradeMaxInvestPct}%(최대 동시 투입 합계 최대 ${(this.autoTradeMaxInvestPct * this.autoTradeMaxPositions).toFixed(0)}%) · ` +
+        `5분마다 탐색(삼분할 1분할 타점만, 이 프로그램이 켜져 있는 동안만 작동)`,
     });
     void this.autoTradeTick(); // 시작하자마자 한 번 즉시 돌리고
     this.autoTradeTimer = setInterval(() => void this.autoTradeTick(), ToolEngine.AUTO_TRADE_INTERVAL_MS); // 이후 5분마다
@@ -3507,6 +3564,7 @@ export class ToolEngine extends EventEmitter {
       maxLossPct: this.autoTradeMaxLossPct,
       maxInvestPct: this.autoTradeMaxInvestPct,
       lastCycleAt: this.autoTradeLastCycleAt,
+      lastScan: this.autoTradeLastScan,
     };
   }
 
@@ -3614,6 +3672,7 @@ export class ToolEngine extends EventEmitter {
       let run: ScreenRun;
       try {
         run = await this.scanScreener({}); // ③빈자리를 "현재 스크리닝으로 탐색된 다른 종목"으로 채움
+        this.autoTradeLastScan = run; // [v0.27.0] 버리지 않고 보관 → "스크리닝 결과" 탭이 그대로 보여줌
       } catch (e) {
         this.addJournal({ kind: "info", symbol: "-", summary: `🤖 자동매매: 이번 사이클 스크리닝 실패 — ${String(e).replace(/^Error:\s*/, "")}` });
         return;
@@ -3622,7 +3681,9 @@ export class ToolEngine extends EventEmitter {
       const activeSymbols = new Set(this.autoTradePositions.map((p) => p.symbol));
       const candidates = run.results.filter((r) => r.status === "confirmed" && !activeSymbols.has(r.symbol));
       const commissionRate = await this.resolveCommissionRate();
-      const perSlotPct = perSlotInvestPct(this.autoTradeMaxInvestPct, this.autoTradeMaxPositions);
+      // [오너 지시 2026-09-25 정정] "최대 투입 비율"은 종목 1개당 배정 시드 비율이다 — 종목 수로
+      // 나누지 않는다(이전 버전은 나눠서 저가주에서 1주만 나오는 버그가 있었음).
+      const perSlotPct = this.autoTradeMaxInvestPct;
 
       let placed = 0;
       for (const cand of candidates) {

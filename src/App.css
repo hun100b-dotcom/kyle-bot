@@ -45,6 +45,20 @@
   --fs-sub: 17px;      /* 섹션 헤더 */
   --fs-body: 15px;     /* 본문 */
   --fs-cap: 13px;      /* 캡션·₩ 병기 */
+
+  /* [v0.27.0 · dataviz 스킬 팔레트] 차트(체결강도·스크리너 캔들) 전용 토큰.
+     3곳에 따로 하드코딩돼 있던 배경(#0f131a)을 여기 하나로 모으고, 참조선(세션고점·EMA200·
+     구름top) 3색은 dataviz 스킬의 dark-surface 검증 카테고리컬 팔레트에서 1~3번 슬롯을 그대로
+     썼다(node validate_palette.js로 --surface #0f131a --mode dark 검증 통과, CVD·명도·대비 전부
+     PASS). 도지·다음봉 강조는 새 색상 슬롯을 더 쓰지 않고(4번째 슬롯부터는 all-pairs 검증이
+     깨짐 — 스킬 palette.md 명시) 대신 굵기·선모양(실선/파선)으로 구분한다(색이 아닌 형태 채널). */
+  --chart-surface: #0f131a;
+  --chart-grid: rgba(255,255,255,0.08);   /* 옅은 그리드라인(recessive) */
+  --chart-axis: rgba(255,255,255,0.35);   /* 축 라벨 글자 */
+  --chart-ref-1: #3987e5; /* 파랑 — EMA200 */
+  --chart-ref-2: #d95926; /* 주황 — 구름top */
+  --chart-ref-3: #199e70; /* 청록 — 세션고점 */
+  --chart-highlight: #f1f3f9; /* 도지·다음봉 강조(선모양으로 구분, 참조선과 색이 안 겹침) */
 }
 
 /* [v0.13.0] 손익색 한국식 토글: 설정에서 켜면 이익=빨강/손실=파랑으로 스왑(부호·삼각형은 그대로).
@@ -136,6 +150,17 @@ body {
 }
 .tab:hover { color: var(--text); }
 .tab.active { color: var(--text); background: var(--surface3); box-shadow: var(--sh-card); }
+
+/* ===== [v0.27.0] 서브탭(2단) — 상단 그룹(.tabs) 바로 아래, 그 그룹의 하위 탭만 보여준다.
+   .tab과 같은 알약형 패턴이되 한 단계 작다는 걸 보여주려고 폰트·패딩을 줄이고 배경을 옅게 뺀다. */
+.subtabs { display: flex; gap: 5px; padding: 8px 18px; background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.subtab {
+  padding: 6px 12px; border: none; background: transparent; color: var(--muted);
+  cursor: pointer; border-radius: var(--r-pill); font-size: 12.5px; font-weight: 600; white-space: nowrap;
+  transition: background 0.15s, color 0.15s;
+}
+.subtab:hover { color: var(--text); }
+.subtab.active { color: var(--text); background: var(--surface2, var(--surface3)); }
 
 /* ===== [v0.15.0] 데스크톱 2컬럼(두 탭 나란히) =====
    1컬럼(기본·폰): panes/pane 를 display:contents 로 완전히 투명하게 → 콘텐츠가 .app 에 직접 놓인
@@ -586,13 +611,27 @@ ul.hint { padding-left: 18px; }
 .str-meta > div { margin: 2px 0; }
 
 /* 스파크라인: 부모 색을 기준선에 물려주기 위해 color 지정(다크/라이트 자동) */
-.str-spark { display: block; color: var(--muted); margin: 6px 0 14px; border: 1px solid var(--border); border-radius: 8px; background: #0f131a; }
+.str-spark { display: block; color: var(--muted); margin: 6px 0 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--chart-surface); }
 .str-table { margin-top: 6px; }
 /* [v0.12.0] 가격·강도 겹쳐보기 차트 + 신호 배지 */
-.str-chart { display: block; color: var(--muted); margin: 6px 0 14px; border: 1px solid var(--border); border-radius: 8px; background: #0f131a; }
+.str-chart { display: block; width: 100%; color: var(--muted); margin: 6px 0 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--chart-surface); }
 /* [v0.25.0] 탐색 결과 캔들차트 */
 .screen-chart-wrap { padding: 4px 0 2px; }
-.screen-chart { display: block; border: 1px solid var(--border); border-radius: 8px; background: #0f131a; }
+.screen-chart { display: block; width: 100%; border: 1px solid var(--border); border-radius: 8px; background: var(--chart-surface); }
+/* [v0.27.0] 차트 범례를 이모지+텍스트 한 줄에서 색상 스와치가 붙은 칩(chip) 여러 개로 교체
+   (.evid-chip 알약형 패턴 재사용) — 줄바꿈 시 자연스럽게 wrap. */
+.chart-legend { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.chart-chip {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 3px 9px 3px 7px;
+  border-radius: 999px; border: 1px solid var(--border); color: var(--muted); background: var(--panel2);
+}
+.chart-chip .swatch { width: 9px; height: 9px; border-radius: 3px; flex: 0 0 auto; }
+.chart-tooltip {
+  position: absolute; pointer-events: none; font-size: 11px; padding: 5px 8px; border-radius: 6px;
+  background: var(--panel2); border: 1px solid var(--border-strong); color: var(--text); white-space: nowrap;
+  box-shadow: var(--sh-card); z-index: 3;
+}
+.chart-wrap-rel { position: relative; }
 .screen-chart-legend { margin-top: 6px; }
 /* [v0.13.0] 틱 플래시 — 새 표본이 올 때 값이 잠깐 반짝(업비트식). 모션 최소화 설정이면 끈다. */
 @keyframes str-flash-up { from { background: rgba(52,211,153,0.28); } to { background: transparent; } }
@@ -891,6 +930,14 @@ html, body { overflow-x: hidden; }
   /* [v0.17.1 · 리뷰 HIGH] 언더라인 잔재 제거 → 데스크톱과 같은 '떠오른 알약' 선택 표시(폰에서 확실히 보이게) */
   .tab.active { background: var(--surface3); box-shadow: var(--sh-card); }
 
+  /* [v0.27.0] 서브탭(2단)도 폰에서 큰 터치 목표 + 안전영역 패딩을 맞춘다(상단 그룹 탭보다 한 단계 작게). */
+  .subtabs {
+    padding: 6px calc(12px + var(--safe-right)) 6px calc(12px + var(--safe-left));
+    gap: 6px;
+  }
+  .subtab { min-height: 40px; padding: 8px 13px; font-size: 13px; border-radius: var(--r-pill); }
+  .subtab.active { background: var(--surface2, var(--surface3)); }
+
   /* ── 본문: 한 줄로, 좌우 안전영역 확보, 아래 홈바 여백 ── */
   .grid {
     grid-template-columns: 1fr;
@@ -969,6 +1016,9 @@ body:has(.update-banner) .topbar {
   width: auto;
   min-width: max-content; /* 글자가 다 들어갈 만큼은 반드시 확보 */
 }
+/* [v0.27.0] 서브탭(2단)도 같은 규칙 — 다만 하위 탭 개수가 적어(최대 3개) 줄바꿈 허용해도 안 어색하다. */
+.subtabs { flex-wrap: wrap; }
+.subtab { flex: 0 0 auto; white-space: nowrap; width: auto; min-width: max-content; }
 
 /* ── ③ 상태 칩: 한 줄 유지 + 폰에서는 긴 설명 감추기 ────────────────── */
 .badge { white-space: nowrap; }

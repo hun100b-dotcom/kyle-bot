@@ -19,22 +19,42 @@ import TodayReport from "./TodayReport"; // [v0.9.1] 오늘의 매매 리포트 
 import { useTabOrder } from "./useTabOrder"; // [v0.9.2] 탭 순서 드래그로 변경
 import { restoreInputsFromSaved } from "../lib/split-restore"; // [v0.9.3] 옛 기록도 계산기로 불러오기
 
-/** 앱이 가진 모든 탭(기본 순서). 순서는 사장님이 드래그로 바꿀 수 있다. */
+/** 앱이 가진 모든 탭(리프 단위 — 실제 콘텐츠를 가리키는 값. paneTab 렌더 가드는 전부 이 id 기준). */
 // [v0.12.0] 탭 통폐합 9→7: '매매분석'은 체결강도 탭 하위로, '기록(journal)'은 설정 탭 하위(고급/진단)로 이동.
-//   두 항목은 여전히 코드로 존재하되(TabId), 상단 탭 버튼에서만 빠진다(TOP_TABS).
-const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "trades", "orders", "journal", "settings"] as const;
+// [v0.27.0] 상단 탭을 2단(그룹→서브탭) 구조로 재편 — 죽은 'trades' id 제거, 자동매매 컨트롤을
+//   설정 탭에서 분리해 'autoControl'로, 자동매매 스크리닝 결과를 신설해 'autoScan'으로 뺐다.
+//   리프 id 자체는 그대로라 paneTab 렌더 가드·activateTab·goToTab·isTabVisible은 손댈 필요 없다.
+const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "autoControl", "autoScan", "orders", "journal", "settings"] as const;
 type TabId = (typeof ALL_TABS)[number];
-/** 상단에 실제로 보이는 탭(7개) — trades·journal 은 다른 탭에 흡수돼 상단에서 뺀다. */
-const TOP_TABS: TabId[] = ["calc", "report", "screener", "splits", "strength", "orders", "settings"];
+
+/** [v0.27.0] 상단 1단 — 매매방식·성격으로 묶은 그룹. 그룹 버튼을 누르면 하위 탭(2단)이 펼쳐진다. */
+type TopGroupId = "manual" | "auto" | "status" | "settings";
+const TOP_GROUP_LABEL: Record<TopGroupId, string> = { manual: "메뉴얼", auto: "🤖 자동매매", status: "현황", settings: "설정" };
+/** 그룹 순서(드래그로 바뀔 수 있는 기본값) + 그룹별 하위 탭 목록(이 순서로 서브탭이 뜬다). */
+const GROUP_CHILDREN: Record<TopGroupId, TabId[]> = {
+  manual: ["calc", "screener", "splits"],
+  auto: ["autoControl", "autoScan"],
+  status: ["report", "strength", "orders"],
+  settings: ["settings"],
+};
+const TOP_GROUPS: TopGroupId[] = ["manual", "auto", "status", "settings"];
+/** 리프 탭 → 소속 그룹(역방향 조회용. journal은 화면에 독립 탭으로 없지만 설정 하위 콘텐츠라 settings로 매핑). */
+const TAB_GROUP: Record<TabId, TopGroupId> = {
+  calc: "manual", screener: "manual", splits: "manual",
+  autoControl: "auto", autoScan: "auto",
+  report: "status", strength: "status", orders: "status",
+  journal: "settings", settings: "settings",
+};
 
 /** 탭에 보여 줄 이름 */
 const TAB_LABEL: Record<TabId, string> = {
   calc: "계산기",
   report: "📊 매매 리포트",
-  screener: "탐색",
+  screener: "스크리너",
   splits: "내 삼분할 기록",
   strength: "매매분석",
-  trades: "매매분석(구)",
+  autoControl: "자동매매 현황",
+  autoScan: "스크리닝 결과",
   orders: "주문 현황",
   journal: "기록",
   settings: "설정",
@@ -186,17 +206,21 @@ function usdKrw(usd: number, fx: number | null): string {
  * [v0.12.0 · 2단계] StrengthChart — 가격과 체결강도를 '겹쳐(위아래로)' 그려 다이버전스를 눈으로 보게 한다.
  *   정본(체결강도_분석 3장)의 그림을 그대로: 위=가격선, 아래=강도선(100 기준). 외부 라이브러리 0.
  *   마지막 점에 신호 마커: ▲(초록)=진입(바닥반전/다이버전스), ▼(빨강)=익절(정점꺾임).
+ * [v0.27.0 고도화] 축 숫자 라벨·옅은 그리드라인 추가, 범례를 칩으로, 컨테이너 폭에 맞춰
+ *   찌그러짐 없이 스케일(고정 height 대신 CSS aspect-ratio), 호버 시 그 시점 값 툴팁.
  */
 function StrengthChart({ samples, signals }: { samples: StrengthSample[]; signals?: StrengthSignals }) {
-  const W = 640, H = 170, PAD = 8;
+  const W = 640, H = 170, PAD = 8, LBLW = 34; // LBLW: 오른쪽 축 숫자 라벨 공간
   const priceH = 62; //   위 패널(가격) 높이
   const gap = 14; //      두 패널 사이 라벨 공간
   const strTop = priceH + gap; //  아래 패널(강도) 시작 y
   const strH = H - strTop - PAD; // 아래 패널 높이
+  const plotR = W - PAD - LBLW; // 그래프 오른쪽 끝(라벨 공간 제외)
   const n = samples.length;
   const strengths = samples.map((s) => s.strength).filter((v): v is number => v != null);
+  const [hover, setHover] = useState<{ i: number; x: number } | null>(null);
   if (n < 2 || strengths.length < 2) return null;
-  const x = (i: number) => PAD + (i / (n - 1)) * (W - 2 * PAD);
+  const x = (i: number) => PAD + (i / (n - 1)) * (plotR - PAD);
 
   // 위 패널: 가격(있는 점만). 자기 범위로 정규화.
   const prices = samples.map((s) => s.price).filter((v): v is number => v != null);
@@ -228,24 +252,68 @@ function StrengthChart({ samples, signals }: { samples: StrengthSample[]; signal
   const up = signals?.phase === "진입";
   const down = signals?.phase === "익절";
 
+  // [v0.27.0] 호버: svg 위 마우스 x좌표(뷰박스 단위)로 가장 가까운 샘플을 찾는다.
+  const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const vx = ((e.clientX - rect.left) / rect.width) * W;
+    let best = 0, bestDist = Infinity;
+    for (let i = 0; i < n; i++) { const d = Math.abs(x(i) - vx); if (d < bestDist) { bestDist = d; best = i; } }
+    setHover({ i: best, x: x(best) });
+  };
+  const hoverSample = hover ? samples[hover.i] : null;
+
   return (
-    <svg className="str-chart" viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none" role="img" aria-label="가격·체결강도 겹쳐보기">
-      {/* 패널 라벨 */}
-      <text x={PAD} y={12} fontSize="10" fill="currentColor" fillOpacity="0.55">가격</text>
-      <text x={PAD} y={strTop - 3} fontSize="10" fill="currentColor" fillOpacity="0.55">체결강도 (100 기준)</text>
-      {/* 가격선 */}
-      <path d={dp.trim()} fill="none" stroke="#a78bfa" strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" />
-      {/* 강도 100 기준선 + 강도선 */}
-      <line x1={PAD} y1={y100} x2={W - PAD} y2={y100} stroke="currentColor" strokeOpacity="0.35" strokeDasharray="4 4" />
-      <path d={ds.trim()} fill="none" stroke={lastV != null && lastV >= 100 ? "#34d399" : "#f87171"} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-      {/* 신호 마커 */}
-      {up && lastV != null && (
-        <g><circle cx={lastX} cy={lastY} r="4" fill="#34d399" /><text x={lastX} y={lastY - 8} fontSize="12" fill="#34d399" textAnchor="middle">▲</text></g>
+    <div className="chart-wrap-rel">
+      <svg
+        className="str-chart" viewBox={`0 0 ${W} ${H}`} width="100%" preserveAspectRatio="xMidYMid meet"
+        style={{ aspectRatio: `${W} / ${H}` }} role="img" aria-label="가격·체결강도 겹쳐보기"
+        onMouseMove={onMove} onMouseLeave={() => setHover(null)}
+      >
+        {/* [v0.27.0] 옅은 그리드라인(recessive — 데이터보다 눈에 덜 띄게) */}
+        <line x1={PAD} y1={PAD} x2={plotR} y2={PAD} stroke="var(--chart-grid)" />
+        <line x1={PAD} y1={priceH} x2={plotR} y2={priceH} stroke="var(--chart-grid)" />
+        <line x1={PAD} y1={strTop} x2={plotR} y2={strTop} stroke="var(--chart-grid)" />
+        <line x1={PAD} y1={H - PAD} x2={plotR} y2={H - PAD} stroke="var(--chart-grid)" />
+        {/* 패널 라벨 + y축 숫자(최소·최대) */}
+        <text x={PAD} y={12} fontSize="10" fill="currentColor" fillOpacity="0.55">가격</text>
+        <text x={plotR + 4} y={PAD + 8} fontSize="9" fill="var(--chart-axis)">{pHi.toFixed(2)}</text>
+        <text x={plotR + 4} y={priceH} fontSize="9" fill="var(--chart-axis)">{pLo.toFixed(2)}</text>
+        <text x={PAD} y={strTop - 3} fontSize="10" fill="currentColor" fillOpacity="0.55">체결강도 (100 기준)</text>
+        <text x={plotR + 4} y={strTop + 8} fontSize="9" fill="var(--chart-axis)">{sHi.toFixed(0)}</text>
+        <text x={plotR + 4} y={H - PAD} fontSize="9" fill="var(--chart-axis)">{sLo.toFixed(0)}</text>
+        {/* 가격선 */}
+        <path d={dp.trim()} fill="none" stroke="#3987e5" strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" />
+        {/* 강도 100 기준선 + 강도선 */}
+        <line x1={PAD} y1={y100} x2={plotR} y2={y100} stroke="currentColor" strokeOpacity="0.35" strokeDasharray="4 4" />
+        <path d={ds.trim()} fill="none" stroke={lastV != null && lastV >= 100 ? "#34d399" : "#f87171"} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+        {/* 신호 마커 */}
+        {up && lastV != null && (
+          <g><circle cx={lastX} cy={lastY} r="4" fill="#34d399" /><text x={lastX} y={lastY - 8} fontSize="12" fill="#34d399" textAnchor="middle">▲</text></g>
+        )}
+        {down && lastV != null && (
+          <g><circle cx={lastX} cy={lastY} r="4" fill="#f87171" /><text x={lastX} y={lastY + 16} fontSize="12" fill="#f87171" textAnchor="middle">▼</text></g>
+        )}
+        {/* [v0.27.0] 호버 크로스헤어(세로선 + 두 점) */}
+        {hover && (
+          <g>
+            <line x1={hover.x} y1={PAD} x2={hover.x} y2={H - PAD} stroke="var(--chart-axis)" strokeDasharray="2 2" />
+            {hoverSample?.price != null && <circle cx={hover.x} cy={py(hoverSample.price)} r="2.5" fill="#3987e5" />}
+            {hoverSample?.strength != null && <circle cx={hover.x} cy={sy(hoverSample.strength)} r="2.5" fill={hoverSample.strength >= 100 ? "#34d399" : "#f87171"} />}
+          </g>
+        )}
+      </svg>
+      {hoverSample && (
+        <div className="chart-tooltip" style={{ left: `${(hover!.x / W) * 100}%`, top: 0 }}>
+          {hoverSample.ts} · {hoverSample.price != null ? `$${hoverSample.price.toFixed(2)}` : "가격 —"} ·
+          {" "}강도 {hoverSample.strength != null ? hoverSample.strength.toFixed(1) : "—"}
+        </div>
       )}
-      {down && lastV != null && (
-        <g><circle cx={lastX} cy={lastY} r="4" fill="#f87171" /><text x={lastX} y={lastY + 16} fontSize="12" fill="#f87171" textAnchor="middle">▼</text></g>
-      )}
-    </svg>
+      <div className="chart-legend">
+        <span className="chart-chip"><span className="swatch" style={{ background: "#3987e5" }} />가격</span>
+        <span className="chart-chip"><span className="swatch" style={{ background: "#34d399" }} />강도(매수우세, ≥100)</span>
+        <span className="chart-chip"><span className="swatch" style={{ background: "#f87171" }} />강도(매도우세, &lt;100)</span>
+      </div>
+    </div>
   );
 }
 
@@ -310,9 +378,22 @@ function ScreenEvidenceView({ ev, price }: { ev: ScreenEvidence; price: number |
  *   외부 차트 라이브러리 없이 SVG로 직접 그린다(StrengthChart와 같은 방식). 표에서 본 근거(도지·다음봉)를
  *   차트 위에 노란/보라 테두리로 표시해 "이게 그 캔들이구나"를 눈으로 바로 확인할 수 있다.
  */
+/**
+ * [v0.25.0] ScreenCandleChart — 스크리너 결과 종목의 캔들차트(도지·EMA200·구름·세션고점 표시).
+ * [v0.27.0 고도화] 가격 축 숫자·시간 축 라벨·옅은 그리드라인 추가, 범례를 칩으로, 컨테이너 폭에
+ *   맞춰 찌그러짐 없이 스케일, 호버 시 그 봉의 OHLC 툴팁.
+ *   [색상 정리] 예전엔 세션고점 참조선과 도지 강조 테두리가 똑같은 노란색(#facc15)을 써서 서로
+ *   구분이 안 됐다. 참조선 3개(세션고점·EMA200·구름top)는 dataviz 팔레트의 검증된 카테고리컬
+ *   3색(청록·파랑·주황, validate_palette.js --surface #0f131a --mode dark 통과)으로 고정 배정하고,
+ *   도지·다음봉 강조는 그 3색과 절대 안 겹치는 별도 색(--chart-highlight, 중립 밝은색) 하나를
+ *   "실선(도지)/파선(다음봉)"이라는 선모양(형태 채널)으로 구분한다 — 4번째 색을 더 쓰면
+ *   참조선과의 전 쌍(all-pairs) 구분 검증이 깨진다는 게 팔레트 문서의 명시적 경고라, 색을
+ *   늘리는 대신 형태로 구분했다.
+ */
 function ScreenCandleChart({ chart }: { chart: ScreenChart }) {
-  const W = 640, H = 220, PAD = 10;
+  const W = 640, H = 220, PAD = 10, LBLW = 40;
   const n = chart.candles.length;
+  const [hover, setHover] = useState<number | null>(null);
   if (n === 0) return <div className="hint">표시할 캔들이 없습니다(데이터 부족).</div>;
 
   const highs = chart.candles.map((c) => c.high);
@@ -323,8 +404,9 @@ function ScreenCandleChart({ chart }: { chart: ScreenChart }) {
     if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
   }
   const span = Math.max(hi - lo, 1e-9);
+  const plotR = W - PAD - LBLW;
   const y = (v: number) => PAD + (1 - (v - lo) / span) * (H - 2 * PAD);
-  const slot = (W - 2 * PAD) / n;
+  const slot = (plotR - PAD) / n;
   const cx = (i: number) => PAD + slot * (i + 0.5);
   const bodyW = Math.max(1.5, slot * 0.6);
   const refLine = (v: number | null) => (v != null ? y(v) : null);
@@ -332,12 +414,39 @@ function ScreenCandleChart({ chart }: { chart: ScreenChart }) {
   const emaY = refLine(chart.ema200);
   const cloudY = refLine(chart.cloudTop);
 
+  // [v0.27.0] 시간축 라벨: 봉이 많으면 다 못 넣으니 최대 4개만 고르게 뽑는다.
+  const tickCount = Math.min(4, n);
+  const tickIdx = Array.from({ length: tickCount }, (_, k) => Math.round((k / Math.max(1, tickCount - 1)) * (n - 1)));
+
+  const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const vx = ((e.clientX - rect.left) / rect.width) * W;
+    const i = Math.min(n - 1, Math.max(0, Math.round((vx - PAD) / slot - 0.5)));
+    setHover(i);
+  };
+  const hc = hover != null ? chart.candles[hover] : null;
+
   return (
-    <div className="screen-chart-wrap">
-      <svg className="screen-chart" viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none" role="img" aria-label={`${chart.symbol} 캔들차트`}>
-        {highY != null && <line x1={PAD} y1={highY} x2={W - PAD} y2={highY} stroke="#facc15" strokeDasharray="3 3" strokeOpacity="0.8" />}
-        {emaY != null && <line x1={PAD} y1={emaY} x2={W - PAD} y2={emaY} stroke="#60a5fa" strokeDasharray="5 3" strokeOpacity="0.8" />}
-        {cloudY != null && <line x1={PAD} y1={cloudY} x2={W - PAD} y2={cloudY} stroke="#fb923c" strokeDasharray="5 3" strokeOpacity="0.8" />}
+    <div className="screen-chart-wrap chart-wrap-rel">
+      <svg
+        className="screen-chart" viewBox={`0 0 ${W} ${H}`} width="100%" preserveAspectRatio="xMidYMid meet"
+        style={{ aspectRatio: `${W} / ${H}` }} role="img" aria-label={`${chart.symbol} 캔들차트`}
+        onMouseMove={onMove} onMouseLeave={() => setHover(null)}
+      >
+        {/* 옅은 가격 그리드라인(recessive) + y축 숫자(최고·최저) */}
+        <line x1={PAD} y1={PAD} x2={plotR} y2={PAD} stroke="var(--chart-grid)" />
+        <line x1={PAD} y1={H / 2} x2={plotR} y2={H / 2} stroke="var(--chart-grid)" />
+        <line x1={PAD} y1={H - PAD} x2={plotR} y2={H - PAD} stroke="var(--chart-grid)" />
+        <text x={plotR + 4} y={PAD + 8} fontSize="9" fill="var(--chart-axis)">${hi.toFixed(2)}</text>
+        <text x={plotR + 4} y={H - PAD} fontSize="9" fill="var(--chart-axis)">${lo.toFixed(2)}</text>
+        {/* 시간축 라벨 */}
+        {tickIdx.map((i) => (
+          <text key={i} x={cx(i)} y={H - 1} fontSize="9" fill="var(--chart-axis)" textAnchor="middle">{chart.candles[i].time}</text>
+        ))}
+        {/* 참조선 3개 — 검증된 카테고리컬 3색 고정 배정(청록·파랑·주황) */}
+        {highY != null && <line x1={PAD} y1={highY} x2={plotR} y2={highY} stroke="var(--chart-ref-3)" strokeDasharray="3 3" strokeOpacity="0.9" />}
+        {emaY != null && <line x1={PAD} y1={emaY} x2={plotR} y2={emaY} stroke="var(--chart-ref-1)" strokeDasharray="5 3" strokeOpacity="0.9" />}
+        {cloudY != null && <line x1={PAD} y1={cloudY} x2={plotR} y2={cloudY} stroke="var(--chart-ref-2)" strokeDasharray="5 3" strokeOpacity="0.9" />}
         {chart.candles.map((c, i) => {
           const up = c.close >= c.open;
           const color = up ? "#34d399" : "#f87171";
@@ -354,21 +463,37 @@ function ScreenCandleChart({ chart }: { chart: ScreenChart }) {
                 width={bodyW}
                 height={bodyH}
                 fill={color}
-                stroke={isDoji ? "#facc15" : isNext ? "#a78bfa" : "none"}
+                stroke={isDoji || isNext ? "var(--chart-highlight)" : "none"}
                 strokeWidth={isDoji || isNext ? 2 : 0}
+                strokeDasharray={isNext ? "3 2" : undefined}
               />
+              {/* [형태 채널] 도지=◆, 다음봉=▸ — 색이 같아도 모양으로 구분(범례에 뜻풀이) */}
+              {isDoji && <text x={cx(i)} y={bodyTop - 5} fontSize="9" fill="var(--chart-highlight)" textAnchor="middle">◆</text>}
+              {isNext && <text x={cx(i)} y={bodyTop - 5} fontSize="9" fill="var(--chart-highlight)" textAnchor="middle">▸</text>}
+              {hover === i && <rect x={cx(i) - slot / 2} y={PAD} width={slot} height={H - 2 * PAD} fill="var(--chart-axis)" fillOpacity="0.08" />}
             </g>
           );
         })}
       </svg>
-      <div className="screen-chart-legend hint small">
-        현재가 {chart.price != null ? `$${chart.price.toFixed(2)}` : "—"}
-        {chart.sessionHigh != null && <span> · 🟡 세션고점 ${chart.sessionHigh.toFixed(2)}{chart.sessionHighTime ? ` @${chart.sessionHighTime}` : ""}</span>}
-        {chart.ema200 != null && <span> · 🔵 EMA200 ${chart.ema200.toFixed(2)}</span>}
-        {chart.cloudTop != null && <span> · 🟠 구름top ${chart.cloudTop.toFixed(2)}</span>}
-        {chart.dojiTime && <span> · 🟨 도지 {chart.dojiTime}</span>}
-        {chart.nextTime && <span> · 🟪 다음봉 {chart.nextTime}</span>}
-        {!chart.dojiTime && <span> · 아직 도지 없음</span>}
+      {hc && (
+        <div className="chart-tooltip" style={{ left: `${(cx(hover!) / W) * 100}%`, top: 0 }}>
+          {hc.time} · 시 ${hc.open.toFixed(2)} 고 ${hc.high.toFixed(2)} 저 ${hc.low.toFixed(2)} 종 ${hc.close.toFixed(2)}
+        </div>
+      )}
+      <div className="chart-legend">
+        <span className="hint small">현재가 {chart.price != null ? `$${chart.price.toFixed(2)}` : "—"}</span>
+        {chart.sessionHigh != null && (
+          <span className="chart-chip"><span className="swatch" style={{ background: "var(--chart-ref-3)" }} />세션고점 ${chart.sessionHigh.toFixed(2)}{chart.sessionHighTime ? ` @${chart.sessionHighTime}` : ""}</span>
+        )}
+        {chart.ema200 != null && (
+          <span className="chart-chip"><span className="swatch" style={{ background: "var(--chart-ref-1)" }} />EMA200 ${chart.ema200.toFixed(2)}</span>
+        )}
+        {chart.cloudTop != null && (
+          <span className="chart-chip"><span className="swatch" style={{ background: "var(--chart-ref-2)" }} />구름top ${chart.cloudTop.toFixed(2)}</span>
+        )}
+        {chart.dojiTime && <span className="chart-chip">◆ 도지 {chart.dojiTime}</span>}
+        {chart.nextTime && <span className="chart-chip">▸ 다음봉 {chart.nextTime}</span>}
+        {!chart.dojiTime && <span className="hint small">아직 도지 없음</span>}
       </div>
     </div>
   );
@@ -396,7 +521,8 @@ function App() {
   /** 웹앱(폰)인가? — 데스크톱에만 있는 '폰 연결' 기능 유무로 구분한다 */
   const isWebApp = !window.kyletool.phoneStart;
   // [v0.9.2] 탭 순서(드래그로 변경, 이 기기에 저장)
-  const { order: tabOrder, dragProps, isDragging } = useTabOrder(TOP_TABS); // [v0.12.0] 상단은 7개만(trades·journal 흡수)
+  // [v0.27.0] 이제 드래그로 순서를 바꾸는 건 '그룹'(4개) — 리프 탭은 그룹 안에서 고정 순서.
+  const { order: groupOrder, dragProps, isDragging } = useTabOrder(TOP_GROUPS);
   // [v0.9.1] 매매 리포트 + [v0.9.2] 기간 선택(오늘/1주일/1개월/날짜)
   const [report, setReport] = useState<DailyReport | null>(null);
   const [reportBusy, setReportBusy] = useState(false);
@@ -694,6 +820,8 @@ function App() {
     else if (t === "splits") refreshSplits();
     else if (t === "strength") { void loadHoldingsStrength(); void loadAnalysis(); }
     else if (t === "report") void loadReport();
+    // [v0.27.0] 자동매매 현황/스크리닝 결과 탭을 열 때 최신 상태를 바로 받아온다(20초 폴링을 기다리지 않게).
+    else if (t === "autoControl" || t === "autoScan") void window.kyletool.autoTradeStatus().then(setAutoStatus);
   };
   // [v0.15.0] 2컬럼이 켜지거나 좌/우 패널 탭이 바뀌면 그 탭들의 데이터를 로드한다(1컬럼과 동일한 지연 로딩).
   useEffect(() => {
@@ -1864,28 +1992,46 @@ ${msg}
         </div>
       </header>
 
-      {/* ===== 탭 (2컬럼일 땐 숨김 — 각 패널의 드롭다운으로 탭을 고른다) ===== */}
+      {/* ===== 탭 2단(2컬럼일 땐 숨김 — 각 패널의 드롭다운으로 탭을 고른다) =====
+          [v0.27.0] 1단: 매매방식·성격으로 묶은 그룹 4개(메뉴얼/자동매매/현황/설정) — 드래그로 순서 변경.
+          2단(서브탭): 지금 tab이 속한 그룹의 하위 탭이 2개 이상일 때만 뜬다(설정처럼 1개면 안 뜸). */}
       {!showTwoCol && (
+      <>
       <nav className="tabs">
-        {tabOrder.map((t) => (
+        {groupOrder.map((g) => (
           <button
-            key={t}
-            className={tab === t ? "tab active" : "tab"}
-            title="좌우로 끌면 탭 순서를 바꿀 수 있어요"
-            {...dragProps(t)}
+            key={g}
+            className={TAB_GROUP[tab] === g ? "tab active" : "tab"}
+            title="좌우로 끌면 그룹 순서를 바꿀 수 있어요"
+            {...dragProps(g)}
             onClick={() => {
               // 끌어서 순서를 바꾼 직후에는 탭 이동이 되지 않게 한다(의도치 않은 화면 전환 방지).
               if (isDragging()) return;
-              setTab(t);
-              if (t === "orders") refreshStatusTab();
-              if (t === "splits") refreshSplits(); // 탭 열 때 최신 목록 다시 읽기
-              if (t === "strength") { void loadHoldingsStrength(); void loadAnalysis(); } // [v0.23.0] 매매분석 탭: 보유 종목 체결강도 자동표시 + 진입/청산 분석
+              const children = GROUP_CHILDREN[g];
+              // 자식이 1개(설정)면 곧장 그리로, 2개 이상이면 이미 그 그룹 안에 있으면 유지(서브탭만 펼침),
+              // 아니면 첫 자식으로 이동(그룹 버튼을 눌렀는데 아무 하위 탭도 안 보이는 상태 방지).
+              if (children.length === 1) { setTab(children[0]); activateTab(children[0]); return; }
+              if (TAB_GROUP[tab] !== g) { setTab(children[0]); activateTab(children[0]); }
             }}
           >
-            {TAB_LABEL[t]}
+            {TOP_GROUP_LABEL[g]}
           </button>
         ))}
       </nav>
+      {GROUP_CHILDREN[TAB_GROUP[tab]].length > 1 && (
+        <nav className="subtabs">
+          {GROUP_CHILDREN[TAB_GROUP[tab]].map((t) => (
+            <button
+              key={t}
+              className={tab === t ? "subtab active" : "subtab"}
+              onClick={() => { setTab(t); activateTab(t); }}
+            >
+              {TAB_LABEL[t]}
+            </button>
+          ))}
+        </nav>
+      )}
+      </>
       )}
 
       {/* [v0.15.0] 본문: 1컬럼이면 현재 탭 1개, 2컬럼이면 좌/우 탭 2개를 나란히.
@@ -1901,7 +2047,13 @@ ${msg}
                   value={paneTab}
                   onChange={(e) => { const nt = e.target.value as TabId; (paneIdx === 0 ? setTabL : setTabR)(nt); /* 데이터 로드는 [tabL,tabR] effect가 처리(중복 호출 방지) */ }}
                 >
-                  {TOP_TABS.map((t) => <option key={t} value={t}>{TAB_LABEL[t]}</option>)}
+                  {/* [v0.27.0] 2컬럼은 그룹 개념 없이 9개 리프 탭 중 아무거나 바로 고르되, optgroup으로
+                      그룹별로 묶어 보여준다(1단 탭바와 같은 분류 — 찾기 쉽게). */}
+                  {TOP_GROUPS.map((g) => (
+                    <optgroup key={g} label={TOP_GROUP_LABEL[g]}>
+                      {GROUP_CHILDREN[g].map((t) => <option key={t} value={t}>{TAB_LABEL[t]}</option>)}
+                    </optgroup>
+                  ))}
                 </select>
               </div>
             )}
@@ -2557,9 +2709,18 @@ ${msg}
                   <div className="str-meta">
                     <div>매수량 <b className="ok">{latest ? latest.buyVol.toLocaleString() : "—"}</b> · 매도량 <b className="danger">{latest ? latest.sellVol.toLocaleString() : "—"}</b></div>
                     <div className="hint">
-                      {latest ? `표본 ${latest.nTicks}틱 · ${latest.session} · ${latest.ts}` : "아직 표본이 없어요 — 집 PC에 연결돼 있으면 잠시 뒤 자동으로 채워집니다."}
+                      {/* [v0.27.0] "틱개수 창"이 아니라 "최근 5분" 시간창 기준임을 항상 숫자 옆에 병기 —
+                          종목마다 창의 실제 시간폭이 다르면 숫자를 비교할 수 없기 때문(체결강도 재설계 참고). */}
+                      {latest
+                        ? `최근 ${Math.round((strState?.windowSec ?? 300) / 60)}분 기준 (${latest.nTicks}건${latest.windowCapped ? "+, 상한도달" : ""}) · ${latest.session} · ${latest.ts}`
+                        : "아직 표본이 없어요 — 집 PC에 연결돼 있으면 잠시 뒤 자동으로 채워집니다."}
                       {latest?.price != null && ` · 체결가 ${usdKrw(latest.price, fx)}`}
                     </div>
+                    {latest?.windowCapped && (
+                      <div className="hint" style={{ color: "var(--warn, #f59e0b)" }}>
+                        ⚠️ 체결이 너무 잦아 서버 조회 상한(50건)에 걸렸어요 — 창 안 일부 체결을 놓쳤을 수 있어요(참고용 신뢰도 안내).
+                      </div>
+                    )}
                   </div>
                 </div>
               );
@@ -2589,7 +2750,7 @@ ${msg}
             {heldSyms.length > 0 && strState && strState.samples.length > 0 && (
               <table className="result-table str-table">
                 <thead>
-                  <tr><th>시각</th><th>체결강도</th><th>매수량</th><th>매도량</th><th>표본</th></tr>
+                  <tr><th>시각</th><th>체결강도</th><th>매수량</th><th>매도량</th><th>최근 5분 표본</th></tr>
                 </thead>
                 <tbody>
                   {[...strState.samples].slice(-12).reverse().map((s, i) => (
@@ -2600,7 +2761,7 @@ ${msg}
                       </td>
                       <td>{s.buyVol.toLocaleString()}</td>
                       <td>{s.sellVol.toLocaleString()}</td>
-                      <td>{s.nTicks}</td>
+                      <td>{s.nTicks}{s.windowCapped ? "+" : ""}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -2685,6 +2846,177 @@ ${msg}
                       ))}
                     </tbody>
                   </table>
+                </>
+              );
+            })()}
+          </section>
+        </main>
+      )}
+
+      {/* ===== 🤖 자동매매 현황 (v0.26.0 설정탭에서 이동, v0.27.0) — 오너가 명시적으로 켰을 때만,
+          이 앱이 켜져 있는 동안만 작동 ===== */}
+      {paneTab === "autoControl" && (
+        <main className="grid">
+          <section className="card wide">
+            <h2>🤖 자동매매</h2>
+            <p className="hint">
+              5분마다 스스로 탐색해 <b>합격 종목을 삼분할 '1분할' 타점으로 자동 매수</b>하고, 체결되면 익절·손절까지
+              자동으로 겁니다. <b>이 프로그램이 켜져 있는 동안만</b> 작동하고, 앱을 끄면 자동매매도 함께 멈춥니다
+              (이미 낸 주문·조건주문은 토스에 그대로 남아 있어요 — 토스 서버가 계속 감시합니다).
+              무엇을 스캔했는지는 <b>[🤖 자동매매 → 스크리닝 결과]</b> 탭에서 자세히 볼 수 있어요.
+            </p>
+
+            <div className="settings-block">
+              <div className="form-row">
+                <button
+                  className={`btn ${autoStatus?.enabled ? "btn-kill kill-on" : "btn-start"}`}
+                  disabled={autoBusy || status?.killSwitch}
+                  onClick={toggleAutoTrade}
+                >
+                  {autoStatus?.enabled ? "🔴 자동매매 중지" : "▶ 자동매매 시작"}
+                </button>
+                <span className="hint">
+                  상태: <b>{autoStatus?.enabled ? "켜짐" : "꺼짐"}</b>
+                  {autoStatus?.lastCycleAt && <> · 마지막 확인 {autoStatus.lastCycleAt}</>}
+                  {autoStatus && <> · 이번 실행 누적손익 <b className={autoStatus.realizedPnlUsd < 0 ? "pnl-down" : "pnl-up"}>${autoStatus.realizedPnlUsd.toFixed(2)}</b></>}
+                </span>
+              </div>
+              {status?.killSwitch && <p className="hint small danger">킬 스위치(🛑 비상 정지)가 켜져 있어 자동매매를 시작할 수 없습니다.</p>}
+
+              <h3>한도 설정 (전부 직접 수정 가능)</h3>
+              <div className="form-row">
+                <label>최대 보유 종목 수
+                  <input type="text" inputMode="numeric" value={autoForm.maxPositions} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxPositions: e.target.value })} placeholder="3" />
+                </label>
+                <label>최대손실 한도 (시드 대비 %)
+                  <input type="text" inputMode="decimal" value={autoForm.maxLossPct} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxLossPct: e.target.value })} placeholder="5" />
+                </label>
+                <label>최대 투입 비율 (시드 대비 %, 종목 1개당 배정 비율)
+                  <input type="text" inputMode="decimal" value={autoForm.maxInvestPct} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxInvestPct: e.target.value })} placeholder="30" />
+                </label>
+                <button className="btn btn-start" onClick={saveAutoSettings}>한도 저장</button>
+                {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
+              </div>
+              <p className="hint small">
+                예) 최대 투입 30% → 종목 1개당 예산은 시드의 30%(종목 수로 나누지 않습니다 — 3종목이면 최대
+                동시 투입 합계는 시드의 최대 90%까지 커질 수 있습니다). 손실 한도는 이번 자동매매 실행 동안
+                누적된 실현손익(달러) 기준으로, 시드 대비 %를 넘으면 자동매매가 스스로 멈춥니다.
+              </p>
+
+              {autoStatus && autoStatus.positions.length > 0 && (
+                <>
+                  <h3>지금 감시 중인 자동매매 포지션</h3>
+                  <table className="result-table">
+                    <thead>
+                      <tr><th>종목</th><th>진입가</th><th>익절가</th><th>손절가</th><th>수량</th><th>상태</th></tr>
+                    </thead>
+                    <tbody>
+                      {autoStatus.positions.map((p) => (
+                        <tr key={`${p.symbol}@${p.entry}`}>
+                          <td>{p.symbol}</td>
+                          <td>${p.entry}</td>
+                          <td>${p.tp}</td>
+                          <td>${p.sl}</td>
+                          <td>{p.quantity}</td>
+                          <td>{p.status === "active" ? "익절/손절 등록됨" : "매수 체결 대기중"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
+              )}
+            </div>
+          </section>
+        </main>
+      )}
+
+      {/* ===== 🤖 자동매매 → 스크리닝 결과 (v0.27.0 신규, 읽기 전용) =====
+          [오너 지시] 자동매매를 켜면 스크리너에서 스크리닝을 진행하고, 그 결과를 여기서 볼 수 있어야
+          한다 — 설정 탭에 컨트롤만 있고 "탐색→진입" 과정이 안 보이던 문제를 고친다. 이 화면은
+          모니터링 전용(분리형 스크리너 — 수동 스캔은 [메뉴얼 → 스크리너] 탭에 따로 있음): "계산기로
+          불러오기" 같은 수동 액션은 없다(자동매매가 이미 판단을 마쳤으므로). */}
+      {paneTab === "autoScan" && (
+        <main className="grid">
+          <section className="card wide">
+            <h2>스크리닝 결과 <span className="hint">(자동매매가 5분마다 훑은 종목 — 읽기 전용)</span></h2>
+            <p className="hint">
+              자동매매가 켜져 있는 동안 5분마다 자동으로 스캔한 결과예요. 여기 뜨는 후보 중 <b>진입 조건(빈
+              자리·중복 방지·안전 한도)</b>을 통과한 것만 실제로 매수됩니다 — 아래 배지로 진입 여부를 바로
+              확인할 수 있어요.
+            </p>
+
+            {!autoStatus?.lastScan && (
+              <div className="result-empty hint">
+                {autoStatus?.enabled
+                  ? "자동매매가 켜져 있어요 — 첫 스캔 결과가 곧 여기 뜹니다(최대 5분)."
+                  : "자동매매를 시작하면 여기에 스캔 결과가 자동으로 뜹니다. [🤖 자동매매 → 자동매매 현황]에서 켤 수 있어요."}
+              </div>
+            )}
+
+            {autoStatus?.lastScan && (() => {
+              const run = autoStatus.lastScan;
+              const activeSymbols = new Set(autoStatus.positions.map((p) => p.symbol));
+              const cand = run.results.filter((r) => r.status === "confirmed" || r.status === "watch");
+              return (
+                <>
+                  <p className="hint">
+                    {run.scannedAt} 스캔 · {run.total}종목(${run.priceMin}~${run.priceMax}) 중 <b className="ok">후보 {cand.length}개</b>
+                    {run.excludedEtf > 0 && <span> · ETF/레버리지 {run.excludedEtf}개 제외</span>}
+                  </p>
+                  {cand.length === 0 ? (
+                    <div className="result-empty hint">이번 스캔에서는 조건에 맞는 후보가 없었어요(다음 사이클에 다시 훑습니다).</div>
+                  ) : (
+                    <table className="result-table screen-table">
+                      <thead>
+                        <tr><th>근거</th><th>상태</th><th>종목</th><th>현재가</th><th>자동매매</th></tr>
+                      </thead>
+                      <tbody>
+                        {cand.map((r) => {
+                          const open = openEvid.has(r.symbol);
+                          const chartOpen = openChart.has(r.symbol);
+                          const entered = activeSymbols.has(r.symbol);
+                          return (
+                            <Fragment key={r.symbol}>
+                              <tr className="screen-row">
+                                <td>
+                                  <button className="mini btn-evid" onClick={() => toggleEvid(r.symbol)} title="판정 근거 펼치기/접기">
+                                    {open ? "▾ 근거" : "▸ 근거"}
+                                  </button>
+                                  {" "}
+                                  <button className="mini btn-evid" onClick={() => toggleChart(r.symbol)} title="이 종목의 캔들차트 불러오기">
+                                    {chartOpen ? "▾ 📈" : "▸ 📈"}
+                                  </button>
+                                </td>
+                                <td>{r.status === "confirmed" ? "🔴 확정" : "🟡 관찰"}</td>
+                                <td><b>{r.symbol}</b></td>
+                                <td>{r.price != null ? usdKrw(r.price, fx) : "—"}</td>
+                                <td>{entered ? <span className="ok">✅ 진입됨</span> : <span className="hint">— 미진입</span>}</td>
+                              </tr>
+                              {open && r.evidence && (
+                                <tr className="evid-row">
+                                  <td colSpan={5}><ScreenEvidenceView ev={r.evidence} price={r.price} /></td>
+                                </tr>
+                              )}
+                              {chartOpen && (
+                                <tr className="evid-row">
+                                  <td colSpan={5}>
+                                    {chartBusy.has(r.symbol) && <p className="hint">차트 불러오는 중…</p>}
+                                    {chartErr[r.symbol] && (
+                                      <p className="hint">
+                                        ⚠️ 차트를 못 불러왔습니다: {chartErr[r.symbol]}
+                                        {" "}<button className="mini" onClick={() => void loadScreenChart(r.symbol)}>다시 시도</button>
+                                      </p>
+                                    )}
+                                    {chartCache[r.symbol] && <ScreenCandleChart chart={chartCache[r.symbol]} />}
+                                  </td>
+                                </tr>
+                              )}
+                            </Fragment>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  )}
                 </>
               );
             })()}
@@ -3269,76 +3601,6 @@ ${msg}
                 />
                 <b>주문 확인 팝업 건너뛰기</b> — 버튼을 누르면 <b>바로 전송</b>(실수 주문 위험 ↑, 권장 안 함)
               </label>
-            </div>
-          </section>
-
-          {/* ── ⑤.5 [v0.26.0] 자동매매 — 오너가 명시적으로 켰을 때만, 이 앱이 켜져 있는 동안만 작동 ── */}
-          <section className="card wide">
-            <h2>🤖 자동매매</h2>
-            <p className="hint">
-              5분마다 스스로 탐색해 <b>합격 종목을 삼분할 '1분할' 타점으로 자동 매수</b>하고, 체결되면 익절·손절까지
-              자동으로 겁니다. <b>이 프로그램이 켜져 있는 동안만</b> 작동하고, 앱을 끄면 자동매매도 함께 멈춥니다
-              (이미 낸 주문·조건주문은 토스에 그대로 남아 있어요 — 토스 서버가 계속 감시합니다).
-            </p>
-
-            <div className="settings-block">
-              <div className="form-row">
-                <button
-                  className={`btn ${autoStatus?.enabled ? "btn-kill kill-on" : "btn-start"}`}
-                  disabled={autoBusy || status?.killSwitch}
-                  onClick={toggleAutoTrade}
-                >
-                  {autoStatus?.enabled ? "🔴 자동매매 중지" : "▶ 자동매매 시작"}
-                </button>
-                <span className="hint">
-                  상태: <b>{autoStatus?.enabled ? "켜짐" : "꺼짐"}</b>
-                  {autoStatus?.lastCycleAt && <> · 마지막 확인 {autoStatus.lastCycleAt}</>}
-                  {autoStatus && <> · 이번 실행 누적손익 <b className={autoStatus.realizedPnlUsd < 0 ? "pnl-down" : "pnl-up"}>${autoStatus.realizedPnlUsd.toFixed(2)}</b></>}
-                </span>
-              </div>
-              {status?.killSwitch && <p className="hint small danger">킬 스위치(🛑 비상 정지)가 켜져 있어 자동매매를 시작할 수 없습니다.</p>}
-
-              <h3>한도 설정 (전부 직접 수정 가능)</h3>
-              <div className="form-row">
-                <label>최대 보유 종목 수
-                  <input type="text" inputMode="numeric" value={autoForm.maxPositions} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxPositions: e.target.value })} placeholder="3" />
-                </label>
-                <label>최대손실 한도 (시드 대비 %)
-                  <input type="text" inputMode="decimal" value={autoForm.maxLossPct} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxLossPct: e.target.value })} placeholder="5" />
-                </label>
-                <label>최대 투입 비율 (시드 대비 %, 종목수만큼 균등 분배)
-                  <input type="text" inputMode="decimal" value={autoForm.maxInvestPct} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxInvestPct: e.target.value })} placeholder="30" />
-                </label>
-                <button className="btn btn-start" onClick={saveAutoSettings}>한도 저장</button>
-                {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
-              </div>
-              <p className="hint small">
-                예) 최대 투입 30% · 3종목 → 종목당 예산은 시드의 10%. 손실 한도는 이번 자동매매 실행 동안 누적된
-                실현손익(달러) 기준으로, 시드 대비 %를 넘으면 자동매매가 스스로 멈춥니다.
-              </p>
-
-              {autoStatus && autoStatus.positions.length > 0 && (
-                <>
-                  <h3>지금 감시 중인 자동매매 포지션</h3>
-                  <table className="result-table">
-                    <thead>
-                      <tr><th>종목</th><th>진입가</th><th>익절가</th><th>손절가</th><th>수량</th><th>상태</th></tr>
-                    </thead>
-                    <tbody>
-                      {autoStatus.positions.map((p) => (
-                        <tr key={`${p.symbol}@${p.entry}`}>
-                          <td>{p.symbol}</td>
-                          <td>${p.entry}</td>
-                          <td>${p.tp}</td>
-                          <td>${p.sl}</td>
-                          <td>{p.quantity}</td>
-                          <td>{p.status === "active" ? "익절/손절 등록됨" : "매수 체결 대기중"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </>
-              )}
             </div>
           </section>
 
