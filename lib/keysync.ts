@@ -2,14 +2,19 @@
 // lib/keysync.ts — 토스 키 기기 간 동기화용 "클라이언트 암호화" (v0.8.0)
 // -----------------------------------------------------------------------------
 // [무엇을 하나?]
-//   맥·윈도우가 토스 키(Client ID/Secret/계좌)를 한 곳(Supabase)에 두고 공유하되,
-//   ⚠️ **평문은 절대 클라우드에 올리지 않는다.** 오너만 아는 마스터 비밀번호(passphrase)로
-//   기기에서 암호화(AES-GCM 256)한 뒤 "암호문만" 저장한다. 복호화도 기기에서 passphrase 로만.
+//   여러 사람·여러 기기가 토스 키(Client ID/Secret/계좌)를 한 곳(Supabase)에 두고
+//   공유하되, ⚠️ **평문은 절대 클라우드에 올리지 않는다.** 로그인한 본인만 아는
+//   비밀번호(passphrase)로 기기에서 암호화(AES-GCM 256)한 뒤 "암호문만" 저장한다.
+//   복호화도 기기에서 passphrase 로만.
 //
 // [왜 안전한가?]
 //   - Supabase 에는 { 암호문, salt, iv } 만 저장된다. passphrase 는 어디에도 저장 안 한다.
-//   - 행 식별자(sync_id)도 passphrase 에서 유도한다 → passphrase 를 모르면 "어느 행인지"조차 모른다.
+//   - 행은 로그인 계정(user_id)으로 구분하고, RLS(행 수준 보안)가 "내 행만" 보이게 막는다.
 //   - AES-GCM 은 인증 태그가 있어, 틀린 passphrase 로 복호화하면 조용히 깨지지 않고 '실패'로 드러난다.
+//
+// [v0.24.0] passphrase 에서 행 식별자를 만드는 deriveSyncId 는 삭제했다. 예전(GitHub
+//   공개 저장소 방식)에는 "어느 파일이 내 것인지" 비밀번호로 숨겨야 했지만, 지금은
+//   Supabase RLS가 로그인 계정(user_id)으로 행을 이미 격리하므로 더 필요 없다.
 //
 // [표준 라이브러리만 사용] Web Crypto(node:crypto webcrypto) — 외부 의존성 없음, 검증 쉬움.
 // =============================================================================
@@ -32,7 +37,6 @@ export interface SecretPayload {
 
 /** 클라우드에 저장되는 것(전부 암호문/공개 파라미터 — 평문 키 없음). */
 export interface EncryptedRecord {
-  syncId: string; //     passphrase 유도 식별자(행 자체가 비밀)
   ciphertext: string; // base64
   salt: string; //       base64 (PBKDF2)
   iv: string; //         base64 (AES-GCM)
@@ -75,25 +79,14 @@ async function deriveKey(passphrase: string, salt: Uint8Array) {
   );
 }
 
-/**
- * deriveSyncId — passphrase 에서 행 식별자를 만든다(양쪽 기기가 같은 값을 계산하도록 고정 규칙).
- *   무작위 솔트를 쓰지 않는 이유: 다른 기기에서도 passphrase 만으로 같은 id 를 재현해야 하기 때문.
- *   대신 고정 컨텍스트 문자열을 섞어, 다른 용도의 해시와 충돌하지 않게 한다.
- */
-export async function deriveSyncId(passphrase: string): Promise<string> {
-  const h = await subtle.digest("SHA-256", enc.encode(`capri-sync-id-v1|${passphrase}`));
-  // URL/DB 안전한 형태로(영숫자), 앞 32자만.
-  return toB64(h).replace(/[+/=]/g, "").slice(0, 32);
-}
-
 /** 민감 데이터를 passphrase 로 암호화 → 클라우드에 올릴 레코드(암호문만). */
 export async function encryptSecret(payload: SecretPayload, passphrase: string): Promise<EncryptedRecord> {
-  if (!passphrase || passphrase.length < 6) throw new Error("마스터 비밀번호는 6자 이상이어야 합니다.");
+  if (!passphrase || passphrase.length < 6) throw new Error("비밀번호는 6자 이상이어야 합니다.");
   const salt = webcrypto.getRandomValues(new Uint8Array(SALT_BYTES));
   const iv = webcrypto.getRandomValues(new Uint8Array(IV_BYTES));
   const key = await deriveKey(passphrase, salt);
   const ctBuf = await subtle.encrypt({ name: "AES-GCM", iv }, key, enc.encode(JSON.stringify(payload)));
-  return { syncId: await deriveSyncId(passphrase), ciphertext: toB64(ctBuf), salt: toB64(salt), iv: toB64(iv) };
+  return { ciphertext: toB64(ctBuf), salt: toB64(salt), iv: toB64(iv) };
 }
 
 /**
@@ -120,18 +113,18 @@ export async function decryptSecret(rec: { ciphertext: string; salt: string; iv:
 // -----------------------------------------------------------------------------
 // 위의 encryptSecret/decryptSecret 은 '토스 키' 전용 모양(clientId 등)이라 그대로 못 쓴다.
 // 같은 자물쇠(PBKDF2 20만회 + AES-GCM 256)를 쓰되, **어떤 JSON이든** 담을 수 있게 한다.
-//   · 매매 이력(체결 결과)을 담아 공개 저장소에 올려도, 비밀번호 없이는 아무 의미 없는 글자다.
-//   · 파일 이름도 비밀번호에서 만들어(deriveSyncId) 어느 파일인지조차 알 수 없다.
+//   매매 이력(체결 결과)을 여기 담아 Supabase(내 계정 전용 행)에 올려도, 비밀번호 없이는
+//   아무 의미 없는 글자다.
 // =============================================================================
 
 /** 아무 JSON 데이터나 passphrase 로 암호화한다. */
 export async function encryptJson(data: unknown, passphrase: string): Promise<EncryptedRecord> {
-  if (!passphrase || passphrase.length < 6) throw new Error("동기화 비밀번호는 6자 이상이어야 합니다.");
+  if (!passphrase || passphrase.length < 6) throw new Error("비밀번호는 6자 이상이어야 합니다.");
   const salt = webcrypto.getRandomValues(new Uint8Array(SALT_BYTES));
   const iv = webcrypto.getRandomValues(new Uint8Array(IV_BYTES));
   const key = await deriveKey(passphrase, salt);
   const ctBuf = await subtle.encrypt({ name: "AES-GCM", iv }, key, enc.encode(JSON.stringify(data)));
-  return { syncId: await deriveSyncId(passphrase), ciphertext: toB64(ctBuf), salt: toB64(salt), iv: toB64(iv) };
+  return { ciphertext: toB64(ctBuf), salt: toB64(salt), iv: toB64(iv) };
 }
 
 /** 암호문을 passphrase 로 풀어 원래 JSON 으로 되돌린다(틀린 비밀번호면 예외). */

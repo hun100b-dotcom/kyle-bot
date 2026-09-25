@@ -151,8 +151,13 @@ export function installKyleTool(): ToolEngine {
     authSignIn: (email: string, pw: string) => e.authSignIn(email, pw),
     authSignOut: () => Promise.resolve(e.authSignOut()),
     authStatus: () => Promise.resolve(e.authStatus()),
-    syncPushKeys: (passphrase: string) => e.syncPushKeys(passphrase),
-    syncPullKeys: (passphrase: string) => e.syncPullKeys(passphrase),
+    // [v0.24.0] 가입 승인 요청함
+    requestAccess: (email: string, note?: string) => e.requestAccess(email, note),
+    listAccessRequests: () => e.listAccessRequests(),
+    approveAccessRequest: (email: string) => e.approveAccessRequest(email),
+    rejectAccessRequest: (email: string) => e.rejectAccessRequest(email),
+    syncPushKeys: () => e.syncPushKeys(),
+    syncPullKeys: () => e.syncPullKeys(),
 
     // ── 안전장치 토글 ──────────────────────────────────────────
     setKillSwitch: (on: boolean) => e.setKillSwitch(!!on),
@@ -174,6 +179,16 @@ export function installKyleTool(): ToolEngine {
     placeEntry: (spec: Parameters<ToolEngine["placeEntry"]>[0]) => e.placeEntry(spec),
     placeOco: (spec: Parameters<ToolEngine["placeOco"]>[0]) => e.placeOco(spec),
     placeOto: (spec: Parameters<ToolEngine["placeOto"]>[0]) => e.placeOto(spec),
+    placeBracket: (spec: Parameters<ToolEngine["placeBracket"]>[0]) => e.placeBracket(spec), // [v0.25.0]
+
+    // [v0.26.0] 자동매매 — "앱이 켜져 있는 동안"은 웹에서는 "이 브라우저 탭이 열려 있는 동안"과 같다.
+    // [실측 발견] 이 4개는 엔진에서 동기 함수라, Electron IPC(invoke)는 알아서 Promise로 감싸 주지만
+    //   웹은 그 다리가 없어 그대로 반환하면 "...then is not a function"으로 화면이 깨진다(getSettings와
+    //   동일한 이유·동일한 해법 — Promise.resolve로 감싼다).
+    autoTradeStart: () => Promise.resolve(e.startAutoTrade()),
+    autoTradeStop: () => Promise.resolve(e.stopAutoTrade()),
+    autoTradeStatus: () => Promise.resolve(e.getAutoTradeStatus()),
+    saveAutoTradeSettings: (input: Parameters<ToolEngine["saveAutoTradeSettings"]>[0]) => Promise.resolve(e.saveAutoTradeSettings(input)),
     placeSell: (spec: Parameters<ToolEngine["placeSell"]>[0]) => e.placeSell(spec),
     openOrders: () => e.openOrders(),
     conditionals: () => e.conditionals(),
@@ -205,6 +220,7 @@ export function installKyleTool(): ToolEngine {
 
     // ── 스크리너(탐색) ─────────────────────────────────────────
     screenerScan: (opts?: { bodyRatio?: number; count?: number; priceMin?: number; priceMax?: number }) => e.scanScreener(opts),
+    screenerChart: (symbol: string) => e.getScreenerChart(symbol), // [v0.25.0]
     onScreenerProgress: (cb: (v: unknown) => void) => {
       subs.screener.add(cb);
       return () => subs.screener.delete(cb);
@@ -215,10 +231,9 @@ export function installKyleTool(): ToolEngine {
     todayReport: () => Promise.resolve(e.todayReport()), // [v0.9.1] 오늘의 매매 리포트
     report: (kind: Parameters<ToolEngine["report"]>[0], picked?: string) => Promise.resolve(e.report(kind, picked)),
     tradeAnalysis: () => Promise.resolve(e.tradeAnalysis()), // [v0.19.0] 매매 사이클 분석
-    // [v0.10.0] 매매 이력 동기화 — 폰은 '받기'만 쓴다(올리기는 집 PC 담당)
-    tradeSyncPush: (pass?: string) => e.syncPushTrades(pass),
-    tradeSyncPull: (pass?: string) => e.syncPullTrades(pass),
-    tradeSyncPass: (pass?: string) => Promise.resolve(pass === undefined ? e.getSyncPass() : e.setSyncPass(pass)),
+    // [v0.10.0→v0.24.0] 매매 이력 동기화 — 로그인 비밀번호로 암호화, 로그인 시 자동 호출됨
+    tradeSyncPush: () => e.syncPushTrades(),
+    tradeSyncPull: () => e.syncPullTrades(),
     tradesStats: () => Promise.resolve(e.getTradeStats()),
     tradesClose: (id: string, exitPrice: number, kind: "tp" | "sl" | "manual") => e.closeTradeManual(id, exitPrice, kind),
     tradesDelete: (id: string) => Promise.resolve(e.deleteTrade(id)),

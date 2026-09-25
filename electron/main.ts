@@ -229,12 +229,17 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:settings:save", (_ev, input) => e.saveSettings(input));
   ipcMain.handle("tool:settings:seed", (_ev, input) => e.saveSeedSettings(input)); // [v0.3.0] 세션 시드 설정
   ipcMain.handle("tool:settings:defaults", (_ev, input) => e.saveDefaultRatio(input)); // [v0.8.3] 기본 손익비
-  ipcMain.handle("tool:sync:push", (_ev, passphrase) => e.syncPushKeys(passphrase)); // [v0.8.0] 키 클라우드 저장(암호문)
-  ipcMain.handle("tool:sync:pull", (_ev, passphrase) => e.syncPullKeys(passphrase)); // [v0.8.0] 키 클라우드 불러오기
+  ipcMain.handle("tool:sync:push", () => e.syncPushKeys()); // [v0.8.0→v0.24.0] 키 클라우드 저장(로그인 비밀번호로 암호화)
+  ipcMain.handle("tool:sync:pull", () => e.syncPullKeys()); // [v0.8.0→v0.24.0] 키 클라우드 불러오기(로그인 시 자동 호출됨)
   ipcMain.handle("tool:auth:signup", (_ev, email, pw) => e.authSignUp(email, pw)); // [v0.8.1] 회원가입
   ipcMain.handle("tool:auth:signin", (_ev, email, pw) => e.authSignIn(email, pw)); // [v0.8.1] 로그인
   ipcMain.handle("tool:auth:signout", () => e.authSignOut());
   ipcMain.handle("tool:auth:status", () => e.authStatus());
+  // [v0.24.0] 가입 승인 요청함 — 누구나 신청, 운영자만 조회·승인·거절.
+  ipcMain.handle("tool:auth:requestAccess", (_ev, email: string, note?: string) => e.requestAccess(email, note));
+  ipcMain.handle("tool:auth:listRequests", () => e.listAccessRequests());
+  ipcMain.handle("tool:auth:approve", (_ev, email: string) => e.approveAccessRequest(email));
+  ipcMain.handle("tool:auth:reject", (_ev, email: string) => e.rejectAccessRequest(email));
   ipcMain.handle("tool:killSwitch", (_ev, on: boolean) => e.setKillSwitch(!!on));
   ipcMain.handle("tool:liveOrders", (_ev, on: boolean) => e.setLiveOrders(!!on));
   ipcMain.handle("tool:priceGuard", (_ev, on: boolean, pct?: number) => e.setPriceGuard(!!on, pct));
@@ -252,6 +257,12 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:order:entry", (_ev, spec) => e.placeEntry(spec));
   ipcMain.handle("tool:order:oco", (_ev, spec) => e.placeOco(spec));
   ipcMain.handle("tool:order:oto", (_ev, spec) => e.placeOto(spec)); // [v0.3.2] 진입+익절(OTO)
+  ipcMain.handle("tool:order:bracket", (_ev, spec) => e.placeBracket(spec)); // [v0.25.0] 매수+익절+손절 한번에
+  // [v0.26.0] 자동매매 — 시작/중지/현황 + 한도 설정(3개, 전부 수정 가능)
+  ipcMain.handle("tool:autoTrade:start", () => e.startAutoTrade());
+  ipcMain.handle("tool:autoTrade:stop", () => e.stopAutoTrade());
+  ipcMain.handle("tool:autoTrade:status", () => e.getAutoTradeStatus());
+  ipcMain.handle("tool:autoTrade:settings", (_ev, input) => e.saveAutoTradeSettings(input));
   // [v0.2.10] 매매 근거 목록 / 보유 포지션(손익 포함) — 둘 다 읽기 전용이라 안전하다.
   ipcMain.handle("tool:rationales", () => e.getRationales());
   // [v0.4.0] 삼분할 타점 기록(여러 종목 동시 운용) — 저장/조회/삭제/진입완료 체크
@@ -267,16 +278,16 @@ function registerIpc(e: ToolEngine): void {
   e.on("strength", (state) => win?.webContents.send("tool:strengthEvent", state));
   // [v0.6.0] 종목 스크리너(탐색) — 온디맨드 스캔 + 진행률 이벤트 중계
   ipcMain.handle("tool:screener:scan", (_ev, opts?: { bodyRatio?: number; count?: number; priceMin?: number; priceMax?: number }) => e.scanScreener(opts));
+  ipcMain.handle("tool:screener:chart", (_ev, symbol: string) => e.getScreenerChart(symbol)); // [v0.25.0] 탐색 종목 차트(온디맨드)
   e.on("screener:progress", (p) => win?.webContents.send("tool:screenerProgress", p));
   // [v0.7.0] 체결강도 자동 기록(매매 연동) — 목록/요약/수동청산/삭제 + 실시간 이벤트
   ipcMain.handle("tool:trades:list", () => e.getTradeLog());
   ipcMain.handle("tool:report:today", () => e.todayReport()); // [v0.9.1] 오늘의 매매 리포트
   ipcMain.handle("tool:report", (_ev, kind, picked) => e.report(kind, picked)); // [v0.9.2] 기간별 리포트
   ipcMain.handle("tool:trade-analysis", () => e.tradeAnalysis()); // [v0.19.0] 매매 사이클 자동추적·분석
-  // [v0.10.0] 매매 이력 암호화 동기화(PC 올리기 / 폰 받기)
-  ipcMain.handle("tool:tradesync:push", (_ev, pass) => e.syncPushTrades(pass));
-  ipcMain.handle("tool:tradesync:pull", (_ev, pass) => e.syncPullTrades(pass));
-  ipcMain.handle("tool:tradesync:pass", (_ev, pass) => (pass === undefined ? e.getSyncPass() : e.setSyncPass(pass)));
+  // [v0.10.0→v0.24.0] 매매 이력 암호화 동기화(로그인 비밀번호로, 로그인 시 자동 호출됨)
+  ipcMain.handle("tool:tradesync:push", () => e.syncPushTrades());
+  ipcMain.handle("tool:tradesync:pull", () => e.syncPullTrades());
   ipcMain.handle("tool:trades:stats", () => e.getTradeStats());
   ipcMain.handle("tool:trades:close", (_ev, id: string, exitPrice: number, kind: "tp" | "sl" | "manual") => e.closeTradeManual(id, exitPrice, kind));
   ipcMain.handle("tool:trades:delete", (_ev, id: string) => e.deleteTrade(id));

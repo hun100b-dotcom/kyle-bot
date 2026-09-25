@@ -1,18 +1,20 @@
 // =============================================================================
-// tests/trade-sync.test.ts — 매매 이력 암호화 동기화 규칙 (v0.10.0)
+// tests/trade-sync.test.ts — 매매 이력 암호화 동기화 규칙 (v0.10.0 → v0.24.0)
 // -----------------------------------------------------------------------------
 // [무엇을 지키나]
-//   집 PC가 매매 이력을 **암호화해서** 인터넷에 올려 두고, 폰이 같은 비밀번호로 풀어 봅니다.
+//   로그인한 기기가 매매 이력을 **암호화해서** Supabase(내 계정 전용 행)에 올려 두고,
+//   같은 계정으로 로그인한 다른 기기가 같은(로그인) 비밀번호로 풀어 봅니다.
 //   여기서 절대 어겨지면 안 되는 것:
 //     ① 올라가는 내용에 **토스 키·토큰·계좌번호가 절대 없어야** 한다(매매 결과만).
 //     ② 비밀번호가 틀리면 **조용히 이상한 값을 주지 말고 실패**해야 한다.
-//     ③ 파일 이름만으로는 누구 것인지 알 수 없어야 한다(비밀번호에서 만든 식별자).
-//     ④ 받아 온 이력을 합칠 때 **중복이 쌓이지 않아야** 한다.
+//     ③ 받아 온 이력을 합칠 때 **중복이 쌓이지 않아야** 한다.
+//   [v0.24.0] 예전엔 파일 이름을 비밀번호에서 만들어야 했다(GitHub 공개 저장소 방식).
+//   지금은 Supabase RLS가 로그인 계정(user_id)으로 행을 이미 격리하므로 그 규칙은 삭제했다.
 // =============================================================================
 
 import { describe, it, expect } from "vitest";
-import { encryptJson, decryptJson, deriveSyncId } from "../lib/keysync";
-import { toSyncPayload, isSyncPayload, syncPath, syncReadUrl, type TradeSyncPayload } from "../lib/trade-sync";
+import { encryptJson, decryptJson } from "../lib/keysync";
+import { toSyncPayload, isSyncPayload, type TradeSyncPayload } from "../lib/trade-sync";
 import { mergeFills, type Fill } from "../lib/fills";
 
 const PASS = "capri-비밀번호-테스트";
@@ -77,23 +79,6 @@ describe("암호화 왕복", () => {
 
   it("너무 짧은 비밀번호는 거부한다", async () => {
     await expect(encryptJson({ a: 1 }, "12345")).rejects.toThrow();
-  });
-});
-
-describe("파일 이름·주소", () => {
-  it("같은 비밀번호는 같은 파일, 다른 비밀번호는 다른 파일", async () => {
-    const a = await deriveSyncId(PASS);
-    const b = await deriveSyncId(PASS);
-    const c = await deriveSyncId(PASS + "2");
-    expect(a).toBe(b);
-    expect(a).not.toBe(c);
-  });
-
-  it("[보안] 파일 이름에 비밀번호가 드러나지 않는다", async () => {
-    const id = await deriveSyncId(PASS);
-    expect(id).not.toContain(PASS);
-    expect(syncPath(id)).toBe(`t/${id}.json`);
-    expect(syncReadUrl(id, false)).toContain(`/t/${id}.json`);
   });
 });
 

@@ -281,6 +281,7 @@ function ScreenEvidenceView({ ev, price }: { ev: ScreenEvidence; price: number |
         {chip(ev.filters.aboveCloud, "현재가>구름top")}
         {chip(ev.filters.firstDoji, "최고점 후 첫 음봉 도지")}
         {chip(ev.filters.bothWicks, "위·아래 꼬리 둘 다(망치형 아님)")}
+        {chip(ev.filters.recentDoji, "도지 발생 20분 이내")}
         {chip(ev.filters.nextBearish, "다음 봉도 음봉")}
       </div>
       <table className="evid-table">
@@ -304,6 +305,75 @@ function ScreenEvidenceView({ ev, price }: { ev: ScreenEvidence; price: number |
   );
 }
 
+/**
+ * [v0.25.0] ScreenCandleChart — 탐색 결과 종목의 차트(하이킨아시 캔들 + EMA200·구름top·세션고점 겹쳐보기).
+ *   외부 차트 라이브러리 없이 SVG로 직접 그린다(StrengthChart와 같은 방식). 표에서 본 근거(도지·다음봉)를
+ *   차트 위에 노란/보라 테두리로 표시해 "이게 그 캔들이구나"를 눈으로 바로 확인할 수 있다.
+ */
+function ScreenCandleChart({ chart }: { chart: ScreenChart }) {
+  const W = 640, H = 220, PAD = 10;
+  const n = chart.candles.length;
+  if (n === 0) return <div className="hint">표시할 캔들이 없습니다(데이터 부족).</div>;
+
+  const highs = chart.candles.map((c) => c.high);
+  const lows = chart.candles.map((c) => c.low);
+  let lo = Math.min(...lows), hi = Math.max(...highs);
+  // 기준선(EMA200·구름top·세션고점)이 캔들 범위 밖이어도 잘리지 않게 범위에 포함시킨다.
+  for (const v of [chart.ema200, chart.cloudTop, chart.sessionHigh]) {
+    if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+  }
+  const span = Math.max(hi - lo, 1e-9);
+  const y = (v: number) => PAD + (1 - (v - lo) / span) * (H - 2 * PAD);
+  const slot = (W - 2 * PAD) / n;
+  const cx = (i: number) => PAD + slot * (i + 0.5);
+  const bodyW = Math.max(1.5, slot * 0.6);
+  const refLine = (v: number | null) => (v != null ? y(v) : null);
+  const highY = refLine(chart.sessionHigh);
+  const emaY = refLine(chart.ema200);
+  const cloudY = refLine(chart.cloudTop);
+
+  return (
+    <div className="screen-chart-wrap">
+      <svg className="screen-chart" viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none" role="img" aria-label={`${chart.symbol} 캔들차트`}>
+        {highY != null && <line x1={PAD} y1={highY} x2={W - PAD} y2={highY} stroke="#facc15" strokeDasharray="3 3" strokeOpacity="0.8" />}
+        {emaY != null && <line x1={PAD} y1={emaY} x2={W - PAD} y2={emaY} stroke="#60a5fa" strokeDasharray="5 3" strokeOpacity="0.8" />}
+        {cloudY != null && <line x1={PAD} y1={cloudY} x2={W - PAD} y2={cloudY} stroke="#fb923c" strokeDasharray="5 3" strokeOpacity="0.8" />}
+        {chart.candles.map((c, i) => {
+          const up = c.close >= c.open;
+          const color = up ? "#34d399" : "#f87171";
+          const isDoji = c.time === chart.dojiTime;
+          const isNext = c.time === chart.nextTime;
+          const bodyTop = Math.min(y(c.open), y(c.close));
+          const bodyH = Math.max(1, Math.abs(y(c.open) - y(c.close)));
+          return (
+            <g key={`${c.time}-${i}`}>
+              <line x1={cx(i)} y1={y(c.high)} x2={cx(i)} y2={y(c.low)} stroke={color} strokeWidth="1" />
+              <rect
+                x={cx(i) - bodyW / 2}
+                y={bodyTop}
+                width={bodyW}
+                height={bodyH}
+                fill={color}
+                stroke={isDoji ? "#facc15" : isNext ? "#a78bfa" : "none"}
+                strokeWidth={isDoji || isNext ? 2 : 0}
+              />
+            </g>
+          );
+        })}
+      </svg>
+      <div className="screen-chart-legend hint small">
+        현재가 {chart.price != null ? `$${chart.price.toFixed(2)}` : "—"}
+        {chart.sessionHigh != null && <span> · 🟡 세션고점 ${chart.sessionHigh.toFixed(2)}{chart.sessionHighTime ? ` @${chart.sessionHighTime}` : ""}</span>}
+        {chart.ema200 != null && <span> · 🔵 EMA200 ${chart.ema200.toFixed(2)}</span>}
+        {chart.cloudTop != null && <span> · 🟠 구름top ${chart.cloudTop.toFixed(2)}</span>}
+        {chart.dojiTime && <span> · 🟨 도지 {chart.dojiTime}</span>}
+        {chart.nextTime && <span> · 🟪 다음봉 {chart.nextTime}</span>}
+        {!chart.dojiTime && <span> · 아직 도지 없음</span>}
+      </div>
+    </div>
+  );
+}
+
 /** 조건주문 만료일 기본값: (KST 기준) 오늘 + 30일.
  *   [주의] toISOString()은 UTC라, KST 새벽(00~09시)엔 하루 이르게 찍힌다.
  *   그래서 KST 오프셋(+9h)을 더한 뒤 날짜를 뽑아 KST 날짜와 일치시킨다. */
@@ -314,7 +384,7 @@ function defaultExpire(): string {
 
 // 주문 확인 팝업에 담기는 내용(무엇을 전송할지 사람이 최종 확인)
 interface PendingOrder {
-  kind: "entry" | "oco" | "oto";
+  kind: "entry" | "oco" | "oto" | "bracket";
   title: string;
   lines: string[];
   send: () => Promise<JournalEntry>;
@@ -325,15 +395,6 @@ function App() {
   const [tab, setTab] = useState<TabId>("calc");
   /** 웹앱(폰)인가? — 데스크톱에만 있는 '폰 연결' 기능 유무로 구분한다 */
   const isWebApp = !window.kyletool.phoneStart;
-  // [v0.10.0] 매매 이력 동기화(암호화) — PC가 올리고 폰이 받는다
-  const [syncTradePass, setSyncTradePass] = useState("");
-  const [syncTradeMsg, setSyncTradeMsg] = useState("");
-  const [syncTradeBusy, setSyncTradeBusy] = useState(false);
-  useEffect(() => {
-    void window.kyletool.tradeSyncPass?.().then((v) => {
-      if (typeof v === "string" && v) setSyncTradePass(v);
-    });
-  }, []);
   // [v0.9.2] 탭 순서(드래그로 변경, 이 기기에 저장)
   const { order: tabOrder, dragProps, isDragging } = useTabOrder(TOP_TABS); // [v0.12.0] 상단은 7개만(trades·journal 흡수)
   // [v0.9.1] 매매 리포트 + [v0.9.2] 기간 선택(오늘/1주일/1개월/날짜)
@@ -404,6 +465,11 @@ function App() {
   const [tabR, setTabR] = useState<TabId>("strength"); // 오른쪽 패널 탭(기본: 신호 보며 매매)
   const showTwoCol = twoCol && isWide;
   const [openEvid, setOpenEvid] = useState<Set<string>>(new Set()); // 근거 펼친 종목들
+  // [v0.25.0] 탐색 결과 종목의 차트 — 펼친 종목 집합 + 심볼별 캐시(재클릭 시 재조회 방지) + 로딩/에러.
+  const [openChart, setOpenChart] = useState<Set<string>>(new Set());
+  const [chartCache, setChartCache] = useState<Record<string, ScreenChart>>({});
+  const [chartBusy, setChartBusy] = useState<Set<string>>(new Set());
+  const [chartErr, setChartErr] = useState<Record<string, string>>({});
   const [journal, setJournal] = useState<JournalEntry[]>([]);
   // [v0.4.0] 내 삼분할 기록(여러 종목 동시 운용). 저장 목록 + 저장 시 메모 입력칸.
   const [splits, setSplits] = useState<SavedSplit[]>([]);
@@ -481,15 +547,21 @@ function App() {
   const [formAccount, setFormAccount] = useState("");
   const [savedMsg, setSavedMsg] = useState("");
   const [guardPct, setGuardPct] = useState("15"); // 오입력 방지 한도(사용자 지정)
-  // [v0.8.0] 키 클라우드 동기화: 마스터 비밀번호(저장 안 함, 세션 중에만 메모리) + 상태 메시지
-  const [syncPass, setSyncPass] = useState("");
+  // [v0.24.0] 클라우드 동기화 상태 메시지 — 비밀번호는 로그인 비밀번호를 그대로 쓰므로 따로 안 둔다.
   const [syncMsg, setSyncMsg] = useState("");
   const [syncBusy, setSyncBusy] = useState(false);
   // [v0.8.1] 로그인(멀티유저). 이메일/비번은 화면에서만, 서버 인증 후 세션은 엔진이 보관.
   const [authEmail, setAuthEmail] = useState("");
   const [authPw, setAuthPw] = useState("");
-  const [authState, setAuthState] = useState<{ email: string | null; loggedIn: boolean }>({ email: null, loggedIn: false });
+  const [authState, setAuthState] = useState<{ email: string | null; loggedIn: boolean; isOwner: boolean }>({ email: null, loggedIn: false, isOwner: false });
   const [authMsg, setAuthMsg] = useState("");
+  // [v0.24.0] 가입이 아직 승인 안 된 사람용 — "승인 요청 남기기" 버튼 노출 여부 + 처리 상태.
+  const [canRequestAccess, setCanRequestAccess] = useState(false);
+  const [reqBusy, setReqBusy] = useState(false);
+  const [reqMsg, setReqMsg] = useState("");
+  // [v0.24.0][운영자 전용] 대기 중인 가입 승인 요청 목록.
+  const [accessRequests, setAccessRequests] = useState<Array<{ email: string; note: string | null; requestedAt: string }>>([]);
+  const [reqActionBusy, setReqActionBusy] = useState<string | null>(null); // 처리 중인 이메일(버튼 개별 비활성용)
   // [v0.3.0] 세션별 시드 비율 설정 입력칸(설정 탭). 문자열 보관(입력 중 뭉개짐 방지).
   // [v0.8.3] 기본 손익비 설정 입력칸(설정 탭). 공장값 2/10, 저장하면 계산기 초기값이 됨.
   const [defForm, setDefForm] = useState<{ tp: string; sl: string }>({ tp: "2", sl: "10" });
@@ -500,6 +572,14 @@ function App() {
     basis: "auto",
     fixed: "",
   });
+  // [v0.26.0] 자동매매 한도 입력칸(설정 탭) + 현재 현황(켜짐 여부·포지션·누적손익).
+  const [autoForm, setAutoForm] = useState<{ maxPositions: string; maxLossPct: string; maxInvestPct: string }>({
+    maxPositions: "3",
+    maxLossPct: "5",
+    maxInvestPct: "30",
+  });
+  const [autoStatus, setAutoStatus] = useState<AutoTradeStatus | null>(null);
+  const [autoBusy, setAutoBusy] = useState(false);
   // [v0.2.8] 조건주문 편집 창 — 계산값에 묶이지 않고 오너가 직접 고칠 수 있게 한다.
   const [ocoEdit, setOcoEdit] = useState<{ tp: string; sl: string; qty: string } | null>(null);
   // [v0.2.9] 토스에서 받아온 수량 정보(주문가능 최대 / 보유 / 매도가능). 표시용 참고값.
@@ -542,14 +622,21 @@ function App() {
       if (s.defaultTpPct) setTpPct(String(s.defaultTpPct));
       if (s.defaultSlPct) setSlPct(String(s.defaultSlPct));
       setDefForm({ tp: String(s.defaultTpPct ?? 2), sl: String(s.defaultSlPct ?? 10) });
+      // [v0.26.0] 저장된 자동매매 한도를 입력칸 초기값으로("켜짐" 자체는 저장 안 되므로 항상 꺼진 채 시작).
+      setAutoForm({
+        maxPositions: String(s.autoTradeMaxPositions ?? 3),
+        maxLossPct: String(s.autoTradeMaxLossPct ?? 5),
+        maxInvestPct: String(s.autoTradeMaxInvestPct ?? 30),
+      });
       // [v0.3.0] 실서버면 켜자마자 상단 바(예수금·손익)와 기본 종목 시세를 자동 로드한다.
       if (s.mode === "live") {
         void loadAccount();
         void autoLoad("AAPL");
       }
     });
+    void window.kyletool.autoTradeStatus().then(setAutoStatus); // [v0.26.0] 자동매매 현재 상태(항상 꺼진 채 시작)
     window.kyletool.appVersion?.().then(setAppVer).catch(() => {});
-    window.kyletool.authStatus?.().then(setAuthState).catch(() => {}); // [v0.8.1] 로그인 상태 복원
+    void refreshAuth(); // [v0.8.1] 로그인 상태 복원(+운영자면 승인 대기 목록도, v0.24.0)
     void loadAnalysis(); // [v0.19.0] 매매분석(실체결) 시작 시 로드
     const off = window.kyletool.onJournal((e) => setJournal((prev) => [...prev.slice(-99), e]));
     // [v0.5.0] 체결강도 실시간 갱신: 지금 화면에서 보고 있는 종목의 이벤트만 반영.
@@ -635,6 +722,14 @@ function App() {
     const id = setInterval(() => void refreshStatusTab(), 30_000);
     return () => clearInterval(id);
   }, [autoRefresh, tab, showTwoCol, tabL, tabR]);
+
+  // [v0.26.0] 자동매매가 켜져 있는 동안만 현황(포지션·누적손익)을 20초마다 새로고침.
+  //   꺼져 있을 땐 돌 이유가 없다(자율 동작 최소화 원칙 — 위 702번째 줄 주석 참고).
+  useEffect(() => {
+    if (!autoStatus?.enabled) return;
+    const id = setInterval(() => void window.kyletool.autoTradeStatus().then(setAutoStatus), 20_000);
+    return () => clearInterval(id);
+  }, [autoStatus?.enabled]);
 
   // [v0.3.0] 자동 계산 — 재료·익절/손절%·기법이 바뀌면 0.35초 뒤 조용히 다시 계산한다.
   //   [계산하기] 버튼을 없앤 대신 이 효과가 대신한다. 타이핑 중 잠깐 멈추면 결과가 갱신된다.
@@ -941,6 +1036,49 @@ function App() {
           slPrice: slLimit,
           expireDate: expire,
           rationale: buildRationale(lv, { tp: lv.tp, sl: lv.sl }), // 기법 근거 동봉
+        }),
+    });
+  }
+
+  /**
+   * [v0.25.0] 매수+익절+손절 한번에 — 진입 접수 후 체결되면 자동으로 OCO(익절+손절) 등록.
+   *   토스 조건주문은 다리가 2개까지만 가능해 "한 번의 API 호출"로는 안 되지만, 이 버튼을 누르면
+   *   진입→체결감시(최대 15분)→OCO 자동등록까지 이어서 처리한다(자세한 이유는 확인 팝업에 안내).
+   */
+  function confirmBracket(lv: CalcLevel) {
+    const q = toNum(qty);
+    if (q === null || q <= 0) {
+      alert("수량을 0보다 큰 숫자로 입력하세요. (예: 1 또는 0.5)");
+      return;
+    }
+    const expire = defaultExpire();
+    const slLimit = roundPrice(lv.sl * 0.99); // OCO와 동일 규칙: 손절 지정가는 감시가 1% 아래
+    const watchMinutes = 15;
+    requestOrder({
+      kind: "bracket",
+      title: `매수+익절+손절 한번에 — ${symbol.toUpperCase()}`,
+      lines: [
+        `매수 ${usdKrw(lv.entry, fx)} × ${q}주`,
+        `→ 체결 확인되면 자동으로: 익절 감시가 ${usdKrw(lv.tp, fx)} / 손절 감시가 ${usdKrw(lv.sl, fx)} (지정가 ${usdKrw(slLimit, fx)}) OCO 등록`,
+        `⚠️ 토스 조건주문은 다리 2개까지만 가능해 "매수+익절+손절"을 한 번에 못 받습니다. 그래서 이 프로그램이`,
+        `체결을 최대 ${watchMinutes}분 지켜보다가(첫 1분은 1초 간격, 이후 5초 간격 확인 — 토스가 체결을 먼저`,
+        `알려주는 기능이 없어 계속 물어보는 방식입니다) 확인되는 대로 바로 OCO를 대신 걸어 드립니다.`,
+        `⚠️ 이 감시는 앱이 켜져 있는 동안만 작동합니다 — ${watchMinutes}분 안에 체결이 안 되거나 그 사이 앱을 끄면`,
+        `자동으로 안 걸리니, [주문현황]에서 체결 여부를 확인하고 직접 걸어 주세요.`,
+        `만료일(OCO) ${expire} · 지정가 · 진입 주문 유효기간: 당일만`,
+      ],
+      send: () =>
+        window.kyletool.placeBracket({
+          symbol,
+          price: lv.entry,
+          quantity: q,
+          tpTrigger: lv.tp,
+          tpPrice: lv.tp,
+          slTrigger: lv.sl,
+          slPrice: slLimit,
+          expireDate: expire,
+          watchMinutes,
+          rationale: buildRationale(lv, { tp: lv.tp, sl: lv.sl }),
         }),
     });
   }
@@ -1278,6 +1416,7 @@ ${msg}
       //   (= !bothWicks 가지는 현재 도달 안 함). 기준이 나중에 갈릴 경우 대비해 방어적으로 남겨 둔다.
       if (!f.firstDoji) reasons.push("최고점 이후 음봉 도지 없음");
       else if (!f.bothWicks) reasons.push("도지에 꼬리가 한쪽만(망치형·유성형)");
+      else if (!f.recentDoji) reasons.push("도지 발생이 너무 오래전(20분 초과 — 신뢰 불가)");
       else if (!f.nextBearish) reasons.push("도지 다음 봉이 음봉 아님(패턴 미완성)");
     }
     return { passed, reasons };
@@ -1309,6 +1448,31 @@ ${msg}
       else next.add(symbol);
       return next;
     });
+  }
+
+  /** [v0.25.0] 결과 행의 [📈 차트] 펼치기/접기 — 처음 펼칠 때만 불러오고(온디맨드), 이후엔 캐시 재사용. */
+  function toggleChart(symbol: string) {
+    setOpenChart((prev) => {
+      const next = new Set(prev);
+      if (next.has(symbol)) next.delete(symbol);
+      else next.add(symbol);
+      return next;
+    });
+    if (!chartCache[symbol] && !chartBusy.has(symbol)) void loadScreenChart(symbol);
+  }
+
+  /** 탐색 종목 차트를 불러온다(실패해도 표는 그대로 — 에러만 그 자리에 표시). */
+  async function loadScreenChart(symbol: string) {
+    setChartBusy((prev) => new Set(prev).add(symbol));
+    setChartErr((prev) => { const { [symbol]: _drop, ...rest } = prev; return rest; });
+    try {
+      const chart = await window.kyletool.screenerChart(symbol);
+      setChartCache((prev) => ({ ...prev, [symbol]: chart }));
+    } catch (e) {
+      setChartErr((prev) => ({ ...prev, [symbol]: String(e).replace(/^Error:\s*(Error invoking remote method '[^']+':\s*Error:\s*)?/, "") }));
+    } finally {
+      setChartBusy((prev) => { const next = new Set(prev); next.delete(symbol); return next; });
+    }
   }
 
   /** 결과 행 클릭 → 계산기 탭에 그 종목 + [v0.16.0] 전봉종가·EMA200까지 자동으로 채운다(재입력 수고 제거).
@@ -1467,17 +1631,71 @@ ${msg}
     setTimeout(() => setSavedMsg(""), 4000);
   }
 
-  /** [v0.8.1] 로그인 상태 새로고침. */
+  /** [v0.26.0] 자동매매 한도 3개(최대 종목 수·최대손실 한도·최대 투입 비율) 저장. */
+  async function saveAutoSettings() {
+    const maxPositions = toNum(autoForm.maxPositions);
+    const maxLossPct = toNum(autoForm.maxLossPct);
+    const maxInvestPct = toNum(autoForm.maxInvestPct);
+    if (maxPositions === null || maxPositions <= 0 || maxLossPct === null || maxLossPct <= 0 || maxInvestPct === null || maxInvestPct <= 0) {
+      setSavedMsg("⚠️ 자동매매 한도 3개 모두 0보다 큰 숫자로 입력하세요.");
+      setTimeout(() => setSavedMsg(""), 4000);
+      return;
+    }
+    const s = await window.kyletool.saveAutoTradeSettings({ maxPositions, maxLossPct, maxInvestPct });
+    setSettings(s);
+    setSavedMsg(`자동매매 한도 저장됨 — 최대 ${s.autoTradeMaxPositions}종목 · 손실한도 ${s.autoTradeMaxLossPct}% · 투입한도 ${s.autoTradeMaxInvestPct}%`);
+    setTimeout(() => setSavedMsg(""), 4000);
+  }
+
+  /** [v0.26.0] 자동매매 시작/중지 버튼. 시작은 확인 팝업으로 한 번 더 의사를 묻는다(실계좌라 신중하게). */
+  async function toggleAutoTrade() {
+    if (autoBusy) return;
+    setAutoBusy(true);
+    try {
+      if (autoStatus?.enabled) {
+        setAutoStatus(await window.kyletool.autoTradeStop());
+        return;
+      }
+      const ok = window.confirm(
+        [
+          "🤖 자동매매를 시작합니다.",
+          "",
+          `이 프로그램이 켜져 있는 동안, 5분마다 스스로 탐색해 합격 종목을 최대 ${autoForm.maxPositions}종목까지`,
+          "삼분할 매매기법의 '1분할' 타점으로 자동 매수하고, 체결되면 익절/손절까지 자동으로 겁니다.",
+          `최대손실 한도(시드 대비 ${autoForm.maxLossPct}%)에 닿으면 스스로 멈춥니다.`,
+          "",
+          "⚠️ 이 창(앱)을 끄면 자동매매도 함께 멈춥니다. 계속할까요?",
+        ].join("\n"),
+      );
+      if (!ok) return;
+      setAutoStatus(await window.kyletool.autoTradeStart());
+    } finally {
+      setAutoBusy(false);
+      void window.kyletool.journal().then(setJournal);
+    }
+  }
+
+  /** [v0.8.1] 로그인 상태 새로고침. 운영자면 대기 중인 가입 승인 요청도 함께 불러온다. */
   async function refreshAuth() {
     try {
-      setAuthState(await window.kyletool.authStatus());
+      const s = await window.kyletool.authStatus();
+      setAuthState(s);
+      if (s.isOwner) void loadAccessRequests();
+    } catch {
+      /* 무시 */
+    }
+  }
+  /** [v0.24.0][운영자 전용] 대기 중인 가입 승인 요청 목록을 다시 불러온다. */
+  async function loadAccessRequests() {
+    try {
+      setAccessRequests(await window.kyletool.listAccessRequests());
     } catch {
       /* 무시 */
     }
   }
   async function doSignIn() {
     if (!authEmail || !authPw) { setAuthMsg("⚠️ 이메일과 비밀번호를 입력하세요."); return; }
-    setSyncBusy(true); setAuthMsg("로그인 중…");
+    setSyncBusy(true); setAuthMsg("로그인 중…"); setCanRequestAccess(false); setReqMsg("");
     try {
       const r = await window.kyletool.authSignIn(authEmail, authPw);
       setAuthMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
@@ -1486,39 +1704,64 @@ ${msg}
   }
   async function doSignUp() {
     if (!authEmail || authPw.length < 6) { setAuthMsg("⚠️ 이메일과 6자 이상 비밀번호를 입력하세요."); return; }
-    setSyncBusy(true); setAuthMsg("가입 요청 중…");
+    setSyncBusy(true); setAuthMsg("가입 요청 중…"); setCanRequestAccess(false); setReqMsg("");
     try {
       const r = await window.kyletool.authSignUp(authEmail, authPw);
       setAuthMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      setCanRequestAccess(!!r.canRequestAccess);
       if (r.ok && !r.needsConfirm) { setAuthPw(""); await refreshAuth(); }
     } finally { setSyncBusy(false); }
   }
   async function doSignOut() {
     await window.kyletool.authSignOut();
-    setAuthMsg(""); setSyncMsg("");
+    setAuthMsg(""); setSyncMsg(""); setAccessRequests([]);
     await refreshAuth();
   }
-
-  /** [v0.8.0] 이 기기 키를 마스터 비밀번호로 암호화해 클라우드에 저장. */
-  async function doSyncPush() {
-    if (syncPass.length < 6) { setSyncMsg("⚠️ 마스터 비밀번호를 6자 이상 입력하세요."); return; }
-    setSyncBusy(true); setSyncMsg("암호화해서 저장 중…");
+  /** [v0.24.0] 가입이 막힌 사람이 "승인해 주세요" 요청을 접수한다(로그인 불필요). */
+  async function doRequestAccess() {
+    if (!authEmail) { setReqMsg("⚠️ 이메일을 먼저 입력하세요."); return; }
+    setReqBusy(true); setReqMsg("신청 접수 중…");
     try {
-      const r = await window.kyletool.syncPushKeys(syncPass);
-      setSyncMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
-    } finally { setSyncBusy(false); }
+      const r = await window.kyletool.requestAccess(authEmail);
+      setReqMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      if (r.ok) setCanRequestAccess(false); // 접수됐으면 버튼은 다시 안 보여도 됨
+    } finally { setReqBusy(false); }
   }
-  /** [v0.8.0] 클라우드에서 키를 받아 복호화해 이 기기에 적용(재입력 불필요). */
-  async function doSyncPull() {
-    if (syncPass.length < 6) { setSyncMsg("⚠️ 마스터 비밀번호를 6자 이상 입력하세요."); return; }
-    setSyncBusy(true); setSyncMsg("클라우드에서 불러와 복호화 중…");
+  /** [v0.24.0][운영자 전용] 요청을 승인 — 허용목록에 추가되고 그 사람은 바로 가입할 수 있게 된다. */
+  async function doApproveRequest(email: string) {
+    setReqActionBusy(email);
     try {
-      const r = await window.kyletool.syncPullKeys(syncPass);
+      const r = await window.kyletool.approveAccessRequest(email);
       setSyncMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
-      if (r.ok) {
+      if (r.ok) await loadAccessRequests();
+    } finally { setReqActionBusy(null); }
+  }
+  /** [v0.24.0][운영자 전용] 요청 거절(허용목록에는 추가 안 함). */
+  async function doRejectRequest(email: string) {
+    setReqActionBusy(email);
+    try {
+      const r = await window.kyletool.rejectAccessRequest(email);
+      setSyncMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      if (r.ok) await loadAccessRequests();
+    } finally { setReqActionBusy(null); }
+  }
+
+  /**
+   * [v0.24.0] 로그인 비밀번호로 클라우드에서 토스 키·매매 이력을 다시 받아온다.
+   *   로그인하는 순간 이미 자동으로 한 번 실행되므로, 평소엔 이 버튼을 쓸 일이 없다.
+   *   다른 기기에서 방금 키를 새로 저장했을 때 등, "지금 바로 반영하고 싶을 때"만 누른다.
+   */
+  async function doSyncNow() {
+    setSyncBusy(true); setSyncMsg("클라우드에서 받아오는 중…");
+    try {
+      const rKeys = await window.kyletool.syncPullKeys();
+      const rTrades = await window.kyletool.tradeSyncPull();
+      setSyncMsg([rKeys.message, rTrades.message].filter(Boolean).join(" "));
+      if (rKeys.ok) {
         const s = await window.kyletool.getSettings(); setSettings(s); setFormMode(s.mode); setFormAccount(s.account);
         await refreshStatus();
       }
+      if (rTrades.ok) void loadReport();
     } finally { setSyncBusy(false); }
   }
 
@@ -1894,14 +2137,16 @@ ${msg}
                             <button className="mini btn-buy" disabled={status.killSwitch} onClick={() => confirmEntry(lv)} title="이 가격에 사기만 합니다(지정가 = 가격을 정해 두는 주문)">매수만 (지정가)</button>
                             <button className="mini btn-oto" disabled={status.killSwitch} onClick={() => confirmOto(lv)} title="사자마자 익절 주문까지 자동으로 걸립니다. 손절은 안 걸리니 직접 챙기세요.">매수+익절 자동</button>
                             <button className="mini btn-oco" disabled={status.killSwitch} onClick={() => openOcoEditor(lv)} title="이미 보유 중일 때, 익절과 손절을 동시에 걸어 둡니다(한쪽 체결되면 다른쪽 자동 취소)">익절+손절 걸기</button>
+                            <button className="mini btn-bracket" disabled={status.killSwitch} onClick={() => confirmBracket(lv)} title="매수 후 체결이 확인되면 이 프로그램이 자동으로 익절+손절(OCO)까지 걸어 줍니다(최대 15분 감시, 앱이 켜져 있어야 함)">매수+익절+손절 한번에</button>
                           </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                   <p className="hint">
-                    💡 1·2·3차 매수가는 <b>어느 것이 낫다고 정해진 게 아닙니다</b>(취향껏 고르세요). 버튼 3개 뜻:
+                    💡 1·2·3차 매수가는 <b>어느 것이 낫다고 정해진 게 아닙니다</b>(취향껏 고르세요). 버튼 4개 뜻:
                     <br />· <b>매수만 (지정가)</b> = 이 가격에 사기만. · <b>매수+익절 자동</b> = 사자마자 익절까지 자동(<b>손절은 직접</b>). · <b>익절+손절 걸기</b> = <b>이미 갖고 있을 때</b> 익절·손절 동시.
+                    <br />· <b>매수+익절+손절 한번에</b> = 매수 후 체결되면 이 프로그램이 자동으로 익절+손절을 걸어 줍니다(<b>앱이 켜져 있는 동안만</b>, 최대 15분 감시 — 토스 조건주문은 다리가 2개까지만 가능해 한 번의 API로는 3개를 못 받기 때문입니다).
                     <br />익절·손절 감시는 <b>토스 서버가 대신</b> 해줘서, 앱을 꺼 둬도 작동합니다.
                     {status.dryRun && " (지금은 주문 잠금 — 실제로 안 나가고 연습 기록만)"}
                   </p>
@@ -2026,12 +2271,17 @@ ${msg}
                       <tbody>
                         {cand.map((r) => {
                           const open = openEvid.has(r.symbol);
+                          const chartOpen = openChart.has(r.symbol);
                           return (
                           <Fragment key={r.symbol}>
                             <tr className="screen-row" onClick={() => pickScreenSymbol(r)} title="클릭하면 계산기로 이동 + 이 종목의 전봉종가·EMA200이 자동 입력됩니다(수정 가능)">
                               <td>
                                 <button className="mini btn-evid" onClick={(e) => { e.stopPropagation(); toggleEvid(r.symbol); }} title="판정 근거 펼치기/접기">
                                   {open ? "▾ 근거" : "▸ 근거"}
+                                </button>
+                                {" "}
+                                <button className="mini btn-evid" onClick={(e) => { e.stopPropagation(); toggleChart(r.symbol); }} title="이 종목의 캔들차트 불러오기(도지·EMA200·구름·세션고점 표시)">
+                                  {chartOpen ? "▾ 📈" : "▸ 📈"}
                                 </button>
                               </td>
                               <td>{r.status === "confirmed" ? "🔴 확정" : "🟡 관찰"}</td>
@@ -2048,6 +2298,20 @@ ${msg}
                             {open && r.evidence && (
                               <tr className="evid-row">
                                 <td colSpan={9}><ScreenEvidenceView ev={r.evidence} price={r.price} /></td>
+                              </tr>
+                            )}
+                            {chartOpen && (
+                              <tr className="evid-row" onClick={(e) => e.stopPropagation()}>
+                                <td colSpan={9}>
+                                  {chartBusy.has(r.symbol) && <p className="hint">차트 불러오는 중…</p>}
+                                  {chartErr[r.symbol] && (
+                                    <p className="hint">
+                                      ⚠️ 차트를 못 불러왔습니다: {chartErr[r.symbol]}
+                                      {" "}<button className="mini" onClick={() => void loadScreenChart(r.symbol)}>다시 시도</button>
+                                    </p>
+                                  )}
+                                  {chartCache[r.symbol] && <ScreenCandleChart chart={chartCache[r.symbol]} />}
+                                </td>
                               </tr>
                             )}
                           </Fragment>
@@ -2792,140 +3056,83 @@ ${msg}
             </div>
           </section>
 
-          {/* ── ③ 동기화 (여러 기기에서 같이 쓰기) ──
-              예전엔 '매매 이력 동기화'와 '키 클라우드 동기화'가 서로 떨어져 있어
-              둘 다 '동기화'라 헷갈렸다 → 한 카드에 두 소절로 합쳐 무엇을 옮기는지 명확히. */}
+          {/* ── ③ 계정 (로그인 하나로 끝) ──
+              [v0.24.0] 예전엔 비밀번호가 3개(로그인·키 잠금·매매이력 동기화)라 너무 복잡했다.
+              → 로그인 비밀번호 하나로 통일. 로그인하면 토스 키·매매 이력이 전부 자동으로
+              이 계정 안에서 동기화된다(따로 버튼을 누를 일이 거의 없다). */}
           <section className="card wide">
-            <h2>☁️ 동기화 (폰·PC에서 같이 쓰기)</h2>
+            <h2>☁️ 계정 (로그인하면 자동으로 동기화)</h2>
             <p className="hint">
-              폰과 PC가 같은 정보를 보게 맞춰 줍니다. 옮기는 대상이 다른 <b>두 가지</b>가 있어요 —
-              <b>① 매매 이력</b>(리포트용)과 <b>② 토스 키</b>(연결용).
+              누구나 <b>자기 계정</b>으로 로그인해 <b>자기 토스 키</b>를 연결하면 바로 쓸 수 있습니다.
+              다른 사람의 키·매매 이력은 서로 <b>절대 볼 수 없어요</b>. 가입은 <b>운영자가 승인한
+              이메일만</b> 됩니다(사용 인원은 운영자가 정합니다) — 아직 승인 전이면 운영자에게
+              사용 신청을 해주세요.
+            </p>
+            <p className="hint">
+              로그인하면 <b>토스 키</b>와 <b>매매 이력</b>이 자동으로 이 기기와 동기화됩니다.
+              외울 비밀번호는 <b>로그인 비밀번호 하나</b>뿐입니다(따로 "동기화 비밀번호"가 없습니다).
             </p>
 
-            {/* ③-① 매매 이력 동기화 (구 '☁️ 매매 이력 동기화' 카드) */}
-            <div className="settings-block">
-              <h3>① 매매 이력 — 리포트를 다른 기기에서도 보기</h3>
-              <p className="hint">
-                집 PC가 <b>매매 이력을 자물쇠로 잠가</b> 인터넷에 올려 두면, 폰이 같은 비밀번호로 풀어서 봅니다.
-                → <b>집 PC가 꺼져 있어도, 회사에서도</b> 매매 리포트가 보여요.
-                <br />
-                <b>토스 키·계좌번호·비밀번호는 절대 올라가지 않습니다</b>(매매 결과만, 그것도 암호문으로).
-              </p>
-              <div className="row">
-                <label>동기화 비밀번호 (6자 이상 · PC와 폰에 <b>같은 값</b>을 넣으세요)</label>
-                <input
-                  type="password"
-                  value={syncTradePass}
-                  onChange={(e) => setSyncTradePass(e.target.value)}
-                  placeholder="예: 나만 아는 문장"
-                  autoComplete="off"
-                />
+            {authState.loggedIn ? (
+              <div className="form-row">
+                <span className="ok">✅ 로그인됨: <b>{authState.email}</b></span>
+                <button className="mini" disabled={syncBusy} onClick={doSignOut}>로그아웃</button>
+                <button className="btn" disabled={syncBusy} onClick={doSyncNow}>지금 다시 동기화</button>
               </div>
-              <div className="row" style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
-                {!isWebApp && (
-                  <button
-                    className="btn"
-                    disabled={syncTradeBusy || syncTradePass.length < 6}
-                    onClick={async () => {
-                      setSyncTradeBusy(true);
-                      try {
-                        await window.kyletool.tradeSyncPass?.(syncTradePass); // 다음부터 자동 업로드
-                        const r = await window.kyletool.tradeSyncPush(syncTradePass);
-                        setSyncTradeMsg(r.message);
-                      } finally {
-                        setSyncTradeBusy(false);
-                      }
-                    }}
-                  >
-                    ⬆ 지금 올리기 (이 PC)
-                  </button>
-                )}
-                <button
-                  className="btn"
-                  disabled={syncTradeBusy || syncTradePass.length < 6}
-                  onClick={async () => {
-                    setSyncTradeBusy(true);
-                    try {
-                      await window.kyletool.tradeSyncPass?.(syncTradePass); // 다음부터 자동으로 받아온다
-                      const r = await window.kyletool.tradeSyncPull(syncTradePass);
-                      setSyncTradeMsg(r.message);
-                      if (r.ok) void loadReport();
-                    } finally {
-                      setSyncTradeBusy(false);
-                    }
-                  }}
-                >
-                  ⬇ 지금 받기 {isWebApp ? "(이 폰)" : ""}
-                </button>
-              </div>
-              {syncTradeMsg && <p className="hint">{syncTradeMsg}</p>}
-              <p className="hint">
-                한 번 넣어 두면 다음부터는 <b>자동</b>이에요 — PC는 새 매매가 생길 때 올리고, 폰은 리포트를 열 때 받아옵니다.
-              </p>
-            </div>
-
-            {/* ③-② 토스 키 동기화 (구 '🔐 키 클라우드 동기화' — 멀티유저) */}
-            <div className="settings-block">
-              <h3>② 토스 키 — 키를 다른 기기로 옮기기 (사람마다 따로 보관)</h3>
-              <p className="hint">
-                <b>사람마다 자기 계정</b>에 <b>자기 토스 키</b>를 두고, 자기 기기들끼리만 나눠 씁니다. 다른 사람의 키는
-                서로 <b>절대 볼 수 없어요</b>. 키는 <b>비밀번호로 잠근 채</b> 올라가서, 운영자도 남의 키를 못 봅니다.
-                <br />
-                <span className="hint small">※ 폰은 보통 [폰에서 쓰기]로 PC 키를 빌려 쓰므로 이건 <b>PC가 여러 대일 때</b> 주로 씁니다.</span>
-              </p>
-
-              {/* STEP 1: 로그인 */}
-              <div className="step-box">
-                <div className="step-title">1단계 · 로그인</div>
-                {authState.loggedIn ? (
-                  <div className="form-row">
-                    <span className="ok">✅ 로그인됨: <b>{authState.email}</b></span>
-                    <button className="mini" disabled={syncBusy} onClick={doSignOut}>로그아웃</button>
-                  </div>
-                ) : (
-                  <>
-                    <div className="form-row">
-                      <label style={{ flex: 1 }}>이메일
-                        <input type="email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="you@example.com" />
-                      </label>
-                      <label style={{ flex: 1 }}>비밀번호(6자+)
-                        <input type="password" value={authPw} onChange={(e) => setAuthPw(e.target.value)} placeholder="계정 비밀번호" />
-                      </label>
-                    </div>
-                    <div className="form-row">
-                      <button className="btn btn-start" disabled={syncBusy} onClick={doSignIn}>로그인</button>
-                      <button className="btn" disabled={syncBusy} onClick={doSignUp}>가입(처음이면)</button>
-                      <span className="hint small">가입하면 바로 로그인됩니다(확인 메일 클릭 불필요).</span>
-                    </div>
-                  </>
-                )}
-                {authMsg && <p className={authMsg.startsWith("✅") ? "ok" : "hint"} style={{ whiteSpace: "pre-wrap" }}>{authMsg}</p>}
-              </div>
-
-              {/* STEP 2: 키 + 마스터 비밀번호 (로그인 후에만) */}
-              <div className={`step-box ${authState.loggedIn ? "" : "step-disabled"}`}>
-                <div className="step-title">2단계 · 비밀번호로 키 저장 / 불러오기</div>
-                <p className="hint small">
-                  위 [토스 키]에 내 키를 저장한 뒤, <b>키 잠금 비밀번호</b>(로그인 비번과 다른 것)를 정해
-                  <b> ①로 클라우드에 올리세요.</b> 다른 기기에선 같은 계정 로그인 + 같은 비밀번호로 <b>②만</b> 누르면 끝.
-                </p>
+            ) : (
+              <>
                 <div className="form-row">
-                  <label style={{ flex: 1 }}>키 잠금 비밀번호 (6자+, 로그인 비번과 별개)
-                    <input type="password" value={syncPass} onChange={(e) => setSyncPass(e.target.value)} placeholder="나만 아는 키 잠금 비밀번호" disabled={!authState.loggedIn} />
+                  <label style={{ flex: 1 }}>이메일
+                    <input type="email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="you@example.com" />
+                  </label>
+                  <label style={{ flex: 1 }}>비밀번호(6자+)
+                    <input type="password" value={authPw} onChange={(e) => setAuthPw(e.target.value)} placeholder="계정 비밀번호" />
                   </label>
                 </div>
                 <div className="form-row">
-                  <button className="btn" disabled={syncBusy || !authState.loggedIn} onClick={doSyncPush}>① 내 키를 클라우드에 올리기(잠가서)</button>
-                  <button className="btn btn-start" disabled={syncBusy || !authState.loggedIn} onClick={doSyncPull}>② 클라우드에서 받기</button>
+                  <button className="btn btn-start" disabled={syncBusy} onClick={doSignIn}>로그인</button>
+                  <button className="btn" disabled={syncBusy} onClick={doSignUp}>가입(처음이면)</button>
+                  <span className="hint small">가입하면 바로 로그인됩니다(확인 메일 클릭 불필요).</span>
                 </div>
-                {syncMsg && <p className={syncMsg.startsWith("✅") ? "ok" : "hint"} style={{ whiteSpace: "pre-wrap" }}>{syncMsg}</p>}
-              </div>
+                {/* [v0.24.0] 아직 승인 안 된 이메일로 가입을 시도했을 때만 나타난다 */}
+                {canRequestAccess && (
+                  <div className="form-row">
+                    <button className="btn" disabled={reqBusy} onClick={doRequestAccess}>📮 승인 요청 남기기</button>
+                    <span className="hint small">운영자가 앱에서 승인하면 바로 가입할 수 있어요.</span>
+                  </div>
+                )}
+                {reqMsg && <p className={reqMsg.startsWith("✅") ? "ok" : "hint"} style={{ whiteSpace: "pre-wrap" }}>{reqMsg}</p>}
+              </>
+            )}
+            {authMsg && <p className={authMsg.startsWith("✅") ? "ok" : "hint"} style={{ whiteSpace: "pre-wrap" }}>{authMsg}</p>}
+            {syncMsg && <p className="hint" style={{ whiteSpace: "pre-wrap" }}>{syncMsg}</p>}
+            <p className="hint small">
+              💡 [설정]에 키를 입력·저장하면 로그인 상태에서 자동으로 클라우드에도 올라갑니다.
+              다른 기기에서는 같은 계정으로 <b>로그인만</b> 하면 키와 매매 이력을 자동으로 받습니다.
+              로그인을 안 쓰면 기존처럼 이 기기 안에만 저장됩니다.
+            </p>
 
-              <p className="hint small">
-                💡 <b>내 PC 2대 쓸 때</b>: 첫 기기에서 로그인 + [토스 키] 저장 + 키 잠금 비번으로 ① → 다른 기기에선 같은 계정 로그인 + 같은 비번으로 ②. 키를 새로 받았으면 한 기기에서 ①만 다시.
-                <br />동기화를 안 쓰면 기존처럼 이 기기 안에만 저장됩니다.
-              </p>
-            </div>
+            {/* [v0.24.0][운영자 전용] 로그인한 이메일이 운영자일 때만 보인다(서버도 RLS로 한 번 더 확인). */}
+            {authState.isOwner && (
+              <div className="settings-block">
+                <h3>📋 가입 승인 대기 ({accessRequests.length}건)</h3>
+                <p className="hint small">
+                  사용 신청이 들어오면 여기 쌓입니다. PC가 꺼져 있어도, 폰으로 로그인만 하면 이 화면에서 바로 처리할 수 있어요.
+                </p>
+                <button className="mini" onClick={loadAccessRequests}>🔄 새로고침</button>
+                {accessRequests.length === 0 ? (
+                  <p className="hint">대기 중인 요청이 없습니다.</p>
+                ) : (
+                  accessRequests.map((r) => (
+                    <div key={r.email} className="form-row">
+                      <span>{r.email}</span>
+                      <button className="btn btn-start" disabled={reqActionBusy === r.email} onClick={() => doApproveRequest(r.email)}>✅ 승인</button>
+                      <button className="mini" disabled={reqActionBusy === r.email} onClick={() => doRejectRequest(r.email)}>거절</button>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
           </section>
 
           {/* ── ④ 화면 표시 — 손익 색 관습(미국식/한국식) ── */}
@@ -3062,6 +3269,76 @@ ${msg}
                 />
                 <b>주문 확인 팝업 건너뛰기</b> — 버튼을 누르면 <b>바로 전송</b>(실수 주문 위험 ↑, 권장 안 함)
               </label>
+            </div>
+          </section>
+
+          {/* ── ⑤.5 [v0.26.0] 자동매매 — 오너가 명시적으로 켰을 때만, 이 앱이 켜져 있는 동안만 작동 ── */}
+          <section className="card wide">
+            <h2>🤖 자동매매</h2>
+            <p className="hint">
+              5분마다 스스로 탐색해 <b>합격 종목을 삼분할 '1분할' 타점으로 자동 매수</b>하고, 체결되면 익절·손절까지
+              자동으로 겁니다. <b>이 프로그램이 켜져 있는 동안만</b> 작동하고, 앱을 끄면 자동매매도 함께 멈춥니다
+              (이미 낸 주문·조건주문은 토스에 그대로 남아 있어요 — 토스 서버가 계속 감시합니다).
+            </p>
+
+            <div className="settings-block">
+              <div className="form-row">
+                <button
+                  className={`btn ${autoStatus?.enabled ? "btn-kill kill-on" : "btn-start"}`}
+                  disabled={autoBusy || status?.killSwitch}
+                  onClick={toggleAutoTrade}
+                >
+                  {autoStatus?.enabled ? "🔴 자동매매 중지" : "▶ 자동매매 시작"}
+                </button>
+                <span className="hint">
+                  상태: <b>{autoStatus?.enabled ? "켜짐" : "꺼짐"}</b>
+                  {autoStatus?.lastCycleAt && <> · 마지막 확인 {autoStatus.lastCycleAt}</>}
+                  {autoStatus && <> · 이번 실행 누적손익 <b className={autoStatus.realizedPnlUsd < 0 ? "pnl-down" : "pnl-up"}>${autoStatus.realizedPnlUsd.toFixed(2)}</b></>}
+                </span>
+              </div>
+              {status?.killSwitch && <p className="hint small danger">킬 스위치(🛑 비상 정지)가 켜져 있어 자동매매를 시작할 수 없습니다.</p>}
+
+              <h3>한도 설정 (전부 직접 수정 가능)</h3>
+              <div className="form-row">
+                <label>최대 보유 종목 수
+                  <input type="text" inputMode="numeric" value={autoForm.maxPositions} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxPositions: e.target.value })} placeholder="3" />
+                </label>
+                <label>최대손실 한도 (시드 대비 %)
+                  <input type="text" inputMode="decimal" value={autoForm.maxLossPct} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxLossPct: e.target.value })} placeholder="5" />
+                </label>
+                <label>최대 투입 비율 (시드 대비 %, 종목수만큼 균등 분배)
+                  <input type="text" inputMode="decimal" value={autoForm.maxInvestPct} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxInvestPct: e.target.value })} placeholder="30" />
+                </label>
+                <button className="btn btn-start" onClick={saveAutoSettings}>한도 저장</button>
+                {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
+              </div>
+              <p className="hint small">
+                예) 최대 투입 30% · 3종목 → 종목당 예산은 시드의 10%. 손실 한도는 이번 자동매매 실행 동안 누적된
+                실현손익(달러) 기준으로, 시드 대비 %를 넘으면 자동매매가 스스로 멈춥니다.
+              </p>
+
+              {autoStatus && autoStatus.positions.length > 0 && (
+                <>
+                  <h3>지금 감시 중인 자동매매 포지션</h3>
+                  <table className="result-table">
+                    <thead>
+                      <tr><th>종목</th><th>진입가</th><th>익절가</th><th>손절가</th><th>수량</th><th>상태</th></tr>
+                    </thead>
+                    <tbody>
+                      {autoStatus.positions.map((p) => (
+                        <tr key={`${p.symbol}@${p.entry}`}>
+                          <td>{p.symbol}</td>
+                          <td>${p.entry}</td>
+                          <td>${p.tp}</td>
+                          <td>${p.sl}</td>
+                          <td>{p.quantity}</td>
+                          <td>{p.status === "active" ? "익절/손절 등록됨" : "매수 체결 대기중"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
+              )}
             </div>
           </section>
 

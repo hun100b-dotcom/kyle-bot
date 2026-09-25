@@ -105,6 +105,34 @@ interface ToolSettings {
   // [v0.8.3] 기본 손익비
   defaultTpPct: number;
   defaultSlPct: number;
+  // [v0.26.0] 자동매매 한도(3개, 전부 수정 가능) + 켜짐 여부(런타임 전용 — 저장 안 됨)
+  autoTradeMaxPositions: number;
+  autoTradeMaxLossPct: number;
+  autoTradeMaxInvestPct: number;
+  autoTradeEnabled: boolean;
+}
+
+/** [v0.26.0] 자동매매가 지금 감시·보유 중인 포지션 하나. */
+interface AutoPosition {
+  symbol: string;
+  entry: number;
+  tp: number;
+  sl: number;
+  quantity: number;
+  enteredAtMs: number;
+  status: "watching" | "active";
+  conditionalOrderId: string | null;
+}
+
+/** [v0.26.0] 자동매매 현황판. */
+interface AutoTradeStatus {
+  enabled: boolean;
+  positions: AutoPosition[];
+  realizedPnlUsd: number;
+  maxPositions: number;
+  maxLossPct: number;
+  maxInvestPct: number;
+  lastCycleAt: string | null;
 }
 
 /** [v0.3.0] orderCapacity(capacity) 응답 — 주문가능/보유 + 세션 시드 제안 */
@@ -288,6 +316,7 @@ interface ScreenEvidence {
     firstDoji: boolean;
     bothWicks: boolean;
     nextBearish: boolean;
+    recentDoji: boolean; // [v0.25.0] 도지 발생 시점이 20분 이내인지
   };
 }
 interface ScreenResult {
@@ -322,6 +351,27 @@ interface ScreenRun {
   priceMax: number;
   excludedEtf: number;
   results: ScreenResult[];
+}
+
+/** [v0.25.0] 탐색 종목 차트 캔들/전체 */
+interface ScreenChartCandle {
+  time: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+interface ScreenChart {
+  symbol: string;
+  candles: ScreenChartCandle[];
+  ema200: number | null;
+  cloudTop: number | null;
+  sessionHigh: number | null;
+  sessionHighTime: string | null;
+  dojiTime: string | null;
+  nextTime: string | null;
+  price: number | null;
+  patternStatus: ScreenStatus;
 }
 
 /** [v0.7.0] 체결강도 자동 기록 트레이드 */
@@ -459,12 +509,17 @@ interface KyletoolBridge {
     seedBasis?: "auto" | "fixed";
     seedFixedUsd?: number | null;
   }): Promise<ToolSettings>;
-  syncPushKeys(passphrase: string): Promise<{ ok: boolean; message: string }>;
-  syncPullKeys(passphrase: string): Promise<{ ok: boolean; message: string }>;
-  authSignUp(email: string, password: string): Promise<{ ok: boolean; needsConfirm: boolean; message: string }>;
+  syncPushKeys(): Promise<{ ok: boolean; message: string }>;
+  syncPullKeys(): Promise<{ ok: boolean; message: string }>;
+  authSignUp(email: string, password: string): Promise<{ ok: boolean; needsConfirm: boolean; message: string; canRequestAccess?: boolean }>;
   authSignIn(email: string, password: string): Promise<{ ok: boolean; message: string }>;
   authSignOut(): Promise<{ ok: boolean }>;
-  authStatus(): Promise<{ email: string | null; loggedIn: boolean }>;
+  authStatus(): Promise<{ email: string | null; loggedIn: boolean; isOwner: boolean }>;
+  /** [v0.24.0] 가입 승인 요청함 — 누구나 신청(로그인 불필요), 운영자만 조회·승인·거절 */
+  requestAccess(email: string, note?: string): Promise<{ ok: boolean; message: string }>;
+  listAccessRequests(): Promise<Array<{ email: string; note: string | null; requestedAt: string }>>;
+  approveAccessRequest(email: string): Promise<{ ok: boolean; message: string }>;
+  rejectAccessRequest(email: string): Promise<{ ok: boolean; message: string }>;
   setKillSwitch(on: boolean): Promise<void>;
   setLiveOrders(on: boolean): Promise<void>;
   setPriceGuard(on: boolean, pct?: number): Promise<void>;
@@ -515,6 +570,25 @@ interface KyletoolBridge {
     expireDate: string;
     rationale?: RationaleInput;
   }): Promise<JournalEntry>;
+  /** [v0.25.0] 매수+익절+손절 한번에 — 진입 접수 후 체결을 감시(최대 watchMinutes)하다 체결되면 자동으로 OCO(익절+손절) 등록 */
+  placeBracket(spec: {
+    symbol: string;
+    price: number;
+    quantity: number;
+    tpTrigger: number;
+    tpPrice: number;
+    slTrigger: number;
+    slPrice: number;
+    expireDate: string;
+    watchMinutes?: number;
+    pollMs?: number; // [테스트 전용] 체결 확인 주기(기본 5000ms)
+    rationale?: RationaleInput;
+  }): Promise<JournalEntry>;
+  // [v0.26.0] 자동매매 — 시작/중지/현황 + 한도 설정
+  autoTradeStart(): Promise<AutoTradeStatus>;
+  autoTradeStop(): Promise<AutoTradeStatus>;
+  autoTradeStatus(): Promise<AutoTradeStatus>;
+  saveAutoTradeSettings(input: { maxPositions?: number; maxLossPct?: number; maxInvestPct?: number }): Promise<ToolSettings>;
   rationales(): Promise<TradeRationale[]>;
   // [v0.4.0] 삼분할 타점 기록(여러 종목 동시 운용)
   splitsList(): Promise<SavedSplit[]>;
@@ -538,16 +612,17 @@ interface KyletoolBridge {
   onStrength(cb: (state: StrengthState) => void): () => void;
   // [v0.6.0] 종목 스크리너(탐색)
   screenerScan(opts?: { bodyRatio?: number; count?: number; priceMin?: number; priceMax?: number }): Promise<ScreenRun>;
+  /** [v0.25.0] 탐색 결과 한 종목의 차트를 불러온다(클릭 시에만, 온디맨드). */
+  screenerChart(symbol: string): Promise<ScreenChart>;
   onScreenerProgress(cb: (p: ScreenProgress) => void): () => void;
   // [v0.7.0] 체결강도 자동 기록(매매 연동)
   tradesList(): Promise<StrengthTrade[]>;
   todayReport(): Promise<DailyReport>;
   report(kind: PeriodKind, picked?: string): Promise<DailyReport>;
   tradeAnalysis(): Promise<{ cycles: TradeCycle[]; insights: TradeInsights; source: "live" | "cache" | "none" }>; // [v0.19.0]
-  /** [v0.10.0] 매매 이력 동기화 */
-  tradeSyncPush(pass?: string): Promise<{ ok: boolean; message: string; count?: number }>;
-  tradeSyncPull(pass?: string): Promise<{ ok: boolean; message: string; count?: number }>;
-  tradeSyncPass(pass?: string): Promise<string | void>;
+  /** [v0.10.0→v0.24.0] 매매 이력 동기화(로그인 비밀번호로 암호화, 로그인 시 자동 호출됨) */
+  tradeSyncPush(): Promise<{ ok: boolean; message: string; count?: number }>;
+  tradeSyncPull(): Promise<{ ok: boolean; message: string; count?: number }>;
   tradesStats(): Promise<TradeStats>;
   tradesClose(id: string, exitPrice: number, kind: "tp" | "sl" | "manual"): Promise<StrengthTrade[]>;
   tradesDelete(id: string): Promise<StrengthTrade[]>;

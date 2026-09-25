@@ -1,15 +1,16 @@
 // =============================================================================
-// tests/keysync.test.ts — 키 동기화 클라이언트 암호화 검증 (v0.8.0)
+// tests/keysync.test.ts — 키 동기화 클라이언트 암호화 검증 (v0.8.0 → v0.24.0)
 // -----------------------------------------------------------------------------
 // 핵심 보장:
 //   1) 암호화→복호화 왕복이 원래 값을 정확히 복원한다.
 //   2) 틀린 passphrase 로는 절대 복호화되지 않는다(조용한 오염 없이 '실패').
 //   3) 암호문 안에 평문 키가 남아있지 않다(클라우드에 평문이 안 올라감을 코드 레벨로 보장).
-//   4) sync_id 는 passphrase 만으로 재현 가능하고(다른 기기 동기화), passphrase 가 다르면 달라진다.
+//   [v0.24.0] sync_id(행 식별자를 passphrase에서 유도) 규칙은 삭제했다. 지금은 Supabase
+//   RLS가 로그인 계정(user_id)으로 행을 이미 격리하므로 더 필요 없다.
 // =============================================================================
 
 import { describe, it, expect } from "vitest";
-import { encryptSecret, decryptSecret, deriveSyncId } from "../lib/keysync";
+import { encryptSecret, decryptSecret } from "../lib/keysync";
 
 const secret = { clientId: "tsck_ABC123", clientSecret: "tssk_SUPER_SECRET_VALUE_xyz", account: "1" };
 
@@ -31,17 +32,6 @@ describe("키 동기화 암호화", () => {
     expect(blob).not.toContain(secret.clientId);
     expect(blob).not.toContain(secret.clientSecret);
     expect(blob).not.toContain("tssk_"); // secret 접두어 흔적도 없어야
-  });
-
-  it("같은 passphrase 는 같은 sync_id 를 만든다(기기 간 동일 행 참조)", async () => {
-    const a = await deriveSyncId("same-pass");
-    const b = await deriveSyncId("same-pass");
-    expect(a).toBe(b);
-    expect(a.length).toBeGreaterThan(10);
-  });
-
-  it("다른 passphrase 는 다른 sync_id 를 만든다", async () => {
-    expect(await deriveSyncId("pass-A")).not.toBe(await deriveSyncId("pass-B"));
   });
 
   it("매번 다른 salt·iv 라서 같은 값이라도 암호문이 달라진다(패턴 노출 방지)", async () => {

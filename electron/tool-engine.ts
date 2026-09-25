@@ -22,13 +22,12 @@ import { join } from "node:path";
 import { DateTime } from "luxon";
 import { getSession, getSessionStart, getMarketStatus, isOrderFrozen, type Session } from "../lib/session";
 import { calcSplit3, calcOrderbook, calcCandle, roundPrice, getTick, type SplitOrder } from "../lib/calc";
-import { encryptSecret, decryptSecret } from "../lib/keysync"; // [v0.8.0] 키 기기 간 동기화(클라이언트 암호화)
+import { encryptSecret, decryptSecret, encryptJson, decryptJson } from "../lib/keysync"; // [v0.8.0] 키 기기 간 동기화(클라이언트 암호화) + [v0.10.0] 매매 이력용
 import { strengthFromTicks, analyzeStrengthSeries, type Side, type StrengthSignals } from "../lib/strength";
 import { buildReport, buildReportFromRealized, makePeriod, type DailyReport, type PeriodKind } from "../lib/report"; // [v0.9.1] 매매 리포트
 import { matchFifo, mergeFills, coveredSince, shouldReuseCache, type Fill, type RealizedTrade } from "../lib/fills"; // [v0.9.6] 토스 실제 체결내역으로 손익 계산 (+v0.10.1 기간 커버리지 헬퍼)
 import { buildCycles, analyzeTrades, type TradeCycle, type TradeInsights } from "../lib/trade-analysis"; // [v0.19.0] 매매 사이클 자동추적·분석
-import { encryptJson, decryptJson, deriveSyncId } from "../lib/keysync"; // [v0.10.0] 매매 이력 암호화 동기화
-import { toSyncPayload, isSyncPayload, syncReadUrl, syncPath, SYNC_REPO, type TradeSyncPayload } from "../lib/trade-sync";
+import { toSyncPayload, isSyncPayload, type TradeSyncPayload } from "../lib/trade-sync";
 import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, WICK_MIN_RATIO, type Candle, type SessionPattern } from "../lib/indicators";
 import {
   getPrice,
@@ -44,6 +43,8 @@ import {
   getExchangeRate,
   createOrder,
   createConditionalOrder,
+  getOrder,
+  getConditionalOrder,
   listOrders,
   listConditionalOrders,
   listOrdersRaw,
@@ -57,6 +58,7 @@ import {
   type OrderResponse,
 } from "../lib/toss";
 import { createMockTossServer } from "../mocks/toss-mock";
+import { canAutoEnter, isLossLimitBreached, perSlotInvestPct, type AutoTradeLimits } from "../lib/auto-risk";
 
 // -----------------------------------------------------------------------------
 // 타입: 화면과 주고받는 모양
@@ -466,6 +468,7 @@ export interface ScreenEvidence {
     firstDoji: boolean; //   최고점 이후 첫 음봉 도지 존재
     bothWicks: boolean; //   [v0.6.3] 위·아래 꼬리 둘 다 존재(망치형·유성형 아님)
     nextBearish: boolean; // 그 다음 봉도 음봉
+    recentDoji: boolean; //  [v0.25.0] 도지 발생 시점이 20분 이내(오래되면 false → 불합격)
   };
 }
 
@@ -514,6 +517,30 @@ export interface ScreenRun {
   priceMax: number; //   [v0.11.0] 사용한 가격 상한($)
   excludedEtf: number; // [v0.6.3] ETF·레버리지·인버스로 제외한 종목 수
   results: ScreenResult[]; // 후보(confirmed·watch) + 참고 목록
+}
+
+/** [v0.25.0] 차트 캔들 한 개(하이킨아시, 화면 표시용) */
+export interface ScreenChartCandle {
+  time: string; // HH:mm(KST)
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+/** [v0.25.0] 탐색 결과 종목의 차트 — 스캔 때와 '완전히 같은 계산'(HA·EMA200·구름·패턴)을 재사용해
+ *   그대로 그린다(다른 계산이면 "왜 표에서 본 근거랑 차트가 다르지" 하는 혼란이 생긴다). */
+export interface ScreenChart {
+  symbol: string;
+  candles: ScreenChartCandle[]; //  최근 구간 5분봉(HA, 완성봉만)
+  ema200: number | null;
+  cloudTop: number | null;
+  sessionHigh: number | null;
+  sessionHighTime: string | null; //  세션 최고점 시각(candles 안의 time과 매칭)
+  dojiTime: string | null; //         기준 음봉 도지 시각(candles 안의 time과 매칭)
+  nextTime: string | null; //         도지 다음 봉 시각
+  price: number | null; //           현재가(조회 실패하면 null — 차트는 그대로 보여준다)
+  patternStatus: ScreenStatus; //    참고용 패턴 판정(가격대·EMA·구름 하드게이트는 미적용, 패턴 자체만)
 }
 
 // -----------------------------------------------------------------------------
@@ -598,6 +625,68 @@ export function summarizeTrades(trades: StrengthTrade[]): TradeStats {
 }
 
 // -----------------------------------------------------------------------------
+// [v0.25.0/v0.26.0] 브라켓 주문(매수+익절+손절 한번에) 공용 타입
+// -----------------------------------------------------------------------------
+
+/** placeBracket(수동 버튼)과 자동매매가 함께 쓰는 입력 스펙. */
+export interface BracketSpec {
+  symbol: string;
+  price: number; //     진입 지정가
+  quantity: number;
+  tpTrigger: number; //  익절 감시가
+  tpPrice: number; //    익절 지정가
+  slTrigger: number; //  손절 감시가
+  slPrice: number; //    손절 지정가
+  expireDate: string; // OCO(익절+손절) 만료일 YYYY-MM-DD
+  watchMinutes?: number; // 체결 감시 최대 시간(기본 15분)
+  pollMs?: number; // [테스트 전용] 체결 확인 주기(기본 5000ms) — 자동 테스트를 빠르게 돌리기 위한 값
+  rationale?: RationaleInput;
+}
+
+/**
+ * watchAndBracket의 결과 — [v0.26.0] 자동매매가 "체결→OCO 등록"까지 실제로 됐는지, 됐다면
+ *   그 조건주문 번호가 뭔지 알아야 포지션을 추적할 수 있어 void 대신 이 결과를 돌려준다.
+ *   (수동 버튼 경로는 이 값을 여전히 기다리지 않는다 — placeBracket 참고.)
+ */
+export type WatchAndBracketResult =
+  | { status: "oco_registered"; conditionalOrderId: string }
+  | { status: "oco_failed"; error: string }
+  | { status: "cancelled" | "failed" }
+  | { status: "timeout" };
+
+// -----------------------------------------------------------------------------
+// [v0.26.0] 자동매매 타입
+// -----------------------------------------------------------------------------
+
+/**
+ * 자동매매가 스스로 진입시킨 포지션 하나. 5분 사이클마다 이 목록을 다시 확인해서
+ *   ①아직 매수 체결 대기 중인지(watching) ②매수 체결돼 OCO(익절+손절)까지 걸렸는지(active)
+ *   ③OCO가 발동돼 끝났는지(closed) 판단한다("빈자리 채우기"·"중복 진입 방지"의 근거 데이터).
+ */
+export interface AutoPosition {
+  symbol: string;
+  entry: number; //   계산된 1분할 진입가(중복 진입 방지 키의 일부)
+  tp: number;
+  sl: number;
+  quantity: number;
+  enteredAtMs: number;
+  status: "watching" | "active";
+  /** OCO 등록 성공 후 채워짐(watching→active 전환 시). 이 번호로 발동 여부를 재조회한다. */
+  conditionalOrderId: string | null;
+}
+
+/** 자동매매 화면 현황판에 보여줄 요약. */
+export interface AutoTradeStatus {
+  enabled: boolean;
+  positions: AutoPosition[];
+  realizedPnlUsd: number;
+  maxPositions: number;
+  maxLossPct: number;
+  maxInvestPct: number;
+  lastCycleAt: string | null;
+}
+
+// -----------------------------------------------------------------------------
 // 엔진 본체
 // -----------------------------------------------------------------------------
 
@@ -663,12 +752,38 @@ export class ToolEngine extends EventEmitter {
   private defaultTpPct = 2;
   private defaultSlPct = 10;
 
+  // -----------------------------------------------------------------------------
+  // [v0.26.0] 자동매매(오너 결정으로 v2 "자율 봇 아님" 원칙에서 벗어난 첫 예외 — CLAUDE.md 갱신 참고)
+  //   3개 한도(최대 종목 수·최대손실 한도·최대 투입 비율)는 설정 탭에서 오너가 언제든 수정 가능하고
+  //   재시작해도 유지된다(persistEnv). 단 "자동매매 켜짐" 자체는 절대 저장하지 않는다 — 앱을 새로
+  //   켤 때마다 오너가 다시 명시적으로 눌러야만 자동매매가 돈다(안전 우선, 아래 startAutoTrade 참고).
+  // -----------------------------------------------------------------------------
+  private autoTradeMaxPositions = 3; //  동시 보유 최대 종목 수(오너 기본값)
+  private autoTradeMaxLossPct = 5; //    최대손실 한도(시드 대비 %) — 넘으면 자동매매 자동 중단
+  private autoTradeMaxInvestPct = 30; // 시드 대비 총 투입 비율 한도(%) — 종목 수만큼 균등 분배
+
+  // [v0.26.0] 자동매매 실행 상태(런타임 전용, 저장 안 함 — 앱 재시작하면 전부 초기화).
+  private autoTradeEnabled = false;
+  private autoTradeTimer: ReturnType<typeof setInterval> | null = null;
+  private autoTradeTickBusy = false; // 한 사이클이 겹쳐 실행되지 않게
+  private autoTradeRealizedPnlUsd = 0; // 이번 자동매매 실행 동안 누적 실현손익(달러, 손실이면 음수)
+  private autoTradePositions: AutoPosition[] = []; // 지금 자동매매로 감시·보유 중인 포지션
+  private autoTradeUsedKeys = new Set<string>(); // `${symbol}@${entry}` — 같은 종목 같은 타점 재진입 방지
+  private autoTradeLastCycleAt: string | null = null; // 마지막 사이클 시각(KST, 화면 표시용)
+  private static readonly AUTO_TRADE_INTERVAL_MS = 5 * 60_000; // "기본적으로 5분마다"(오너 지시)
+
   // [v0.8.1] 로그인 세션(Supabase Auth). refresh 토큰만 로컬 저장, access 는 메모리+필요시 갱신.
   private authAccessToken: string | null = null;
   private authRefreshToken: string | null = null;
   private authEmail: string | null = null;
   private authUserId: string | null = null;
   private authExpiresAtMs = 0;
+  // [v0.24.0] 로그인 비밀번호 — 오직 "이번에 앱을 켠 동안"만 메모리에 들고 있는다.
+  //   ⚠️ 파일에 절대 저장하지 않는다(persistEnv에도 안 씀). 이 값을 그대로
+  //   토스 키·매매 이력 암호화 열쇠로 재사용해서, 사용자가 따로 외울 "동기화 비밀번호"가
+  //   없어진다(로그인 비밀번호 = 잠금 비밀번호). 앱을 다시 켜면(재로그인 전까지) null이라
+  //   자동 동기화가 잠시 쉬는데, 그동안도 로컬에 저장된 값으로는 그대로 동작한다.
+  private authPassword: string | null = null;
 
   private mock: ReturnType<typeof createMockTossServer> | null = null;
   private mockPort = 0;
@@ -751,6 +866,13 @@ export class ToolEngine extends EventEmitter {
     if (Number.isFinite(dtp) && dtp > 0) this.defaultTpPct = dtp;
     const dsl = Number(process.env.DEFAULT_SL_PCT);
     if (Number.isFinite(dsl) && dsl > 0) this.defaultSlPct = dsl;
+    // [v0.26.0] 저장된 자동매매 한도 복원(3개 전부 오너가 수정 가능). "켜짐" 자체는 저장 안 함.
+    const amp = Number(process.env.AUTO_MAX_POSITIONS);
+    if (Number.isFinite(amp) && amp > 0) this.autoTradeMaxPositions = Math.round(amp);
+    const alp = Number(process.env.AUTO_MAX_LOSS_PCT);
+    if (Number.isFinite(alp) && alp > 0) this.autoTradeMaxLossPct = alp;
+    const aip = Number(process.env.AUTO_MAX_INVEST_PCT);
+    if (Number.isFinite(aip) && aip > 0) this.autoTradeMaxInvestPct = aip;
     // [v0.8.1] 저장된 로그인 세션 복원(리프레시 토큰만). access token 은 필요 시 갱신한다.
     if (process.env.CAPRI_AUTH_REFRESH) this.authRefreshToken = process.env.CAPRI_AUTH_REFRESH;
     if (process.env.CAPRI_AUTH_EMAIL) this.authEmail = process.env.CAPRI_AUTH_EMAIL;
@@ -775,6 +897,11 @@ export class ToolEngine extends EventEmitter {
       // [v0.8.3] 기본 손익비
       defaultTpPct: this.defaultTpPct,
       defaultSlPct: this.defaultSlPct,
+      // [v0.26.0] 자동매매 한도(3개, 전부 수정 가능) + 켜짐 여부(런타임 전용)
+      autoTradeMaxPositions: this.autoTradeMaxPositions,
+      autoTradeMaxLossPct: this.autoTradeMaxLossPct,
+      autoTradeMaxInvestPct: this.autoTradeMaxInvestPct,
+      autoTradeEnabled: this.autoTradeEnabled,
     };
   }
 
@@ -787,6 +914,29 @@ export class ToolEngine extends EventEmitter {
     if (typeof input.slPct === "number" && Number.isFinite(input.slPct) && input.slPct > 0) this.defaultSlPct = input.slPct;
     this.persistEnv();
     this.addJournal({ kind: "info", symbol: "-", summary: `기본 손익비 저장 — 익절 ${this.defaultTpPct}% / 손절 ${this.defaultSlPct}%` });
+    return this.getSettings();
+  }
+
+  /**
+   * [v0.26.0] 자동매매 한도 3개(최대 종목 수·최대손실 한도·최대 투입 비율) 저장.
+   *   0 이하·비정상 값은 무시(이전값 유지). "켜짐" 여부는 여기서 다루지 않는다(startAutoTrade 참고).
+   */
+  saveAutoTradeSettings(input: { maxPositions?: number; maxLossPct?: number; maxInvestPct?: number }) {
+    if (typeof input.maxPositions === "number" && Number.isFinite(input.maxPositions) && input.maxPositions > 0) {
+      this.autoTradeMaxPositions = Math.round(input.maxPositions);
+    }
+    if (typeof input.maxLossPct === "number" && Number.isFinite(input.maxLossPct) && input.maxLossPct > 0) {
+      this.autoTradeMaxLossPct = input.maxLossPct;
+    }
+    if (typeof input.maxInvestPct === "number" && Number.isFinite(input.maxInvestPct) && input.maxInvestPct > 0) {
+      this.autoTradeMaxInvestPct = input.maxInvestPct;
+    }
+    this.persistEnv();
+    this.addJournal({
+      kind: "info",
+      symbol: "-",
+      summary: `자동매매 한도 저장 — 최대 ${this.autoTradeMaxPositions}종목 · 최대손실 시드대비 ${this.autoTradeMaxLossPct}% · 총 투입한도 시드대비 ${this.autoTradeMaxInvestPct}%`,
+    });
     return this.getSettings();
   }
 
@@ -820,6 +970,10 @@ export class ToolEngine extends EventEmitter {
       // --- [v0.8.3] 기본 손익비 ---
       `DEFAULT_TP_PCT=${this.defaultTpPct}`,
       `DEFAULT_SL_PCT=${this.defaultSlPct}`,
+      // --- [v0.26.0] 자동매매 한도(3개). "켜짐" 자체는 여기 없음 — 절대 저장하지 않는다(안전). ---
+      `AUTO_MAX_POSITIONS=${this.autoTradeMaxPositions}`,
+      `AUTO_MAX_LOSS_PCT=${this.autoTradeMaxLossPct}`,
+      `AUTO_MAX_INVEST_PCT=${this.autoTradeMaxInvestPct}`,
       // --- [v0.8.1] 로그인 세션(리프레시 토큰만 로컬 저장 → 재시작해도 로그인 유지). 비밀번호·마스터 비번은 저장 안 함. ---
       `CAPRI_AUTH_REFRESH=${this.authRefreshToken ?? ""}`,
       `CAPRI_AUTH_EMAIL=${this.authEmail ?? ""}`,
@@ -914,6 +1068,15 @@ export class ToolEngine extends EventEmitter {
 
     this.persistEnv(); // [v0.3.0] 모든 설정을 한 경로로 저장(토글·시드 포함)
     this.addJournal({ kind: "info", symbol: "-", summary: `설정 저장 (모드: ${this.mode === "mock" ? "연습" : "실서버(주문 잠금)"})` });
+
+    // [v0.24.0] 로그인 상태면 방금 저장한 키를 조용히 클라우드에도 올린다(실패해도 무시).
+    //   → "로그인 + 키 저장"만 하면 다른 기기는 로그인만으로 자동으로 받아간다.
+    if (this.authPassword && (input.clientId || input.clientSecret)) {
+      void this.syncPushKeys().catch(() => {
+        /* 업로드 실패는 조용히 넘어간다(로컬 저장은 이미 됐다) */
+      });
+    }
+
     return this.getSettings();
   }
 
@@ -928,11 +1091,36 @@ export class ToolEngine extends EventEmitter {
   private static readonly SUPABASE_URL = "https://fauieykjxdfkngwvfoky.supabase.co";
   private static readonly SUPABASE_ANON =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZhdWlleWtqeGRma25nd3Zmb2t5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUxNDY0NDIsImV4cCI6MjEwMDcyMjQ0Mn0.Wq9jnoKGO5CbRbDfzYKrZCaV3RD4zjZCdBgQJLQrqRI";
+  // [v0.24.0] 유일한 운영자 계정. 가입 승인 화면(설정 탭)은 로그인한 이메일이 이 값과
+  //   같을 때만 보인다. 실제 권한 검사는 Supabase RLS 정책이 같은 이메일 조건으로
+  //   서버에서 한 번 더 하므로(마이그레이션 4번), 이 값을 바꿔치기해도 서버가 막는다.
+  private static readonly OWNER_EMAIL = "hun100b@gmail.com";
 
-  // ---- 로그인(Supabase Auth) — 사람마다 자기 계정, 키는 계정별로 격리 ----
+  // ---- 로그인(Supabase Auth) — 사람마다 자기 계정, 키·매매이력은 계정별로 격리 ----
+  //   [v0.24.0] "허용된 사람만 가입할 수 있다" — Supabase 쪽에 가입 허용목록 트리거가
+  //   있어(supabase/migrations/…_capri_v2_…), 목록에 없는 이메일은 가입 자체가 막힌다.
+  //   몇 명까지 쓸지는 오너가 그 목록에 이메일을 추가/삭제하는 것으로 정한다(앱은 관여 안 함).
+  //   [v0.24.0 추가] 오너는 더 이상 SQL을 직접 안 써도 된다 — 앱(설정 탭 → 가입 승인)에
+  //   로그인만 하면 대기 중인 요청을 보고 [승인]을 누를 수 있다(PC가 꺼져 있어도 폰으로 가능).
 
-  /** [v0.8.1] 회원가입. 이 프로젝트는 이메일 확인이 켜져 있어, 가입 후 메일 링크 클릭이 필요하다. */
-  async authSignUp(email: string, password: string): Promise<{ ok: boolean; needsConfirm: boolean; message: string }> {
+  /** 서버가 돌려준 원문 오류를 사람이 이해할 문구로 바꾼다. notAllowed면 "승인 요청 남기기" 버튼을 보여줄 근거가 된다. */
+  private static explainSignupError(raw: string): { message: string; notAllowed: boolean } {
+    if (/CAPRI_NOT_ALLOWED/i.test(raw)) {
+      return { message: "아직 사용 승인이 안 된 이메일입니다. 아래에서 승인 요청을 남겨 주세요.", notAllowed: true };
+    }
+    // Supabase는 보안상 트리거의 원문 예외를 그대로 안 돌려주고 일반 문구로 감쌀 때가 있다
+    // (예: "Database error saving new user"). 그런 경우도 같은 안내를 우선 보여준다.
+    if (/database error|unexpected_failure/i.test(raw)) {
+      return {
+        message: `가입할 수 없습니다 — 아직 운영자 승인이 안 된 이메일일 수 있어요. 아래에서 승인 요청을 남겨 보세요.\n(자세한 오류: ${raw})`,
+        notAllowed: true,
+      };
+    }
+    return { message: raw, notAllowed: false };
+  }
+
+  /** [v0.8.1] 회원가입. [v0.24.0] 허용목록에 있는 이메일만 가입되고, 성공하면 바로 로그인·자동 동기화까지 된다. */
+  async authSignUp(email: string, password: string): Promise<{ ok: boolean; needsConfirm: boolean; message: string; canRequestAccess?: boolean }> {
     try {
       const res = await fetch(`${ToolEngine.SUPABASE_URL}/auth/v1/signup`, {
         method: "POST",
@@ -941,13 +1129,15 @@ export class ToolEngine extends EventEmitter {
       });
       const data = (await res.json()) as Record<string, unknown>;
       if (!res.ok) {
-        const msg = String(data.msg ?? data.error_description ?? data.error ?? `가입 실패(HTTP ${res.status})`);
-        return { ok: false, needsConfirm: false, message: msg };
+        const raw = String(data.msg ?? data.error_description ?? data.error ?? `가입 실패(HTTP ${res.status})`);
+        const explained = ToolEngine.explainSignupError(raw);
+        return { ok: false, needsConfirm: false, message: explained.message, canRequestAccess: explained.notAllowed };
       }
       // [v0.8.2] 서버에 자동확인이 걸려 있어 가입하면 보통 바로 세션이 온다 → 즉시 로그인 상태.
       if (data.access_token) {
         this.applySession(data);
-        this.persistEnv(); // 세션 저장(재시작해도 로그인 유지)
+        this.authPassword = password; // [v0.24.0] 이번 로그인 비밀번호를 그대로 잠금 열쇠로 재사용
+        this.persistEnv(); // 세션 저장(재시작해도 로그인 유지). 비밀번호는 저장하지 않는다.
         return { ok: true, needsConfirm: false, message: "가입·로그인 완료되었습니다." };
       }
       // 혹시 세션이 안 오면(설정 변경 등) 같은 자격증명으로 바로 로그인 시도.
@@ -959,7 +1149,11 @@ export class ToolEngine extends EventEmitter {
     }
   }
 
-  /** [v0.8.1] 로그인(이메일+비밀번호). 성공 시 세션 저장(재시작해도 유지). */
+  /**
+   * [v0.8.1] 로그인(이메일+비밀번호). 성공 시 세션 저장(재시작해도 유지).
+   * [v0.24.0] 로그인 = 동기화. 이 기기에 아직 없는 토스 키·매매 이력을 로그인 직후
+   *   조용히(실패해도 무시) 자동으로 받아온다 — 사용자가 따로 버튼을 누를 필요가 없다.
+   */
   async authSignIn(email: string, password: string): Promise<{ ok: boolean; message: string }> {
     try {
       const res = await fetch(`${ToolEngine.SUPABASE_URL}/auth/v1/token?grant_type=password`, {
@@ -974,8 +1168,19 @@ export class ToolEngine extends EventEmitter {
         return { ok: false, message: msg };
       }
       this.applySession(data);
-      this.persistEnv(); // refresh 토큰·이메일 저장(재시작 후에도 로그인 유지)
-      return { ok: true, message: `로그인되었습니다(${this.authEmail}).` };
+      this.authPassword = password; // [v0.24.0] 이번 로그인 비밀번호를 그대로 잠금 열쇠로 재사용
+      this.persistEnv(); // refresh 토큰·이메일 저장(재시작 후에도 로그인 유지). 비밀번호는 저장하지 않는다.
+
+      // 자동 동기화: 이 기기에 키가 없으면 클라우드에서 받아오고, 매매 이력도 함께 받아온다.
+      let extra = "";
+      if (!process.env.TOSS_CLIENT_ID) {
+        const pulled = await this.syncPullKeys().catch(() => null);
+        if (pulled?.ok) extra += " 저장된 토스 키를 자동으로 불러왔습니다.";
+      }
+      const pulledTrades = await this.syncPullTrades().catch(() => null);
+      if (pulledTrades?.ok && (pulledTrades.count ?? 0) > 0) extra += ` 매매 이력 ${pulledTrades.count}건도 함께 받아왔습니다.`;
+
+      return { ok: true, message: `로그인되었습니다(${this.authEmail}).${extra}` };
     } catch (e) {
       return { ok: false, message: String(e).replace(/^Error:\s*/, "") };
     }
@@ -988,13 +1193,18 @@ export class ToolEngine extends EventEmitter {
     this.authEmail = null;
     this.authUserId = null;
     this.authExpiresAtMs = 0;
+    this.authPassword = null; // [v0.24.0] 메모리에서만 들고 있던 비밀번호도 지운다
     this.persistEnv();
     return { ok: true };
   }
 
-  /** 로그인 상태(화면 표시용). */
-  authStatus(): { email: string | null; loggedIn: boolean } {
-    return { email: this.authEmail, loggedIn: !!(this.authAccessToken || this.authRefreshToken) };
+  /** 로그인 상태(화면 표시용). isOwner면 화면이 "가입 승인" 패널을 보여준다. */
+  authStatus(): { email: string | null; loggedIn: boolean; isOwner: boolean } {
+    return {
+      email: this.authEmail,
+      loggedIn: !!(this.authAccessToken || this.authRefreshToken),
+      isOwner: this.authEmail === ToolEngine.OWNER_EMAIL,
+    };
   }
 
   /** 토큰 응답을 세션 상태로 반영. */
@@ -1033,19 +1243,114 @@ export class ToolEngine extends EventEmitter {
     return { apikey: ToolEngine.SUPABASE_ANON, Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
   }
 
+  /** 로그인 없이(비로그인) REST 호출용 헤더 — 승인 요청 접수처럼 계정이 아직 없는 사람이 쓴다. */
+  private anonRestHeaders(): Record<string, string> {
+    return { apikey: ToolEngine.SUPABASE_ANON, Authorization: `Bearer ${ToolEngine.SUPABASE_ANON}`, "Content-Type": "application/json" };
+  }
+
+  // --------------------------------------------------------------------------
+  // [v0.24.0] 가입 승인 요청함 — 오너가 앱 안(로그인만 하면)에서 승인할 수 있게 한다.
+  //   PC가 꺼져 있어도, Supabase 사이트에 안 들어가도, 오너가 폰으로 로그인만 하면 된다.
+  //   보안: capri_access_requests 는 "요청서 우편함"일 뿐이다. 실제로 가입을 허용하는
+  //   열쇠는 capri_allowed_emails 뿐이라, 이 우편함에 아무나 써넣어도 스스로를
+  //   승인시킬 수는 없다(RLS로 오너 계정만 capri_allowed_emails 에 쓸 수 있음).
+  // --------------------------------------------------------------------------
+
+  /** 가입이 막힌 사람이 "승인해 주세요" 요청을 접수한다. 로그인 불필요(아직 계정이 없으니까). */
+  async requestAccess(email: string, note?: string): Promise<{ ok: boolean; message: string }> {
+    const e = email.trim().toLowerCase();
+    if (!e || !e.includes("@")) return { ok: false, message: "올바른 이메일을 입력하세요." };
+    try {
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_access_requests`, {
+        method: "POST",
+        headers: { ...this.anonRestHeaders(), Prefer: "return=minimal" },
+        body: JSON.stringify({ email: e, note: note?.trim() || null }),
+      });
+      if (res.status === 409) return { ok: true, message: "이미 신청하셨습니다. 운영자 승인을 기다려 주세요." };
+      if (!res.ok) return { ok: false, message: `신청 실패(HTTP ${res.status}).` };
+      return { ok: true, message: "사용 신청을 접수했습니다. 운영자 승인 후 가입할 수 있어요." };
+    } catch (err) {
+      return { ok: false, message: String(err).replace(/^Error:\s*/, "") };
+    }
+  }
+
+  /** [운영자 전용] 대기 중인 승인 요청 목록. RLS가 운영자 계정 로그인일 때만 결과를 준다. */
+  async listAccessRequests(): Promise<Array<{ email: string; note: string | null; requestedAt: string }>> {
+    const token = await this.ensureAccessToken();
+    if (!token) return [];
+    try {
+      const res = await fetch(
+        `${ToolEngine.SUPABASE_URL}/rest/v1/capri_access_requests?status=eq.pending&select=email,note,requested_at&order=requested_at.asc`,
+        { headers: this.authRestHeaders(token) },
+      );
+      if (!res.ok) return [];
+      const rows = (await res.json()) as Array<{ email: string; note: string | null; requested_at: string }>;
+      return rows.map((r) => ({ email: r.email, note: r.note, requestedAt: r.requested_at }));
+    } catch {
+      return [];
+    }
+  }
+
+  /** [운영자 전용] 요청을 승인 — 허용목록(capri_allowed_emails)에 추가 + 요청 상태를 갱신한다. */
+  async approveAccessRequest(email: string): Promise<{ ok: boolean; message: string }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요." };
+    const e = email.trim().toLowerCase();
+    try {
+      const insertRes = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_allowed_emails`, {
+        method: "POST",
+        headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({ email: e, note: "앱에서 승인" }),
+      });
+      if (!insertRes.ok) {
+        return { ok: false, message: `허용 목록 추가 실패(HTTP ${insertRes.status}). 운영자 계정으로 로그인했는지 확인하세요.` };
+      }
+      await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_access_requests?email=eq.${encodeURIComponent(e)}`, {
+        method: "PATCH",
+        headers: { ...this.authRestHeaders(token), Prefer: "return=minimal" },
+        body: JSON.stringify({ status: "approved", decided_at: new Date().toISOString() }),
+      });
+      this.addJournal({ kind: "info", symbol: "-", summary: `✅ 가입 승인: ${e}` });
+      return { ok: true, message: `${e} 승인 완료. 이제 이 이메일로 가입할 수 있습니다.` };
+    } catch (err) {
+      return { ok: false, message: String(err).replace(/^Error:\s*/, "") };
+    }
+  }
+
+  /** [운영자 전용] 요청을 거절(허용목록에는 추가하지 않고, 요청 상태만 갱신). */
+  async rejectAccessRequest(email: string): Promise<{ ok: boolean; message: string }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요." };
+    const e = email.trim().toLowerCase();
+    try {
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_access_requests?email=eq.${encodeURIComponent(e)}`, {
+        method: "PATCH",
+        headers: { ...this.authRestHeaders(token), Prefer: "return=minimal" },
+        body: JSON.stringify({ status: "rejected", decided_at: new Date().toISOString() }),
+      });
+      if (!res.ok) return { ok: false, message: `거절 처리 실패(HTTP ${res.status}).` };
+      return { ok: true, message: `${e} 요청을 거절했습니다.` };
+    } catch (err) {
+      return { ok: false, message: String(err).replace(/^Error:\s*/, "") };
+    }
+  }
+
   /**
-   * [v0.8.1] 지금 이 기기의 토스 키를 마스터 비밀번호로 암호화해 '내 계정' 행에 저장.
+   * [v0.8.1] 지금 이 기기의 토스 키를 로그인 비밀번호로 암호화해 '내 계정' 행에 저장.
    *   RLS가 user_id=본인만 허용하므로 다른 사람은 절대 못 본다. 평문은 올라가지 않는다.
+   * [v0.24.0] 인자로 비밀번호를 따로 안 받는다 — 로그인할 때 쓴 비밀번호(authPassword)를
+   *   그대로 잠금 열쇠로 쓴다. [설정 저장] 시 로그인 상태면 자동으로도 호출된다(saveSettings).
    */
-  async syncPushKeys(passphrase: string): Promise<{ ok: boolean; message: string }> {
+  async syncPushKeys(): Promise<{ ok: boolean; message: string }> {
     const token = await this.ensureAccessToken();
     if (!token) return { ok: false, message: "먼저 로그인하세요(설정 탭 상단). 로그인해야 내 계정에 키를 저장할 수 있어요." };
+    if (!this.authPassword) return { ok: false, message: "다시 로그인해야 동기화할 수 있습니다(비밀번호는 저장해 두지 않아요)." };
     const clientId = process.env.TOSS_CLIENT_ID ?? "";
     const clientSecret = process.env.TOSS_CLIENT_SECRET ?? "";
     const account = process.env.TOSS_ACCOUNT ?? "";
     if (!clientId || !clientSecret) return { ok: false, message: "먼저 [설정]에서 Client ID/Secret을 입력·저장한 뒤 동기화하세요." };
     try {
-      const rec = await encryptSecret({ clientId, clientSecret, account }, passphrase);
+      const rec = await encryptSecret({ clientId, clientSecret, account }, this.authPassword);
       // upsert: 내 user_id 행이 있으면 갱신, 없으면 삽입. user_id 는 JWT의 것으로 명시(RLS with_check 통과).
       const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_secrets?on_conflict=user_id`, {
         method: "POST",
@@ -1054,19 +1359,22 @@ export class ToolEngine extends EventEmitter {
       });
       if (!res.ok) return { ok: false, message: `클라우드 저장 실패(HTTP ${res.status}). ${await res.text().catch(() => "")}`.slice(0, 160) };
       this.addJournal({ kind: "info", symbol: "-", summary: "🔐 내 토스 키를 암호화해 클라우드(내 계정)에 저장" });
-      return { ok: true, message: "내 계정에 암호화 저장했습니다. 다른 기기에서 같은 계정 로그인 + 같은 마스터 비밀번호로 [불러오기] 하세요." };
+      return { ok: true, message: "내 계정에 암호화 저장했습니다. 다른 기기에서 같은 계정으로 로그인만 하면 자동으로 받아집니다." };
     } catch (e) {
       return { ok: false, message: String(e).replace(/^Error:\s*/, "") };
     }
   }
 
   /**
-   * [v0.8.1] 내 계정의 암호문을 받아 마스터 비밀번호로 복호화해 이 기기에 적용.
+   * [v0.8.1] 내 계정의 암호문을 받아 로그인 비밀번호로 복호화해 이 기기에 적용.
    *   복호화 성공 시 로컬 .env에도 저장하고 토큰을 재발급한다(즉시 사용 가능).
+   * [v0.24.0] authSignIn 이 로그인 직후 자동으로 이 함수를 부른다 — 보통 사람이 직접
+   *   호출할 일이 없다(문제가 있을 때 다시 시도하는 용도로만 UI에 남겨 둔다).
    */
-  async syncPullKeys(passphrase: string): Promise<{ ok: boolean; message: string }> {
+  async syncPullKeys(): Promise<{ ok: boolean; message: string }> {
     const token = await this.ensureAccessToken();
     if (!token) return { ok: false, message: "먼저 로그인하세요(설정 탭 상단)." };
+    if (!this.authPassword) return { ok: false, message: "다시 로그인해야 키를 불러올 수 있습니다(비밀번호는 저장해 두지 않아요)." };
     try {
       // RLS 덕분에 select 는 자동으로 '내 행'만 돌려준다(user_id 조건 불필요).
       const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_secrets?select=ciphertext,salt,iv`, {
@@ -1075,9 +1383,9 @@ export class ToolEngine extends EventEmitter {
       if (!res.ok) return { ok: false, message: `클라우드 조회 실패(HTTP ${res.status}).` };
       const rows = (await res.json()) as Array<{ ciphertext: string; salt: string; iv: string }>;
       if (!rows || rows.length === 0) {
-        return { ok: false, message: "내 계정에 저장된 키가 없습니다. 키가 있는 기기에서 먼저 [클라우드에 저장]하세요." };
+        return { ok: false, message: "내 계정에 저장된 키가 없습니다. 이 기기에서 [설정]에 키를 입력·저장하면 자동으로 클라우드에도 올라갑니다." };
       }
-      const payload = await decryptSecret(rows[0], passphrase); // 틀린 비번이면 여기서 실패
+      const payload = await decryptSecret(rows[0], this.authPassword); // 틀린 비번이면 여기서 실패
       await this.saveSettings({ mode: "live", clientId: payload.clientId, clientSecret: payload.clientSecret, account: payload.account });
       this.addJournal({ kind: "info", symbol: "-", summary: "🔓 클라우드(내 계정)에서 토스 키를 복호화해 이 기기에 적용" });
       return { ok: true, message: "내 계정에서 키를 불러와 적용했습니다. 이제 이 기기에서 바로 조회·주문이 됩니다." };
@@ -1803,6 +2111,182 @@ export class ToolEngine extends EventEmitter {
     });
   }
 
+  /**
+   * ④ [v0.25.0] 매수+익절+손절 한 번에("브라켓 주문").
+   *
+   * [왜 OTO/OCO 하나로 안 되나 — 오너 질문에 대한 답]
+   *   토스 조건주문(OCO/OTO) 스펙은 다리(leg)가 first/second **최대 2개**뿐이다(위 OTO 주석 참고,
+   *   공식 openapi.json으로 이미 확인됨). "매수+익절+손절"은 다리가 3개라 토스 서버가 한 번의
+   *   조건주문으로 못 받는다 — PC 화면에서 못 찾은 게 아니라 API 자체의 제약이다. 토스 모바일
+   *   앱이 "한 번에" 거는 것처럼 보여도, 내부적으로는 ①매수 주문 ②체결 확인 ③OCO(익절+손절) 등록,
+   *   이렇게 최소 2단계일 수밖에 없다(OCO는 실제 보유가 있어야만 등록되기 때문).
+   *
+   * [그래서 이 기능이 하는 일]
+   *   ①진입 지정가 매수를 접수하고 ②그 주문이 체결되는지 이 프로그램이 지켜보다가(최대
+   *   watchMinutes분, 기본 15분) ③체결되면 즉시 OCO(익절+손절)를 자동으로 등록한다. 사람이 미리
+   *   정한 값(진입가·익절가·손절가·수량)을 그대로 실행할 뿐이라 "판단은 사람, 실행은 기계"
+   *   원칙에 어긋나지 않는다.
+   *
+   * [⚠️ "즉시"의 실제 의미 — 완전한 무지연(0초)은 불가능함, 반드시 알아야 함]
+   *   토스 주문 API에는 "체결됐다"고 먼저 알려주는 실시간 알림(웹소켓·푸시) 채널이 없다(공식
+   *   openapi.json에도, 이 코드베이스 전체에도 그런 기능은 없음 — 조사 완료). 심지어 주문을 낼 때
+   *   받는 응답에도 상태값이 안 들어있고(생성 응답은 orderId뿐), 상태는 오직 "단건 조회"를
+   *   반복해서 물어봐야만(폴링) 알 수 있다. 그래서 이 기능도 어쩔 수 없이 주기적으로 "체결됐나요?"
+   *   하고 물어보는 방식이며, **그 확인 간격만큼은 항상 지연이 생긴다.** 아래 watchAndBracket이
+   *   그 지연을 최대한 줄이도록 "진입 직후 1분은 1초 간격으로 빠르게, 그 이후엔 5초 간격으로
+   *   느슨하게" 확인한다(v0.25.1) — 실전에서 체감상 "거의 즉시"에 가깝지만, 수학적으로 정확히
+   *   0초는 아니다(최악의 경우 최대 약 1초).
+   *
+   * [⚠️ 또 다른 중요한 한계 — 반드시 알아야 함]
+   *   이 감시는 **이 프로그램이 켜져 있는 동안만** 작동한다. OCO 등록 전에 앱을 끄거나 컴퓨터가
+   *   잠들면, 체결이 돼도 손절/익절이 자동으로 걸리지 않는다(진입 주문 자체는 토스에 그대로
+   *   남아 있다). 정해진 시간 안에 체결이 안 되면 조용히 감시를 멈추고 알림만 남긴다(진입은 취소
+   *   하지 않는다 — 취소는 사람이 판단할 일).
+   */
+  async placeBracket(spec: BracketSpec): Promise<JournalEntry> {
+    const { entryJournal, watchPromise } = await this.placeBracketCore(spec);
+    // 화면(수동) 버튼 경로: 최대 watchMinutes만큼 걸릴 수 있는 감시를 기다리지 않는다(기존 동작 그대로).
+    //   [v0.26.0] 자동매매 경로(startAutoTrade)는 이 watchPromise를 직접 기다려 OCO 등록 여부를
+    //   알아내야 하므로 placeBracketCore를 따로 호출한다(아래 autoTradeTick 참고).
+    if (watchPromise) void watchPromise;
+    return entryJournal;
+  }
+
+  /**
+   * placeBracket의 실제 로직(공용 코어). placeBracket(수동 버튼)과 자동매매 경로가 함께 쓴다.
+   *   [v0.26.0] 자동매매는 watchPromise를 끝까지 기다려 "OCO가 실제로 등록됐는지, 등록됐다면
+   *   그 조건주문 번호가 뭔지"를 알아야 포지션을 추적할 수 있어 이렇게 분리했다.
+   */
+  private async placeBracketCore(spec: BracketSpec): Promise<{ entryJournal: JournalEntry; watchPromise: Promise<WatchAndBracketResult> | null }> {
+    const symbol = spec.symbol.toUpperCase();
+    const cur = await this.orderGate(symbol, [spec.price]);
+    await this.assertAffordable(spec.price, spec.quantity);
+
+    const clientOrderId = makeClientOrderId(`brk${DateTime.now().toFormat("HHmmss")}`, 1, "entry");
+
+    if (this.isDryRun()) {
+      // 드라이런은 실제 체결이 없으니(연습·실주문잠금 공통) 진입+조건주문을 한 번에 시뮬레이션한다.
+      this.saveRationale(spec.rationale, { clientOrderId, kind: "entry", symbol, quantity: spec.quantity, priceAtOrder: cur, dryRun: true });
+      void this.recordEntry(symbol, spec.price, this.currentMode(), spec.quantity);
+      this.addJournal({
+        kind: "dryrun",
+        symbol,
+        summary: `[드라이런] 진입 매수 ${symbol} $${spec.price} × ${spec.quantity}주 접수(연습)`,
+      });
+      const entryJournal = this.addJournal({
+        kind: "dryrun",
+        symbol,
+        summary: `[드라이런] 체결 시뮬레이션 → OCO 등록 ${symbol} ${spec.quantity}주: 익절 $${spec.tpTrigger}↑ / 손절 $${spec.slTrigger}↓ (실주문 잠금 — 매수+익절+손절 한번에)`,
+        detail: { ...spec, clientOrderId },
+      });
+      return { entryJournal, watchPromise: null };
+    }
+
+    const o = await createOrder({ symbol, side: "BUY", orderType: "LIMIT", price: spec.price, quantity: spec.quantity, clientOrderId });
+    this.saveRationale(spec.rationale, { clientOrderId, kind: "entry", symbol, quantity: spec.quantity, priceAtOrder: cur, dryRun: false, tossOrderId: o.tossOrderId });
+    void this.recordEntry(symbol, spec.price, this.currentMode(), spec.quantity);
+    const entryJournal = this.addJournal({
+      kind: "entry",
+      symbol,
+      summary: `진입 지정가 매수 접수 ${symbol} $${spec.price} × ${spec.quantity}주 (주문번호 ${o.tossOrderId}) — 체결되면 자동으로 조건주문(익절+손절)을 등록합니다(최대 ${spec.watchMinutes ?? 15}분 감시)`,
+      detail: o,
+    });
+
+    const watchPromise = this.watchAndBracket(symbol, o.tossOrderId, spec);
+    return { entryJournal, watchPromise };
+  }
+
+  /**
+   * 진입 주문의 체결을 기다렸다가, 체결되면 OCO(익절+손절)를 자동 등록한다.
+   *   [수명 제한] watchMinutes(기본 15분)를 넘기면 조용히 감시를 멈춘다(무한 폴링 방지 —
+   *   v0.22.0 체결강도 자동 기록과 같은 원칙). 진입 주문 자체는 취소하지 않는다.
+   *   [v0.25.1 — 적응형(빠르게→느슨하게) 폴링] 토스 주문 API는 체결을 먼저 알려주는 실시간
+   *   채널이 없어(위 placeBracket 주석 참고) "물어봐야만" 아는데, 무작정 빨리 자주 물어보면
+   *   API 호출이 너무 많아지고(공식 한도가 명시돼 있진 않지만 다른 그룹들처럼 초당 제한이
+   *   있을 가능성이 큼), 너무 느리게 물어보면 체결→보호(익절/손절) 등록 사이 무방비 시간이
+   *   길어진다. 그래서 "체결될 가능성이 가장 높은 진입 직후 FAST_WINDOW_MS(1분) 동안은
+   *   FAST_POLL_MS(1초) 간격으로, 그 뒤엔 느슨한 간격(기본 5초)으로" 절충한다. 테스트에서
+   *   spec.pollMs를 넘기면 이 적응형 로직을 끄고 그 값 하나로 처음부터 끝까지 폴링한다
+   *   (빠른 자동 테스트용 — 화면(UI)은 이 값을 넘기지 않으므로 실사용에는 영향 없음).
+   */
+  private static readonly BRACKET_FAST_POLL_MS = 1000; // 진입 직후엔 1초 간격(체결 반응을 최대한 빠르게)
+  private static readonly BRACKET_FAST_WINDOW_MS = 60_000; // "진입 직후"로 볼 구간(1분)
+  private static readonly BRACKET_SLOW_POLL_MS = 5000; // 그 이후엔 5초 간격(API 부담 완화)
+
+  private async watchAndBracket(
+    symbol: string,
+    tossOrderId: string,
+    spec: {
+      quantity: number;
+      tpTrigger: number;
+      tpPrice: number;
+      slTrigger: number;
+      slPrice: number;
+      expireDate: string;
+      watchMinutes?: number;
+      pollMs?: number;
+      rationale?: RationaleInput;
+    },
+  ): Promise<WatchAndBracketResult> {
+    const watchMinutes = spec.watchMinutes ?? 15;
+    const startedAt = Date.now();
+    const deadline = startedAt + watchMinutes * 60_000;
+
+    while (Date.now() < deadline) {
+      // spec.pollMs가 있으면(테스트 전용) 처음부터 끝까지 그 값 하나로 고정. 없으면(실사용)
+      // 진입 직후 1분은 1초, 그 이후는 5초로 적응형 폴링(위 클래스 설명 참고).
+      const elapsed = Date.now() - startedAt;
+      const pollMs =
+        spec.pollMs ?? (elapsed < ToolEngine.BRACKET_FAST_WINDOW_MS ? ToolEngine.BRACKET_FAST_POLL_MS : ToolEngine.BRACKET_SLOW_POLL_MS);
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      let o: OrderResponse;
+      try {
+        o = await getOrder(tossOrderId);
+      } catch {
+        continue; // 조회 실패는 다음 폴링에서 재시도(막지 않음)
+      }
+      if (o.status === "filled") {
+        try {
+          const ocoJournal = await this.placeOco({
+            symbol,
+            quantity: o.filled_qty && o.filled_qty > 0 ? o.filled_qty : spec.quantity,
+            tpTrigger: spec.tpTrigger,
+            tpPrice: spec.tpPrice,
+            slTrigger: spec.slTrigger,
+            slPrice: spec.slPrice,
+            expireDate: spec.expireDate,
+            rationale: spec.rationale,
+          });
+          // [v0.26.0] 자동매매가 이 OCO를 추적할 수 있게 조건주문 번호를 결과로 돌려준다.
+          const conditionalOrderId = (ocoJournal.detail as { conditionalOrderId?: string } | undefined)?.conditionalOrderId;
+          if (conditionalOrderId) return { status: "oco_registered", conditionalOrderId };
+          // 드라이런처럼 conditionalOrderId가 없는 경우(이론상 이 분기는 isDryRun()이 이미
+          // placeBracketCore에서 걸러내 도달하지 않지만, 안전하게 실패로 취급한다).
+          return { status: "oco_failed", error: "조건주문 번호를 확인할 수 없습니다." };
+        } catch (e) {
+          const error = String(e).replace(/^Error:\s*/, "");
+          this.addJournal({
+            kind: "info",
+            symbol,
+            summary: `⚠️ 진입 체결을 확인했지만 조건주문(익절+손절) 자동 등록에 실패했습니다 — 직접 걸어 주세요: ${error}`,
+          });
+          return { status: "oco_failed", error };
+        }
+      }
+      if (o.status === "cancelled" || o.status === "failed") {
+        this.addJournal({ kind: "info", symbol, summary: `진입 주문이 ${o.status === "cancelled" ? "취소" : "실패"}돼 자동 감시를 멈췄습니다.` });
+        return { status: o.status };
+      }
+      // pending/partial/unknown이면 계속 기다린다.
+    }
+    this.addJournal({
+      kind: "info",
+      symbol,
+      summary: `⏱ ${watchMinutes}분 동안 체결을 기다렸지만 되지 않아 자동 감시를 멈췄습니다. 진입 주문은 그대로 있으니, 체결되면 [주문현황]에서 직접 조건주문(익절+손절)을 걸어 주세요.`,
+    });
+    return { status: "timeout" };
+  }
+
   // --------------------------------------------------------------------------
   // 주문 현황(조회·취소) — 조회는 드라이런과 무관하게 실서버에서도 안전(읽기)
   // --------------------------------------------------------------------------
@@ -2211,37 +2695,33 @@ export class ToolEngine extends EventEmitter {
     }
   }
 
-  // ── [v0.10.0] 매매 이력 암호화 동기화 (PC가 올리고, 폰이 받는다) ────────────
-  //   회사에서도 리포트를 보려면 이력이 폰에 있어야 한다. 집 PC가 이력을 **암호화해서**
-  //   인터넷 보관함에 올려 두면, 폰은 비밀번호로 풀어서 쓴다.
+  // ── [v0.10.0→v0.24.0] 매매 이력 암호화 동기화 (로그인 계정 안에서 PC↔폰) ────
+  //   회사에서도 리포트를 보려면 이력이 폰에 있어야 한다. 로그인한 기기가 이력을
+  //   **로그인 비밀번호로 암호화해서** Supabase(내 계정 전용 행)에 올려 두면, 같은
+  //   계정으로 로그인한 다른 기기가 자동으로 받아서 푼다.
   //   ⚠️ 토스 키·토큰·계좌번호는 **절대** 올리지 않는다(매매 결과만).
-
-  /** 동기화 비밀번호를 저장/조회 (PC는 .env, 폰은 브라우저 저장소에 남는다) */
-  getSyncPass(): string {
-    return process.env.TRADE_SYNC_PASS ?? "";
-  }
-
-  setSyncPass(pass: string): void {
-    process.env.TRADE_SYNC_PASS = pass.trim();
-    this.persistEnv();
-  }
+  //   [v0.24.0] 예전엔 GitHub 공개 저장소 + 별도 "동기화 비밀번호"를 썼다(githubToken
+  //   으로 git 자격증명을 찾아야 해서, 일반 사용자 PC에서는 애초에 작동하지 않았다).
+  //   지금은 토스 키(capri_secrets)와 완전히 같은 방식 — capri_trades 표에 RLS로
+  //   저장한다. 비밀번호는 로그인 비밀번호(authPassword) 하나뿐이다.
 
   /**
-   * syncPushTrades — [PC] 저장된 매매 이력을 암호화해 공개 저장소에 올린다.
-   *   토큰은 이 PC에 이미 있는 GitHub 자격증명에서 가져온다(새로 저장하지 않는다).
+   * syncPushTrades — 저장된 매매 이력을 암호화해 내 계정(capri_trades) 행에 올린다.
    */
-  async syncPushTrades(passphrase?: string): Promise<{ ok: boolean; message: string; count?: number }> {
-    const pass = (passphrase ?? this.getSyncPass()).trim();
-    if (!pass) return { ok: false, message: "동기화 비밀번호를 먼저 정해 주세요(6자 이상)." };
+  async syncPushTrades(): Promise<{ ok: boolean; message: string; count?: number }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요." };
+    if (!this.authPassword) return { ok: false, message: "다시 로그인해야 동기화할 수 있습니다(비밀번호는 저장해 두지 않아요)." };
     if (this.savedFills.length === 0) return { ok: false, message: "올릴 매매 이력이 없습니다." };
 
     try {
-      const rec = await encryptJson(toSyncPayload(this.savedFills, Date.now()), pass);
-      const token = await this.githubToken();
-      if (!token) {
-        return { ok: false, message: "이 PC의 GitHub 자격증명을 찾지 못했습니다(터미널에서 gh auth login 한 번 필요)." };
-      }
-      await this.githubPutFile(token, syncPath(rec.syncId), JSON.stringify(rec));
+      const rec = await encryptJson(toSyncPayload(this.savedFills, Date.now()), this.authPassword);
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_trades?on_conflict=user_id`, {
+        method: "POST",
+        headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({ user_id: this.authUserId, ciphertext: rec.ciphertext, salt: rec.salt, iv: rec.iv, updated_at: new Date().toISOString() }),
+      });
+      if (!res.ok) return { ok: false, message: `클라우드 저장 실패(HTTP ${res.status}).` };
       this.lastSyncPushAtMs = Date.now();
       return { ok: true, message: `매매 이력 ${this.savedFills.length}건을 올렸습니다(암호화됨).`, count: this.savedFills.length };
     } catch (e) {
@@ -2250,24 +2730,25 @@ export class ToolEngine extends EventEmitter {
   }
 
   /**
-   * syncPullTrades — [폰·PC] 올려 둔 매매 이력을 받아 복호화해 저장본에 합친다.
-   *   홈 PC 연결(터널)이 없어도, 인터넷만 되면 어디서든 된다.
+   * syncPullTrades — 내 계정에 올려 둔 매매 이력을 받아 복호화해 저장본에 합친다.
+   *   authSignIn 이 로그인 직후 자동으로 부른다 — 보통 사람이 직접 누를 일이 없다.
    */
-  async syncPullTrades(passphrase?: string): Promise<{ ok: boolean; message: string; count?: number }> {
-    const pass = (passphrase ?? this.getSyncPass()).trim();
-    if (!pass) return { ok: false, message: "동기화 비밀번호를 입력해 주세요." };
+  async syncPullTrades(): Promise<{ ok: boolean; message: string; count?: number }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요." };
+    if (!this.authPassword) return { ok: false, message: "다시 로그인해야 매매 이력을 받을 수 있습니다(비밀번호는 저장해 두지 않아요)." };
 
     try {
-      const syncId = await deriveSyncId(pass);
-      const res = await fetch(syncReadUrl(syncId));
-      if (res.status === 404) {
-        return { ok: false, message: "올려 둔 매매 이력이 없습니다(집 PC에서 먼저 [올리기]를 눌러 주세요)." };
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_trades?select=ciphertext,salt,iv`, {
+        headers: this.authRestHeaders(token),
+      });
+      if (!res.ok) return { ok: false, message: `클라우드 조회 실패(HTTP ${res.status}).` };
+      const rows = (await res.json()) as Array<{ ciphertext: string; salt: string; iv: string }>;
+      if (!rows || rows.length === 0) {
+        return { ok: false, message: "내 계정에 저장된 매매 이력이 없습니다." };
       }
-      if (!res.ok) return { ok: false, message: `받기 실패(HTTP ${res.status})` };
-
-      const rec = (await res.json()) as { ciphertext: string; salt: string; iv: string };
-      const payload = await decryptJson<TradeSyncPayload>(rec, pass);
-      if (!isSyncPayload(payload)) return { ok: false, message: "받은 파일 형식이 올바르지 않습니다." };
+      const payload = await decryptJson<TradeSyncPayload>(rows[0], this.authPassword); // 틀린 비번이면 여기서 실패
+      if (!isSyncPayload(payload)) return { ok: false, message: "받은 데이터 형식이 올바르지 않습니다." };
 
       const before = this.savedFills.length;
       this.savedFills = mergeFills(this.savedFills, payload.fills);
@@ -2284,49 +2765,6 @@ export class ToolEngine extends EventEmitter {
     }
   }
 
-  /** 이 PC에 이미 있는 GitHub 자격증명을 찾는다(값은 저장하지 않는다). */
-  private async githubToken(): Promise<string | null> {
-    if (process.env.GH_TOKEN) return process.env.GH_TOKEN;
-    try {
-      const { execFileSync } = await import("node:child_process");
-      const out = execFileSync("git", ["credential", "fill"], {
-        input: ["protocol=https", "host=github.com", "", ""].join(String.fromCharCode(10)),
-        encoding: "utf8",
-        stdio: ["pipe", "pipe", "ignore"],
-      });
-      const m = out.match(/^password=(.*)$/m);
-      return m ? m[1].trim() : null;
-    } catch {
-      return null; // 브라우저(폰)에서는 여기까지 오지 않는다(올리기는 PC 전용)
-    }
-  }
-
-  /** 공개 저장소에 파일 하나를 올린다(있으면 덮어쓴다). */
-  private async githubPutFile(token: string, path: string, body: string): Promise<void> {
-    const api = `https://api.github.com/repos/${SYNC_REPO.owner}/${SYNC_REPO.repo}/contents/${path}`;
-    const headers = {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github+json",
-      "Content-Type": "application/json",
-    };
-    // 이미 있으면 sha 가 필요하다(덮어쓰기 규칙).
-    let sha: string | undefined;
-    const cur = await fetch(`${api}?ref=${SYNC_REPO.branch}`, { headers });
-    if (cur.ok) sha = ((await cur.json()) as { sha?: string }).sha;
-
-    const put = await fetch(api, {
-      method: "PUT",
-      headers,
-      body: JSON.stringify({
-        message: `매매 이력 동기화 ${new Date().toISOString()}`,
-        content: Buffer.from(body, "utf8").toString("base64"),
-        branch: SYNC_REPO.branch,
-        ...(sha ? { sha } : {}),
-      }),
-    });
-    if (!put.ok) throw new Error(`업로드 실패(HTTP ${put.status})`);
-  }
-
   /** 새로 받은 체결을 저장본에 합친다(중복 제거). 다른 화면(주문 현황 등)에서도 부를 수 있다. */
   private absorbFills(incoming: Fill[]): void {
     if (incoming.length === 0) return;
@@ -2339,12 +2777,12 @@ export class ToolEngine extends EventEmitter {
     this.persistFills();
 
     // [v0.10.0] 새 매매가 생겼으면 클라우드에도 올려 둔다(폰이 회사에서 볼 수 있게).
-    //   · 비밀번호를 정해 둔 경우에만 동작한다.
+    //   · 로그인 상태(authPassword 있음)일 때만 동작한다.
     //   · 실패해도 무시한다(로컬 저장본은 그대로라 화면은 정상).
     //   · 5분에 한 번으로 제한 — 너무 잦은 업로드 방지.
     const changed = this.savedFills.length !== before;
     const longEnough = Date.now() - (this.lastSyncPushAtMs ?? 0) > 5 * 60_000;
-    if (changed && longEnough && this.getSyncPass()) {
+    if (changed && longEnough && this.authPassword) {
       void this.syncPushTrades().catch(() => {
         /* 업로드 실패는 조용히 넘어간다 */
       });
@@ -2519,9 +2957,9 @@ export class ToolEngine extends EventEmitter {
       }
     }
 
-    // ①-B [v0.10.0] 토스 조회가 안 됐고(회사·PC 꺼짐) 동기화 비밀번호가 있으면,
+    // ①-B [v0.10.0] 토스 조회가 안 됐고(회사·PC 꺼짐) 로그인 상태면,
     //     클라우드에 올려 둔 매매 이력을 받아 온다 → 홈 연결 없이도 리포트가 채워진다.
-    if (source !== "live" && this.getSyncPass()) {
+    if (source !== "live" && this.authPassword) {
       try {
         await this.syncPullTrades();
       } catch {
@@ -2593,7 +3031,7 @@ export class ToolEngine extends EventEmitter {
         /* 연결 없으면 저장본으로 */
       }
     }
-    if (source !== "live" && this.getSyncPass()) {
+    if (source !== "live" && this.authPassword) {
       try { await this.syncPullTrades(); } catch { /* 실패해도 저장본으로 */ }
     }
     const realized = matchFifo(this.savedFills, this.lastAvgCost);
@@ -2845,7 +3283,9 @@ export class ToolEngine extends EventEmitter {
           const priceInBand = inPriceBand(price, priceMin, priceMax); // [v0.11.0] 사용자 지정 가격대
           const ema200 = ema(closes, 200);
           const cloud = ichimoku(candles5m);
-          const pat = scanSessionPattern(candles5m, sessionStartMs, br); // HA 캔들로 패턴 판정
+          // [v0.25.0] now.toMillis()를 넘겨 "너무 오래된 도지"(기본 20분 초과)는 scanSessionPattern이
+          //   스스로 status를 none으로 강제하게 한다(실 매매엔 불확실한 과거 데이터라는 오너 지적 반영).
+          const pat = scanSessionPattern(candles5m, sessionStartMs, br, WICK_MIN_RATIO, now.toMillis()); // HA 캔들로 패턴 판정
 
           const aboveEma = ema200 != null && price > ema200;
           const aboveCloud = cloud != null && price > cloud.cloudTop;
@@ -2941,8 +3381,352 @@ export class ToolEngine extends EventEmitter {
         firstDoji: pat.dojiIndex >= 0,
         bothWicks: pat.dojiUpperWickPct != null && pat.dojiLowerWickPct != null && pat.dojiUpperWickPct >= WICK_MIN_RATIO && pat.dojiLowerWickPct >= WICK_MIN_RATIO,
         nextBearish: pat.nextCandle ? pat.nextCandle.close < pat.nextCandle.open : false,
+        recentDoji: !pat.tooOld,
       },
     };
+  }
+
+  /**
+   * [v0.25.0] getScreenerChart — 탐색 결과 한 종목의 차트를 불러온다(온디맨드, 클릭 시에만).
+   *   scanScreener가 판정할 때 쓴 것과 **완전히 같은 계산**(1분봉→5분봉→하이킨아시→EMA200·구름·
+   *   세션패턴)을 그대로 재실행해 돌려준다 — 표에서 본 근거와 차트가 서로 다른 계산이면 안 되므로.
+   *   ⚠️ 읽기 전용(시세·캔들 조회만). 주문과 무관. 버튼을 눌렀을 때만 호출된다(자동 폴링 없음).
+   */
+  async getScreenerChart(symbol: string): Promise<ScreenChart> {
+    await this.prepareBackend();
+    const sym = symbol.trim().toUpperCase();
+    const now = DateTime.now().setZone("Asia/Seoul");
+    const sessionStart = getSessionStart(now);
+    const sessionStartMs = sessionStart ? sessionStart.toMillis() : now.toMillis() - 8 * 3600_000;
+
+    const oneMin = await getCandles1mPaged(sym, 1100);
+    const raw5m = dropIncompleteBucket(aggregate1mTo5m(oneMin), now.toMillis());
+    if (raw5m.length === 0) throw new Error(`${sym}: 캔들 데이터를 받지 못했습니다(시장 휴장 또는 데이터 없음).`);
+    const candles5m = toHeikinAshi(raw5m);
+    const closes = candles5m.map((c) => c.close);
+    const ema200 = ema(closes, 200);
+    const cloud = ichimoku(candles5m);
+    const pat = scanSessionPattern(candles5m, sessionStartMs, 0.3, WICK_MIN_RATIO, now.toMillis());
+
+    let price: number | null = null;
+    try {
+      price = (await getPrice(sym)).price;
+    } catch {
+      /* 시세 조회 실패해도 차트(과거 캔들)는 그대로 보여준다 */
+    }
+
+    const hm = (ms: number) => DateTime.fromMillis(ms).setZone("Asia/Seoul").toFormat("HH:mm");
+    const MAX_CANDLES = 60; // 너무 많으면 빽빽해져 안 보인다 — 현재 세션의 최근 구간만.
+    const shown = candles5m.filter((c) => c.time >= sessionStartMs).slice(-MAX_CANDLES);
+
+    return {
+      symbol: sym,
+      candles: shown.map((c) => ({ time: hm(c.time), open: c.open, high: c.high, low: c.low, close: c.close })),
+      ema200,
+      cloudTop: cloud?.cloudTop ?? null,
+      sessionHigh: pat.sessionHigh,
+      sessionHighTime: pat.highTime != null ? hm(pat.highTime) : null,
+      dojiTime: pat.dojiCandle ? hm(pat.dojiCandle.time) : null,
+      nextTime: pat.nextCandle ? hm(pat.nextCandle.time) : null,
+      price,
+      patternStatus: pat.status,
+    };
+  }
+
+  // ==========================================================================
+  // [v0.26.0] 자동매매 — 오너가 명시적으로 켰을 때만, 이 앱이 켜져 있는 동안만 작동한다.
+  //
+  // [CLAUDE.md 원칙과의 관계 — 반드시 읽을 것]
+  //   이 저장소의 CLAUDE.md에는 "자율 봇 아님(오너 결정) — 자동 루프·자율판단 금지"라고 적혀
+  //   있다. 이 기능은 그 원칙에서 벗어나는 **오너의 명시적인 새 결정**이다(대화에서 "B(완전
+  //   자동화) 진행할거야"라고 직접 지시함). CLAUDE.md는 이 결정을 반영해 함께 갱신했다.
+  //   대신 아래 안전장치로 "무엇을 얼마나 자동으로 할지"는 여전히 오너가 정한다:
+  //     ① 마스터 스위치(이 자체는 절대 저장 안 함 — 앱 켤 때마다 다시 켜야 함)
+  //     ② 최대 종목 수·최대손실 한도·최대 투입 비율(전부 설정 탭에서 언제든 수정 가능)
+  //     ③ 오직 삼분할 매매기법의 "1분할" 타점만 쓴다(가장 얕게 눌렸을 때만 — 오너 지시)
+  //     ④ 신규 진입은 반드시 lib/auto-risk.ts의 canAutoEnter 게이트를 통과해야 나간다(우회 금지 —
+  //        이 원칙은 CLAUDE.md의 옛 lib/risk.ts canPlaceOrder 규칙을 v2 방식으로 재구현한 것.
+  //        조사해보니 실제 lib/risk.ts 파일은 이미 삭제되어 있었다 — 오너에게 보고함).
+  //
+  // [5분마다 무엇을 하나]
+  //   ①기존 자동매매 포지션을 다시 확인한다(매수 체결→OCO 등록 완료됐는지, OCO가 익절/손절로
+  //     "발동"돼 끝났는지). 끝난 자리는 즉시 빈자리가 된다("같은 5분 사이클 안에 빈자리를
+  //     채운다"는 오너 지시를 만족하려면 이 확인이 스캔보다 먼저 끝나 있어야 한다).
+  //   ②최대손실 한도(시드 대비 %)를 넘었으면 자동매매 자체를 끄고 끝낸다.
+  //   ③빈자리가 있으면 스크리닝을 새로 돌려 "합격(confirmed)" 종목 중 지금 보유 중이 아니고
+  //     이전에 같은 가격으로 이미 시도하지 않은 종목만 골라, 빈자리 수만큼 진입한다.
+  //
+  // [체결·발동 확인 방법 — 왜 이렇게 하나]
+  //   토스 API는 실시간 알림이 없어(v0.25.1 조사 결과 재확인) 전부 "물어봐서" 안다. 매수 체결은
+  //   기존 브라켓 기능(watchAndBracket)을 그대로 재사용하고, OCO(익절+손절)가 "발동"됐는지는
+  //   5분 사이클마다 조건주문 단건 조회(getConditionalOrder)로 확인한다 — 이 정도 지연은
+  //   "5분마다 도는 자동매매"의 취지에 맞고, 실시간성이 중요한 손절/익절 자체는 여전히
+  //   토스 서버(OCO)가 즉시 처리한다(우리는 "끝났다는 사실"만 뒤늦게 확인할 뿐).
+  // ==========================================================================
+
+  /** 자동매매를 켠다. 이미 켜져 있으면 아무 일도 하지 않는다(타이머 중복 방지). */
+  startAutoTrade(): AutoTradeStatus {
+    if (this.autoTradeEnabled) return this.getAutoTradeStatus();
+    this.autoTradeEnabled = true;
+    this.autoTradeRealizedPnlUsd = 0;
+    this.autoTradePositions = [];
+    this.autoTradeUsedKeys = new Set();
+    this.addJournal({
+      kind: "info",
+      symbol: "-",
+      summary:
+        `🤖 자동매매 시작 — 최대 ${this.autoTradeMaxPositions}종목 · 최대손실 한도 시드대비 ${this.autoTradeMaxLossPct}% · ` +
+        `총 투입한도 시드대비 ${this.autoTradeMaxInvestPct}% · 5분마다 탐색(삼분할 1분할 타점만, 이 프로그램이 켜져 있는 동안만 작동)`,
+    });
+    void this.autoTradeTick(); // 시작하자마자 한 번 즉시 돌리고
+    this.autoTradeTimer = setInterval(() => void this.autoTradeTick(), ToolEngine.AUTO_TRADE_INTERVAL_MS); // 이후 5분마다
+    return this.getAutoTradeStatus();
+  }
+
+  /** 자동매매를 끈다. 타이머만 멈출 뿐, 이미 낸 진입·조건주문은 취소하지 않는다(취소는 사람 판단). */
+  stopAutoTrade(reason?: string): AutoTradeStatus {
+    this.autoTradeEnabled = false;
+    if (this.autoTradeTimer) {
+      clearInterval(this.autoTradeTimer);
+      this.autoTradeTimer = null;
+    }
+    this.addJournal({
+      kind: "info",
+      symbol: "-",
+      summary: `🤖 자동매매 중지${reason ? ` — ${reason}` : ""} (이미 낸 진입·조건주문은 그대로 있습니다. 필요하면 [주문현황]에서 직접 취소하세요.)`,
+    });
+    return this.getAutoTradeStatus();
+  }
+
+  getAutoTradeStatus(): AutoTradeStatus {
+    return {
+      enabled: this.autoTradeEnabled,
+      positions: this.autoTradePositions.map((p) => ({ ...p })),
+      realizedPnlUsd: Math.round(this.autoTradeRealizedPnlUsd * 100) / 100,
+      maxPositions: this.autoTradeMaxPositions,
+      maxLossPct: this.autoTradeMaxLossPct,
+      maxInvestPct: this.autoTradeMaxInvestPct,
+      lastCycleAt: this.autoTradeLastCycleAt,
+    };
+  }
+
+  /** 시드 기준 금액(달러) — orderCapacity와 동일 규칙: auto=매수가능금액, fixed=오너가 정한 고정 금액. */
+  private async resolveSeedUsd(): Promise<number | null> {
+    if (this.seedBasis === "fixed") return this.seedFixedUsd;
+    try {
+      const bp = await getBuyingPower("USD");
+      return Number.isFinite(bp.buyingPowerUsd) ? bp.buyingPowerUsd : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 미국 시장 수수료율(참고용, 실패하면 0으로 계산 — orderCapacity와 동일 로직). */
+  private async resolveCommissionRate(): Promise<number | null> {
+    try {
+      const raw = (await getCommissions()) as unknown;
+      const arr = Array.isArray(raw) ? raw : [];
+      const us = arr.find((x) => (x as Record<string, unknown>)?.marketCountry === "US") as Record<string, unknown> | undefined;
+      const v = us ? Number(us.commissionRate) : NaN;
+      return Number.isFinite(v) ? (v > 0.01 ? v / 100 : v) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private autoTradeExpireDate(): string {
+    return DateTime.now().setZone("Asia/Seoul").plus({ days: 30 }).toFormat("yyyy-MM-dd");
+  }
+
+  /**
+   * 기존 자동매매 포지션을 다시 확인한다("빈자리 채우기"가 늦지 않으려면 스캔보다 먼저 끝나야 함).
+   *   - watching(매수 체결 대기 중) 상태는 watchAndBracket 자체의 완료 콜백(onAutoBracketResolved)이
+   *     처리하므로 여기서는 건드리지 않는다.
+   *   - active(OCO 등록 완료) 상태만 조건주문이 "발동"됐는지 조회해, 발동됐으면 실현손익에 반영하고
+   *     자리를 비운다.
+   */
+  private async reconcileAutoPositions(): Promise<void> {
+    const active = this.autoTradePositions.filter((p) => p.status === "active" && p.conditionalOrderId);
+    for (const pos of active) {
+      let resp: ConditionalOrderResponse;
+      try {
+        resp = await getConditionalOrder(pos.conditionalOrderId as string);
+      } catch {
+        continue; // 조회 실패는 다음 사이클에 재시도(포지션을 잃어버리지 않음)
+      }
+      if (resp.status === "TRIGGERED" || resp.triggeredLeg) {
+        // 익절(first)/손절(second) 중 어느 쪽이 발동됐는지에 따라 우리가 등록해 둔 그 가격을 그대로 쓴다
+        // (실제 체결가 조회 없이도 정확 — 조건주문 지정가로 나가므로).
+        const exitPrice = resp.triggeredLeg === "second" ? pos.sl : pos.tp;
+        const pnlUsd = (exitPrice - pos.entry) * pos.quantity;
+        this.autoTradeRealizedPnlUsd += pnlUsd;
+        this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
+        const kindKo = resp.triggeredLeg === "second" ? "손절" : "익절";
+        this.addJournal({
+          kind: "info",
+          symbol: pos.symbol,
+          summary:
+            `🤖 자동매매 ${kindKo} 완료 ${pos.symbol}: 진입 $${pos.entry} → 청산 $${exitPrice} × ${pos.quantity}주 ` +
+            `(이번 실행 누적손익 $${this.autoTradeRealizedPnlUsd.toFixed(2)}) — 빈자리는 다음 확인 때 채웁니다.`,
+        });
+      } else if (resp.status === "CANCELED") {
+        // 사람이 [주문현황]에서 직접 취소한 경우 — 손익 반영 없이 자리만 비운다.
+        this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
+        this.addJournal({ kind: "info", symbol: pos.symbol, summary: `자동매매 포지션의 조건주문이 취소돼 있어 감시를 멈춥니다: ${pos.symbol}` });
+      }
+      // WAITING(그대로 감시 중)이면 할 일 없음.
+    }
+  }
+
+  /** watchAndBracket이 끝난 뒤(체결→OCO등록/타임아웃/취소/실패) 자동매매 포지션 상태를 갱신한다. */
+  private onAutoBracketResolved(symbol: string, entry: number, res: WatchAndBracketResult): void {
+    const idx = this.autoTradePositions.findIndex((p) => p.symbol === symbol && p.entry === entry && p.status === "watching");
+    if (idx === -1) return;
+    if (res.status === "oco_registered") {
+      this.autoTradePositions[idx] = { ...this.autoTradePositions[idx], status: "active", conditionalOrderId: res.conditionalOrderId };
+    } else {
+      // 타임아웃/취소/실패/OCO등록실패 → 이 자리를 비운다(다음 사이클에 다시 채워질 수 있음).
+      this.autoTradePositions.splice(idx, 1);
+    }
+  }
+
+  /**
+   * 자동매매 한 사이클(시작 즉시 1회 + 이후 5분마다).
+   *   [재진입 방지] 한 사이클이 오래 걸려도(스캔에 수십 초) 다음 타이머 틱과 겹치지 않게 막는다.
+   */
+  private async autoTradeTick(): Promise<void> {
+    if (!this.autoTradeEnabled || this.autoTradeTickBusy) return;
+    this.autoTradeTickBusy = true;
+    this.autoTradeLastCycleAt = DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss");
+    try {
+      await this.prepareBackend();
+      await this.reconcileAutoPositions(); // ①빈자리 먼저 확인(같은 사이클 안에 채우기 위해)
+
+      const seedUsd = await this.resolveSeedUsd();
+      if (isLossLimitBreached(this.autoTradeRealizedPnlUsd, seedUsd, this.autoTradeMaxLossPct)) {
+        this.stopAutoTrade(`최대손실 한도 도달 — 이번 실행 누적손익 $${this.autoTradeRealizedPnlUsd.toFixed(2)}(한도: 시드 대비 ${this.autoTradeMaxLossPct}%)`); // ②
+        return;
+      }
+
+      const freeSlots = this.autoTradeMaxPositions - this.autoTradePositions.length;
+      if (freeSlots <= 0) return; // 꽉 찼으면 이번 사이클은 스캔 생략
+
+      let run: ScreenRun;
+      try {
+        run = await this.scanScreener({}); // ③빈자리를 "현재 스크리닝으로 탐색된 다른 종목"으로 채움
+      } catch (e) {
+        this.addJournal({ kind: "info", symbol: "-", summary: `🤖 자동매매: 이번 사이클 스크리닝 실패 — ${String(e).replace(/^Error:\s*/, "")}` });
+        return;
+      }
+
+      const activeSymbols = new Set(this.autoTradePositions.map((p) => p.symbol));
+      const candidates = run.results.filter((r) => r.status === "confirmed" && !activeSymbols.has(r.symbol));
+      const commissionRate = await this.resolveCommissionRate();
+      const perSlotPct = perSlotInvestPct(this.autoTradeMaxInvestPct, this.autoTradeMaxPositions);
+
+      let placed = 0;
+      for (const cand of candidates) {
+        if (placed >= freeSlots) break;
+        if (cand.ema200 == null || cand.prevClose == null) continue; // 1분할 계산 불가(데이터 부족)
+
+        let level1: SplitOrder;
+        try {
+          // [오너 지시] 삼분할 매매기법의 "1분할" 타점만 쓴다 — 가장 얕게 눌렸을 때만 자동 진입.
+          level1 = calcSplit3(cand.prevClose, cand.ema200, this.defaultTpPct, this.defaultSlPct).splits[0];
+        } catch {
+          continue; // 진입 필터 불성립(전봉종가<=EMA200) — 이 종목은 건너뜀
+        }
+
+        const usedKey = `${cand.symbol}@${level1.entry}`;
+        if (this.autoTradeUsedKeys.has(usedKey)) continue; // [오너 지시] 동일종목 동일타점 재진입 방지
+
+        const qty = computeSeedQty(seedUsd, perSlotPct, level1.entry, commissionRate) ?? 0;
+        const gate = canAutoEnter({
+          limits: {
+            enabled: this.autoTradeEnabled,
+            maxPositions: this.autoTradeMaxPositions,
+            maxLossPct: this.autoTradeMaxLossPct,
+            maxInvestPct: this.autoTradeMaxInvestPct,
+          },
+          activePositionCount: this.autoTradePositions.length,
+          realizedPnlUsd: this.autoTradeRealizedPnlUsd,
+          seedUsd,
+          candidateQty: qty,
+        });
+        if (!gate.allow) {
+          // 종목 수·손실 한도처럼 "이 사이클 전체"에 적용되는 사유면 더 시도할 필요가 없다.
+          if (gate.reason?.includes("종목 수") || gate.reason?.includes("손실")) break;
+          continue; // 그 외(예: 예산으로 1주도 못 사는 경우)는 이 종목만 건너뛰고 다음 후보 시도
+        }
+
+        this.autoTradeUsedKeys.add(usedKey);
+        const posDraft: AutoPosition = {
+          symbol: cand.symbol,
+          entry: level1.entry,
+          tp: level1.tp,
+          sl: level1.sl,
+          quantity: qty,
+          enteredAtMs: Date.now(),
+          status: "watching",
+          conditionalOrderId: null,
+        };
+        this.autoTradePositions.push(posDraft);
+
+        try {
+          const { watchPromise } = await this.placeBracketCore({
+            symbol: cand.symbol,
+            price: level1.entry,
+            quantity: qty,
+            tpTrigger: level1.tp,
+            tpPrice: level1.tp,
+            slTrigger: level1.sl,
+            slPrice: roundPrice(level1.sl * 0.99), // OCO와 동일 규칙: 손절 지정가는 감시가 1% 아래
+            expireDate: this.autoTradeExpireDate(),
+            rationale: {
+              technique: "split3",
+              level: 1,
+              baseClose: cand.prevClose,
+              ema200: cand.ema200,
+              entry: level1.entry,
+              tp: level1.tp,
+              sl: level1.sl,
+              priceAtOrder: null, // placeBracketCore가 실제 현재가로 덮어씀(saveRationale 참고)
+            },
+          });
+          this.addJournal({
+            kind: "info",
+            symbol: cand.symbol,
+            summary: `🤖 자동매매 진입 ${cand.symbol} $${level1.entry} × ${qty}주(삼분할 1분할) — 체결되면 자동으로 익절 $${level1.tp} / 손절 $${level1.sl}을 등록합니다.`,
+          });
+          if (watchPromise) {
+            watchPromise
+              .then((res) => this.onAutoBracketResolved(cand.symbol, level1.entry, res))
+              .catch(() => this.onAutoBracketResolved(cand.symbol, level1.entry, { status: "oco_failed", error: "확인 실패" }));
+          } else {
+            // 드라이런(실주문 잠금 상태) — 실제 체결이 없어 자리를 계속 점유할 이유가 없다.
+            this.autoTradePositions = this.autoTradePositions.filter((p) => p !== posDraft);
+          }
+        } catch (e) {
+          this.autoTradePositions = this.autoTradePositions.filter((p) => p !== posDraft);
+          this.addJournal({ kind: "info", symbol: cand.symbol, summary: `🤖 자동매매 진입 실패 ${cand.symbol}: ${String(e).replace(/^Error:\s*/, "")}` });
+          continue;
+        }
+        placed++;
+      }
+    } catch (e) {
+      // [안전장치] 이 사이클 안에서 예상 못 한 오류가 나도(네트워크 순단 등) 자동매매 전체가
+      //   조용히 죽어버리면 안 된다(백그라운드 실행이라 사람이 못 봄 — void로 호출되므로 여기서
+      //   막지 않으면 처리되지 않은 프라미스 거부가 된다). 저널에 남기고 다음 5분 사이클에서
+      //   다시 시도한다 — 반복 실패는 지켜보다 사람이 직접 끄면 된다. 저널 기록 자체가 실패해도
+      //   (예: 저장 공간 문제) 이 사이클을 죽이지 않는다.
+      try {
+        this.addJournal({ kind: "info", symbol: "-", summary: `🤖 자동매매: 이번 사이클 중 예상 못 한 오류 — ${String(e).replace(/^Error:\s*/, "")}` });
+      } catch {
+        /* 저널 기록조차 실패 — 조용히 넘어간다(다음 사이클에서 재시도) */
+      }
+    } finally {
+      this.autoTradeTickBusy = false;
+    }
   }
 
   /**
