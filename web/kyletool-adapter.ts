@@ -182,10 +182,13 @@ export function installKyleTool(): ToolEngine {
     placeBracket: (spec: Parameters<ToolEngine["placeBracket"]>[0]) => e.placeBracket(spec), // [v0.25.0]
 
     // [v0.26.0] 자동매매 — "앱이 켜져 있는 동안"은 웹에서는 "이 브라우저 탭이 열려 있는 동안"과 같다.
-    autoTradeStart: () => e.startAutoTrade(),
-    autoTradeStop: () => e.stopAutoTrade(),
-    autoTradeStatus: () => e.getAutoTradeStatus(),
-    saveAutoTradeSettings: (input: Parameters<ToolEngine["saveAutoTradeSettings"]>[0]) => e.saveAutoTradeSettings(input),
+    // [실측 발견] 이 4개는 엔진에서 동기 함수라, Electron IPC(invoke)는 알아서 Promise로 감싸 주지만
+    //   웹은 그 다리가 없어 그대로 반환하면 "...then is not a function"으로 화면이 깨진다(getSettings와
+    //   동일한 이유·동일한 해법 — Promise.resolve로 감싼다).
+    autoTradeStart: () => Promise.resolve(e.startAutoTrade()),
+    autoTradeStop: () => Promise.resolve(e.stopAutoTrade()),
+    autoTradeStatus: () => Promise.resolve(e.getAutoTradeStatus()),
+    saveAutoTradeSettings: (input: Parameters<ToolEngine["saveAutoTradeSettings"]>[0]) => Promise.resolve(e.saveAutoTradeSettings(input)),
     placeSell: (spec: Parameters<ToolEngine["placeSell"]>[0]) => e.placeSell(spec),
     openOrders: () => e.openOrders(),
     conditionals: () => e.conditionals(),
