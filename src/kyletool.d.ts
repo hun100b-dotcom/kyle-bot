@@ -87,6 +87,14 @@ interface JournalEntry {
   summary: string;
 }
 
+/** [v0.32.0] 자동매매 관찰 확정·주문 알림 — PC/폰이 각자 Notification API로 띄운다. */
+interface NotifyEvent {
+  title: string;
+  body: string;
+  symbol: string;
+  ts: string;
+}
+
 interface ToolSettings {
   mode: "mock" | "live";
   liveOrdersEnabled: boolean;
@@ -683,6 +691,7 @@ interface KyletoolBridge {
   phoneStatus?(): Promise<PhoneState>;
   onPhoneState?(cb: (v: PhoneState) => void): () => void;
   onJournal(cb: (entry: JournalEntry) => void): () => void;
+  onNotify(cb: (entry: NotifyEvent) => void): () => void;
 
   // 자동 업데이트
   appVersion(): Promise<string>;

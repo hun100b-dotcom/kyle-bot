@@ -123,11 +123,13 @@ export function installKyleTool(): ToolEngine {
     strength: new Set<(v: unknown) => void>(),
     screener: new Set<(v: unknown) => void>(),
     trades: new Set<(v: unknown) => void>(),
+    notify: new Set<(v: unknown) => void>(),
   };
   e.on("journal", (v: unknown) => subs.journal.forEach((f) => f(v)));
   e.on("strength", (v: unknown) => subs.strength.forEach((f) => f(v)));
   e.on("screener:progress", (v: unknown) => subs.screener.forEach((f) => f(v)));
   e.on("trades", (v: unknown) => subs.trades.forEach((f) => f(v)));
+  e.on("notify", (v: unknown) => subs.notify.forEach((f) => f(v))); // [v0.32.0] 관찰 확정·주문 알림
 
   const api = {
     // ── 상태·설정 ──────────────────────────────────────────────
@@ -251,6 +253,12 @@ export function installKyleTool(): ToolEngine {
     onJournal: (cb: (v: unknown) => void) => {
       subs.journal.add(cb);
       return () => subs.journal.delete(cb);
+    },
+
+    // [v0.32.0] 자동매매 관찰 확정·주문 알림(브라우저 Notification API로 화면이 띄운다)
+    onNotify: (cb: (v: unknown) => void) => {
+      subs.notify.add(cb);
+      return () => subs.notify.delete(cb);
     },
 
     // ── 연습(목) 모드는 웹에서 불가 — 누르면 안내만 ────────────

@@ -730,6 +730,16 @@ function App() {
   });
   const [autoStatus, setAutoStatus] = useState<AutoTradeStatus | null>(null);
   const [autoBusy, setAutoBusy] = useState(false);
+  // [v0.32.0] 자동매매 알림(관찰 확정·주문) — 브라우저/OS Notification 권한 상태.
+  //   "unsupported"는 Notification API 자체가 없는 드문 환경(구형 브라우저 등).
+  const [notifyPermission, setNotifyPermission] = useState<NotificationPermission | "unsupported">(
+    typeof Notification === "undefined" ? "unsupported" : Notification.permission,
+  );
+  async function requestNotifyPermission() {
+    if (typeof Notification === "undefined") return;
+    const p = await Notification.requestPermission();
+    setNotifyPermission(p);
+  }
   // [v0.28.0] 자동매매용 스크리너 조건(메뉴얼 스크리너와 같은 4항목) + 수동 새로고침 상태.
   const [autoScanForm, setAutoScanForm] = useState<{ scanCount: string; priceMin: string; priceMax: string }>({
     scanCount: "60",
@@ -824,6 +834,16 @@ function App() {
     void refreshAuth(); // [v0.8.1] 로그인 상태 복원(+운영자면 승인 대기 목록도, v0.24.0)
     void loadAnalysis(); // [v0.19.0] 매매분석(실체결) 시작 시 로드
     const off = window.kyletool.onJournal((e) => setJournal((prev) => [...prev.slice(-99), e]));
+    // [v0.32.0] 자동매매 관찰 확정·주문 알림 — 권한이 허용돼 있을 때만 실제로 띄운다(요청은
+    //   오너가 버튼을 눌러야만 — 브라우저가 사용자 동작 없는 자동 요청을 막거나 무시할 수 있음).
+    const offNotify = window.kyletool.onNotify?.((n) => {
+      if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+      try {
+        new Notification(n.title, { body: n.body, tag: `capri-${n.symbol}-${n.ts}` });
+      } catch {
+        /* 일부 환경(예: 알림 미지원 PWA 백그라운드)에서 생성 자체가 실패해도 앱은 계속 동작 */
+      }
+    });
     // [v0.5.0] 체결강도 실시간 갱신: 지금 화면에서 보고 있는 종목의 이벤트만 반영.
     const offStr = window.kyletool.onStrength?.((state) => {
       setStrState((prev) => (state.symbol === (prev?.symbol ?? state.symbol) ? state : prev));
@@ -847,6 +867,7 @@ function App() {
     });
     return () => {
       off();
+      offNotify?.();
       offStr?.();
       offScr?.();
       offTrd?.();
@@ -3100,6 +3121,33 @@ ${msg}
                 동시 투입 합계는 시드의 최대 90%까지 커질 수 있습니다). 손실 한도는 이번 자동매매 실행 동안
                 누적된 실현손익(달러) 기준으로, 시드 대비 %를 넘으면 자동매매가 스스로 멈춥니다.
               </p>
+              <p className="hint small">
+                🔒 여러 기기에서 동시에 자동매매를 켜도(예: PC와 폰 양쪽에서 자동매매 시작, 또는
+                PC 두 대) 안전합니다 — 신규 진입 직전 매번 <b>실계좌 보유 현황을 직접 조회</b>해
+                최대 종목 수·중복 종목을 확인하므로(어느 기기의 로컬 기록이 아니라 토스 계좌 자체가
+                기준), 한 기기가 모르는 사이 다른 기기가 이미 채운 자리에는 진입하지 않습니다.
+              </p>
+
+              <h3>🔔 알림</h3>
+              <p className="hint small">
+                화면을 안 보고 있어도 <b>관찰 확정</b>(스크리닝 통과)과 <b>주문 이벤트</b>(진입·체결·
+                익절/손절·취소/실패)를 이 기기의 알림으로 받을 수 있습니다(이 앱/탭이 켜져 있는
+                동안만 — 토스 자체 매수·매도 알림과는 별개로, 카프리가 자동매매에서 직접 보는
+                내용을 알려줍니다).
+              </p>
+              {notifyPermission === "unsupported" && (
+                <p className="hint small">이 브라우저는 알림 기능을 지원하지 않습니다.</p>
+              )}
+              {notifyPermission === "default" && (
+                <button className="btn" onClick={requestNotifyPermission}>🔔 이 기기에서 알림 켜기</button>
+              )}
+              {notifyPermission === "granted" && <p className="hint small ok">🔔 알림 켜짐</p>}
+              {notifyPermission === "denied" && (
+                <p className="hint small danger">
+                  알림이 차단돼 있습니다 — 브라우저(또는 시스템) 알림 설정에서 이 앱을 직접 허용해야
+                  다시 켤 수 있습니다.
+                </p>
+              )}
 
               {autoStatus && autoStatus.positions.length > 0 && (
                 <>

@@ -137,6 +137,13 @@ contextBridge.exposeInMainWorld("kyletool", {
     return () => ipcRenderer.removeListener("tool:journalEvent", h);
   },
 
+  // [v0.32.0] 자동매매 관찰 확정·주문 알림 구독(화면이 OS/브라우저 알림으로 띄운다)
+  onNotify: (cb) => {
+    const h = (_ev, payload) => cb(payload);
+    ipcRenderer.on("tool:notifyEvent", h);
+    return () => ipcRenderer.removeListener("tool:notifyEvent", h);
+  },
+
   // --- 자동 업데이트 ---
   appVersion: () => ipcRenderer.invoke("app:version"),
   downloadUpdate: () => ipcRenderer.invoke("update:download"),

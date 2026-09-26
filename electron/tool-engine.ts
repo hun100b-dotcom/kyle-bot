@@ -267,6 +267,21 @@ export interface JournalEntry {
   symbol: string;
   summary: string; // 사람이 읽는 한 줄 요약
   detail?: unknown;
+  /** [v0.32.0] true면 이 저널과 함께 오너에게 알림(PC 데스크톱 알림/폰 브라우저 알림)도 띄운다.
+   *  자동매매의 주요 이벤트(관찰 확정·진입·체결·익절손절·취소·실패)에만 붙인다 — 모든 로그를
+   *  알림으로 띄우면 알림 피로만 쌓이므로, 화면을 안 보고 있어도 놓치면 안 되는 것만 고른다. */
+  notify?: boolean;
+  /** notify=true일 때 알림 제목(짧게). 없으면 addJournal이 일반 제목으로 채운다. */
+  notifyTitle?: string;
+}
+
+/** [v0.32.0] addJournal이 notify:true인 저널마다 함께 내보내는 알림 이벤트.
+ *  PC(Electron)와 웹앱(브라우저) 양쪽이 각자의 Notification API로 화면 밖에서도 띄운다. */
+export interface NotifyEvent {
+  title: string;
+  body: string;
+  symbol: string;
+  ts: string;
 }
 
 // -----------------------------------------------------------------------------
@@ -303,6 +318,15 @@ export function computeSeedQty(seedUsd: number | null, pct: number, price: numbe
   const budget = seedUsd * (pct / 100); // 이번 진입에 쓸 금액
   const perShare = price * (1 + fee); // 수수료 포함 1주 실비용
   return Math.max(0, Math.floor(budget / perShare));
+}
+
+/**
+ * [v0.32.0] 스캔 결과 중 "이번에 새로 확정(confirmed)된" 종목만 골라낸다 — 직전 스캔에서
+ *   이미 확정 상태였던 종목은 제외해 "관찰 확정" 알림이 5분마다 중복으로 뜨지 않게 한다.
+ *   순수 함수라 실제 스크리너 판정 로직과 분리해 테스트할 수 있다.
+ */
+export function newlyConfirmedSymbols(results: ScreenResult[], previouslyConfirmed: Set<string>): string[] {
+  return results.filter((r) => r.status === "confirmed" && !previouslyConfirmed.has(r.symbol)).map((r) => r.symbol);
 }
 
 // -----------------------------------------------------------------------------
@@ -858,6 +882,9 @@ export class ToolEngine extends EventEmitter {
   //   버려지던 것을 "스크리닝 결과" 탭에 노출한다 — 오너 피드백: 사유 문자열 같은 별도 추적은
   //   불필요, lastScan만 있으면 화면(프론트)이 positions와 대조해 진입여부를 계산할 수 있다).
   private autoTradeLastScan: ScreenRun | null = null;
+  /** [v0.32.0] "관찰 확정" 알림을 중복으로 보내지 않기 위해, 직전 스캔에서 이미 확정 상태였던
+   *  종목을 기억해 둔다(재시작하면 초기화돼도 무해 — 다시 확정되면 또 한 번 알려도 문제 없음). */
+  private autoScanNotifiedConfirmed = new Set<string>();
   private static readonly AUTO_TRADE_INTERVAL_MS = 5 * 60_000; // "기본적으로 5분마다"(오너 지시)
   /** [v0.29.0] 자동매매 진입 주문의 체결 감시 최대 시간 — 오너 요청(2026-09-25) "장시간 미체결 대책":
    *  수동 버튼(기본 15분, 사람이 지켜보며 직접 판단)보다 짧게 잡아, 5분 사이클 기준 최대 2회 안에
@@ -2421,6 +2448,9 @@ export class ToolEngine extends EventEmitter {
         kind: "info",
         symbol,
         summary: `⚠️ 체결을 확인했지만 조건주문(익절+손절) 자동 등록에 실패했습니다 — 직접 걸어 주세요: ${error}`,
+        // [v0.32.0] 보호주문 없이 포지션만 남은 상태라 매매 방식(수동/자동)과 무관하게 중요한 알림.
+        notify: true,
+        notifyTitle: `⚠️ 보호주문 등록 실패: ${symbol}`,
       });
       return { status: "oco_failed", error };
     }
@@ -2465,7 +2495,10 @@ export class ToolEngine extends EventEmitter {
         return this.registerOcoForFilled(symbol, o.filled_qty && o.filled_qty > 0 ? o.filled_qty : spec.quantity, spec);
       }
       if (o.status === "cancelled" || o.status === "failed") {
-        this.addJournal({ kind: "info", symbol, summary: `진입 주문이 ${o.status === "cancelled" ? "취소" : "실패"}돼 자동 감시를 멈췄습니다.` });
+        this.addJournal({
+          kind: "info", symbol, summary: `진입 주문이 ${o.status === "cancelled" ? "취소" : "실패"}돼 자동 감시를 멈췄습니다.`,
+          notify: true, notifyTitle: `${o.status === "cancelled" ? "취소됨" : "⚠️ 실패"}: ${symbol}`,
+        });
         return { status: o.status };
       }
       // pending/partial/unknown이면 계속 기다린다.
@@ -2478,6 +2511,8 @@ export class ToolEngine extends EventEmitter {
         kind: "info",
         symbol,
         summary: `⏱ ${watchMinutes}분 동안 체결을 기다렸지만 되지 않아 자동 감시를 멈췄습니다. 진입 주문은 그대로 있으니, 체결되면 [주문현황]에서 직접 조건주문(익절+손절)을 걸어 주세요.`,
+        notify: true,
+        notifyTitle: `⏱ 미체결 감시 종료: ${symbol}`,
       });
       return { status: "timeout" };
     }
@@ -2503,6 +2538,8 @@ export class ToolEngine extends EventEmitter {
         kind: "info",
         symbol,
         summary: `⚠️ ${watchMinutes}분 동안 체결되지 않아 자동 취소를 시도했지만 실패했습니다 — [주문현황]에서 직접 확인해 주세요: ${String(e).replace(/^Error:\s*/, "")}`,
+        notify: true,
+        notifyTitle: `⚠️ 자동 취소 실패: ${symbol}`,
       });
       return { status: "timeout" };
     }
@@ -2512,6 +2549,8 @@ export class ToolEngine extends EventEmitter {
         kind: "info",
         symbol,
         summary: `⏱ ${watchMinutes}분 동안 전량 체결되지 않아 나머지 주문은 자동 취소했습니다. 이미 부분 체결된 ${filledQty}주는 보호를 위해 익절/손절(조건주문)을 걸었습니다.`,
+        notify: true,
+        notifyTitle: `⏱ 부분체결 취소: ${symbol}`,
       });
       return this.registerOcoForFilled(symbol, filledQty, spec);
     }
@@ -2519,6 +2558,8 @@ export class ToolEngine extends EventEmitter {
       kind: "info",
       symbol,
       summary: `⏱ ${watchMinutes}분 동안 체결되지 않아 미체결 주문을 자동 취소했습니다(다음 자동매매 사이클에서 새 후보로 대체됩니다).`,
+      notify: true,
+      notifyTitle: `⏱ 미체결 자동 취소: ${symbol}`,
     });
     return { status: "cancelled" };
   }
@@ -3975,6 +4016,10 @@ export class ToolEngine extends EventEmitter {
       kind: "info",
       symbol: "-",
       summary: `🤖 자동매매 중지${reason ? ` — ${reason}` : ""} (이미 낸 진입·조건주문은 그대로 있습니다. 필요하면 [주문현황]에서 직접 취소하세요.)`,
+      // [v0.32.0] reason이 있을 때만 알림(=손실 한도 도달 등 프로그램이 스스로 멈춘 경우) —
+      //   오너가 직접 [중지] 버튼을 누른 경우(reason 없음)까지 알리면 당연한 걸 또 알리는 셈이다.
+      notify: !!reason,
+      notifyTitle: "🚨 자동매매 자동 중지",
     });
     return this.getAutoTradeStatus();
   }
@@ -4059,6 +4104,8 @@ export class ToolEngine extends EventEmitter {
           summary:
             `🤖 자동매매 ${kindKo} 완료 ${pos.symbol}: 진입 $${pos.entry} → 청산 $${exitPrice} × ${pos.quantity}주 ` +
             `(이번 실행 누적손익 $${this.autoTradeRealizedPnlUsd.toFixed(2)}) — 빈자리는 다음 확인 때 채웁니다.`,
+          notify: true,
+          notifyTitle: `${kindKo === "손절" ? "🛑" : "✅"} ${kindKo} 완료: ${pos.symbol}`,
         });
         this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
           status: resp.triggeredLeg === "second" ? "closed_loss" : "closed_win",
@@ -4117,6 +4164,8 @@ export class ToolEngine extends EventEmitter {
           this.addJournal({
             kind: "info", symbol: pos.symbol,
             summary: `🤖 재시작 후 감시 복구: ${pos.symbol}이 그 사이 체결된 걸 확인해 보호주문(익절/손절)을 지금 등록했습니다.`,
+            notify: true,
+            notifyTitle: `🛡 보호주문 등록: ${pos.symbol}`,
           });
           this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
             status: "active", note: "재시작 후 재확인 — 매수 체결을 뒤늦게 확인해 보호주문 등록",
@@ -4135,6 +4184,8 @@ export class ToolEngine extends EventEmitter {
         this.addJournal({
           kind: "info", symbol: pos.symbol,
           summary: `재시작 후 재확인: ${pos.symbol}의 매수 주문이 ${o.status === "cancelled" ? "취소" : "실패"} 상태로 확인돼 감시를 멈춥니다.`,
+          notify: true,
+          notifyTitle: `${o.status === "cancelled" ? "취소됨" : "⚠️ 실패"}: ${pos.symbol}`,
         });
         this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
           status: "closed_manual",
@@ -4159,6 +4210,14 @@ export class ToolEngine extends EventEmitter {
       this.saveAutoPositions();
       this.updateAutoTradeHistory(symbol, entry, enteredAtMs, {
         status: "active", note: "매수 체결 확인 — 익절/손절(조건주문) 등록됨", conditionalOrderId: res.conditionalOrderId,
+      });
+      // [v0.32.0] 이 성공 경로는 그동안 저널에 한 줄도 안 남기고 있었다(실패 쪽만 남겼음) —
+      //   "매수 체결 확인 → 보호주문 등록 완료"는 오너가 놓치면 안 되는 좋은 소식이라 추가한다.
+      this.addJournal({
+        kind: "info", symbol,
+        summary: `🛡 ${symbol} 매수 체결 확인 — 익절/손절(조건주문) 등록 완료.`,
+        notify: true,
+        notifyTitle: `🛡 보호주문 등록: ${symbol}`,
       });
     } else {
       // 타임아웃/취소/실패/OCO등록실패 → 이 자리를 비운다(다음 사이클에 다시 채워질 수 있음).
@@ -4189,6 +4248,47 @@ export class ToolEngine extends EventEmitter {
   }
 
   /**
+   * [v0.32.0] 실계좌(토스) 보유 종목을 직접 조회해 "지금 실제로 몇 종목·어느 종목을 들고
+   *   있는지"의 진실을 확인한다. `autoTradePositions`(로컬 파일)만 보고 판단하면, 오너가
+   *   윈도우·맥북 등 **서로 다른 기기에서 각각 앱을 켜고 자동매매를 동시에 시작**했을 때
+   *   각 기기가 서로의 존재를 몰라 같은 종목에 중복 진입하거나 설정한 최대 종목 수를 합쳐서
+   *   넘어설 수 있다(각 기기의 로컬 파일은 자기 자신이 넣은 주문만 안다 — 매매기록 동기화는
+   *   진입 "이후"에 15초 쓰로틀로 올라가므로, 두 기기가 같은 5분 사이클 안에서 거의 동시에
+   *   판단하면 그 동기화조차 따라잡지 못한다). 반면 토스 보유 현황은 어느 기기에서 조회하든
+   *   **하나의 실제 계좌 상태**이므로, 이걸 기준으로 삼으면 기기가 몇 대든 안전하다.
+   *   조회 실패 시 null을 돌려주며, 호출부는 "확인 안 됨"을 "겹치는 게 없음"으로 착각하지
+   *   않고 이번 사이클의 신규 진입을 보류한다(안전 우선 — 기존 포지션 재확인·청산은 계속됨).
+   */
+  private async fetchRealHeldSymbols(): Promise<Set<string> | null> {
+    try {
+      const h = (await getHoldings()) as Record<string, unknown>;
+      const items = (h?.items as Array<Record<string, unknown>>) ?? [];
+      const symbols = new Set<string>();
+      for (const it of items) {
+        const symbol = String(it.symbol ?? "").toUpperCase();
+        const qty = Number(it.quantity);
+        if (symbol && Number.isFinite(qty) && qty > 0) symbols.add(symbol);
+      }
+      return symbols;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * [v0.32.0] "지금 자동매매 몫으로 채워진 자리 수"를 실계좌 기준으로 계산한다.
+   *   이미 실제로 체결된 종목은 `realHeldSymbols`에 잡히므로(어느 기기가 넣었든 상관없이),
+   *   거기에 "아직 체결 전이라 실계좌엔 안 잡히는 이 프로세스의 watching 포지션"만 더한다
+   *   (이중 카운트 방지 — 이미 realHeldSymbols에 있는 종목은 watching이어도 또 안 더함).
+   */
+  private effectiveActivePositionCount(realHeldSymbols: Set<string>): number {
+    const pendingOnly = this.autoTradePositions.filter(
+      (p) => p.status === "watching" && !realHeldSymbols.has(p.symbol),
+    ).length;
+    return realHeldSymbols.size + pendingOnly;
+  }
+
+  /**
    * 자동매매 한 사이클(시작 즉시 1회 + 이후 5분마다).
    *   [재진입 방지] 한 사이클이 오래 걸려도(스캔에 수십 초) 다음 타이머 틱과 겹치지 않게 막는다.
    */
@@ -4207,7 +4307,19 @@ export class ToolEngine extends EventEmitter {
         return;
       }
 
-      const freeSlots = this.autoTradeMaxPositions - this.autoTradePositions.length;
+      // [v0.32.0 — 중복진입 점검] 신규 진입 전에 반드시 실계좌 보유 현황을 확인한다. 실패하면
+      //   "다른 기기와 안 겹치는지"를 확인할 방법이 없다는 뜻이므로, 기존 포지션 재확인은
+      //   이미 위에서 끝났고 신규 진입만 이번 사이클에 한해 보류한다(안전 우선).
+      const realHeldSymbols = await this.fetchRealHeldSymbols();
+      if (realHeldSymbols === null) {
+        this.addJournal({
+          kind: "info", symbol: "-",
+          summary: "🤖 자동매매: 실계좌 보유 종목 확인에 실패해 이번 사이클은 신규 진입 없이 건너뜁니다(다른 기기와 겹칠 위험을 확인할 수 없어 안전을 위해 보류 — 기존 포지션 감시는 계속됩니다).",
+        });
+        return;
+      }
+
+      const freeSlots = this.autoTradeMaxPositions - this.effectiveActivePositionCount(realHeldSymbols);
       if (freeSlots <= 0) return; // 꽉 찼으면 이번 사이클은 스캔 생략
 
       let run: ScreenRun;
@@ -4226,7 +4338,27 @@ export class ToolEngine extends EventEmitter {
         return;
       }
 
-      const activeSymbols = new Set(this.autoTradePositions.map((p) => p.symbol));
+      // [v0.32.0 — 오너 요청: "종목 탐색 성공 시 관찰 확정 알림"] 이번 스캔에서 새로 "확정
+      //   (confirmed)"이 된 종목만 골라 알린다(매 5분 스캔마다 여전히 확정 상태인 종목까지
+      //   반복 알리면 알림 피로만 쌓이므로, 직전 스캔엔 없었는데 이번에 새로 나타난 것만).
+      const newlyConfirmed = newlyConfirmedSymbols(run.results, this.autoScanNotifiedConfirmed);
+      for (const sym of newlyConfirmed) {
+        const r = run.results.find((x) => x.symbol === sym);
+        this.addJournal({
+          kind: "info",
+          symbol: sym,
+          summary: `🔍 스크리닝에서 ${sym}이 진입 조건을 모두 통과해 관찰이 확정됐습니다(현재가 ${r?.price != null ? `$${r.price}` : "확인 불가"}).`,
+          notify: true,
+          notifyTitle: `🔍 관찰 확정: ${sym}`,
+        });
+      }
+      // 다음 비교 기준을 이번 스캔으로 교체(빠졌다가 나중에 재확정되면 그때 다시 알림).
+      this.autoScanNotifiedConfirmed = new Set(run.results.filter((r) => r.status === "confirmed").map((r) => r.symbol));
+
+      // [v0.32.0] 로컬 기록(이 기기가 아는 것)과 실계좌 보유(다른 기기가 넣었을 수도 있는 것)를
+      //   합쳐서 "이미 잡고 있는 종목"으로 취급 — 둘 중 하나만 보면 다른 기기가 방금 넣은 종목에
+      //   또 진입할 수 있다.
+      const activeSymbols = new Set([...this.autoTradePositions.map((p) => p.symbol), ...realHeldSymbols]);
       const candidates = run.results.filter((r) => r.status === "confirmed" && !activeSymbols.has(r.symbol));
       const commissionRate = await this.resolveCommissionRate();
       // [오너 지시 2026-09-25 정정] "최대 투입 비율"은 종목 1개당 배정 시드 비율이다 — 종목 수로
@@ -4257,7 +4389,8 @@ export class ToolEngine extends EventEmitter {
             maxLossPct: this.autoTradeMaxLossPct,
             maxInvestPct: this.autoTradeMaxInvestPct,
           },
-          activePositionCount: this.autoTradePositions.length,
+          // [v0.32.0] 로컬 개수 대신 실계좌 보유와 합친 값 — 다른 기기가 이미 채운 자리도 셈에 넣는다.
+          activePositionCount: this.effectiveActivePositionCount(realHeldSymbols),
           realizedPnlUsd: this.autoTradeRealizedPnlUsd,
           seedUsd,
           candidateQty: qty,
@@ -4313,6 +4446,8 @@ export class ToolEngine extends EventEmitter {
             kind: "info",
             symbol: cand.symbol,
             summary: `🤖 자동매매 진입 ${cand.symbol} $${level1.entry} × ${qty}주(삼분할 1분할) — 체결되면 자동으로 익절 $${level1.tp} / 손절 $${level1.sl}을 등록합니다.`,
+            notify: true,
+            notifyTitle: `🤖 진입 접수: ${cand.symbol}`,
           });
           if (watchPromise) {
             // [v0.30.1] 매수 주문번호를 기록해 둔다 — 앱이 재시작돼 이 감시(watchPromise)가
@@ -4339,7 +4474,10 @@ export class ToolEngine extends EventEmitter {
           this.autoTradePositions = this.autoTradePositions.filter((p) => p !== posDraft);
           this.saveAutoPositions();
           const errMsg = String(e).replace(/^Error:\s*/, "");
-          this.addJournal({ kind: "info", symbol: cand.symbol, summary: `🤖 자동매매 진입 실패 ${cand.symbol}: ${errMsg}` });
+          this.addJournal({
+            kind: "info", symbol: cand.symbol, summary: `🤖 자동매매 진입 실패 ${cand.symbol}: ${errMsg}`,
+            notify: true, notifyTitle: `⚠️ 진입 실패: ${cand.symbol}`,
+          });
           this.updateAutoTradeHistory(cand.symbol, level1.entry, posDraft.enteredAtMs, {
             status: "closed_manual",
             exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
@@ -4673,6 +4811,15 @@ export class ToolEngine extends EventEmitter {
     writeFileSync(tmp, JSON.stringify(this.journal, null, 2), "utf8");
     renameSync(tmp, this.journalPath);
     this.emit("journal", entry);
+    if (entry.notify) {
+      const notifyEvent: NotifyEvent = {
+        title: entry.notifyTitle ?? "Capri 자동매매",
+        body: entry.summary,
+        symbol: entry.symbol,
+        ts: entry.ts,
+      };
+      this.emit("notify", notifyEvent);
+    }
     return entry;
   }
 }

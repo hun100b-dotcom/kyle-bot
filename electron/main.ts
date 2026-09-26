@@ -341,6 +341,9 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("app:version", () => app.getVersion());
 
   e.on("journal", (entry) => win?.webContents.send("tool:journalEvent", entry));
+  // [v0.32.0] 자동매매 관찰 확정·주문 알림 — 화면(App.tsx)이 이 이벤트를 받아 브라우저/OS
+  //   Notification API로 띄운다(창이 최소화·백그라운드여도 뜬다 — 앱이 켜져 있는 동안만).
+  e.on("notify", (payload) => win?.webContents.send("tool:notifyEvent", payload));
 }
 
 // 앱을 끌 때 릴레이·터널도 같이 정리한다(좀비 프로세스 방지).

@@ -22,7 +22,10 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ToolEngine, computeSeedQty, type AutoPosition, type JournalEntry } from "../electron/tool-engine";
+import {
+  ToolEngine, computeSeedQty, newlyConfirmedSymbols,
+  type AutoPosition, type JournalEntry, type NotifyEvent, type ScreenResult,
+} from "../electron/tool-engine";
 
 /** [v0.30.1] OCO 등록 저널이 뜰 때까지 기다린다(bracket.test.ts의 waitForJournal과 동일 패턴). */
 function waitForOcoJournal(eng: ToolEngine, timeoutMs = 5000): Promise<JournalEntry> {
@@ -410,6 +413,119 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
       writeFileSync(positionsPath, "{ 이건 유효한 JSON이 아님 ", "utf8");
       const eng = new ToolEngine(dir, { forceMock: true });
       expect(eng.getAutoTradeStatus().positions).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("[v0.32.0] 중복진입 방지 — 여러 기기가 동시에 자동매매를 켰을 때의 안전장치", () => {
+  // [왜 이 테스트가 필요한가] v0.30.1까지는 "지금 몇 종목 보유 중인가"를 이 프로세스의 로컬
+  //   파일(autoTradePositions)만 보고 판단했다. 오너가 윈도우·맥북 등 서로 다른 기기에서 각각
+  //   앱을 켜고 자동매매를 동시에 시작하면, 두 번째 기기는 첫 번째 기기가 이미 넣은 실제 주문을
+  //   전혀 모른 채 같은 종목에 또 진입하거나 최대 종목 수를 합쳐서 넘어설 수 있었다. v0.32.0은
+  //   신규 진입 직전 실계좌 보유 현황(fetchRealHeldSymbols)을 직접 조회해 이 로컬 파일의 착시를
+  //   깨는 게 핵심이라, 아래 테스트들은 "로컬 기록은 비어 있는데 실계좌엔 이미 있는" 상황을
+  //   일부러 재현한다(목 서버 holdings는 AAPL 100주 보유로 고정돼 있어 이 상황을 그대로 흉내낼
+  //   수 있음 — mocks/toss-mock.ts 참고).
+  type EngineInternals = {
+    autoTradeEnabled: boolean;
+    autoTradePositions: AutoPosition[];
+    autoTradeLastScan: unknown;
+    fetchRealHeldSymbols: () => Promise<Set<string> | null>;
+    effectiveActivePositionCount: (realHeldSymbols: Set<string>) => number;
+    autoTradeTick: () => Promise<void>;
+  };
+
+  it("fetchRealHeldSymbols는 실계좌(토스) 보유 종목을 그대로 돌려준다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const engAny = eng as unknown as EngineInternals;
+      await (eng as unknown as { prepareBackend: () => Promise<void> }).prepareBackend();
+      const held = await engAny.fetchRealHeldSymbols();
+      expect(held).not.toBeNull();
+      expect(held?.has("AAPL")).toBe(true); // 목 서버 고정 보유값
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("effectiveActivePositionCount는 실계좌 보유 + 아직 실계좌엔 안 잡히는 로컬 watching만 더하고, 같은 종목은 중복으로 세지 않는다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const engAny = eng as unknown as EngineInternals;
+      const mk = (symbol: string): AutoPosition => ({
+        symbol, entry: 1, tp: 1.2, sl: 0.9, quantity: 1, enteredAtMs: Date.now(),
+        status: "watching", conditionalOrderId: null,
+      });
+      // AAPL은 실계좌에도 있고 로컬에도 있음(같은 것) → 1개로만 셈. TSLA는 로컬에만 있는
+      // "아직 체결 전" 주문 → 별도로 1개 더함.
+      engAny.autoTradePositions.push(mk("AAPL"), mk("TSLA"));
+      const count = engAny.effectiveActivePositionCount(new Set(["AAPL"]));
+      expect(count).toBe(2); // AAPL(중복 제외, 실계좌 기준 1개) + TSLA(로컬 전용 1개)
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("로컬 기록이 텅 비어 있어도(=다른 기기가 넣은 걸 이 기기가 모름) 실계좌 보유가 이미 최대 종목 수만큼 있으면 이번 사이클은 신규 스캔·진입을 건너뛴다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.saveAutoTradeSettings({ maxPositions: 1 }); // 목 서버가 항상 AAPL 1종목을 보유 중이라고 답하므로 이미 꽉 참
+      const engAny = eng as unknown as EngineInternals;
+      expect(engAny.autoTradePositions).toEqual([]); // 이 기기의 로컬 기록은 완전히 비어 있음(핵심 전제)
+
+      engAny.autoTradeEnabled = true; // startAutoTrade()의 백그라운드 반복 없이 tick 한 번만 직접 검증
+      await engAny.autoTradeTick();
+
+      // freeSlots = maxPositions(1) - effectiveActivePositionCount(실계좌 AAPL 1개) = 0 → 스캔 자체를 생략해야 함
+      expect(engAny.autoTradeLastScan).toBeNull();
+      expect(eng.getAutoTradeStatus().positions).toEqual([]); // 이 기기가 새로 진입 기록을 남기지 않았어야 함
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("[v0.32.0] 알림 — 스크리닝 관찰 확정 + 주문 이벤트", () => {
+  function mkResult(symbol: string, status: ScreenResult["status"]): ScreenResult {
+    return {
+      rank: 1, symbol, price: 2.5, ema200: 2, prevClose: 2.1, cloudTop: 1.9,
+      priceInBand: true, aboveEma: true, aboveCloud: true, status,
+      sessionHigh: 2.6, proximityPct: -3, n1m: 300, n5m: 60, evidence: null,
+    };
+  }
+
+  it("newlyConfirmedSymbols — 직전에 이미 확정이었던 종목은 제외하고, 새로 확정된 것만 돌려준다", () => {
+    const results = [mkResult("AAPL", "confirmed"), mkResult("TSLA", "confirmed"), mkResult("MSFT", "watch")];
+    // AAPL은 직전 스캔에서도 이미 확정이었음 → 이번엔 제외. TSLA는 새로 확정됨 → 포함.
+    // MSFT는 confirmed가 아니므로(watch) 애초에 대상이 아님.
+    const added = newlyConfirmedSymbols(results, new Set(["AAPL"]));
+    expect(added).toEqual(["TSLA"]);
+  });
+
+  it("newlyConfirmedSymbols — 직전 스캔에 아무 것도 없었으면(첫 스캔) 지금 확정된 전부가 신규다", () => {
+    const results = [mkResult("AAPL", "confirmed"), mkResult("TSLA", "none")];
+    expect(newlyConfirmedSymbols(results, new Set())).toEqual(["AAPL"]);
+  });
+
+  it("stopAutoTrade — 이유가 있을 때만(손실 한도 등 프로그램이 스스로 멈춘 경우) 알림을 낸다, 오너가 직접 누른 중지는 알리지 않는다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const notifies: NotifyEvent[] = [];
+      eng.on("notify", (n: NotifyEvent) => notifies.push(n));
+
+      eng.stopAutoTrade(); // 오너가 직접 [중지] 버튼을 누른 경우 — 당연한 걸 또 알릴 필요 없음
+      expect(notifies).toHaveLength(0);
+
+      eng.stopAutoTrade("최대손실 한도 도달 — 테스트");
+      expect(notifies).toHaveLength(1);
+      expect(notifies[0].title).toContain("자동 중지");
+      expect(notifies[0].body).toContain("최대손실 한도 도달");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
