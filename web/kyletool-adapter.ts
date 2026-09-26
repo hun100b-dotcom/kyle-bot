@@ -237,6 +237,8 @@ export function installKyleTool(): ToolEngine {
     // [v0.10.0→v0.24.0] 매매 이력 동기화 — 로그인 비밀번호로 암호화, 로그인 시 자동 호출됨
     tradeSyncPush: () => e.syncPushTrades(),
     tradeSyncPull: () => e.syncPullTrades(),
+    autoStateSyncPush: () => e.syncPushAutoState(),
+    autoStateSyncPull: () => e.syncPullAutoState(),
     tradesStats: () => Promise.resolve(e.getTradeStats()),
     tradesClose: (id: string, exitPrice: number, kind: "tp" | "sl" | "manual") => e.closeTradeManual(id, exitPrice, kind),
     tradesDelete: (id: string) => Promise.resolve(e.deleteTrade(id)),

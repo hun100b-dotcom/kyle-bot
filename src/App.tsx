@@ -2032,12 +2032,15 @@ ${msg}
     try {
       const rKeys = await window.kyletool.syncPullKeys();
       const rTrades = await window.kyletool.tradeSyncPull();
-      setSyncMsg([rKeys.message, rTrades.message].filter(Boolean).join(" "));
+      // [v0.31.0] 자동매매 기록(포지션+이력)도 함께 — 다른 기기에서 진입한 것도 여기서 받아온다.
+      const rAuto = await window.kyletool.autoStateSyncPull();
+      setSyncMsg([rKeys.message, rTrades.message, rAuto.message].filter(Boolean).join(" "));
       if (rKeys.ok) {
         const s = await window.kyletool.getSettings(); setSettings(s); setFormMode(s.mode); setFormAccount(s.account);
         await refreshStatus();
       }
       if (rTrades.ok) void loadReport();
+      if (rAuto.ok) void window.kyletool.autoTradeStatus().then(setAutoStatus);
     } finally { setSyncBusy(false); }
   }
 
@@ -3102,10 +3105,11 @@ ${msg}
                 <>
                   <h3>지금 감시 중인 자동매매 포지션</h3>
                   <p className="hint">
-                    이 기기(PC/폰)에 저장돼 있어 앱을 껐다 켜거나 업데이트해도 그대로 남아요. 다만 이
-                    저장은 <b>지금 쓰고 있는 이 기기 안에서만</b> 유지됩니다 — 다른 기기에서 진입한
-                    주문은 여기 안 보일 수 있어요(실제 주문 여부는 항상 [현황 → 주문 현황]에서
-                    토스와 직접 확인하세요, 그 화면은 이 목록과 무관하게 항상 정확합니다).
+                    이 기기에 저장돼 있어 앱을 껐다 켜거나 업데이트해도 그대로 남아요. 로그인
+                    상태면 <b>다른 기기(PC↔폰)와도 자동으로 동기화</b>됩니다(로그인 직후, 그리고
+                    [설정 → ☁️ 계정 → 지금 다시 동기화]로 언제든). 그래도 실제 주문 여부의
+                    최종 확인은 항상 [현황 → 주문 현황]에서 토스와 직접 하세요 — 그 화면은 이
+                    목록과 무관하게 항상 정확합니다.
                   </p>
                   <table className="result-table">
                     <thead>

@@ -658,6 +658,9 @@ interface KyletoolBridge {
   /** [v0.10.0→v0.24.0] 매매 이력 동기화(로그인 비밀번호로 암호화, 로그인 시 자동 호출됨) */
   tradeSyncPush(): Promise<{ ok: boolean; message: string; count?: number }>;
   tradeSyncPull(): Promise<{ ok: boolean; message: string; count?: number }>;
+  /** [v0.31.0] 자동매매 기록(포지션+이력) 기기 간 동기화 — 로그인 시 자동 호출됨. */
+  autoStateSyncPush(): Promise<{ ok: boolean; message: string; count?: number }>;
+  autoStateSyncPull(): Promise<{ ok: boolean; message: string; count?: number }>;
   tradesStats(): Promise<TradeStats>;
   tradesClose(id: string, exitPrice: number, kind: "tp" | "sl" | "manual"): Promise<StrengthTrade[]>;
   tradesDelete(id: string): Promise<StrengthTrade[]>;

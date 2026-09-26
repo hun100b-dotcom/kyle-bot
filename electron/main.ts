@@ -299,6 +299,9 @@ function registerIpc(e: ToolEngine): void {
   // [v0.10.0→v0.24.0] 매매 이력 암호화 동기화(로그인 비밀번호로, 로그인 시 자동 호출됨)
   ipcMain.handle("tool:tradesync:push", () => e.syncPushTrades());
   ipcMain.handle("tool:tradesync:pull", () => e.syncPullTrades());
+  // [v0.31.0] 자동매매 기록(포지션+이력) 기기 간 동기화
+  ipcMain.handle("tool:autostatesync:push", () => e.syncPushAutoState());
+  ipcMain.handle("tool:autostatesync:pull", () => e.syncPullAutoState());
   ipcMain.handle("tool:trades:stats", () => e.getTradeStats());
   ipcMain.handle("tool:trades:close", (_ev, id: string, exitPrice: number, kind: "tp" | "sl" | "manual") => e.closeTradeManual(id, exitPrice, kind));
   ipcMain.handle("tool:trades:delete", (_ev, id: string) => e.deleteTrade(id));

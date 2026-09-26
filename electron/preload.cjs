@@ -98,6 +98,8 @@ contextBridge.exposeInMainWorld("kyletool", {
   tradeAnalysis: () => ipcRenderer.invoke("tool:trade-analysis"),
   tradeSyncPush: () => ipcRenderer.invoke("tool:tradesync:push"), // [v0.24.0] 로그인 비밀번호로 암호화
   tradeSyncPull: () => ipcRenderer.invoke("tool:tradesync:pull"), // [v0.24.0] 로그인 시 자동 호출됨
+  autoStateSyncPush: () => ipcRenderer.invoke("tool:autostatesync:push"), // [v0.31.0] 자동매매 기록 동기화
+  autoStateSyncPull: () => ipcRenderer.invoke("tool:autostatesync:pull"), // [v0.31.0] 로그인 시 자동 호출됨
   tradesStats: () => ipcRenderer.invoke("tool:trades:stats"),
   tradesClose: (id, exitPrice, kind) => ipcRenderer.invoke("tool:trades:close", id, exitPrice, kind),
   tradesDelete: (id) => ipcRenderer.invoke("tool:trades:delete", id),

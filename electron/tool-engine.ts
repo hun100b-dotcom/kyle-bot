@@ -28,6 +28,7 @@ import { buildReport, buildReportFromRealized, makePeriod, type DailyReport, typ
 import { matchFifo, mergeFills, coveredSince, shouldReuseCache, type Fill, type RealizedTrade } from "../lib/fills"; // [v0.9.6] 토스 실제 체결내역으로 손익 계산 (+v0.10.1 기간 커버리지 헬퍼)
 import { buildCycles, analyzeTrades, type TradeCycle, type TradeInsights } from "../lib/trade-analysis"; // [v0.19.0] 매매 사이클 자동추적·분석
 import { toSyncPayload, isSyncPayload, type TradeSyncPayload } from "../lib/trade-sync";
+import { toAutoStateSyncPayload, isAutoStateSyncPayload, mergeAutoHistory, derivePositionsFromHistory, type AutoStateSyncPayload } from "../lib/auto-state-sync"; // [v0.31.0] 자동매매 기록 기기 간 동기화
 import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, WICK_MIN_RATIO, type Candle, type SessionPattern } from "../lib/indicators";
 import {
   getPrice,
@@ -737,6 +738,11 @@ export interface AutoTradeHistoryEntry {
   pnlUsd: number | null;
   pnlPct: number | null;
   note: string; // 사람이 읽을 한 줄 요약(결과 사유)
+  /** [v0.31.0] 기기 간 동기화(Supabase)로 이 기록을 받은 다른 기기가, watching/active
+   *  상태를 "그냥 화면 표시용"이 아니라 실제로 이어서 감시할 수 있게 남겨 둔다(이 번호가
+   *  있어야 getOrder/getConditionalOrder로 실제 체결·발동 여부를 물어볼 수 있다). */
+  conditionalOrderId?: string | null;
+  buyOrderId?: string | null;
 }
 
 // -----------------------------------------------------------------------------
@@ -889,6 +895,7 @@ export class ToolEngine extends EventEmitter {
   private lastAvgCost: Record<string, number> = {};
   /** 마지막으로 클라우드에 올린 시각(표시용) */
   private lastSyncPushAtMs: number | null = null;
+  private lastAutoStatePushAtMs: number | null = null; // [v0.31.0] 자동매매 기록 업로드 쓰로틀용
 
   // 환율 캐시(토스 스펙: 1분 갱신이므로 60초 캐시)
   private fxCache: { rate: number; atMs: number; source: "toss" | "manual" } | null = null;
@@ -1348,6 +1355,8 @@ export class ToolEngine extends EventEmitter {
       }
       const pulledTrades = await this.syncPullTrades().catch(() => null);
       if (pulledTrades?.ok && (pulledTrades.count ?? 0) > 0) extra += ` 매매 이력 ${pulledTrades.count}건도 함께 받아왔습니다.`;
+      const pulledAutoState = await this.syncPullAutoState().catch(() => null);
+      if (pulledAutoState?.ok && (pulledAutoState.count ?? 0) > 0) extra += ` 자동매매 기록도 함께 받아왔습니다.`;
 
       return { ok: true, message: `로그인되었습니다(${this.authEmail}).${extra}` };
     } catch (e) {
@@ -2946,6 +2955,15 @@ export class ToolEngine extends EventEmitter {
     } catch {
       /* 기록 실패는 자동매매 진행을 막지 않는다 */
     }
+    // [v0.31.0] 로그인 상태면 다른 기기도 곧바로 볼 수 있게 클라우드에도 올려 둔다.
+    //   · 로그인 상태(authPassword 있음)일 때만 동작, 실패해도 조용히 무시(로컬은 이미 저장됨).
+    //   · 15초에 한 번으로 제한 — 상태 전이마다(watching→active→종료) 매번 올리면 과함.
+    const longEnough = Date.now() - (this.lastAutoStatePushAtMs ?? 0) > 15_000;
+    if (longEnough && this.authPassword) {
+      void this.syncPushAutoState().catch(() => {
+        /* 업로드 실패는 조용히 넘어간다 */
+      });
+    }
   }
 
   /** 새 진입이 접수될 때 한 줄 추가("watching" 상태). */
@@ -2965,6 +2983,8 @@ export class ToolEngine extends EventEmitter {
         pnlUsd: null,
         pnlPct: null,
         note: "매수 주문 접수 — 체결 대기 중",
+        conditionalOrderId: pos.conditionalOrderId,
+        buyOrderId: pos.buyOrderId,
       });
       this.persistAutoTradeHistory();
     } catch {
@@ -3114,6 +3134,76 @@ export class ToolEngine extends EventEmitter {
         ok: true,
         message: `매매 이력 ${payload.fills.length}건을 받았습니다(새로 추가 ${added}건).`,
         count: this.savedFills.length,
+      };
+    } catch (e) {
+      return { ok: false, message: `받기 실패: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // [v0.31.0] 자동매매 기록(포지션+이력) 기기 간 동기화 — capri_trades와 완전히 같은 패턴.
+  //   [오너 보고 2026-09-26] "PC에서 진행하다 폰에서 킬 경우 자동매매 기록이 사라짐"의
+  //   나머지 절반(v0.30.1은 "같은 기기 재시작"만 고쳤었다) — 자세한 설계 이유는
+  //   lib/auto-state-sync.ts 파일 상단 주석 참고.
+  // ---------------------------------------------------------------------------
+
+  /** syncPushAutoState — 자동매매 기록 전체를 암호화해 내 계정(capri_auto_state) 행에 올린다. */
+  async syncPushAutoState(): Promise<{ ok: boolean; message: string; count?: number }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요." };
+    if (!this.authPassword) return { ok: false, message: "다시 로그인해야 동기화할 수 있습니다(비밀번호는 저장해 두지 않아요)." };
+    if (this.autoTradeHistory.length === 0) return { ok: false, message: "올릴 자동매매 기록이 없습니다." };
+
+    try {
+      const rec = await encryptJson(toAutoStateSyncPayload(this.autoTradeHistory, Date.now()), this.authPassword);
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_auto_state?on_conflict=user_id`, {
+        method: "POST",
+        headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({ user_id: this.authUserId, ciphertext: rec.ciphertext, salt: rec.salt, iv: rec.iv, updated_at: new Date().toISOString() }),
+      });
+      if (!res.ok) return { ok: false, message: `클라우드 저장 실패(HTTP ${res.status}).` };
+      this.lastAutoStatePushAtMs = Date.now();
+      return { ok: true, message: `자동매매 기록 ${this.autoTradeHistory.length}건을 올렸습니다(암호화됨).`, count: this.autoTradeHistory.length };
+    } catch (e) {
+      return { ok: false, message: `올리기 실패: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+
+  /**
+   * syncPullAutoState — 내 계정에 올려 둔 자동매매 기록을 받아 복호화해 병합하고,
+   *   "지금 감시 중" 목록(autoTradePositions)도 병합된 기록에서 다시 만든다(derivePositionsFromHistory).
+   *   authSignIn이 로그인 직후 자동으로 부른다.
+   */
+  async syncPullAutoState(): Promise<{ ok: boolean; message: string; count?: number }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요." };
+    if (!this.authPassword) return { ok: false, message: "다시 로그인해야 자동매매 기록을 받을 수 있습니다(비밀번호는 저장해 두지 않아요)." };
+
+    try {
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_auto_state?select=ciphertext,salt,iv`, {
+        headers: this.authRestHeaders(token),
+      });
+      if (!res.ok) return { ok: false, message: `클라우드 조회 실패(HTTP ${res.status}).` };
+      const rows = (await res.json()) as Array<{ ciphertext: string; salt: string; iv: string }>;
+      if (!rows || rows.length === 0) {
+        return { ok: false, message: "내 계정에 저장된 자동매매 기록이 없습니다." };
+      }
+      const payload = await decryptJson<AutoStateSyncPayload>(rows[0], this.authPassword); // 틀린 비번이면 여기서 실패
+      if (!isAutoStateSyncPayload(payload)) return { ok: false, message: "받은 데이터 형식이 올바르지 않습니다." };
+
+      const before = this.autoTradeHistory.length;
+      this.autoTradeHistory = mergeAutoHistory(this.autoTradeHistory, payload.history);
+      this.persistAutoTradeHistory();
+      // [핵심] "지금 감시 중" 목록도 병합된 기록에서 다시 만든다 — 이 기기가 한 번도 진입시킨
+      //   적 없는 포지션이라도, 다른 기기가 올려 둔 기록에 conditionalOrderId/buyOrderId가
+      //   있으면 이 기기도 그 번호로 실제 체결·발동 여부를 재확인할 수 있게 된다.
+      this.autoTradePositions = derivePositionsFromHistory(this.autoTradeHistory);
+      this.saveAutoPositions();
+      const added = this.autoTradeHistory.length - before;
+      return {
+        ok: true,
+        message: `자동매매 기록 ${payload.history.length}건을 받았습니다(새로 추가 ${added}건, 지금 감시 중 ${this.autoTradePositions.length}종목).`,
+        count: this.autoTradeHistory.length,
       };
     } catch (e) {
       return { ok: false, message: `받기 실패: ${e instanceof Error ? e.message : String(e)}` };
@@ -4030,6 +4120,7 @@ export class ToolEngine extends EventEmitter {
           });
           this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
             status: "active", note: "재시작 후 재확인 — 매수 체결을 뒤늦게 확인해 보호주문 등록",
+            conditionalOrderId: result.conditionalOrderId,
           });
         } else {
           // OCO 등록 자체가 실패 — registerOcoForFilled가 이미 상세 사유를 저널에 남겼다.
@@ -4066,7 +4157,9 @@ export class ToolEngine extends EventEmitter {
     if (res.status === "oco_registered") {
       this.autoTradePositions[idx] = { ...this.autoTradePositions[idx], status: "active", conditionalOrderId: res.conditionalOrderId };
       this.saveAutoPositions();
-      this.updateAutoTradeHistory(symbol, entry, enteredAtMs, { status: "active", note: "매수 체결 확인 — 익절/손절(조건주문) 등록됨" });
+      this.updateAutoTradeHistory(symbol, entry, enteredAtMs, {
+        status: "active", note: "매수 체결 확인 — 익절/손절(조건주문) 등록됨", conditionalOrderId: res.conditionalOrderId,
+      });
     } else {
       // 타임아웃/취소/실패/OCO등록실패 → 이 자리를 비운다(다음 사이클에 다시 채워질 수 있음).
       this.autoTradePositions.splice(idx, 1);
