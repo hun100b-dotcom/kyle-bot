@@ -1,11 +1,16 @@
 # =============================================================================
-# ship.yml — 코드가 올라가면 폰(웹)과 PC(설치파일)를 자동으로 최신으로 만든다
+# ship.yml — 코드가 올라가면 폰(웹)과 PC(설치파일, 윈도우+맥)를 자동으로 최신으로 만든다
 # -----------------------------------------------------------------------------
 # [무엇을 하나?]
 #   main 브랜치에 코드가 올라오고 package.json 의 version 이 바뀌었으면,
 #   ① 테스트·타입검사 → ② 웹앱 빌드 후 capri-web 저장소로 배포(폰 즉시 반영)
 #   → ③ 윈도우 설치파일(exe) 빌드 → kyle-bot-releases 에 릴리스 게시(PC 자동 업데이트)
+#   → ④(③ 성공 후) 맥 설치파일(dmg+zip)도 같은 릴리스에 추가 게시(맥 자동 업데이트)
 #   까지 사람 손 없이 자동으로 합니다.
+#
+#   [v0.32.1 전에는 왜 맥이 없었나?] 이 워크플로가 원래 윈도우 러너 하나뿐이었어서,
+#   맥 사용자는 지금까지 단 한 번도 CI로 자동 배포된 적이 없었다(수동으로 맥에서
+#   `npm run release:mac`을 돌려야만 했음). ④번 작업(ship-mac)이 그 빈틈을 메운다.
 #
 # [필요한 것 — 딱 하나: 토큰]
 #   배포 대상이 **다른 저장소**(kyle-bot-releases, capri-web)라서,
@@ -29,9 +34,21 @@
 #     토큰이면 혹시 새어 나가도 피해 범위가 작습니다.
 #
 # [토큰이 없으면?] 이 워크플로는 '무엇이 필요한지'만 알려 주고 조용히 끝납니다(실패 아님).
-#   그 동안에는 PC에서 `npm run ship` 한 줄로 똑같이 배포할 수 있습니다.
+#   그 동안에는 PC에서 `npm run ship`, 맥에서 `npm run release:mac`으로 직접 배포할 수 있습니다.
 #
-# [서명] 코드 서명 인증서는 쓰지 않습니다(미서명). 첫 설치 때 SmartScreen 경고는 정상입니다.
+# [서명]
+#   윈도우: 코드 서명 인증서 없음(미서명) — 첫 설치 때 SmartScreen 경고는 정상입니다.
+#   맥: 애플 개발자 인증서 없음 → 애드혹("-") 서명만 적용(electron-builder.yml 참고).
+#     애드혹 서명이 없으면 애플 실리콘(M1 이후) 맥은 아예 실행이 안 됩니다(윈도우
+#     SmartScreen 경고보다 훨씬 심각 — 경고가 아니라 실행 자체가 거부됨). 공증(notarize)은
+#     유료 계정이 필요해 하지 않으므로, 첫 실행은 여전히 "우클릭 → 열기"가 필요합니다
+#     (README/사용 가이드에 안내돼 있음).
+#
+# [왜 맥 작업이 윈도우 작업 뒤에 오나(needs)?]
+#   테스트·타입검사를 두 러너에서 각각 돌리면 macOS 러너 사용 시간이 쓸데없이 늘어난다
+#   (macOS 러너는 분당 소모량이 더 큼). 윈도우 작업이 이미 검사를 끝낸 뒤에만 맥 작업이
+#   이어서 돌게 해 같은 검사를 중복하지 않는다 — 대신 전체 소요 시간은 두 작업을 합친
+#   만큼(순차) 걸린다.
 # =============================================================================
 name: ship (폰+PC 자동 배포)
 
@@ -45,6 +62,8 @@ on:
 jobs:
   ship:
     runs-on: windows-latest # 윈도우 설치파일(exe)은 윈도우에서만 만들 수 있다
+    outputs:
+      ready: ${{ steps.gate.outputs.ready }} # ship-mac 작업이 같은 토큰 유무 판단을 그대로 물려받는다
 
     steps:
       - name: 소스 받기
@@ -105,3 +124,43 @@ jobs:
         run: |
           echo "폰(웹앱):  https://hun100b-dotcom.github.io/capri-web/"
           echo "PC(설치):  https://github.com/hun100b-dotcom/kyle-bot-releases/releases"
+
+  ship-mac:
+    needs: ship # 윈도우 작업의 테스트·타입검사가 이미 끝난 뒤에만 진행(중복 검사 방지)
+    if: needs.ship.outputs.ready == 'true'
+    runs-on: macos-latest # 맥 설치파일(dmg/서명 포함)은 실제 macOS에서만 만들 수 있다
+
+    steps:
+      - name: 소스 받기
+        uses: actions/checkout@v4
+
+      - name: Node 준비
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 의존성 설치
+        run: npm ci
+
+      - name: 설치파일(dmg+zip, arm64+x64) 빌드(맥 러너에서 처음부터 다시 — 산출물은 작업 간에 공유되지 않음)
+        run: npm run dist:mac
+
+      - name: 애드혹 서명 확인(빌드가 조용히 미서명으로 새어나가지 않았는지)
+        run: |
+          set -e
+          for APP in release/mac-arm64/Capri.app release/mac/Capri.app; do
+            if [ -d "$APP" ]; then
+              echo "검사: $APP"
+              codesign --display --verbose=2 "$APP"
+            fi
+          done
+
+      - name: 릴리스 게시(맥)
+        env:
+          GH_TOKEN: ${{ secrets.CAPRI_DEPLOY_TOKEN }} # publish-release.mjs 가 이 값을 먼저 찾는다
+        run: node scripts/publish-release.mjs
+
+      - name: 결과 안내
+        run: |
+          echo "맥(설치): https://github.com/hun100b-dotcom/kyle-bot-releases/releases"

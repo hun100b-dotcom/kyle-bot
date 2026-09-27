@@ -86,9 +86,19 @@ mac:
       arch: [arm64, x64]         # 사람이 내려받아 설치하는 파일(애플 실리콘 + 인텔)
     - target: zip
       arch: [arm64, x64]         # ★ 자동 업데이트용(맥의 electron-updater는 dmg가 아니라 zip을 받는다)
-  # 애플 개발자 인증서 없음 → 기본(ad-hoc) 서명. 첫 실행은 우클릭→열기(README 안내).
+  # 애플 개발자 인증서 없음 → 애드혹(ad-hoc, "-") 서명. 첫 실행은 우클릭→열기(README 안내).
   # [주의] 공증(notarize)도 안 한다(유료 계정 필요). 개인 사용에는 우클릭→열기로 충분.
-  identity: null                 # 서명 시도하다 실패해 빌드가 멈추는 것을 방지(미서명 고정)
+  #
+  # [중요한 교훈 — v0.32.1] 예전엔 여기가 `identity: null`이었다. 이름과 달리 electron-builder
+  # 소스(app-builder-lib/macPackager.js의 handleNullIdentity)를 직접 확인해 보니, `null`은
+  # "서명 실패 방지용 애드혹"이 아니라 **서명 자체를 통째로 건너뛴다**는 뜻이었다(주석이 착각한
+  # 것 — 실제로 맥 빌드를 CI에 연결해 본 적이 없어 아무도 몰랐던 문제). 애플 실리콘(M1 이후)
+  # macOS는 인텔과 달리 **서명이 전혀 없는 arm64 실행파일은 커널이 아예 실행을 거부한다**
+  # (Gatekeeper의 "확인되지 않은 개발자" 경고 이전 단계 — 우클릭→열기로도 못 고친다). `"-"`로
+  # 명시하면 electron-builder가 실제로 애드혹 서명을 적용해(macCodeSign.js: qualifier === "-" 분기)
+  # 인증서 없이도 앱이 최소한 실행은 되게 만든다. 우클릭→열기 안내는 이 상태에서도 여전히 필요
+  # (Gatekeeper 격리 경고 자체는 애드혹 서명으로는 안 없어짐 — 공증까지 해야 완전히 없어짐).
+  identity: "-"
 
 dmg:
   title: Capri 설치

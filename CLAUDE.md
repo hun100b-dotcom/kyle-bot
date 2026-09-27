@@ -53,6 +53,12 @@ npm run app:dist   # macOS 설치 파일(dmg) 생성 → release/
 ```
 - 데스크톱 앱 v0.2(도구) 완료: 계산기 3종 + $·₩ 병기 + 조건주문. **실주문은 소액 테스트 전까지 코드 잠금(드라이런)**.
 - macOS 패키징 주의: productName 한글 금지(SIGTRAP) — 영문 이름 + CFBundleDisplayName 한글.
+- macOS 서명 주의(v0.32.1 확인): `electron-builder.yml`의 `mac.identity`는 반드시 `"-"`(애드혹)여야
+  한다 — `null`은 "서명 실패 방지용 애드혹"이 아니라 **서명 자체를 건너뛴다**는 뜻이고(과거 주석이
+  착각했던 부분), 애드혹조차 없는 arm64(애플 실리콘) 앱은 macOS 커널이 실행 자체를 거부한다(윈도우
+  SmartScreen 경고보다 심각 — 우클릭→열기로도 못 고침). `ship.yml`의 `ship-mac` 작업(macos-latest
+  러너)이 매 배포마다 `codesign --display`로 서명 여부를 확인해 이 문제가 다시 새어나가면 CI가
+  실패하도록 막아 둠.
 
 ## 환경 팁
 - 커밋 메시지에 큰따옴표가 있으면 PowerShell here-string이 깨진다 → `git commit -F <메시지파일>` 사용.
