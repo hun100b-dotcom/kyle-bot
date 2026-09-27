@@ -268,7 +268,7 @@ export function installKyleTool(): ToolEngine {
     // ── 앱 업데이트: 웹은 서비스 워커가 담당하므로 여기선 무해한 값만 ──
     appVersion: () => Promise.resolve(`web-${__BUILD_ID__}`),
     downloadUpdate: () => Promise.resolve({ ok: true }),
-    installUpdate: () => Promise.resolve(),
+    installUpdate: () => Promise.resolve({ ok: true }),
     onUpdate: (_cb: (v: unknown) => void) => () => {},
   };
 

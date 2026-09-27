@@ -696,7 +696,7 @@ interface KyletoolBridge {
   // 자동 업데이트
   appVersion(): Promise<string>;
   downloadUpdate(): Promise<{ ok: boolean; error?: string }>;
-  installUpdate(): Promise<void>;
+  installUpdate(): Promise<{ ok: boolean; error?: string }>;
   onUpdate(handlers: {
     available?: (info: { version: string; notes: string }) => void;
     progress?: (pct: number) => void;

@@ -334,8 +334,17 @@ function registerIpc(e: ToolEngine): void {
     }
   });
   // "재시작하고 적용": 앱을 끄고 새 버전 설치 후 다시 켠다.
+  // [v0.32.2] 예전엔 실패해도(quitAndInstall이 던지는 예외) 화면에 아무 신호도 안 가서
+  //   "버튼을 눌러도 반응이 없다"는 것처럼 보였다(update:download는 이미 v0.27.1에서
+  //   같은 방식으로 고쳐 놨었는데 install 쪽은 빠져 있었음). 다운로드 실패 처리와 동일한
+  //   패턴으로 맞춘다 — try/catch로 감싸 결과를 화면에 그대로 돌려준다.
   ipcMain.handle("update:install", () => {
-    setImmediate(() => autoUpdater.quitAndInstall());
+    try {
+      setImmediate(() => autoUpdater.quitAndInstall());
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    }
   });
   // 현재 앱 버전(화면 표시용)
   ipcMain.handle("app:version", () => app.getVersion());

@@ -4167,7 +4167,22 @@ ${msg}
 
             <div className="form-row">
               {updateReady ? (
-                <button className="btn btn-start" onClick={() => window.kyletool.installUpdate()}>
+                <button
+                  className="btn btn-start"
+                  onClick={async () => {
+                    // [v0.32.2] 예전엔 실패해도 화면에 아무 신호가 없어 "버튼이 안 눌린다"처럼
+                    // 보였다 — 다운로드 실패 처리(startDownloadUpdate)와 같은 방식으로 맞춘다.
+                    const r = await window.kyletool.installUpdate();
+                    if (!r.ok) {
+                      const detail = r.error ? `\n\n(자세히: ${r.error})` : "";
+                      alert(
+                        `재시작·적용에 실패했습니다. 앱은 계속 사용 가능합니다 — ` +
+                          `[주문현황] 등 기존 기능엔 영향 없습니다. 한 번 더 눌러보거나, 그래도 안 되면 ` +
+                          `설치 파일을 새로 받아 직접 설치해 주세요: https://github.com/hun100b-dotcom/kyle-bot-releases/releases${detail}`,
+                      );
+                    }
+                  }}
+                >
                   ↻ 재시작하고 적용
                 </button>
               ) : updateProgress != null ? (
