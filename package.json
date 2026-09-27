@@ -24,8 +24,8 @@
     "web:check": "tsc -p tsconfig.web.json --noEmit",
     "web:build": "npm run web:check && vite build --config vite.web.config.ts && node scripts/stamp-sw.mjs",
     "web:deploy": "npm run web:build && node scripts/deploy-web.mjs",
-    "dist:win": "npm run build && npm run app:compile && electron-builder --win nsis",
-    "dist:mac": "npm run build && npm run app:compile && electron-builder --mac",
+    "dist:win": "npm run build && npm run app:compile && electron-builder --win nsis --publish never",
+    "dist:mac": "npm run build && npm run app:compile && electron-builder --mac --publish never",
     "publish:release": "node scripts/publish-release.mjs",
     "release:win": "npm run dist:win && node scripts/publish-release.mjs",
     "release:mac": "npm run dist:mac && node scripts/publish-release.mjs"
