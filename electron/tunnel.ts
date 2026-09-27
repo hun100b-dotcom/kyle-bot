@@ -16,11 +16,24 @@
 //   내려받은 파일은 앱 데이터 폴더에 두고 다음부터 재사용합니다.
 // =============================================================================
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, createWriteStream, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+
+/** [v0.32.3 — 전수조사] 맥에서 새로 받은 실행파일에 격리(quarantine) 표시가 남아 있으면
+ *  Gatekeeper가 실행을 막을 수 있다(Capri.app 자체의 "그래도 열기" 문제와 같은 종류).
+ *  cloudflared는 우리가 직접 spawn으로 실행하니 팝업은 안 뜨지만, 그래도 막힐 수 있어
+ *  선제적으로 지워 둔다(속성이 없어도 실패하지 않고 조용히 넘어감 — 안전한 방어적 조치). */
+function clearQuarantine(path: string): void {
+  if (process.platform !== "darwin") return;
+  try {
+    spawnSync("xattr", ["-d", "com.apple.quarantine", path], { stdio: "ignore" });
+  } catch {
+    /* xattr가 없거나 속성이 없어도 무해 — 앱은 계속 진행 */
+  }
+}
 
 /** 이 컴퓨터에 맞는 cloudflared 내려받기 주소 */
 function downloadUrl(): { url: string; isArchive: boolean; fileName: string } {
@@ -54,6 +67,7 @@ export async function ensureCloudflared(dir: string, onProgress?: (msg: string) 
   if (!isArchive) {
     await pipeline(Readable.fromWeb(res.body as never), createWriteStream(target));
     if (process.platform !== "win32") chmodSync(target, 0o755); // 실행 권한
+    clearQuarantine(target);
     return target;
   }
 
@@ -65,7 +79,10 @@ export async function ensureCloudflared(dir: string, onProgress?: (msg: string) 
     p.on("error", reject);
     p.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`압축 풀기 실패(코드 ${code})`))));
   });
-  if (existsSync(target)) chmodSync(target, 0o755);
+  if (existsSync(target)) {
+    chmodSync(target, 0o755);
+    clearQuarantine(target);
+  }
   return target;
 }
 

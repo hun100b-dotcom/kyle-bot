@@ -392,9 +392,53 @@ app.whenReady().then(async () => {
     return;
   }
 
-  // 상단 기본 메뉴바(File/Edit/View/Window) 제거 — 이 도구엔 불필요.
-  //   (개발용 F12 devtools 단축키는 창 webContents 에서 그대로 동작한다.)
-  Menu.setApplicationMenu(null);
+  // [v0.32.3 — 전수조사로 발견] 상단 기본 메뉴바(File/Edit/View/Window) 제거는
+  //   윈도우에서는 문제 없지만(복붙은 운영체제가 메뉴와 무관하게 처리), **맥에서는
+  //   메뉴가 아예 없으면 Cmd+C/V/X/A/Z(복사·붙여넣기·잘라내기·전체선택·실행취소)가
+  //   텍스트 입력창 전체에서 먹통이 된다**(macOS는 이 단축키들을 메뉴의 Edit 역할에
+  //   연결해서만 처리 — Electron의 잘 알려진 함정). 설정 탭에 토스 Client
+  //   ID/Secret(길어서 대부분 복사→붙여넣기로 입력)을 붙여넣으려다 계속 실패했던 게
+  //   바로 이 문제였을 가능성이 크다 — "파일 열기·설정 오류가 계속 난다"는 보고와 일치.
+  //   그래서 맥에서만 최소 메뉴(Edit 역할 포함)를 만들어 붙여넣기가 되게 하고,
+  //   윈도우/리눅스는 기존처럼 메뉴 없이 깔끔하게 유지한다.
+  if (process.platform === "darwin") {
+    Menu.setApplicationMenu(
+      Menu.buildFromTemplate([
+        {
+          label: app.name,
+          submenu: [
+            { role: "about" },
+            { type: "separator" },
+            { role: "services" },
+            { type: "separator" },
+            { role: "hide" },
+            { role: "hideOthers" },
+            { role: "unhide" },
+            { type: "separator" },
+            { role: "quit" },
+          ],
+        },
+        {
+          label: "Edit",
+          submenu: [
+            { role: "undo" },
+            { role: "redo" },
+            { type: "separator" },
+            { role: "cut" },
+            { role: "copy" },
+            { role: "paste" }, // ★ 이게 없으면 설정 탭에 키를 붙여넣을 수 없었다
+            { role: "selectAll" },
+          ],
+        },
+        {
+          label: "Window",
+          submenu: [{ role: "minimize" }, { role: "zoom" }, { role: "close" }],
+        },
+      ]),
+    );
+  } else {
+    Menu.setApplicationMenu(null);
+  }
 
   // KYLEBOT_E2E(자동 검증)일 때는 실서버 접근을 원천 차단(연습 모드 강제).
   engine = new ToolEngine(app.getPath("userData"), { forceMock: process.env.KYLEBOT_E2E === "1" });
