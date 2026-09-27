@@ -788,6 +788,12 @@ function App() {
   const [update, setUpdate] = useState<{ version: string; notes: string } | null>(null);
   const [updateProgress, setUpdateProgress] = useState<number | null>(null); // 다운로드 진행률 %
   const [updateReady, setUpdateReady] = useState(false); // 다운로드 완료 → 재시작 대기
+  // [v0.32.3] macOS는 코드서명이 실행 중인 앱과 새 버전 사이에 맞아야만 자동 업데이트
+  //   (Squirrel.Mac)가 적용된다 — 특히 아주 오래된(서명 방식이 다른) 버전에서 최신으로
+  //   건너뛸 때 이 실패가 "재시작하고 적용" 버튼을 눌러도 조용히 아무 일도 안 일어나는
+  //   것처럼 보이게 한다. 지금까지 이 오류(autoUpdater "error" 이벤트)가 화면에 전혀
+  //   연결돼 있지 않아 원인을 알 수 없었다 — 이제 여기 보여준다.
+  const [updateErr, setUpdateErr] = useState<string | null>(null);
 
   useEffect(() => {
     refreshStatus();
@@ -856,7 +862,11 @@ function App() {
     const offScr = window.kyletool.onScreenerProgress?.((p) => { setScreenProg(p); setAutoScanProg(p); });
     // [v0.7.0] 매매 시 자동 기록된 트레이드가 갱신되면 목록·요약 새로고침
     const offTrd = window.kyletool.onTrades?.(() => void loadAnalysis());
-    // 업데이트 이벤트 구독(있음/진행률/완료). 오류는 조용히 무시(앱 정상 동작 우선).
+    // 업데이트 이벤트 구독(있음/진행률/완료/오류).
+    // [v0.32.3] 예전엔 오류를 "조용히 무시"했다(앱이 죽지 않는 건 맞지만, 그 대가로
+    //   업데이트가 실패해도 오너가 원인을 전혀 알 수 없었다 — "버튼이 안 눌린다"는 보고의
+    //   실제 원인). 이제 다운로드/설치 배경에서 나는 오류(autoUpdater가 emit하는 "error")도
+    //   화면에 그대로 보여준다.
     const offUpd = window.kyletool.onUpdate?.({
       available: (info) => setUpdate(info),
       progress: (pct) => setUpdateProgress(pct),
@@ -864,6 +874,7 @@ function App() {
         setUpdateReady(true);
         setUpdateProgress(100);
       },
+      error: (msg) => setUpdateErr(String(msg)),
     });
     return () => {
       off();
@@ -4163,6 +4174,17 @@ ${msg}
                 <div className="progress-bar" style={{ width: `${updateProgress}%` }} />
                 <span className="progress-txt">다운로드 중… {updateProgress}%</span>
               </div>
+            )}
+
+            {updateErr && (
+              <p className="hint small danger">
+                ⚠️ 자동 업데이트 중 오류가 있었습니다(자세히: {updateErr}). 특히 아주 오래된 버전에서
+                업데이트할 때는 자동 적용이 안 될 수 있습니다 — 그럴 땐{" "}
+                <a href="https://github.com/hun100b-dotcom/kyle-bot-releases/releases" target="_blank" rel="noreferrer">
+                  릴리스 페이지
+                </a>
+                에서 설치 파일을 새로 받아 직접 설치해 주세요(기존 설정·기록은 그대로 남습니다).
+              </p>
             )}
 
             <div className="form-row">

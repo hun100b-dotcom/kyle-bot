@@ -47,10 +47,15 @@ function setupAutoUpdater(): void {
 
   // 새 버전이 있을 때: 화면에 버전·변경사항을 보내 팝업을 띄운다.
   autoUpdater.on("update-available", (info) => {
+    // [v0.32.3] GitHub 릴리스 노트는 electron-updater가 마크다운→HTML로 변환해 주는데,
+    //   화면은 이걸 그냥 <pre>로 그대로 찍어서 "<p>...</p>" 태그가 글자 그대로 보였다
+    //   (오너가 스크린샷으로 확인). 굳이 HTML로 렌더링할 필요 없는 한 줄짜리 배포 문구라,
+    //   태그만 걷어내고 순수 텍스트로 보여준다.
+    const rawNotes = typeof info.releaseNotes === "string" ? info.releaseNotes : "";
+    const notes = rawNotes.replace(/<[^>]+>/g, "").trim();
     win?.webContents.send("update:available", {
       version: info.version,
-      // 릴리스 노트(변경사항). 문자열 또는 배열일 수 있어 문자열로 정리.
-      notes: typeof info.releaseNotes === "string" ? info.releaseNotes : "",
+      notes,
     });
   });
 
