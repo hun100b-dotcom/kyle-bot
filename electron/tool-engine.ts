@@ -4573,7 +4573,19 @@ export class ToolEngine extends EventEmitter {
       }
 
       const freeSlots = this.autoTradeMaxPositions - this.effectiveActivePositionCount(realHeldSymbols);
-      if (freeSlots <= 0) return; // 꽉 찼으면 이번 사이클은 스캔 생략
+      if (freeSlots <= 0) {
+        // [v0.38.0 버그 수정] 꽉 차서 이번 사이클은 스캔 자체를 건너뛰면, 화면엔 "지난 스캔에서
+        //   확정됐던 종목"이 그대로 남아 있는데 사유는 하나도 안 채워져 "확정인데 왜 안 들어가지?"
+        //   처럼 보였다 — 최대 종목 수 도달이 이유임을 여기서도 채워 둔다(스캔을 새로 안 해도).
+        if (this.autoTradeLastScan) {
+          for (const r of this.autoTradeLastScan.results) {
+            if (r.status === "confirmed") {
+              this.autoTradeSkipReasons[r.symbol] = `최대 종목 수(${this.autoTradeMaxPositions}개)에 이미 도달해 이번 사이클은 새 스캔 없이 건너뛰었습니다.`;
+            }
+          }
+        }
+        return; // 꽉 찼으면 이번 사이클은 스캔 생략
+      }
 
       let run: ScreenRun;
       try {
@@ -4614,6 +4626,21 @@ export class ToolEngine extends EventEmitter {
 
       // [v0.35.0] 이번 사이클에 실제로 검토한 후보만 채운다 — 지난 사이클 사유가 남아 헷갈리지 않게.
       this.autoTradeSkipReasons = {};
+      // [v0.38.0 버그 수정 — 오너 보고 "확정인데 사유 없이 미진입"(MEDS 사례)] 위 `candidates`는
+      //   `activeSymbols`(로컬 포지션 + 실계좌 보유)에 이미 걸리는 확정 종목을 아예 걸러내고
+      //   시작한다 — 그러면 아래 for(candidates) 루프에 그 종목이 한 번도 들어가지 않아
+      //   autoTradeSkipReasons에 사유가 절대 안 남았다. 화면(자동 스크리너 탭)은 이 사유를 못
+      //   찾으니 그냥 "— 미진입"만 보여줬다 — 실제로는 버그가 아니라 "이미 보유 중이라 중복
+      //   진입 안 함"이 정상 동작이었는데, 그 이유가 어디에도 안 보였던 것. 특히 "로컬 추적엔
+      //   없지만 실계좌엔 이미 보유 중"(수동 매수, 또는 다른 기기가 방금 넣은 진입)인 경우가
+      //   가장 헷갈렸다. candidates를 거르기 전에 먼저 이유를 채워 둔다.
+      for (const r of run.results) {
+        if (r.status !== "confirmed" || !activeSymbols.has(r.symbol)) continue;
+        const heldLocally = this.autoTradePositions.some((p) => p.symbol === r.symbol);
+        this.autoTradeSkipReasons[r.symbol] = heldLocally
+          ? "이미 이 종목을 자동매매로 보유(또는 매수 감시) 중이라 중복 진입하지 않습니다."
+          : "실계좌에 이미 이 종목을 보유 중입니다(수동 매수 또는 다른 기기의 자동매매 진입으로 추정) — 중복 진입 방지를 위해 건너뜁니다.";
+      }
       let placed = 0;
       for (const cand of candidates) {
         if (placed >= freeSlots) {

@@ -490,6 +490,70 @@ describe("[v0.32.0] 중복진입 방지 — 여러 기기가 동시에 자동매
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // [v0.38.0 버그 수정 — 오너 실사용 보고: "스크리너 확정으로 나온 종목 주문이 안 들어가고 있음
+  //   (사유도 안 보임)"] 위 테스트가 확인하는 "freeSlots<=0이면 스캔 자체를 건너뛴다"는 안전
+  //   동작 자체는 문제가 없었다 — 문제는 그 상태에서 화면에 남아있는 "지난 스캔의 확정 종목"에
+  //   왜 못 들어가는지 사유가 전혀 안 채워진다는 것이었다(autoTradeSkipReasons가 스캔이 실제로
+  //   도는 경로에서만 채워졌음). 아래는 그 간극을 직접 재현·검증한다.
+  it("[v0.38.0] 실계좌 보유로 꽉 차서 스캔을 생략해도, 화면에 남아있던 지난 확정 종목엔 '왜 안 들어가는지' 사유가 채워진다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.saveAutoTradeSettings({ maxPositions: 1 }); // 목 서버가 항상 AAPL 1종목을 보유 중 → 이미 꽉 참
+      const engAny = eng as unknown as EngineInternals & { autoTradeLastScan: unknown };
+      // "지금 새로고침" 또는 직전 사이클에서 확정으로 남아있던 스캔 결과를 흉내낸다.
+      engAny.autoTradeLastScan = {
+        scannedAt: "09-28 20:11:58", total: 1, priceMin: 1, priceMax: 9, excludedEtf: 0,
+        results: [{
+          rank: 1, symbol: "MEDS", price: 3.83, ema200: 3, prevClose: 3.5, cloudTop: 2.9,
+          priceInBand: true, aboveEma: true, aboveCloud: true, status: "confirmed",
+          sessionHigh: 4, proximityPct: -3, n1m: 300, n5m: 60, evidence: null,
+        }],
+      };
+      engAny.autoTradeEnabled = true;
+      await engAny.autoTradeTick();
+
+      const s = eng.getAutoTradeStatus();
+      expect(s.skipReasons.MEDS).toBeDefined();
+      expect(s.skipReasons.MEDS).toContain("최대 종목 수"); // 왜 못 들어가는지 이유가 명확히 남아야 함
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // [v0.38.0 버그 수정 — 위와 같은 오너 보고의 또 다른 원인] freeSlots>0이라 스캔은 실제로
+  //   도는데, 확정 종목이 "이미 로컬 또는 실계좌에 보유 중"이라는 이유로 candidates 필터에서
+  //   아예 걸러지면, 그 종목은 진입 시도 for문에 한 번도 들어가지 않아 사유가 절대 안 남았다.
+  //   목 서버는 AAPL을 항상 실계좌 보유로 고정 응답하므로(이 describe 상단 주석 참고), scanScreener만
+  //   가짜로 바꿔 AAPL이 "확정"으로 나온 상황을 그대로 재현한다.
+  it("[v0.38.0] 확정 종목이 이미 실계좌에 보유 중이라 후보 목록에서 걸러져도, '이미 보유 중' 사유가 남는다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.saveAutoTradeSettings({ maxPositions: 3 }); // 여유 있게 — freeSlots>0이라 스캔은 실제로 돎
+      const engAny = eng as unknown as EngineInternals & {
+        scanScreener: (opts?: unknown) => Promise<unknown>;
+      };
+      engAny.scanScreener = async () => ({
+        scannedAt: "09-28 20:11:58", total: 1, priceMin: 1, priceMax: 9, excludedEtf: 0,
+        results: [{
+          rank: 1, symbol: "AAPL", price: 2.5, ema200: 2, prevClose: 2.1, cloudTop: 1.9,
+          priceInBand: true, aboveEma: true, aboveCloud: true, status: "confirmed",
+          sessionHigh: 2.6, proximityPct: -3, n1m: 300, n5m: 60, evidence: null,
+        }],
+      });
+      engAny.autoTradeEnabled = true;
+      await engAny.autoTradeTick();
+
+      const s = eng.getAutoTradeStatus();
+      expect(s.positions.find((p) => p.symbol === "AAPL")).toBeUndefined(); // 새로 진입 시도를 안 함(이미 보유 중이므로 정상)
+      expect(s.skipReasons.AAPL).toBeDefined();
+      expect(s.skipReasons.AAPL).toContain("이미"); // "이미 보유 중" 계열 사유가 남아야 함
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("[v0.32.0] 알림 — 스크리닝 관찰 확정 + 주문 이벤트", () => {

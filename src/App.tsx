@@ -3458,8 +3458,14 @@ ${msg}
                                   ) : (
                                     <span className="hint">
                                       — 미진입
-                                      {autoStatus?.skipReasons?.[r.symbol] && (
-                                        <><br /><span className="hint small">{autoStatus.skipReasons[r.symbol]}</span></>
+                                      {r.status === "confirmed" && (
+                                        <>
+                                          <br />
+                                          <span className="hint small">
+                                            {autoStatus?.skipReasons?.[r.symbol] ??
+                                              "아직 이유가 안 잡혔습니다 — 다음 자동 사이클(최대 5분 이내)에서 다시 판단합니다."}
+                                          </span>
+                                        </>
                                       )}
                                     </span>
                                   )}
