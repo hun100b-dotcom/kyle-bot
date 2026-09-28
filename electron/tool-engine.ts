@@ -1243,17 +1243,42 @@ export class ToolEngine extends EventEmitter {
   }
 
   /**
-   * [v0.28.0] 자동매매 스크리너 수동 새로고침 — 5분 주기를 기다리지 않고 지금 바로 다시 훑어
-   *   "스크리닝 결과" 탭을 갱신한다. autoTradeTick과 달리 진입 시도는 하지 않는다(모니터링·미리보기
-   *   전용) — 자동매매가 꺼져 있어도 "켜면 뭐가 나올지" 미리 확인하는 용도로도 쓸 수 있다.
+   * [v0.28.0→v0.39.0 오너 지시로 동작 변경] 자동매매 스크리너 수동 새로고침 — 5분 주기를
+   *   기다리지 않고 지금 바로 다시 훑어 "스크리닝 결과"/"자동 스크리너" 탭을 갱신한다.
+   *   [v0.28.0 원안의 문제] 예전엔 여기서 스캔만 하고 진입 시도는 절대 안 했다(모니터링·
+   *   미리보기 전용) — 그런데 그러다 보니 "지금 새로고침"으로 갓 나타난 확정 종목엔
+   *   `autoTradeSkipReasons`가 아예 채워질 기회가 없어(그건 오직 실제 `autoTradeTick` 안에서만
+   *   채워짐), 화면엔 "아직 이유가 안 잡혔습니다" 같은 임시 문구만 계속 떴다. 게다가 "다음 자동
+   *   스캔까지" 카운트다운도 이 수동 새로고침과 무관하게 옛 일정 그대로 흘러가, 오너가 방금
+   *   확인한 화면과 실제 돌아가는 사이클이 서로 안 맞았다.
+   *   [수정] 자동매매가 켜져 있으면 이제 여기서 실제 사이클(`autoTradeTick`)을 그대로 한 번
+   *   호출한다 — 스캔은 물론 진입 시도·`skipReasons`까지 전부 실제 로직 그대로 돌고, "다음
+   *   자동 스캔까지" 타이머도 이 수동 새로고침이 끝난 시점 기준으로 5분 뒤로 다시 맞춘다(5분
+   *   주기 자체는 그대로 유지 — 타이머를 없애는 게 아니라 기준 시각만 지금으로 당김). 마침
+   *   다른 사이클이 이미 진행 중이면(흔치 않음) 새로 겹쳐 돌리지 않고 그 결과를 그대로
+   *   보여준다. 자동매매가 꺼져 있을 때는 예전 그대로 "켜면 뭐가 나올지" 미리보기만 한다
+   *   (진입 게이트가 애초에 "자동매매가 꺼져 있습니다"로 막으므로 진입 시도 자체가 의미 없음).
    */
   async autoScanNow(): Promise<AutoTradeStatus> {
+    if (this.autoTradeEnabled) {
+      if (this.autoTradeTickBusy) {
+        this.addJournal({ kind: "info", symbol: "-", summary: "🤖 자동매매: 마침 사이클이 진행 중이라 그 결과를 그대로 보여드립니다." });
+      } else {
+        await this.autoTradeTick(); // 스캔+진입 시도+skipReasons까지 실제 사이클과 완전히 동일
+        if (this.autoTradeTimer) {
+          // 5분 주기 자체는 유지하되, 기준 시각을 이 수동 새로고침이 끝난 지금으로 다시 맞춘다.
+          clearInterval(this.autoTradeTimer);
+          this.autoTradeTimer = setInterval(() => void this.autoTradeTick(), ToolEngine.AUTO_TRADE_INTERVAL_MS);
+        }
+      }
+      return this.getAutoTradeStatus();
+    }
     try {
       await this.prepareBackend();
       const run = await this.scanScreener(this.buildAutoScanOpts());
       this.autoTradeLastScan = run;
       const cand = run.results.filter((r) => r.status === "confirmed" || r.status === "watch").length;
-      this.addJournal({ kind: "info", symbol: "-", summary: `🤖 자동매매 스크리너 수동 새로고침 — 후보 ${cand}개` });
+      this.addJournal({ kind: "info", symbol: "-", summary: `🤖 자동매매 스크리너 수동 새로고침(미리보기) — 후보 ${cand}개` });
     } catch (e) {
       this.addJournal({ kind: "info", symbol: "-", summary: `🤖 자동매매 스크리너 수동 새로고침 실패 — ${String(e).replace(/^Error:\s*/, "")}` });
     }
@@ -4529,16 +4554,23 @@ export class ToolEngine extends EventEmitter {
   }
 
   /**
-   * [v0.32.0] "지금 자동매매 몫으로 채워진 자리 수"를 실계좌 기준으로 계산한다.
-   *   이미 실제로 체결된 종목은 `realHeldSymbols`에 잡히므로(어느 기기가 넣었든 상관없이),
-   *   거기에 "아직 체결 전이라 실계좌엔 안 잡히는 이 프로세스의 watching 포지션"만 더한다
-   *   (이중 카운트 방지 — 이미 realHeldSymbols에 있는 종목은 watching이어도 또 안 더함).
+   * [v0.32.0→v0.39.0 버그 수정] "지금 자동매매 몫으로 채워진 자리 수".
+   *   [v0.32.0 원안의 문제 — 오너 실사용 보고 2026-09-28 "거래를 아예 못하는중"] 예전엔 이 값을
+   *   실계좌 전체 보유 종목 수(`realHeldSymbols.size`)로 계산했다 — "다른 기기가 넣은 종목도
+   *   놓치지 않으려고" 넣은 값이었는데, 그 실계좌엔 자동매매와 전혀 상관없는 종목(오너가 예전에
+   *   수동으로 사둔 것 등)도 섞여 있을 수 있다. 그런 기보유 종목까지 몽땅 "자동매매가 채운 자리"로
+   *   잘못 세면, 오너의 최대 종목 수(기본 3) 설정을 실제 자동매매 진입 없이도 넘겨버려 `freeSlots`가
+   *   영원히 0 이하가 되고 — 그러면 스캔조차 안 돌아 확정 종목이 계속 나와도 자동매매가 단 한 번도
+   *   진입을 시도하지 못하는 채로 막혀버린다(오너가 겪은 증상 그대로).
+   *   [수정] 이제 "자동매매 종목 수"는 오직 이 엔진이 직접 아는 자동매매 포지션(`autoTradePositions`
+   *   — 이 기기가 넣었거나, 로그인 시 다른 기기의 기록을 받아온 것 포함, watching/active뿐)의
+   *   개수만 센다. 기보유(자동매매와 무관한) 종목은 더 이상 최대 종목 수에 안 잡힌다.
+   *   [남겨둔 안전장치] "이미 보유 중인 특정 종목에 또 진입하지 않기"(중복 매수 방지)는 여전히
+   *   `autoTradeTick`의 `activeSymbols`(로컬 포지션 + 실계좌 보유)가 별도로 막는다 — 이건 "최대
+   *   종목 수 한도"와는 다른 안전장치라 그대로 유지했다.
    */
-  private effectiveActivePositionCount(realHeldSymbols: Set<string>): number {
-    const pendingOnly = this.autoTradePositions.filter(
-      (p) => p.status === "watching" && !realHeldSymbols.has(p.symbol),
-    ).length;
-    return realHeldSymbols.size + pendingOnly;
+  private effectiveActivePositionCount(): number {
+    return this.autoTradePositions.length;
   }
 
   /**
@@ -4572,7 +4604,7 @@ export class ToolEngine extends EventEmitter {
         return;
       }
 
-      const freeSlots = this.autoTradeMaxPositions - this.effectiveActivePositionCount(realHeldSymbols);
+      const freeSlots = this.autoTradeMaxPositions - this.effectiveActivePositionCount();
       if (freeSlots <= 0) {
         // [v0.38.0 버그 수정] 꽉 차서 이번 사이클은 스캔 자체를 건너뛰면, 화면엔 "지난 스캔에서
         //   확정됐던 종목"이 그대로 남아 있는데 사유는 하나도 안 채워져 "확정인데 왜 안 들어가지?"
@@ -4675,8 +4707,8 @@ export class ToolEngine extends EventEmitter {
             maxLossPct: this.autoTradeMaxLossPct,
             maxInvestPct: this.autoTradeMaxInvestPct,
           },
-          // [v0.32.0] 로컬 개수 대신 실계좌 보유와 합친 값 — 다른 기기가 이미 채운 자리도 셈에 넣는다.
-          activePositionCount: this.effectiveActivePositionCount(realHeldSymbols),
+          // [v0.39.0] 자동매매가 직접 아는 포지션 개수만(기보유 등 무관한 실계좌 종목은 제외).
+          activePositionCount: this.effectiveActivePositionCount(),
           realizedPnlUsd: this.autoTradeRealizedPnlUsd,
           seedUsd,
           candidateQty: qty,

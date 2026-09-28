@@ -421,21 +421,27 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
   });
 });
 
-describe("[v0.32.0] 중복진입 방지 — 여러 기기가 동시에 자동매매를 켰을 때의 안전장치", () => {
+describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에 자동매매를 켰을 때의 안전장치", () => {
   // [왜 이 테스트가 필요한가] v0.30.1까지는 "지금 몇 종목 보유 중인가"를 이 프로세스의 로컬
   //   파일(autoTradePositions)만 보고 판단했다. 오너가 윈도우·맥북 등 서로 다른 기기에서 각각
   //   앱을 켜고 자동매매를 동시에 시작하면, 두 번째 기기는 첫 번째 기기가 이미 넣은 실제 주문을
-  //   전혀 모른 채 같은 종목에 또 진입하거나 최대 종목 수를 합쳐서 넘어설 수 있었다. v0.32.0은
-  //   신규 진입 직전 실계좌 보유 현황(fetchRealHeldSymbols)을 직접 조회해 이 로컬 파일의 착시를
-  //   깨는 게 핵심이라, 아래 테스트들은 "로컬 기록은 비어 있는데 실계좌엔 이미 있는" 상황을
-  //   일부러 재현한다(목 서버 holdings는 AAPL 100주 보유로 고정돼 있어 이 상황을 그대로 흉내낼
-  //   수 있음 — mocks/toss-mock.ts 참고).
+  //   전혀 모른 채 같은 종목에 또 진입할 수 있었다. v0.32.0은 신규 진입 직전 실계좌 보유 현황
+  //   (fetchRealHeldSymbols)을 직접 조회해 "이미 보유 중인 특정 종목엔 또 진입하지 않기"(심볼
+  //   단위 중복 매수 방지, `activeSymbols` 필터)를 넣었다 — 이 부분은 지금도 유효하다.
+  //   [v0.39.0에서 갈라낸 부분] 다만 v0.32.0은 "최대 종목 수" 자체도 같은 실계좌 전체 보유
+  //   현황으로 셌는데(`effectiveActivePositionCount`), 그러면 자동매매와 전혀 무관한 기보유
+  //   종목(수동 매수 등)까지 자동매매의 "자리"로 잘못 세어 최대 종목 수 한도를 자동매매가 진입
+  //   하나도 안 했는데도 넘겨버릴 수 있었다 — 오너가 실사용에서 "거래를 아예 못하는중"으로
+  //   겪은 그 버그. v0.39.0부터 "최대 종목 수"는 오직 이 엔진이 아는 자동매매 포지션만 센다
+  //   (아래 관련 테스트 참고). 아래 테스트들은 목 서버 holdings가 AAPL 100주 보유로 고정돼
+  //   있는 걸 이용해(mocks/toss-mock.ts) "실계좌엔 있는데 로컬 자동매매 기록엔 없는" 상황을
+  //   일부러 재현한다.
   type EngineInternals = {
     autoTradeEnabled: boolean;
     autoTradePositions: AutoPosition[];
     autoTradeLastScan: unknown;
     fetchRealHeldSymbols: () => Promise<Set<string> | null>;
-    effectiveActivePositionCount: (realHeldSymbols: Set<string>) => number;
+    effectiveActivePositionCount: () => number;
     autoTradeTick: () => Promise<void>;
   };
 
@@ -453,7 +459,15 @@ describe("[v0.32.0] 중복진입 방지 — 여러 기기가 동시에 자동매
     }
   });
 
-  it("effectiveActivePositionCount는 실계좌 보유 + 아직 실계좌엔 안 잡히는 로컬 watching만 더하고, 같은 종목은 중복으로 세지 않는다", () => {
+  // [v0.39.0 버그 수정 — 오너 실사용 보고 2026-09-28 "거래를 아예 못하는중, 심각"] 아래 두
+  //   테스트는 예전(v0.32.0) 동작 — "최대 종목 수"를 실계좌 전체 보유 종목 수로 셈 — 을
+  //   그대로 검증하고 있었다. 그런데 그 실계좌엔 자동매매와 무관한 기보유 종목(수동 매수 등)도
+  //   섞여 있을 수 있어, 그런 종목까지 자동매매의 "자리"로 잘못 세면 `freeSlots`가 영원히
+  //   0 이하가 되어 확정 종목이 계속 나와도 자동매매가 단 한 번도 진입을 시도 못 하게 막혀버릴
+  //   수 있었다(오너가 겪은 증상 그대로). 오너 지시: "자동매매 섹션은 자동매매 항목만 카운트".
+  //   이제 `effectiveActivePositionCount`는 이 엔진이 직접 아는 자동매매 포지션
+  //   (`autoTradePositions`)만 세고, 실계좌 전체 보유 현황과는 무관하다.
+  it("[v0.39.0] effectiveActivePositionCount는 실계좌 보유와 무관하게 자동매매가 직접 아는 포지션 개수만 센다", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
       const eng = new ToolEngine(dir, { forceMock: true });
@@ -462,46 +476,57 @@ describe("[v0.32.0] 중복진입 방지 — 여러 기기가 동시에 자동매
         symbol, entry: 1, tp: 1.2, sl: 0.9, quantity: 1, enteredAtMs: Date.now(),
         status: "watching", conditionalOrderId: null,
       });
-      // AAPL은 실계좌에도 있고 로컬에도 있음(같은 것) → 1개로만 셈. TSLA는 로컬에만 있는
-      // "아직 체결 전" 주문 → 별도로 1개 더함.
+      expect(engAny.effectiveActivePositionCount()).toBe(0); // 아무것도 없으면 0(목 서버가 AAPL을 실계좌에 들고 있어도 무관)
+      // AAPL은 목 서버 실계좌에도 항상 잡히지만(mocks/toss-mock.ts), 그건 이 카운트와 무관하다 —
+      // 자동매매가 "아는" 포지션(로컬 autoTradePositions)만 세어야 한다.
       engAny.autoTradePositions.push(mk("AAPL"), mk("TSLA"));
-      const count = engAny.effectiveActivePositionCount(new Set(["AAPL"]));
-      expect(count).toBe(2); // AAPL(중복 제외, 실계좌 기준 1개) + TSLA(로컬 전용 1개)
+      expect(engAny.effectiveActivePositionCount()).toBe(2); // 실계좌 보유 여부와 무관하게 둘 다 셈
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("로컬 기록이 텅 비어 있어도(=다른 기기가 넣은 걸 이 기기가 모름) 실계좌 보유가 이미 최대 종목 수만큼 있으면 이번 사이클은 신규 스캔·진입을 건너뛴다", async () => {
+  it("[v0.39.0] 자동매매와 무관한 기보유 종목이 실계좌에 있어도(=이 엔진의 autoTradePositions는 비어 있음) 신규 스캔·진입은 막히지 않는다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
       const eng = new ToolEngine(dir, { forceMock: true });
-      eng.saveAutoTradeSettings({ maxPositions: 1 }); // 목 서버가 항상 AAPL 1종목을 보유 중이라고 답하므로 이미 꽉 참
+      // 목 서버가 항상 AAPL 1종목을 실계좌 보유로 응답한다(자동매매와 무관한 기보유 상황을 흉내냄).
+      // maxPositions는 여유 있게 둬서, "실계좌 AAPL 보유"가 이 한도를 잡아먹지 않는지를 검증한다.
+      eng.saveAutoTradeSettings({ maxPositions: 3 });
+      eng.saveAutoScanSettings({ count: 10 }); // 빠른 테스트를 위해 최소치로(파일 상단 autoScanNow 테스트와 동일 패턴)
       const engAny = eng as unknown as EngineInternals;
-      expect(engAny.autoTradePositions).toEqual([]); // 이 기기의 로컬 기록은 완전히 비어 있음(핵심 전제)
+      expect(engAny.autoTradePositions).toEqual([]); // 이 엔진은 자동매매로 연 포지션이 하나도 없음(핵심 전제)
 
       engAny.autoTradeEnabled = true; // startAutoTrade()의 백그라운드 반복 없이 tick 한 번만 직접 검증
       await engAny.autoTradeTick();
 
-      // freeSlots = maxPositions(1) - effectiveActivePositionCount(실계좌 AAPL 1개) = 0 → 스캔 자체를 생략해야 함
-      expect(engAny.autoTradeLastScan).toBeNull();
-      expect(eng.getAutoTradeStatus().positions).toEqual([]); // 이 기기가 새로 진입 기록을 남기지 않았어야 함
+      // freeSlots = maxPositions(3) - effectiveActivePositionCount(자동매매 포지션 0개) = 3 > 0
+      //   → 실계좌에 AAPL을 보유 중이어도(기보유) 스캔은 정상적으로 돌아야 한다(예전엔 여기서
+      //   조용히 막혔었다 — 그게 바로 이번에 고친 버그).
+      expect(engAny.autoTradeLastScan).not.toBeNull();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   // [v0.38.0 버그 수정 — 오너 실사용 보고: "스크리너 확정으로 나온 종목 주문이 안 들어가고 있음
-  //   (사유도 안 보임)"] 위 테스트가 확인하는 "freeSlots<=0이면 스캔 자체를 건너뛴다"는 안전
-  //   동작 자체는 문제가 없었다 — 문제는 그 상태에서 화면에 남아있는 "지난 스캔의 확정 종목"에
-  //   왜 못 들어가는지 사유가 전혀 안 채워진다는 것이었다(autoTradeSkipReasons가 스캔이 실제로
-  //   도는 경로에서만 채워졌음). 아래는 그 간극을 직접 재현·검증한다.
-  it("[v0.38.0] 실계좌 보유로 꽉 차서 스캔을 생략해도, 화면에 남아있던 지난 확정 종목엔 '왜 안 들어가는지' 사유가 채워진다", async () => {
+  //   (사유도 안 보임)"] "freeSlots<=0이면 스캔 자체를 건너뛴다"는 안전 동작 자체는 문제가
+  //   없었다 — 문제는 그 상태에서 화면에 남아있는 "지난 스캔의 확정 종목"에 왜 못 들어가는지
+  //   사유가 전혀 안 채워진다는 것이었다(autoTradeSkipReasons가 스캔이 실제로 도는 경로에서만
+  //   채워졌음). [v0.39.0] freeSlots<=0을 재현하는 방법이 "실계좌 보유"에서 "자동매매 자체
+  //   포지션으로 자리를 채움"으로 바뀌었다(위 버그 수정과 일관되게) — 아래는 그 방식으로 다시
+  //   재현·검증한다.
+  it("[v0.38.0/v0.39.0] 자동매매 포지션으로 꽉 차서 스캔을 생략해도, 화면에 남아있던 지난 확정 종목엔 '왜 안 들어가는지' 사유가 채워진다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
       const eng = new ToolEngine(dir, { forceMock: true });
-      eng.saveAutoTradeSettings({ maxPositions: 1 }); // 목 서버가 항상 AAPL 1종목을 보유 중 → 이미 꽉 참
+      eng.saveAutoTradeSettings({ maxPositions: 1 });
       const engAny = eng as unknown as EngineInternals & { autoTradeLastScan: unknown };
+      // 자동매매가 이미 진입해 감시 중인 종목 하나로 최대 종목 수(1개)를 채운다(실계좌 보유가 아님).
+      engAny.autoTradePositions.push({
+        symbol: "TSLA", entry: 5, tp: 5.5, sl: 4.5, quantity: 1, enteredAtMs: Date.now(),
+        status: "watching", conditionalOrderId: null,
+      });
       // "지금 새로고침" 또는 직전 사이클에서 확정으로 남아있던 스캔 결과를 흉내낸다.
       engAny.autoTradeLastScan = {
         scannedAt: "09-28 20:11:58", total: 1, priceMin: 1, priceMax: 9, excludedEtf: 0,
