@@ -18,6 +18,7 @@ import "./App.css";
 import TodayReport from "./TodayReport"; // [v0.9.1] 오늘의 매매 리포트 화면
 import { useTabOrder } from "./useTabOrder"; // [v0.9.2] 탭 순서 드래그로 변경
 import { restoreInputsFromSaved } from "../lib/split-restore"; // [v0.9.3] 옛 기록도 계산기로 불러오기
+import { summarizeAutoHistory } from "../lib/auto-research"; // [v0.33.0] 자동매매기록 → 연구탭 통계(순수 함수)
 
 /** 앱이 가진 모든 탭(리프 단위 — 실제 콘텐츠를 가리키는 값. paneTab 렌더 가드는 전부 이 id 기준). */
 // [v0.12.0] 탭 통폐합 9→7: '매매분석'은 체결강도 탭 하위로, '기록(journal)'은 설정 탭 하위(고급/진단)로 이동.
@@ -28,7 +29,9 @@ import { restoreInputsFromSaved } from "../lib/split-restore"; // [v0.9.3] 옛 �
 //   매매의 전체 이력(영속 로그)을 따로 볼 수 있게.
 // [v0.33.0] 자동매매 그룹에 "스크리닝 기준"(screenCriteria) 서브탭 신설 — 오너 요청: 스크리닝
 //   조건들의 활성/비활성·수치를 전부 메뉴얼로 조절하고, 조건별 설명도 펼쳐 볼 수 있게.
-const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "autoControl", "autoScan", "screenCriteria", "autoHistory", "orders", "journal", "settings"] as const;
+// [v0.33.0] 자동매매 그룹에 "매매연구"(research) 서브탭 신설 — 오너 요청: 자동매매기록을 취합해
+//   승률·종목별/시간대별 성적 같은 매매연구를 할 수 있게.
+const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "autoControl", "autoScan", "screenCriteria", "autoHistory", "research", "orders", "journal", "settings"] as const;
 type TabId = (typeof ALL_TABS)[number];
 
 /** [v0.27.0] 상단 1단 — 매매방식·성격으로 묶은 그룹. 그룹 버튼을 누르면 하위 탭(2단)이 펼쳐진다. */
@@ -37,7 +40,7 @@ const TOP_GROUP_LABEL: Record<TopGroupId, string> = { manual: "메뉴얼", auto:
 /** 그룹 순서(드래그로 바뀔 수 있는 기본값) + 그룹별 하위 탭 목록(이 순서로 서브탭이 뜬다). */
 const GROUP_CHILDREN: Record<TopGroupId, TabId[]> = {
   manual: ["calc", "screener", "splits"],
-  auto: ["autoControl", "autoScan", "screenCriteria", "autoHistory"],
+  auto: ["autoControl", "autoScan", "screenCriteria", "autoHistory", "research"],
   status: ["report", "strength", "orders"],
   settings: ["settings"],
 };
@@ -45,7 +48,7 @@ const TOP_GROUPS: TopGroupId[] = ["manual", "auto", "status", "settings"];
 /** 리프 탭 → 소속 그룹(역방향 조회용. journal은 화면에 독립 탭으로 없지만 설정 하위 콘텐츠라 settings로 매핑). */
 const TAB_GROUP: Record<TabId, TopGroupId> = {
   calc: "manual", screener: "manual", splits: "manual",
-  autoControl: "auto", autoScan: "auto", screenCriteria: "auto", autoHistory: "auto",
+  autoControl: "auto", autoScan: "auto", screenCriteria: "auto", autoHistory: "auto", research: "auto",
   report: "status", strength: "status", orders: "status",
   journal: "settings", settings: "settings",
 };
@@ -61,6 +64,7 @@ const TAB_LABEL: Record<TabId, string> = {
   autoScan: "자동 스크리너",
   screenCriteria: "스크리닝 기준",
   autoHistory: "자동매매기록",
+  research: "매매연구",
   orders: "주문 현황",
   journal: "기록",
   settings: "설정",
@@ -952,7 +956,8 @@ function App() {
     // [v0.27.0] 자동매매 현황/스크리닝 결과 탭을 열 때 최신 상태를 바로 받아온다(20초 폴링을 기다리지 않게).
     else if (t === "autoControl" || t === "autoScan") void window.kyletool.autoTradeStatus().then(setAutoStatus);
     // [v0.30.0] 자동매매기록 탭을 열 때 최신 기록을 불러온다.
-    else if (t === "autoHistory") void loadAutoHistory();
+    // [v0.33.0] 매매연구 탭도 같은 기록(autoHistory)을 재료로 통계를 내므로 똑같이 불러온다.
+    else if (t === "autoHistory" || t === "research") void loadAutoHistory();
   };
   // [v0.15.0] 2컬럼이 켜지거나 좌/우 패널 탭이 바뀌면 그 탭들의 데이터를 로드한다(1컬럼과 동일한 지연 로딩).
   useEffect(() => {
@@ -3688,6 +3693,116 @@ ${msg}
                       ))}
                     </tbody>
                   </table>
+                </>
+              );
+            })()}
+          </section>
+        </main>
+      )}
+
+      {/* ===== 🤖 자동매매 → 매매연구 (v0.33.0 신규) =====
+          [오너 지시 2026-09-28] "자동매매기록을 통한 연구탭을 만들어 데이터를 취합하여 매매연구를
+          진행하려고 한다. 기본적으로 나의 계정에 대한 데이터를 토대로." — 자동매매기록(autoHistory,
+          위 탭과 같은 원본 데이터)을 lib/auto-research.ts의 순수 함수 summarizeAutoHistory로
+          집계해 승률·종목별/시간대별 성적을 보여준다(오너 개인 계정 데이터 기준, 기기 로컬 계산 —
+          다른 사용자 데이터는 전혀 안 섞임). */}
+      {paneTab === "research" && (
+        <main className="grid">
+          <section className="card wide">
+            <h2>매매연구 <span className="hint">(내 자동매매기록을 모아 승률·종목별/시간대별 성적 분석)</span></h2>
+            <p className="hint">
+              [자동매매기록] 탭의 데이터를 그대로 모아 계산합니다(새 데이터를 따로 쌓지 않음 — 원본은
+              하나). 오너 개인 계정의 매매만 대상이에요.
+            </p>
+            <div className="form-row">
+              <button className="mini" disabled={autoHistoryBusy} onClick={() => void loadAutoHistory()}>
+                {autoHistoryBusy ? "불러오는 중…" : "↻ 새로고침"}
+              </button>
+            </div>
+
+            {autoHistory.length === 0 ? (
+              <div className="result-empty hint">
+                {autoHistoryBusy ? "불러오는 중…" : "아직 자동매매기록이 없어요. 자동매매를 한 번이라도 켜서 매매가 나가면 여기서 연구할 수 있습니다."}
+              </div>
+            ) : (() => {
+              const r = summarizeAutoHistory(autoHistory);
+              return (
+                <>
+                  {r.headline && (
+                    <p className="hint" style={{ fontSize: 14 }}>💡 <b>{r.headline}</b></p>
+                  )}
+                  {r.overall.n < 10 && (
+                    <p className="hint">
+                      ⚠️ 아직 승/패로 마감된 매매가 {r.overall.n}건뿐이에요. 표본이 10건 미만이면
+                      우연에 좌우되는 폭이 커서, 종목별·시간대별 차이가 커 보여도 아직 "진짜 경향"인지
+                      확신하기 이릅니다 — 참고용으로만 보세요.
+                    </p>
+                  )}
+
+                  <div className="sum-cards">
+                    <div className="sum-card">
+                      <span className="sum-k">승/패 표본</span>
+                      <b className="sum-v">{r.overall.n}건</b>
+                      <span className="sum-sub">수동청산 {r.manualCloses} · 취소/실패/드라이런 {r.cancelledCount}(표본 제외)</span>
+                    </div>
+                    <div className="sum-card">
+                      <span className="sum-k">승률</span>
+                      <b className="sum-v">{r.overall.winRate != null ? `${r.overall.winRate}%` : "—"}</b>
+                      <span className="sum-sub">익절 {r.overall.wins} · 손절 {r.overall.losses}</span>
+                    </div>
+                    <div className={`sum-card ${pnlClass(r.overall.n ? r.overall.totalPnlUsd : null)}`}>
+                      <span className="sum-k">누적 실현손익</span>
+                      <b className="sum-v">{r.overall.n ? `${r.overall.totalPnlUsd >= 0 ? "+" : ""}$${r.overall.totalPnlUsd}` : "—"}</b>
+                      <span className="sum-sub">평균 {r.overall.avgPnlPct != null ? `${r.overall.avgPnlPct >= 0 ? "+" : ""}${r.overall.avgPnlPct}%` : "—"} · 평균 보유 {r.avgHoldMin != null ? `${r.avgHoldMin}분` : "—"}</span>
+                    </div>
+                  </div>
+
+                  {(r.best || r.worst) && (
+                    <p className="hint">
+                      {r.best && <>🏆 최고 매매: <b>{r.best.symbol}</b> {r.best.pnlUsd != null && `+$${r.best.pnlUsd.toFixed(2)}`} ({r.best.enteredAt})</>}
+                      {r.best && r.worst && " · "}
+                      {r.worst && <>💥 최악 매매: <b>{r.worst.symbol}</b> {r.worst.pnlUsd != null && `${r.worst.pnlUsd >= 0 ? "+" : ""}$${r.worst.pnlUsd.toFixed(2)}`} ({r.worst.enteredAt})</>}
+                    </p>
+                  )}
+
+                  <h3>종목별 성적 <span className="hint">(손익 합계 큰 순)</span></h3>
+                  {r.bySymbol.length === 0 ? (
+                    <div className="result-empty hint">아직 승/패로 마감된 매매가 없어요.</div>
+                  ) : (
+                    <table className="result-table screen-table">
+                      <thead><tr><th>종목</th><th>건수</th><th>승률</th><th>누적손익</th><th>평균수익률</th></tr></thead>
+                      <tbody>
+                        {r.bySymbol.map((s) => (
+                          <tr key={s.symbol} className="screen-row">
+                            <td><b>{s.symbol}</b></td>
+                            <td>{s.n}건 ({s.wins}승 {s.losses}패)</td>
+                            <td>{s.winRate != null ? `${s.winRate}%` : "—"}</td>
+                            <td className={pnlClass(s.totalPnlUsd)}>{s.totalPnlUsd >= 0 ? "+" : ""}${s.totalPnlUsd}</td>
+                            <td>{s.avgPnlPct != null ? `${s.avgPnlPct >= 0 ? "+" : ""}${s.avgPnlPct}%` : "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+
+                  <h3>진입 시각대별 성적 <span className="hint">(KST 기준, 시 단위)</span></h3>
+                  {r.byHour.length === 0 ? (
+                    <div className="result-empty hint">아직 승/패로 마감된 매매가 없어요.</div>
+                  ) : (
+                    <table className="result-table screen-table">
+                      <thead><tr><th>시각</th><th>건수</th><th>승률</th><th>누적손익</th></tr></thead>
+                      <tbody>
+                        {r.byHour.map((h) => (
+                          <tr key={h.hour} className="screen-row">
+                            <td>{String(h.hour).padStart(2, "0")}시</td>
+                            <td>{h.n}건 ({h.wins}승 {h.losses}패)</td>
+                            <td>{h.winRate != null ? `${h.winRate}%` : "—"}</td>
+                            <td className={pnlClass(h.totalPnlUsd)}>{h.totalPnlUsd >= 0 ? "+" : ""}${h.totalPnlUsd}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
                 </>
               );
             })()}
