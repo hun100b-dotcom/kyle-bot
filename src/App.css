@@ -675,6 +675,12 @@ ul.hint { padding-left: 18px; }
   padding: 8px 10px; font-size: 16px; background: #0f131a; color: #e6e9ef;
   border: 1px solid var(--border); border-radius: 8px; width: 100%; min-height: 40px;
 }
+/* [v0.33.0] "스크리닝 기준" 탭 — 조건 하나당 카드 하나(토글+수치+코멘트+펼침 상세설명) */
+.crit-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin: 10px 0; background: var(--surface2, var(--panel)); }
+.crit-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.crit-head .radio { margin: 0; }
+.crit-detail { margin-top: 8px; padding: 10px 12px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px dashed var(--border); line-height: 1.6; }
+
 /* [v0.11.0] 아쉽게 탈락(근접) 목록 */
 .near-miss { margin-top: 14px; }
 .miss-table { opacity: 0.92; }

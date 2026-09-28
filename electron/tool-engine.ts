@@ -29,7 +29,7 @@ import { matchFifo, mergeFills, coveredSince, shouldReuseCache, type Fill, type 
 import { buildCycles, analyzeTrades, type TradeCycle, type TradeInsights } from "../lib/trade-analysis"; // [v0.19.0] 매매 사이클 자동추적·분석
 import { toSyncPayload, isSyncPayload, type TradeSyncPayload } from "../lib/trade-sync";
 import { toAutoStateSyncPayload, isAutoStateSyncPayload, mergeAutoHistory, derivePositionsFromHistory, type AutoStateSyncPayload } from "../lib/auto-state-sync"; // [v0.31.0] 자동매매 기록 기기 간 동기화
-import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, WICK_MIN_RATIO, type Candle, type SessionPattern } from "../lib/indicators";
+import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, WICK_MIN_RATIO, DOJI_MAX_AGE_MINUTES, type Candle, type SessionPattern } from "../lib/indicators";
 import {
   getPrice,
   getTrades,
@@ -329,6 +329,22 @@ export function newlyConfirmedSymbols(results: ScreenResult[], previouslyConfirm
   return results.filter((r) => r.status === "confirmed" && !previouslyConfirmed.has(r.symbol)).map((r) => r.symbol);
 }
 
+/**
+ * [v0.33.0 — 스크리닝 기준 탭] 도지 패턴 판정(watch/confirmed/none) + 하드 게이트(가격대·EMA·
+ *   구름) + "다음 봉 확인" 켜짐 여부를 합쳐 최종 상태를 정한다. scanScreener 안에 묻혀 있던
+ *   이 결정 로직을 순수 함수로 빼서, 실제 스캔(네트워크·캔들 계산) 없이도 "토글을 끄면 실제로
+ *   결과가 달라지는지"를 직접 검증할 수 있게 한다 — 오너가 강조한 핵심 포인트(설정이 진짜
+ *   스크리닝에 반영되는지)를 코드로 증명하는 자리.
+ */
+export function applyScreenGates(
+  patStatus: "confirmed" | "watch" | "none",
+  gates: { priceInBand: boolean; emaGateOk: boolean; cloudGateOk: boolean; nextCandleConfirmEnabled: boolean },
+): ScreenStatus {
+  // "다음 봉 확인"을 꺼 두면 도지만 나온 상태(watch)를 곧바로 확정으로 승격한다.
+  const promoted: "confirmed" | "watch" | "none" = !gates.nextCandleConfirmEnabled && patStatus === "watch" ? "confirmed" : patStatus;
+  return gates.priceInBand && gates.emaGateOk && gates.cloudGateOk ? promoted : "none";
+}
+
 // -----------------------------------------------------------------------------
 // [v0.4.0] 삼분할 타점 "기록" — 여러 종목을 동시에 굴리기 위한 저장 기능
 // -----------------------------------------------------------------------------
@@ -543,6 +559,16 @@ export interface ScreenOpts {
   count?: number; //     스캔할 거래량 상위 종목 수(10~200, 기본 60)
   priceMin?: number; //  현재가 하한($, 기본 1)
   priceMax?: number; //  현재가 상한($, 기본 9)
+  // [v0.33.0 — 스크리닝 기준 탭] 전부 선택 항목. 안 주면(메뉴얼 스크리너처럼) 지금까지의
+  //   고정 동작과 완전히 같은 기본값을 쓴다 — 회귀 없음.
+  emaTrendEnabled?: boolean; //  "현재가 > EMA" 켜짐 여부(기본 true)
+  emaPeriod?: number; //          EMA 기간(기본 200)
+  cloudEnabled?: boolean; //      "현재가 > 이치모쿠 구름 상단" 켜짐 여부(기본 true)
+  dojiWickMinRatio?: number; //   도지 최소 꼬리 비율(기본 WICK_MIN_RATIO=0.1)
+  dojiMaxAgeEnabled?: boolean; // 도지 신선도 검사 켜짐 여부(기본 true)
+  dojiMaxAgeMinutes?: number; //  도지 신선도 기준 분(기본 DOJI_MAX_AGE_MINUTES=40)
+  nextCandleConfirmEnabled?: boolean; // 도지 다음 봉 음봉 확인 켜짐 여부(기본 true) — 끄면 도지만으로 확정
+  excludeEtf?: boolean; //        ETF/ETN 등 제외 여부(기본 true)
 }
 
 /** 스캔 최종 결과 */
@@ -736,6 +762,9 @@ export interface AutoTradeStatus {
   /** [v0.29.0] 다음 사이클 예정 시각(ms, epoch) — 화면의 "다음 스캔까지 N분 N초" 카운트다운용.
    *  자동매매가 꺼져 있거나 아직 한 번도 안 돌았으면 null. */
   nextCycleAtMs: number | null;
+  /** [v0.35.0] "스크리닝은 확정인데 왜 안 사졌지?"에 답하는 사유 — 종목코드 → 사람이 읽을 한 줄
+   *  문장. 이번 사이클에 진입을 검토했지만 안(못) 산 종목만 있고, 매 사이클 새로 채워진다. */
+  skipReasons: Record<string, string>;
 }
 
 /**
@@ -856,6 +885,17 @@ export class ToolEngine extends EventEmitter {
   private autoScanPriceMin = 1; //    현재가 하한($)
   private autoScanPriceMax = 9; //    현재가 상한($)
   private autoScanBodyRatio = 0.3; // 도지 몸통비율 상한(0.1~0.8)
+  // [v0.33.0 — 오너 요청 "스크리닝 기준 탭"] 그동안 코드에 고정값으로 박혀 있던 나머지 필터들도
+  //   전부 켜기/끄기 + 수치 조절이 가능하게 연다. 기본값은 지금까지 실제로 쓰이던 고정값과
+  //   동일해서, 아무도 안 건드리면 기존 동작과 완전히 같다(회귀 없음).
+  private autoScanEmaTrendEnabled = true; //  "현재가 > EMA" 추세 필터 켜짐 여부
+  private autoScanEmaPeriod = 200; //         EMA 기간(50~300)
+  private autoScanCloudEnabled = true; //     "현재가 > 이치모쿠 구름 상단" 추세 필터 켜짐 여부
+  private autoScanDojiWickMinRatio = 0.1; //  도지 최소 꼬리 비율(위·아래 각각, 0~0.4)
+  private autoScanDojiMaxAgeEnabled = true; // 도지 신선도(너무 오래된 도지 배제) 켜짐 여부
+  private autoScanDojiMaxAgeMinutes = 40; //  도지가 이보다 오래되면 배제(10~180분)
+  private autoScanNextCandleConfirmEnabled = true; // 도지 다음 봉까지 음봉이어야 "확정" — 끄면 도지만으로 확정
+  private autoScanExcludeEtf = true; //       ETF·ETN 등(일반 주식 아닌 것) 제외 여부
 
   // [v0.26.0] 자동매매 켜짐 자체(스위치)는 절대 저장 안 함 — 앱을 새로 켤 때마다 오너가 직접
   //   다시 켜야 한다(오너 결정, 안전 원칙). 그러나 "지금 감시 중인 포지션"은 다르다 — [v0.30.1
@@ -923,6 +963,10 @@ export class ToolEngine extends EventEmitter {
   /** 마지막으로 클라우드에 올린 시각(표시용) */
   private lastSyncPushAtMs: number | null = null;
   private lastAutoStatePushAtMs: number | null = null; // [v0.31.0] 자동매매 기록 업로드 쓰로틀용
+  private lastGroupPushAtMs: number | null = null; // [v0.35.0] 그룹 공유(capri_group_trades) 업로드 쓰로틀용
+  /** [v0.35.0] "스크리닝은 확정인데 왜 안 사졌지?"를 화면에서 바로 보이게 — 사이클마다 다시 채움
+   *  (지난 사이클 이유가 이번 사이클에도 그대로 남아 헷갈리는 일이 없도록 매번 초기화). */
+  private autoTradeSkipReasons: Record<string, string> = {};
 
   // 환율 캐시(토스 스펙: 1분 갱신이므로 60초 캐시)
   private fxCache: { rate: number; atMs: number; source: "toss" | "manual" } | null = null;
@@ -1014,6 +1058,24 @@ export class ToolEngine extends EventEmitter {
     if (Number.isFinite(aspMax) && aspMax >= 0) this.autoScanPriceMax = aspMax;
     const asbr = Number(process.env.AUTO_SCAN_BODY_RATIO);
     if (Number.isFinite(asbr) && asbr > 0) this.autoScanBodyRatio = asbr;
+    // [v0.33.0] 나머지 스크리닝 조건(켜짐/꺼짐 + 수치) 복원 — 전부 기본값이 true/기존 고정값이라,
+    //   저장된 적 없으면(신규 설치·이전 버전에서 올라온 설정) 지금까지와 동일하게 동작한다.
+    if (process.env.AUTO_SCAN_EMA_ENABLED === "false") this.autoScanEmaTrendEnabled = false;
+    else if (process.env.AUTO_SCAN_EMA_ENABLED === "true") this.autoScanEmaTrendEnabled = true;
+    const asep = Number(process.env.AUTO_SCAN_EMA_PERIOD);
+    if (Number.isFinite(asep) && asep > 0) this.autoScanEmaPeriod = Math.round(asep);
+    if (process.env.AUTO_SCAN_CLOUD_ENABLED === "false") this.autoScanCloudEnabled = false;
+    else if (process.env.AUTO_SCAN_CLOUD_ENABLED === "true") this.autoScanCloudEnabled = true;
+    const aswr = Number(process.env.AUTO_SCAN_DOJI_WICK_MIN_RATIO);
+    if (Number.isFinite(aswr) && aswr >= 0) this.autoScanDojiWickMinRatio = aswr;
+    if (process.env.AUTO_SCAN_DOJI_MAX_AGE_ENABLED === "false") this.autoScanDojiMaxAgeEnabled = false;
+    else if (process.env.AUTO_SCAN_DOJI_MAX_AGE_ENABLED === "true") this.autoScanDojiMaxAgeEnabled = true;
+    const asdma = Number(process.env.AUTO_SCAN_DOJI_MAX_AGE_MINUTES);
+    if (Number.isFinite(asdma) && asdma > 0) this.autoScanDojiMaxAgeMinutes = Math.round(asdma);
+    if (process.env.AUTO_SCAN_NEXT_CANDLE_CONFIRM_ENABLED === "false") this.autoScanNextCandleConfirmEnabled = false;
+    else if (process.env.AUTO_SCAN_NEXT_CANDLE_CONFIRM_ENABLED === "true") this.autoScanNextCandleConfirmEnabled = true;
+    if (process.env.AUTO_SCAN_EXCLUDE_ETF === "false") this.autoScanExcludeEtf = false;
+    else if (process.env.AUTO_SCAN_EXCLUDE_ETF === "true") this.autoScanExcludeEtf = true;
     // [v0.8.1] 저장된 로그인 세션 복원(리프레시 토큰만). access token 은 필요 시 갱신한다.
     if (process.env.CAPRI_AUTH_REFRESH) this.authRefreshToken = process.env.CAPRI_AUTH_REFRESH;
     if (process.env.CAPRI_AUTH_EMAIL) this.authEmail = process.env.CAPRI_AUTH_EMAIL;
@@ -1048,6 +1110,15 @@ export class ToolEngine extends EventEmitter {
       autoScanPriceMin: this.autoScanPriceMin,
       autoScanPriceMax: this.autoScanPriceMax,
       autoScanBodyRatio: this.autoScanBodyRatio,
+      // [v0.33.0] 스크리닝 기준 탭 — 나머지 조건도 전부 켜짐/꺼짐 + 수치 노출
+      autoScanEmaTrendEnabled: this.autoScanEmaTrendEnabled,
+      autoScanEmaPeriod: this.autoScanEmaPeriod,
+      autoScanCloudEnabled: this.autoScanCloudEnabled,
+      autoScanDojiWickMinRatio: this.autoScanDojiWickMinRatio,
+      autoScanDojiMaxAgeEnabled: this.autoScanDojiMaxAgeEnabled,
+      autoScanDojiMaxAgeMinutes: this.autoScanDojiMaxAgeMinutes,
+      autoScanNextCandleConfirmEnabled: this.autoScanNextCandleConfirmEnabled,
+      autoScanExcludeEtf: this.autoScanExcludeEtf,
     };
   }
 
@@ -1093,7 +1164,21 @@ export class ToolEngine extends EventEmitter {
    *   조건을 따로 정해 두고 화면(메뉴얼 스크리너)의 즉흥적인 값 변경에 영향받지 않게 하기 위함.
    *   0 이하·비정상 값은 무시(이전값 유지). bodyRatio는 0.1~0.8로 보정.
    */
-  saveAutoScanSettings(input: { count?: number; priceMin?: number; priceMax?: number; bodyRatio?: number }) {
+  saveAutoScanSettings(input: {
+    count?: number;
+    priceMin?: number;
+    priceMax?: number;
+    bodyRatio?: number;
+    // [v0.33.0] 스크리닝 기준 탭에서 새로 추가된 항목들 — 전부 선택(안 보내면 이전값 유지).
+    emaTrendEnabled?: boolean;
+    emaPeriod?: number;
+    cloudEnabled?: boolean;
+    dojiWickMinRatio?: number;
+    dojiMaxAgeEnabled?: boolean;
+    dojiMaxAgeMinutes?: number;
+    nextCandleConfirmEnabled?: boolean;
+    excludeEtf?: boolean;
+  }) {
     if (typeof input.count === "number" && Number.isFinite(input.count) && input.count > 0) {
       this.autoScanCount = Math.round(Math.min(200, Math.max(10, input.count)));
     }
@@ -1106,13 +1191,51 @@ export class ToolEngine extends EventEmitter {
     if (typeof input.bodyRatio === "number" && Number.isFinite(input.bodyRatio) && input.bodyRatio > 0) {
       this.autoScanBodyRatio = Math.min(0.8, Math.max(0.1, input.bodyRatio));
     }
+    if (typeof input.emaTrendEnabled === "boolean") this.autoScanEmaTrendEnabled = input.emaTrendEnabled;
+    if (typeof input.emaPeriod === "number" && Number.isFinite(input.emaPeriod) && input.emaPeriod > 0) {
+      this.autoScanEmaPeriod = Math.round(Math.min(300, Math.max(50, input.emaPeriod)));
+    }
+    if (typeof input.cloudEnabled === "boolean") this.autoScanCloudEnabled = input.cloudEnabled;
+    if (typeof input.dojiWickMinRatio === "number" && Number.isFinite(input.dojiWickMinRatio) && input.dojiWickMinRatio >= 0) {
+      this.autoScanDojiWickMinRatio = Math.min(0.4, Math.max(0, input.dojiWickMinRatio));
+    }
+    if (typeof input.dojiMaxAgeEnabled === "boolean") this.autoScanDojiMaxAgeEnabled = input.dojiMaxAgeEnabled;
+    if (typeof input.dojiMaxAgeMinutes === "number" && Number.isFinite(input.dojiMaxAgeMinutes) && input.dojiMaxAgeMinutes > 0) {
+      this.autoScanDojiMaxAgeMinutes = Math.round(Math.min(180, Math.max(10, input.dojiMaxAgeMinutes)));
+    }
+    if (typeof input.nextCandleConfirmEnabled === "boolean") this.autoScanNextCandleConfirmEnabled = input.nextCandleConfirmEnabled;
+    if (typeof input.excludeEtf === "boolean") this.autoScanExcludeEtf = input.excludeEtf;
     this.persistEnv();
     this.addJournal({
       kind: "info",
       symbol: "-",
-      summary: `자동매매 스크리너 조건 저장 — 종목수 ${this.autoScanCount} · 가격 $${this.autoScanPriceMin}~$${this.autoScanPriceMax} · 도지 몸통상한 ${Math.round(this.autoScanBodyRatio * 100)}%`,
+      summary:
+        `자동매매 스크리너 조건 저장 — 종목수 ${this.autoScanCount} · 가격 $${this.autoScanPriceMin}~$${this.autoScanPriceMax} · ` +
+        `도지 몸통상한 ${Math.round(this.autoScanBodyRatio * 100)}% · EMA${this.autoScanEmaPeriod} ${this.autoScanEmaTrendEnabled ? "ON" : "OFF"} · ` +
+        `구름 ${this.autoScanCloudEnabled ? "ON" : "OFF"} · 꼬리비율 ${Math.round(this.autoScanDojiWickMinRatio * 100)}% · ` +
+        `신선도 ${this.autoScanDojiMaxAgeEnabled ? `${this.autoScanDojiMaxAgeMinutes}분` : "OFF"} · ` +
+        `다음봉확인 ${this.autoScanNextCandleConfirmEnabled ? "ON" : "OFF"} · ETF제외 ${this.autoScanExcludeEtf ? "ON" : "OFF"}`,
     });
     return this.getSettings();
+  }
+
+  /** [v0.33.0] 지금 저장된 "스크리닝 기준" 전부를 scanScreener에 넘길 옵션 객체로 묶는다 —
+   *  autoScanNow·autoTradeTick 두 호출부가 항목을 하나씩 나열하다 서로 어긋나는 사고를 막는다. */
+  private buildAutoScanOpts(): ScreenOpts {
+    return {
+      count: this.autoScanCount,
+      priceMin: this.autoScanPriceMin,
+      priceMax: this.autoScanPriceMax,
+      bodyRatio: this.autoScanBodyRatio,
+      emaTrendEnabled: this.autoScanEmaTrendEnabled,
+      emaPeriod: this.autoScanEmaPeriod,
+      cloudEnabled: this.autoScanCloudEnabled,
+      dojiWickMinRatio: this.autoScanDojiWickMinRatio,
+      dojiMaxAgeEnabled: this.autoScanDojiMaxAgeEnabled,
+      dojiMaxAgeMinutes: this.autoScanDojiMaxAgeMinutes,
+      nextCandleConfirmEnabled: this.autoScanNextCandleConfirmEnabled,
+      excludeEtf: this.autoScanExcludeEtf,
+    };
   }
 
   /**
@@ -1123,12 +1246,7 @@ export class ToolEngine extends EventEmitter {
   async autoScanNow(): Promise<AutoTradeStatus> {
     try {
       await this.prepareBackend();
-      const run = await this.scanScreener({
-        count: this.autoScanCount,
-        priceMin: this.autoScanPriceMin,
-        priceMax: this.autoScanPriceMax,
-        bodyRatio: this.autoScanBodyRatio,
-      });
+      const run = await this.scanScreener(this.buildAutoScanOpts());
       this.autoTradeLastScan = run;
       const cand = run.results.filter((r) => r.status === "confirmed" || r.status === "watch").length;
       this.addJournal({ kind: "info", symbol: "-", summary: `🤖 자동매매 스크리너 수동 새로고침 — 후보 ${cand}개` });
@@ -1177,6 +1295,15 @@ export class ToolEngine extends EventEmitter {
       `AUTO_SCAN_PRICE_MIN=${this.autoScanPriceMin}`,
       `AUTO_SCAN_PRICE_MAX=${this.autoScanPriceMax}`,
       `AUTO_SCAN_BODY_RATIO=${this.autoScanBodyRatio}`,
+      // --- [v0.33.0] 스크리닝 기준 탭 — 나머지 조건 ---
+      `AUTO_SCAN_EMA_ENABLED=${this.autoScanEmaTrendEnabled}`,
+      `AUTO_SCAN_EMA_PERIOD=${this.autoScanEmaPeriod}`,
+      `AUTO_SCAN_CLOUD_ENABLED=${this.autoScanCloudEnabled}`,
+      `AUTO_SCAN_DOJI_WICK_MIN_RATIO=${this.autoScanDojiWickMinRatio}`,
+      `AUTO_SCAN_DOJI_MAX_AGE_ENABLED=${this.autoScanDojiMaxAgeEnabled}`,
+      `AUTO_SCAN_DOJI_MAX_AGE_MINUTES=${this.autoScanDojiMaxAgeMinutes}`,
+      `AUTO_SCAN_NEXT_CANDLE_CONFIRM_ENABLED=${this.autoScanNextCandleConfirmEnabled}`,
+      `AUTO_SCAN_EXCLUDE_ETF=${this.autoScanExcludeEtf}`,
       // --- [v0.8.1] 로그인 세션(리프레시 토큰만 로컬 저장 → 재시작해도 로그인 유지). 비밀번호·마스터 비번은 저장 안 함. ---
       `CAPRI_AUTH_REFRESH=${this.authRefreshToken ?? ""}`,
       `CAPRI_AUTH_EMAIL=${this.authEmail ?? ""}`,
@@ -1384,6 +1511,12 @@ export class ToolEngine extends EventEmitter {
       if (pulledTrades?.ok && (pulledTrades.count ?? 0) > 0) extra += ` 매매 이력 ${pulledTrades.count}건도 함께 받아왔습니다.`;
       const pulledAutoState = await this.syncPullAutoState().catch(() => null);
       if (pulledAutoState?.ok && (pulledAutoState.count ?? 0) > 0) extra += ` 자동매매 기록도 함께 받아왔습니다.`;
+      // [v0.35.0] 로그인 시점까지 쌓여 있던 기존 자동매매기록도 그룹 공유 표에 곧바로 올려 둔다
+      //   (다음 매매가 나가야만 올라가면, 새로 로그인한 회원의 과거 기록이 그룹 연구탭에
+      //   한참 안 보일 수 있음 — 로그인 직후 1회는 즉시 반영).
+      void this.syncPushGroupTrades().catch(() => {
+        /* 조용히 무시 */
+      });
 
       return { ok: true, message: `로그인되었습니다(${this.authEmail}).${extra}` };
     } catch (e) {
@@ -3005,6 +3138,15 @@ export class ToolEngine extends EventEmitter {
         /* 업로드 실패는 조용히 넘어간다 */
       });
     }
+    // [v0.35.0] 그룹 공유(평문, capri_group_trades)도 같은 타이밍·쓰로틀로 함께 올린다 —
+    //   로그인만 돼 있으면 되고(비밀번호는 필요 없음 — 암호화하지 않으므로), 실패해도
+    //   조용히 무시(개인 기록은 이미 로컬+개인 클라우드에 안전하게 저장돼 있다).
+    const groupLongEnough = Date.now() - (this.lastGroupPushAtMs ?? 0) > 15_000;
+    if (groupLongEnough && this.authEmail) {
+      void this.syncPushGroupTrades().catch(() => {
+        /* 업로드 실패는 조용히 넘어간다 */
+      });
+    }
   }
 
   /** 새 진입이 접수될 때 한 줄 추가("watching" 상태). */
@@ -3248,6 +3390,60 @@ export class ToolEngine extends EventEmitter {
       };
     } catch (e) {
       return { ok: false, message: `받기 실패: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // [v0.35.0] 그룹(공동개발자·동업자) 전체 연구용 — capri_group_trades에 "평문"으로 올린다.
+  //   [오너 지시 2026-09-28] 카프리는 비공개 그룹(가입 자체가 모든 사항에 대한 동의 전제)이고
+  //   전원이 소유주(고객 없음)라, 위 syncPushAutoState/syncPullAutoState(본인만 보는 암호화
+  //   동기화)와는 완전히 별도로, "그룹 전원이 실명으로 함께 보는" 표를 하나 더 둔다.
+  //   비식별화하지 않는다 — 오너 지시 그대로 이메일을 그대로 올린다.
+  // ---------------------------------------------------------------------------
+
+  /** syncPushGroupTrades — 내 자동매매기록 전체를 평문 그대로 그룹 공유 표에 올린다(암호화 없음). */
+  async syncPushGroupTrades(): Promise<{ ok: boolean; message: string; count?: number }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요." };
+    if (!this.authEmail || !this.authUserId) return { ok: false, message: "로그인 정보가 없습니다." };
+    if (this.autoTradeHistory.length === 0) return { ok: false, message: "올릴 자동매매 기록이 없습니다." };
+
+    try {
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_trades?on_conflict=user_id`, {
+        method: "POST",
+        headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({
+          user_id: this.authUserId,
+          member_email: this.authEmail,
+          history: this.autoTradeHistory,
+          updated_at: new Date().toISOString(),
+        }),
+      });
+      if (!res.ok) return { ok: false, message: `그룹 공유 저장 실패(HTTP ${res.status}).` };
+      this.lastGroupPushAtMs = Date.now();
+      return { ok: true, message: `그룹에 자동매매 기록 ${this.autoTradeHistory.length}건을 공유했습니다.`, count: this.autoTradeHistory.length };
+    } catch (e) {
+      return { ok: false, message: `공유 실패: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+
+  /** syncPullGroupHistory — 그룹(가입 허용목록) 전원의 자동매매기록을 실명(이메일)째로 받아온다. */
+  async syncPullGroupHistory(): Promise<{ ok: boolean; message: string; members: { email: string; history: AutoTradeHistoryEntry[] }[] }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요.", members: [] };
+
+    try {
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_trades?select=member_email,history`, {
+        headers: this.authRestHeaders(token),
+      });
+      if (!res.ok) return { ok: false, message: `그룹 기록 조회 실패(HTTP ${res.status}).`, members: [] };
+      const rows = (await res.json()) as Array<{ member_email: string; history: unknown }>;
+      const members = rows
+        .filter((r) => Array.isArray(r.history))
+        .map((r) => ({ email: r.member_email, history: r.history as AutoTradeHistoryEntry[] }));
+      return { ok: true, message: `그룹 회원 ${members.length}명의 자동매매기록을 받았습니다.`, members };
+    } catch (e) {
+      return { ok: false, message: `받기 실패: ${e instanceof Error ? e.message : String(e)}`, members: [] };
     }
   }
 
@@ -3722,6 +3918,16 @@ export class ToolEngine extends EventEmitter {
     let priceMin = Math.max(0, opts.priceMin ?? 1);
     let priceMax = Math.max(0, opts.priceMax ?? 9);
     if (priceMin > priceMax) [priceMin, priceMax] = [priceMax, priceMin];
+    // [v0.33.0 — 스크리닝 기준 탭] 나머지 조건도 전부 안전 보정. 아무것도 안 주면(메뉴얼
+    //   스크리너처럼) 지금까지의 고정 동작과 완전히 같은 기본값이라 회귀가 없다.
+    const emaTrendEnabled = opts.emaTrendEnabled ?? true;
+    const emaPeriod = Math.min(300, Math.max(50, Math.round(opts.emaPeriod ?? 200)));
+    const cloudEnabled = opts.cloudEnabled ?? true;
+    const dojiWickMinRatio = Math.min(0.4, Math.max(0, opts.dojiWickMinRatio ?? WICK_MIN_RATIO));
+    const dojiMaxAgeEnabled = opts.dojiMaxAgeEnabled ?? true;
+    const dojiMaxAgeMinutes = Math.min(180, Math.max(10, Math.round(opts.dojiMaxAgeMinutes ?? DOJI_MAX_AGE_MINUTES)));
+    const nextCandleConfirmEnabled = opts.nextCandleConfirmEnabled ?? true;
+    const excludeEtf = opts.excludeEtf ?? true;
     try {
       await this.prepareBackend();
 
@@ -3732,20 +3938,23 @@ export class ToolEngine extends EventEmitter {
       // 1-b) [v0.6.3] ETF·레버리지·인버스 배제 — 종목 메타(securityType)를 한 번에 조회해 걸러낸다.
       //   securityType이 "STOCK"인 일반 주식만 남긴다(ETF/ETN 등은 전부 제외). 메타 조회가 실패하면
       //   (안전하게) 전부 통과시킨다 — 필터 때문에 스캔 자체가 막히지 않도록.
+      //   [v0.33.0] excludeEtf=false면 이 단계 자체를 건너뛴다(오너가 명시적으로 끈 경우).
       let rankings = ranked;
       let excludedEtf = 0;
-      try {
-        const metas = await getStocks(ranked.map((r) => r.symbol));
-        const typeBySym = new Map(metas.map((m) => [m.symbol, m]));
-        rankings = ranked.filter((r) => {
-          const m = typeBySym.get(r.symbol);
-          if (!m) return true; // 메타 없으면 통과(정보 부족을 이유로 배제하지 않음)
-          const isStock = m.securityType === "STOCK"; // ETF/ETN 등은 제외
-          if (!isStock) excludedEtf++;
-          return isStock;
-        });
-      } catch {
-        /* 메타 조회 실패 → 필터 생략(스캔은 계속) */
+      if (excludeEtf) {
+        try {
+          const metas = await getStocks(ranked.map((r) => r.symbol));
+          const typeBySym = new Map(metas.map((m) => [m.symbol, m]));
+          rankings = ranked.filter((r) => {
+            const m = typeBySym.get(r.symbol);
+            if (!m) return true; // 메타 없으면 통과(정보 부족을 이유로 배제하지 않음)
+            const isStock = m.securityType === "STOCK"; // ETF/ETN 등은 제외
+            if (!isStock) excludedEtf++;
+            return isStock;
+          });
+        } catch {
+          /* 메타 조회 실패 → 필터 생략(스캔은 계속) */
+        }
       }
       const total = rankings.length;
 
@@ -3783,16 +3992,28 @@ export class ToolEngine extends EventEmitter {
 
           const price = Number.isFinite(rk.lastPrice) ? rk.lastPrice : raw5m[raw5m.length - 1].close;
           const priceInBand = inPriceBand(price, priceMin, priceMax); // [v0.11.0] 사용자 지정 가격대
-          const ema200 = ema(closes, 200);
+          const ema200 = ema(closes, emaPeriod); // [v0.33.0] 기간(기본 200) 조절 가능
           const cloud = ichimoku(candles5m);
           // [v0.25.0] now.toMillis()를 넘겨 "너무 오래된 도지"(기본 20분 초과)는 scanSessionPattern이
           //   스스로 status를 none으로 강제하게 한다(실 매매엔 불확실한 과거 데이터라는 오너 지적 반영).
-          const pat = scanSessionPattern(candles5m, sessionStartMs, br, WICK_MIN_RATIO, now.toMillis()); // HA 캔들로 패턴 판정
+          // [v0.33.0] 신선도 검사를 꺼 두면(dojiMaxAgeEnabled=false) 한도를 사실상 무한대로 줘서
+          //   "너무 오래됐다"는 판정 자체가 절대 나오지 않게 한다(indicators.ts 쪽 로직은 안 건드림).
+          const pat = scanSessionPattern(
+            candles5m,
+            sessionStartMs,
+            br,
+            dojiWickMinRatio,
+            now.toMillis(),
+            dojiMaxAgeEnabled ? dojiMaxAgeMinutes : Number.POSITIVE_INFINITY,
+          ); // HA 캔들로 패턴 판정
 
+          // 화면에 보여줄 값(aboveEma/aboveCloud)은 실제 비교 결과 그대로 — 조건을 꺼도 "지표상
+          // 실제로 위인지"는 정직하게 보여주고, 게이트로 쓸지만 별도로 결정한다.
           const aboveEma = ema200 != null && price > ema200;
           const aboveCloud = cloud != null && price > cloud.cloudTop;
-          // 하드 게이트(가격대·EMA·구름)를 못 넘으면 패턴이 있어도 후보 아님 → none
-          const status: ScreenStatus = priceInBand && aboveEma && aboveCloud ? pat.status : "none";
+          const emaGateOk = !emaTrendEnabled || aboveEma;
+          const cloudGateOk = !cloudEnabled || aboveCloud;
+          const status = applyScreenGates(pat.status, { priceInBand, emaGateOk, cloudGateOk, nextCandleConfirmEnabled });
           const proximityPct = pat.sessionHigh && Number.isFinite(price) ? ((price - pat.sessionHigh) / pat.sessionHigh) * 100 : null;
 
           results.push({
@@ -4036,6 +4257,7 @@ export class ToolEngine extends EventEmitter {
       lastScan: this.autoTradeLastScan,
       nextCycleAtMs:
         this.autoTradeEnabled && this.autoTradeLastCycleAtMs != null ? this.autoTradeLastCycleAtMs + ToolEngine.AUTO_TRADE_INTERVAL_MS : null,
+      skipReasons: { ...this.autoTradeSkipReasons },
     };
   }
 
@@ -4324,14 +4546,8 @@ export class ToolEngine extends EventEmitter {
 
       let run: ScreenRun;
       try {
-        // [v0.28.0] 오너가 "자동매매 현황" 탭에서 조절한 스크리너 조건(종목수·가격대·도지
-        //   몸통비율)을 그대로 쓴다 — 예전엔 항상 공장값({})만 썼다.
-        run = await this.scanScreener({
-          count: this.autoScanCount,
-          priceMin: this.autoScanPriceMin,
-          priceMax: this.autoScanPriceMax,
-          bodyRatio: this.autoScanBodyRatio,
-        }); // ③빈자리를 "현재 스크리닝으로 탐색된 다른 종목"으로 채움
+        // [v0.28.0→v0.33.0] 오너가 "스크리닝 기준" 탭에서 조절한 조건을 그대로 쓴다(전부).
+        run = await this.scanScreener(this.buildAutoScanOpts()); // ③빈자리를 "현재 스크리닝으로 탐색된 다른 종목"으로 채움
         this.autoTradeLastScan = run; // [v0.27.0] 버리지 않고 보관 → "스크리닝 결과" 탭이 그대로 보여줌
       } catch (e) {
         this.addJournal({ kind: "info", symbol: "-", summary: `🤖 자동매매: 이번 사이클 스크리닝 실패 — ${String(e).replace(/^Error:\s*/, "")}` });
@@ -4365,21 +4581,33 @@ export class ToolEngine extends EventEmitter {
       // 나누지 않는다(이전 버전은 나눠서 저가주에서 1주만 나오는 버그가 있었음).
       const perSlotPct = this.autoTradeMaxInvestPct;
 
+      // [v0.35.0] 이번 사이클에 실제로 검토한 후보만 채운다 — 지난 사이클 사유가 남아 헷갈리지 않게.
+      this.autoTradeSkipReasons = {};
       let placed = 0;
       for (const cand of candidates) {
-        if (placed >= freeSlots) break;
-        if (cand.ema200 == null || cand.prevClose == null) continue; // 1분할 계산 불가(데이터 부족)
+        if (placed >= freeSlots) {
+          this.autoTradeSkipReasons[cand.symbol] = `이번 사이클엔 빈 자리(${freeSlots}개)를 다른 후보가 먼저 채웠습니다 — 다음 사이클에 다시 시도됩니다.`;
+          continue;
+        }
+        if (cand.ema200 == null || cand.prevClose == null) {
+          this.autoTradeSkipReasons[cand.symbol] = "가격 데이터 부족(EMA200 또는 전봉종가 확인 안 됨) — 다음 사이클에 다시 시도됩니다.";
+          continue; // 1분할 계산 불가(데이터 부족)
+        }
 
         let level1: SplitOrder;
         try {
           // [오너 지시] 삼분할 매매기법의 "1분할" 타점만 쓴다 — 가장 얕게 눌렸을 때만 자동 진입.
           level1 = calcSplit3(cand.prevClose, cand.ema200, this.defaultTpPct, this.defaultSlPct).splits[0];
         } catch {
+          this.autoTradeSkipReasons[cand.symbol] = "1분할 진입 조건 불성립(전봉종가가 EMA200 이하) — 삼분할 매매기법상 지금은 진입 대상이 아닙니다.";
           continue; // 진입 필터 불성립(전봉종가<=EMA200) — 이 종목은 건너뜀
         }
 
         const usedKey = `${cand.symbol}@${level1.entry}`;
-        if (this.autoTradeUsedKeys.has(usedKey)) continue; // [오너 지시] 동일종목 동일타점 재진입 방지
+        if (this.autoTradeUsedKeys.has(usedKey)) {
+          this.autoTradeSkipReasons[cand.symbol] = `이미 이 타점($${level1.entry})으로 진입을 완료한 적이 있습니다(동일종목 동일타점 재진입 방지).`;
+          continue; // [오너 지시] 동일종목 동일타점 재진입 방지
+        }
 
         const qty = computeSeedQty(seedUsd, perSlotPct, level1.entry, commissionRate) ?? 0;
         const gate = canAutoEnter({
@@ -4396,12 +4624,17 @@ export class ToolEngine extends EventEmitter {
           candidateQty: qty,
         });
         if (!gate.allow) {
+          this.autoTradeSkipReasons[cand.symbol] = gate.reason ?? "안전 게이트에서 거부됨.";
           // 종목 수·손실 한도처럼 "이 사이클 전체"에 적용되는 사유면 더 시도할 필요가 없다.
           if (gate.reason?.includes("종목 수") || gate.reason?.includes("손실")) break;
           continue; // 그 외(예: 예산으로 1주도 못 사는 경우)는 이 종목만 건너뛰고 다음 후보 시도
         }
 
-        this.autoTradeUsedKeys.add(usedKey);
+        // [v0.35.0 버그 수정] 예전엔 여기서(시도 직전에) usedKeys에 등록했다 — 그러면 진입이
+        //   일시적 오류(네트워크 순단 등)로 실패해도 "이미 시도했다"고 영구 기록돼, 같은 타점이
+        //   다음 사이클에도 계속 나타나는데 조용히 skip만 되고 다시는 재시도되지 않는 버그가
+        //   있었다("확정인데 왜 계속 미진입이지?"의 실제 원인 중 하나). 이제는 아래 placeBracketCore가
+        //   "성공"한 뒤에만(드라이런 포함) 기록해, 실패하면 다음 사이클에 자동으로 재시도된다.
         const posDraft: AutoPosition = {
           symbol: cand.symbol,
           entry: level1.entry,
@@ -4442,6 +4675,9 @@ export class ToolEngine extends EventEmitter {
               priceAtOrder: null, // placeBracketCore가 실제 현재가로 덮어씀(saveRationale 참고)
             },
           });
+          // [v0.35.0] 주문 접수가 여기까지 성공(예외 없이)해야만 "이미 시도했다"로 기록한다 —
+          //   실패는 이 try 블록을 못 벗어나고 catch로 가므로 절대 여기 도달하지 않는다.
+          this.autoTradeUsedKeys.add(usedKey);
           this.addJournal({
             kind: "info",
             symbol: cand.symbol,
@@ -4474,6 +4710,8 @@ export class ToolEngine extends EventEmitter {
           this.autoTradePositions = this.autoTradePositions.filter((p) => p !== posDraft);
           this.saveAutoPositions();
           const errMsg = String(e).replace(/^Error:\s*/, "");
+          // [v0.35.0] usedKeys에는 안 올렸으므로(위 성공 지점에서만 올림) 다음 사이클에 자동 재시도된다.
+          this.autoTradeSkipReasons[cand.symbol] = `방금 진입을 시도했지만 실패했습니다(${errMsg}) — 다음 사이클에 다시 시도됩니다.`;
           this.addJournal({
             kind: "info", symbol: cand.symbol, summary: `🤖 자동매매 진입 실패 ${cand.symbol}: ${errMsg}`,
             notify: true, notifyTitle: `⚠️ 진입 실패: ${cand.symbol}`,

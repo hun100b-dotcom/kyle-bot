@@ -23,7 +23,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  ToolEngine, computeSeedQty, newlyConfirmedSymbols,
+  ToolEngine, computeSeedQty, newlyConfirmedSymbols, applyScreenGates,
   type AutoPosition, type JournalEntry, type NotifyEvent, type ScreenResult,
 } from "../electron/tool-engine";
 
@@ -59,6 +59,8 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
       expect(s.maxInvestPct).toBe(30);
       // [v0.27.0] 스크리닝 결과 탭이 쓰는 필드 — 아직 한 번도 스캔 안 했으면 null이어야 한다.
       expect(s.lastScan).toBeNull();
+      // [v0.35.0] "왜 미진입인지" 사유 맵 — 아직 한 사이클도 안 돌았으면 빈 객체.
+      expect(s.skipReasons).toEqual({});
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -529,5 +531,130 @@ describe("[v0.32.0] 알림 — 스크리닝 관찰 확정 + 주문 이벤트", (
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("[v0.33.0] 스크리닝 기준 탭 — 조건별 켜짐/꺼짐 + 수치가 실제 저장·복원된다", () => {
+  it("공장값은 지금까지의 고정 동작과 완전히 같다(EMA200 ON·구름 ON·꼬리비율 10%·신선도 40분 ON·다음봉확인 ON·ETF제외 ON)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const s = eng.getSettings();
+      expect(s.autoScanEmaTrendEnabled).toBe(true);
+      expect(s.autoScanEmaPeriod).toBe(200);
+      expect(s.autoScanCloudEnabled).toBe(true);
+      expect(s.autoScanDojiWickMinRatio).toBe(0.1);
+      expect(s.autoScanDojiMaxAgeEnabled).toBe(true);
+      expect(s.autoScanDojiMaxAgeMinutes).toBe(40);
+      expect(s.autoScanNextCandleConfirmEnabled).toBe(true);
+      expect(s.autoScanExcludeEtf).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("전부 바꿔 저장하면 재시작(새 엔진 인스턴스)해도 그대로 유지된다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const saved = eng.saveAutoScanSettings({
+        emaTrendEnabled: false,
+        emaPeriod: 120,
+        cloudEnabled: false,
+        dojiWickMinRatio: 0.2,
+        dojiMaxAgeEnabled: false,
+        dojiMaxAgeMinutes: 90,
+        nextCandleConfirmEnabled: false,
+        excludeEtf: false,
+      });
+      expect(saved.autoScanEmaTrendEnabled).toBe(false);
+      expect(saved.autoScanEmaPeriod).toBe(120);
+      expect(saved.autoScanCloudEnabled).toBe(false);
+      expect(saved.autoScanDojiWickMinRatio).toBe(0.2);
+      expect(saved.autoScanDojiMaxAgeEnabled).toBe(false);
+      expect(saved.autoScanDojiMaxAgeMinutes).toBe(90);
+      expect(saved.autoScanNextCandleConfirmEnabled).toBe(false);
+      expect(saved.autoScanExcludeEtf).toBe(false);
+
+      const eng2 = new ToolEngine(dir, { forceMock: true });
+      const s2 = eng2.getSettings();
+      expect(s2.autoScanEmaTrendEnabled).toBe(false);
+      expect(s2.autoScanEmaPeriod).toBe(120);
+      expect(s2.autoScanCloudEnabled).toBe(false);
+      expect(s2.autoScanDojiWickMinRatio).toBe(0.2);
+      expect(s2.autoScanDojiMaxAgeEnabled).toBe(false);
+      expect(s2.autoScanDojiMaxAgeMinutes).toBe(90);
+      expect(s2.autoScanNextCandleConfirmEnabled).toBe(false);
+      expect(s2.autoScanExcludeEtf).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("EMA 기간은 50~300으로, 도지 꼬리비율은 0~0.4로, 신선도는 10~180분으로 안전 보정된다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      expect(eng.saveAutoScanSettings({ emaPeriod: 10 }).autoScanEmaPeriod).toBe(50);
+      expect(eng.saveAutoScanSettings({ emaPeriod: 500 }).autoScanEmaPeriod).toBe(300);
+      // 도지 꼬리비율: 범위 밖 값(0.9)은 상한(0.4)으로 "보정"되지만, 음수(-1)는 애초에 말이
+      // 안 되는 입력이라 다른 항목(bodyRatio 등)과 같은 규칙으로 통째로 "거부"되어 직전 값이
+      // 그대로 유지된다(보정이 아니라 거부) — 그래서 먼저 0.15로 기준값을 확실히 잡아둔 뒤,
+      // -1을 보내도 그 0.15가 안 바뀌는지를 검증한다(테스트 시작 시 기본값 0.1에 기대는 대신).
+      expect(eng.saveAutoScanSettings({ dojiWickMinRatio: 0.15 }).autoScanDojiWickMinRatio).toBe(0.15);
+      expect(eng.saveAutoScanSettings({ dojiWickMinRatio: -1 }).autoScanDojiWickMinRatio).toBe(0.15);
+      expect(eng.saveAutoScanSettings({ dojiWickMinRatio: 0.9 }).autoScanDojiWickMinRatio).toBe(0.4);
+      expect(eng.saveAutoScanSettings({ dojiMaxAgeMinutes: 1 }).autoScanDojiMaxAgeMinutes).toBe(10);
+      expect(eng.saveAutoScanSettings({ dojiMaxAgeMinutes: 999 }).autoScanDojiMaxAgeMinutes).toBe(180);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("buildAutoScanOpts는 저장된 8개 항목 전부를 scanScreener 옵션으로 그대로 넘긴다(가장 중요한 연동 지점)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.saveAutoScanSettings({
+        count: 45, priceMin: 3, priceMax: 20, bodyRatio: 0.5,
+        emaTrendEnabled: false, emaPeriod: 150, cloudEnabled: false,
+        dojiWickMinRatio: 0.15, dojiMaxAgeEnabled: false, dojiMaxAgeMinutes: 77,
+        nextCandleConfirmEnabled: false, excludeEtf: false,
+      });
+      const opts = (eng as unknown as { buildAutoScanOpts: () => Record<string, unknown> }).buildAutoScanOpts();
+      expect(opts).toEqual({
+        count: 45, priceMin: 3, priceMax: 20, bodyRatio: 0.5,
+        emaTrendEnabled: false, emaPeriod: 150, cloudEnabled: false,
+        dojiWickMinRatio: 0.15, dojiMaxAgeEnabled: false, dojiMaxAgeMinutes: 77,
+        nextCandleConfirmEnabled: false, excludeEtf: false,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("[v0.33.0] applyScreenGates — 토글이 실제 최종 판정에 반영되는지(순수 함수)", () => {
+  it("모든 게이트가 열려 있으면 도지 패턴 그대로 통과한다", () => {
+    expect(applyScreenGates("confirmed", { priceInBand: true, emaGateOk: true, cloudGateOk: true, nextCandleConfirmEnabled: true })).toBe("confirmed");
+    expect(applyScreenGates("watch", { priceInBand: true, emaGateOk: true, cloudGateOk: true, nextCandleConfirmEnabled: true })).toBe("watch");
+    expect(applyScreenGates("none", { priceInBand: true, emaGateOk: true, cloudGateOk: true, nextCandleConfirmEnabled: true })).toBe("none");
+  });
+
+  it("가격대·EMA·구름 중 하나라도 게이트가 막히면 패턴과 무관하게 none이다", () => {
+    expect(applyScreenGates("confirmed", { priceInBand: false, emaGateOk: true, cloudGateOk: true, nextCandleConfirmEnabled: true })).toBe("none");
+    expect(applyScreenGates("confirmed", { priceInBand: true, emaGateOk: false, cloudGateOk: true, nextCandleConfirmEnabled: true })).toBe("none");
+    expect(applyScreenGates("confirmed", { priceInBand: true, emaGateOk: true, cloudGateOk: false, nextCandleConfirmEnabled: true })).toBe("none");
+  });
+
+  it("다음 봉 확인을 꺼 두면(nextCandleConfirmEnabled=false) 'watch'가 곧바로 'confirmed'로 승격된다", () => {
+    expect(applyScreenGates("watch", { priceInBand: true, emaGateOk: true, cloudGateOk: true, nextCandleConfirmEnabled: false })).toBe("confirmed");
+    // confirmed/none은 그대로 유지(승격 대상이 watch일 때만 의미 있음)
+    expect(applyScreenGates("confirmed", { priceInBand: true, emaGateOk: true, cloudGateOk: true, nextCandleConfirmEnabled: false })).toBe("confirmed");
+    expect(applyScreenGates("none", { priceInBand: true, emaGateOk: true, cloudGateOk: true, nextCandleConfirmEnabled: false })).toBe("none");
+  });
+
+  it("다음 봉 확인을 꺼도 하드 게이트(가격대 등)가 막혀 있으면 여전히 none이다", () => {
+    expect(applyScreenGates("watch", { priceInBand: false, emaGateOk: true, cloudGateOk: true, nextCandleConfirmEnabled: false })).toBe("none");
   });
 });
