@@ -849,6 +849,11 @@ export class ToolEngine extends EventEmitter {
   private static readonly AUTO_MAX_MS = 6 * 3_600_000; // 6시간(한 세션 충분히 커버)
   /** [v0.6.0] 스크리너 중복 실행 방지(스캔 중 또 누르면 무시). */
   private screenBusy = false;
+  /** [v0.43.0] 오너가 "스크리닝 취소"를 눌렀는지 — scanScreener 루프가 다음 종목으로 넘어가기 전에
+   *  이 값을 확인해 멈춘다("협조적 취소": 이미 날아간 네트워크 요청 하나는 끝까지 기다림). 수동
+   *  스캔이든 자동매매 5분 사이클의 스캔이든 어차피 한 번에 하나만 돌기 때문에(screenBusy) 공용으로
+   *  둬도 안전하다. */
+  private screenCancelRequested = false;
   /** [v0.7.0] 체결강도 자동 기록 트레이드 저장 파일 + 메모리 캐시. */
   private tradesPath: string;
   private trades: StrengthTrade[] = [];
@@ -1308,7 +1313,13 @@ export class ToolEngine extends EventEmitter {
       const cand = run.results.filter((r) => r.status === "confirmed" || r.status === "watch").length;
       this.addJournal({ kind: "info", symbol: "-", summary: `🤖 자동매매 스크리너 수동 새로고침(미리보기) — 후보 ${cand}개` });
     } catch (e) {
-      this.addJournal({ kind: "info", symbol: "-", summary: `🤖 자동매매 스크리너 수동 새로고침 실패 — ${String(e).replace(/^Error:\s*/, "")}` });
+      // [v0.43.0] 오너가 취소 버튼을 눌러 멈춘 경우는 "실패"가 아니다 — 문구를 구분한다.
+      const msg = String(e).replace(/^Error:\s*/, "");
+      this.addJournal({
+        kind: "info",
+        symbol: "-",
+        summary: msg.includes("취소") ? "🤖 자동매매 스크리너 수동 새로고침을 오너가 직접 취소했습니다." : `🤖 자동매매 스크리너 수동 새로고침 실패 — ${msg}`,
+      });
     }
     return this.getAutoTradeStatus();
   }
@@ -4028,6 +4039,7 @@ export class ToolEngine extends EventEmitter {
   async scanScreener(opts: ScreenOpts = {}): Promise<ScreenRun> {
     if (this.screenBusy) throw new Error("이미 스캔이 진행 중입니다. 끝날 때까지 기다려 주세요.");
     this.screenBusy = true;
+    this.screenCancelRequested = false; // [v0.43.0] 새 스캔 시작 — 이전 취소 요청 잔재 제거
     // [v0.28.0] 상한 0.5→0.8로 확대(오너 지시) — 자동매매용 스크리너 화면에서 더 깐깐하지 않은
     //   (몸통이 커도 도지로 인정하는) 완화된 조건까지 선택할 수 있게 한다.
     const br = Math.min(0.8, Math.max(0.1, opts.bodyRatio ?? 0.3)); // 0.1~0.8로 안전 보정
@@ -4084,6 +4096,12 @@ export class ToolEngine extends EventEmitter {
       const results: ScreenResult[] = [];
       let done = 0;
       for (const rk of rankings) {
+        // [v0.43.0] 종목마다(=네트워크 요청 하나씩) 확인 — 취소 요청이 있으면 다음 종목으로
+        //   넘어가지 않고 여기서 멈춘다. 이미 처리하던 종목 하나는 끝까지 기다린 뒤 멈추므로
+        //   "즉시 중단"은 아니지만, 종목당 몇 초 단위라 체감상 충분히 빠르게 멎는다.
+        if (this.screenCancelRequested) {
+          throw new Error("오너 요청으로 스크리닝을 취소했습니다.");
+        }
         this.emit("screener:progress", { phase: "scanning", done, total, symbol: rk.symbol } as ScreenProgress);
         try {
           // 1분봉을 과거로 당겨 확보한다.
@@ -4173,6 +4191,17 @@ export class ToolEngine extends EventEmitter {
     } finally {
       this.screenBusy = false;
     }
+  }
+
+  /**
+   * [v0.43.0] 진행 중인 스크리닝 스캔을 취소한다(수동 스크리너·자동매매 5분 사이클 스캔 공용 —
+   *  어차피 한 번에 하나만 돈다). 스캔 중이 아니면 조용히 "취소할 게 없다"고만 알린다. 즉시
+   *  멈추는 게 아니라 "협조적 취소"라 지금 조회 중인 종목 하나는 끝까지 기다렸다가 멈춘다.
+   */
+  cancelScreenerScan(): { ok: boolean; message: string } {
+    if (!this.screenBusy) return { ok: false, message: "지금 진행 중인 스크리닝이 없습니다." };
+    this.screenCancelRequested = true;
+    return { ok: true, message: "스크리닝 취소를 요청했습니다 — 지금 확인 중인 종목까지만 마치고 곧 멈춥니다." };
   }
 
   /**
@@ -4739,7 +4768,16 @@ export class ToolEngine extends EventEmitter {
         run = await this.scanScreener(this.buildAutoScanOpts()); // ③빈자리를 "현재 스크리닝으로 탐색된 다른 종목"으로 채움
         this.autoTradeLastScan = run; // [v0.27.0] 버리지 않고 보관 → "스크리닝 결과" 탭이 그대로 보여줌
       } catch (e) {
-        this.addJournal({ kind: "info", symbol: "-", summary: `🤖 자동매매: 이번 사이클 스크리닝 실패 — ${String(e).replace(/^Error:\s*/, "")}` });
+        // [v0.43.0] 오너가 스크리닝 취소 버튼을 눌러 멈춘 경우는 "실패"가 아니라 요청한 결과다 —
+        //   문구를 구분해 저널이 헷갈리지 않게 한다. 이번 사이클은 신규 진입 없이 건너뛴다(안전).
+        const msg = String(e).replace(/^Error:\s*/, "");
+        this.addJournal({
+          kind: "info",
+          symbol: "-",
+          summary: msg.includes("취소")
+            ? "🤖 자동매매: 오너가 스크리닝을 취소해 이번 사이클은 신규 진입 없이 건너뜁니다(기존 포지션 감시는 계속됩니다)."
+            : `🤖 자동매매: 이번 사이클 스크리닝 실패 — ${msg}`,
+        });
         return;
       }
 

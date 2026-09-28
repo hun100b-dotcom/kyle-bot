@@ -315,6 +315,7 @@ function registerIpc(e: ToolEngine): void {
   e.on("strength", (state) => win?.webContents.send("tool:strengthEvent", state));
   // [v0.6.0] 종목 스크리너(탐색) — 온디맨드 스캔 + 진행률 이벤트 중계
   ipcMain.handle("tool:screener:scan", (_ev, opts?: { bodyRatio?: number; count?: number; priceMin?: number; priceMax?: number }) => e.scanScreener(opts));
+  ipcMain.handle("tool:screener:cancel", () => e.cancelScreenerScan()); // [v0.43.0] 진행 중인 스크리닝 취소
   ipcMain.handle("tool:screener:chart", (_ev, symbol: string) => e.getScreenerChart(symbol)); // [v0.25.0] 탐색 종목 차트(온디맨드)
   e.on("screener:progress", (p) => win?.webContents.send("tool:screenerProgress", p));
   // [v0.7.0] 체결강도 자동 기록(매매 연동) — 목록/요약/수동청산/삭제 + 실시간 이벤트

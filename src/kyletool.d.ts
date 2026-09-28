@@ -690,6 +690,8 @@ interface KyletoolBridge {
   onStrength(cb: (state: StrengthState) => void): () => void;
   // [v0.6.0] 종목 스크리너(탐색)
   screenerScan(opts?: { bodyRatio?: number; count?: number; priceMin?: number; priceMax?: number }): Promise<ScreenRun>;
+  /** [v0.43.0] 진행 중인 스크리닝 스캔을 취소한다(수동/자동 공용). */
+  cancelScreenerScan(): Promise<{ ok: boolean; message: string }>;
   /** [v0.25.0] 탐색 결과 한 종목의 차트를 불러온다(클릭 시에만, 온디맨드). */
   screenerChart(symbol: string): Promise<ScreenChart>;
   onScreenerProgress(cb: (p: ScreenProgress) => void): () => void;

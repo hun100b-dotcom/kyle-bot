@@ -601,6 +601,9 @@ function App() {
   const [screenRun, setScreenRun] = useState<ScreenRun | null>(null);
   const [screenBusy, setScreenBusy] = useState(false);
   const [screenProg, setScreenProg] = useState<ScreenProgress | null>(null);
+  // [v0.43.0] 스크리닝 취소 버튼 — 요청을 보냈으면 협조적 취소가 실제로 멈출 때까지(screenBusy가
+  //   꺼질 때까지) 버튼을 다시 못 누르게 막는다(중복 클릭 방지).
+  const [scanCancelRequested, setScanCancelRequested] = useState(false);
   const [bodyRatio, setBodyRatio] = useState(0.3);
   // [v0.11.0] 스크리너 필터 사용자 조절 — 스캔 종목수·가격대(하한/상한). 문자열로 들고 입력 편의 유지.
   const [scanCount, setScanCount] = useState("60");
@@ -933,7 +936,13 @@ function App() {
     // [v0.6.0] 스크리너 진행률 실시간 표시
     // [v0.28.0] 이 이벤트는 스캔이 메뉴얼 버튼이든 자동매매 5분 사이클이든 상관없이 온다 —
     //   두 화면(메뉴얼 스크리너·자동 스크리너) 모두 같은 진행률을 각자 보여줄 수 있게 둘 다 갱신.
-    const offScr = window.kyletool.onScreenerProgress?.((p) => { setScreenProg(p); setAutoScanProg(p); });
+    const offScr = window.kyletool.onScreenerProgress?.((p) => {
+      setScreenProg(p);
+      setAutoScanProg(p);
+      // [v0.43.0] "ranking" = 이제 막 시작된 새 스캔(수동 버튼이든 자동 5분 사이클이든) — 지난
+      //   스캔에서 눌렀던 취소 요청 표시가 새 스캔까지 넘어와 버튼이 계속 잠겨 있지 않게 지운다.
+      if (p.phase === "ranking") setScanCancelRequested(false);
+    });
     // [v0.7.0] 매매 시 자동 기록된 트레이드가 갱신되면 목록·요약 새로고침
     const offTrd = window.kyletool.onTrades?.(() => void loadAnalysis());
     // 업데이트 이벤트 구독(있음/진행률/완료/오류).
@@ -1710,17 +1719,30 @@ ${msg}
     const pMin = Math.max(0, toNum(priceMin) ?? 1);
     const pMax = Math.max(0, toNum(priceMax) ?? 9);
     setScreenBusy(true);
+    setScanCancelRequested(false); // [v0.43.0] 새 스캔이니 이전 취소 요청 표시는 지운다
     setScreenProg({ phase: "ranking", done: 0, total: count, symbol: "" });
     try {
       const run = await window.kyletool.screenerScan({ bodyRatio, count, priceMin: pMin, priceMax: pMax });
       setScreenRun(run);
       setShowMiss(false); // 새 스캔이면 근접 목록은 접은 채로 시작
     } catch (e) {
-      alert("스캔 실패: " + String(e));
+      // [v0.43.0] 오너가 직접 취소를 눌러 멈춘 경우는 "실패"가 아니므로 경고창을 띄우지 않는다.
+      if (!String(e).includes("취소")) alert("스캔 실패: " + String(e));
     } finally {
       setScreenBusy(false);
       setScreenProg(null);
+      setScanCancelRequested(false);
     }
+  }
+
+  /** [v0.43.0] 진행 중인 스크리닝을 취소한다 — [메뉴얼 → 스크리너] 수동 스캔이든, [🤖 자동매매 →
+   *  자동 스크리너] 화면에 보이는 자동 사이클(또는 그 수동 새로고침)의 스캔이든 상관없이 어차피
+   *  엔진은 한 번에 하나만 스캔하므로 공용 버튼 하나로 처리한다. */
+  async function doCancelScan() {
+    if (scanCancelRequested) return;
+    setScanCancelRequested(true);
+    const r = await window.kyletool.cancelScreenerScan();
+    if (!r.ok) setScanCancelRequested(false); // 취소할 스캔이 이미 없었다면 다시 누를 수 있게
   }
 
   /**
@@ -2754,10 +2776,16 @@ ${msg}
                 <div className="screen-prog-bar">
                   <div className="screen-prog-fill" style={{ width: `${screenProg.total ? Math.round((screenProg.done / screenProg.total) * 100) : 0}%` }} />
                 </div>
-                <div className="hint">
-                  {screenProg.phase === "ranking" ? "거래량 랭킹 불러오는 중…"
-                    : screenProg.phase === "done" ? "정리 중…"
-                    : `${screenProg.done}/${screenProg.total} · ${screenProg.symbol} 분석 중…`}
+                <div className="hint" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span>
+                    {screenProg.phase === "ranking" ? "거래량 랭킹 불러오는 중…"
+                      : screenProg.phase === "done" ? "정리 중…"
+                      : `${screenProg.done}/${screenProg.total} · ${screenProg.symbol} 분석 중…`}
+                  </span>
+                  {/* [v0.43.0] 스크리닝 진행 중 취소 — 지금 조회 중인 종목 하나만 마치고 곧 멈춘다. */}
+                  <button className="mini" disabled={scanCancelRequested} onClick={() => void doCancelScan()}>
+                    {scanCancelRequested ? "취소 중…" : "✕ 취소"}
+                  </button>
                 </div>
               </div>
             )}
@@ -3459,8 +3487,15 @@ ${msg}
                 <div className="screen-prog-bar">
                   <div className="screen-prog-fill" style={{ width: `${autoScanProg.total ? Math.round((autoScanProg.done / autoScanProg.total) * 100) : 0}%` }} />
                 </div>
-                <div className="hint">
-                  {autoScanProg.phase === "ranking" ? "거래량 랭킹 불러오는 중…" : `${autoScanProg.done}/${autoScanProg.total} · ${autoScanProg.symbol} 분석 중…`}
+                <div className="hint" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span>
+                    {autoScanProg.phase === "ranking" ? "거래량 랭킹 불러오는 중…" : `${autoScanProg.done}/${autoScanProg.total} · ${autoScanProg.symbol} 분석 중…`}
+                  </span>
+                  {/* [v0.43.0] 자동 사이클이 지금 돌리는 스캔도 여기서 바로 취소할 수 있다(다음
+                      5분 사이클이 알아서 다시 시도하므로, 이번 한 번만 건너뛰는 셈). */}
+                  <button className="mini" disabled={scanCancelRequested} onClick={() => void doCancelScan()}>
+                    {scanCancelRequested ? "취소 중…" : "✕ 취소"}
+                  </button>
                 </div>
               </div>
             )}

@@ -304,4 +304,40 @@ describe("엔진 스캔 왕복(연습 모드 + 목 서버)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 60_000); // 12종목 페이지네이션 → 넉넉히
+
+  it("[v0.43.0] cancelScreenerScan — 스캔 중이 아니면 취소할 게 없다고 알린다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-scr-cancel-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const r = eng.cancelScreenerScan();
+      expect(r.ok).toBe(false);
+      expect(r.message).toContain("없습니다");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("[v0.43.0] cancelScreenerScan — 진행 중 취소하면 스캔이 취소 에러로 끝나고, 이후 새 스캔은 정상 재개된다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-scr-cancel-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      // scanScreener는 async 함수라 첫 await(prepareBackend) 전까지는 동기로 실행된다 — 즉 이 줄이
+      // 끝난 시점엔 이미 screenBusy=true다. 그 직후(아직 첫 종목도 조회 전) 취소를 요청해도
+      // scanScreener 루프가 반드시 그 요청을 확인하게 되므로(모든 루프 반복 시작 시 확인) 타이밍에
+      // 흔들리지 않는 결정적인 테스트다.
+      const scanPromise = eng.scanScreener({ bodyRatio: 0.3, count: 10, priceMin: 1, priceMax: 9 });
+      const cancelResult = eng.cancelScreenerScan();
+      expect(cancelResult.ok).toBe(true);
+      expect(cancelResult.message).toContain("취소");
+
+      await expect(scanPromise).rejects.toThrow(/취소/);
+
+      // screenBusy가 제대로 풀렸는지 — 다음 스캔이 "이미 진행 중" 에러 없이 정상적으로 돈다.
+      const run2 = await eng.scanScreener({ bodyRatio: 0.3, count: 10, priceMin: 1, priceMax: 9 });
+      expect(run2.total).toBeGreaterThan(0);
+      eng.stopAllStrength();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
