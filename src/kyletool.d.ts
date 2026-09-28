@@ -123,6 +123,15 @@ interface ToolSettings {
   autoScanPriceMin: number;
   autoScanPriceMax: number;
   autoScanBodyRatio: number;
+  // [v0.33.0] "스크리닝 기준" 탭 — 추가 8개 조건(전부 켜짐/꺼짐 + 수치 수정 가능)
+  autoScanEmaTrendEnabled: boolean;
+  autoScanEmaPeriod: number;
+  autoScanCloudEnabled: boolean;
+  autoScanDojiWickMinRatio: number;
+  autoScanDojiMaxAgeEnabled: boolean;
+  autoScanDojiMaxAgeMinutes: number;
+  autoScanNextCandleConfirmEnabled: boolean;
+  autoScanExcludeEtf: boolean;
 }
 
 /** [v0.26.0] 자동매매가 지금 감시·보유 중인 포지션 하나. */
@@ -628,7 +637,21 @@ interface KyletoolBridge {
   autoTradeStatus(): Promise<AutoTradeStatus>;
   saveAutoTradeSettings(input: { maxPositions?: number; maxLossPct?: number; maxInvestPct?: number }): Promise<ToolSettings>;
   // [v0.28.0] 자동매매용 스크리너 조건 저장 + 수동 새로고침(5분 기다리지 않고 지금 훑기)
-  saveAutoScanSettings(input: { count?: number; priceMin?: number; priceMax?: number; bodyRatio?: number }): Promise<ToolSettings>;
+  // [v0.33.0] "스크리닝 기준" 탭에서 8개 조건(켜짐/꺼짐 + 수치)이 추가됨 — 전부 선택 항목(안 보내면 이전값 유지)
+  saveAutoScanSettings(input: {
+    count?: number;
+    priceMin?: number;
+    priceMax?: number;
+    bodyRatio?: number;
+    emaTrendEnabled?: boolean;
+    emaPeriod?: number;
+    cloudEnabled?: boolean;
+    dojiWickMinRatio?: number;
+    dojiMaxAgeEnabled?: boolean;
+    dojiMaxAgeMinutes?: number;
+    nextCandleConfirmEnabled?: boolean;
+    excludeEtf?: boolean;
+  }): Promise<ToolSettings>;
   autoScanNow(): Promise<AutoTradeStatus>;
   /** [v0.30.0] 자동매매기록 — 자동매매가 낸 매매의 전체 생애주기 로그(읽기 전용, 최신순). */
   autoTradeHistory(): Promise<AutoTradeHistoryEntry[]>;

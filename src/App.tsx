@@ -26,7 +26,9 @@ import { restoreInputsFromSaved } from "../lib/split-restore"; // [v0.9.3] 옛 �
 //   리프 id 자체는 그대로라 paneTab 렌더 가드·activateTab·goToTab·isTabVisible은 손댈 필요 없다.
 // [v0.30.0] 자동매매 그룹에 "자동매매기록"(autoHistory) 서브탭 신설 — 오너 요청: 자동매매가 낸
 //   매매의 전체 이력(영속 로그)을 따로 볼 수 있게.
-const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "autoControl", "autoScan", "autoHistory", "orders", "journal", "settings"] as const;
+// [v0.33.0] 자동매매 그룹에 "스크리닝 기준"(screenCriteria) 서브탭 신설 — 오너 요청: 스크리닝
+//   조건들의 활성/비활성·수치를 전부 메뉴얼로 조절하고, 조건별 설명도 펼쳐 볼 수 있게.
+const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "autoControl", "autoScan", "screenCriteria", "autoHistory", "orders", "journal", "settings"] as const;
 type TabId = (typeof ALL_TABS)[number];
 
 /** [v0.27.0] 상단 1단 — 매매방식·성격으로 묶은 그룹. 그룹 버튼을 누르면 하위 탭(2단)이 펼쳐진다. */
@@ -35,7 +37,7 @@ const TOP_GROUP_LABEL: Record<TopGroupId, string> = { manual: "메뉴얼", auto:
 /** 그룹 순서(드래그로 바뀔 수 있는 기본값) + 그룹별 하위 탭 목록(이 순서로 서브탭이 뜬다). */
 const GROUP_CHILDREN: Record<TopGroupId, TabId[]> = {
   manual: ["calc", "screener", "splits"],
-  auto: ["autoControl", "autoScan", "autoHistory"],
+  auto: ["autoControl", "autoScan", "screenCriteria", "autoHistory"],
   status: ["report", "strength", "orders"],
   settings: ["settings"],
 };
@@ -43,7 +45,7 @@ const TOP_GROUPS: TopGroupId[] = ["manual", "auto", "status", "settings"];
 /** 리프 탭 → 소속 그룹(역방향 조회용. journal은 화면에 독립 탭으로 없지만 설정 하위 콘텐츠라 settings로 매핑). */
 const TAB_GROUP: Record<TabId, TopGroupId> = {
   calc: "manual", screener: "manual", splits: "manual",
-  autoControl: "auto", autoScan: "auto", autoHistory: "auto",
+  autoControl: "auto", autoScan: "auto", screenCriteria: "auto", autoHistory: "auto",
   report: "status", strength: "status", orders: "status",
   journal: "settings", settings: "settings",
 };
@@ -57,6 +59,7 @@ const TAB_LABEL: Record<TabId, string> = {
   strength: "매매분석",
   autoControl: "자동매매 현황",
   autoScan: "자동 스크리너",
+  screenCriteria: "스크리닝 기준",
   autoHistory: "자동매매기록",
   orders: "주문 현황",
   journal: "기록",
@@ -748,6 +751,28 @@ function App() {
   });
   const [autoScanBodyRatio, setAutoScanBodyRatio] = useState(0.3);
   const [autoScanBusy, setAutoScanBusy] = useState(false); // "지금 새로고침" 버튼 눌러 응답 기다리는 중
+  // [v0.33.0] "스크리닝 기준" 탭 — 추가 8개 조건(켜짐/꺼짐 + 수치)의 입력칸 상태.
+  //   숫자는 문자열로 들고 있다가 저장 시점에 변환(다른 폼들과 동일한 패턴 — 입력 중 "0.1" 같은
+  //   중간 상태가 Number()에 막히지 않게).
+  const [screenCritForm, setScreenCritForm] = useState({
+    emaTrendEnabled: true,
+    emaPeriod: "200",
+    cloudEnabled: true,
+    dojiWickMinRatio: "0.1",
+    dojiMaxAgeEnabled: true,
+    dojiMaxAgeMinutes: "40",
+    nextCandleConfirmEnabled: true,
+    excludeEtf: true,
+  });
+  // [v0.33.0] 조건별 "자세히" 펼침 상태 — 코멘트는 항상 보이고, 상세 설명만 펼쳐야 보인다.
+  const [openCritDetail, setOpenCritDetail] = useState<Set<string>>(new Set());
+  function toggleCritDetail(key: string) {
+    setOpenCritDetail((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }
   const [autoScanProg, setAutoScanProg] = useState<ScreenProgress | null>(null); // 스캔 진행률(수동/자동 사이클 공용)
   // [v0.29.0] "다음 스캔까지 N분 N초" 카운트다운 표시용 — 1초마다 흘러가는 현재시각(서버 재조회 없이
   //   화면에서만 초 단위로 줄어들게 보여준다. 실제 값(nextCycleAtMs)은 20초 폴링으로 서버와 맞춘다).
@@ -829,6 +854,17 @@ function App() {
         priceMax: String(s.autoScanPriceMax ?? 9),
       });
       setAutoScanBodyRatio(s.autoScanBodyRatio ?? 0.3);
+      // [v0.33.0] 저장된 "스크리닝 기준" 8개 조건을 입력칸 초기값으로.
+      setScreenCritForm({
+        emaTrendEnabled: s.autoScanEmaTrendEnabled ?? true,
+        emaPeriod: String(s.autoScanEmaPeriod ?? 200),
+        cloudEnabled: s.autoScanCloudEnabled ?? true,
+        dojiWickMinRatio: String(s.autoScanDojiWickMinRatio ?? 0.1),
+        dojiMaxAgeEnabled: s.autoScanDojiMaxAgeEnabled ?? true,
+        dojiMaxAgeMinutes: String(s.autoScanDojiMaxAgeMinutes ?? 40),
+        nextCandleConfirmEnabled: s.autoScanNextCandleConfirmEnabled ?? true,
+        excludeEtf: s.autoScanExcludeEtf ?? true,
+      });
       // [v0.3.0] 실서버면 켜자마자 상단 바(예수금·손익)와 기본 종목 시세를 자동 로드한다.
       if (s.mode === "live") {
         void loadAccount();
@@ -1941,6 +1977,46 @@ ${msg}
     const s = await window.kyletool.saveAutoScanSettings({ count: scanCount, priceMin: pMin, priceMax: pMax, bodyRatio: autoScanBodyRatio });
     setSettings(s);
     setSavedMsg(`자동매매 스크리너 조건 저장됨 — 종목수 ${s.autoScanCount} · $${s.autoScanPriceMin}~$${s.autoScanPriceMax} · 도지 몸통상한 ${Math.round(s.autoScanBodyRatio * 100)}%`);
+    setTimeout(() => setSavedMsg(""), 4000);
+  }
+
+  /** [v0.33.0] "스크리닝 기준" 탭 — 추가 8개 조건(켜짐/꺼짐 + 수치) 저장.
+   *  Key Point(오너 요청): 여기서 저장한 값은 saveAutoScanSettings → autoScanEmaPeriod 등 필드로
+   *  바로 들어가고, buildAutoScanOpts()가 그 필드들을 그대로 scanScreener 옵션으로 넘기므로
+   *  "화면에서 끈 조건은 실제 스캔에서도 꺼진다"가 우회 경로 없이 보장된다(electron/tool-engine.ts). */
+  async function saveScreenCriteriaUI() {
+    const emaPeriod = toNum(screenCritForm.emaPeriod);
+    const dojiWickMinRatio = toNum(screenCritForm.dojiWickMinRatio);
+    const dojiMaxAgeMinutes = toNum(screenCritForm.dojiMaxAgeMinutes);
+    if (emaPeriod === null || emaPeriod <= 0 || dojiWickMinRatio === null || dojiWickMinRatio < 0 || dojiMaxAgeMinutes === null || dojiMaxAgeMinutes <= 0) {
+      setSavedMsg("⚠️ EMA 기간·도지 꼬리비율·신선도(분)를 올바른 숫자로 입력하세요.");
+      setTimeout(() => setSavedMsg(""), 4000);
+      return;
+    }
+    const s = await window.kyletool.saveAutoScanSettings({
+      emaTrendEnabled: screenCritForm.emaTrendEnabled,
+      emaPeriod,
+      cloudEnabled: screenCritForm.cloudEnabled,
+      dojiWickMinRatio,
+      dojiMaxAgeEnabled: screenCritForm.dojiMaxAgeEnabled,
+      dojiMaxAgeMinutes,
+      nextCandleConfirmEnabled: screenCritForm.nextCandleConfirmEnabled,
+      excludeEtf: screenCritForm.excludeEtf,
+    });
+    setSettings(s);
+    // 저장 직후 입력칸을 서버가 실제로 보정한 값(clamp 결과)으로 다시 맞춘다 — 예: 500분을
+    // 넣었어도 서버가 180분으로 잘랐으면 화면도 180으로 보여야 헷갈리지 않는다.
+    setScreenCritForm({
+      emaTrendEnabled: s.autoScanEmaTrendEnabled,
+      emaPeriod: String(s.autoScanEmaPeriod),
+      cloudEnabled: s.autoScanCloudEnabled,
+      dojiWickMinRatio: String(s.autoScanDojiWickMinRatio),
+      dojiMaxAgeEnabled: s.autoScanDojiMaxAgeEnabled,
+      dojiMaxAgeMinutes: String(s.autoScanDojiMaxAgeMinutes),
+      nextCandleConfirmEnabled: s.autoScanNextCandleConfirmEnabled,
+      excludeEtf: s.autoScanExcludeEtf,
+    });
+    setSavedMsg("스크리닝 기준 저장됨 — 다음 자동 스캔부터(또는 [자동 스크리너] 탭의 [🔄 지금 새로고침]으로 즉시) 반영돼요.");
     setTimeout(() => setSavedMsg(""), 4000);
   }
 
@@ -3363,6 +3439,177 @@ ${msg}
                 </>
               );
             })()}
+          </section>
+        </main>
+      )}
+
+      {/* ===== 🤖 자동매매 → 스크리닝 기준 (v0.33.0 신규) =====
+          [오너 지시 2026-09-28] "스크리닝 기준 조건들의 수치 및 활성/비활성을 모두 메뉴얼로 설정할 수
+          있도록 하고, 각 조건별 코멘트 + 펼치면 상세 설명도 보이게 해라. 가장 중요한 건 활성/비활성·
+          수치가 실 스크리닝에 완벽히 연동되는 것" — 여기서 저장한 값은 electron/tool-engine.ts의
+          saveAutoScanSettings → buildAutoScanOpts() → scanScreener()로 그대로 이어져(우회 경로 없음),
+          자동매매의 실제 5분 사이클 스캔과 [자동 스크리너] 탭의 [🔄 지금 새로고침]에 곧바로 반영된다. */}
+      {paneTab === "screenCriteria" && (
+        <main className="grid">
+          <section className="card wide">
+            <h2>스크리닝 기준 <span className="hint">(조건별로 켜고 끄거나 수치를 직접 조절)</span></h2>
+            <p className="hint">
+              여기서 끈 조건은 스캔할 때 아예 검사하지 않고(항상 통과 취급), 켠 조건은 옆 수치를
+              기준으로 실제로 걸러냅니다. 조건마다 짧은 설명이 붙어 있고, <b>[자세히]</b>를 누르면
+              더 상세한 설명을 볼 수 있어요. 스캔 종목수·가격대·도지 몸통비율 상한은 [자동 스크리너]
+              탭에서 조절할 수 있어요(이 탭은 켜고 끌 수 있는 나머지 조건 전용).
+            </p>
+
+            {/* ① EMA 추세 필터 */}
+            <div className="crit-card">
+              <div className="crit-head">
+                <label className="radio">
+                  <input type="checkbox" checked={screenCritForm.emaTrendEnabled}
+                    onChange={(e) => setScreenCritForm({ ...screenCritForm, emaTrendEnabled: e.target.checked })} />
+                  <b>EMA 추세 필터</b>
+                </label>
+                <button className="mini" onClick={() => toggleCritDetail("ema")}>{openCritDetail.has("ema") ? "▾ 자세히" : "▸ 자세히"}</button>
+              </div>
+              <p className="hint">주가가 장기 이동평균선(EMA) 위에 있을 때만 후보로 인정해요(상승 추세 확인용).</p>
+              {openCritDetail.has("ema") && (
+                <p className="hint crit-detail">
+                  EMA(지수이동평균, Exponential Moving Average)는 최근 가격에 더 큰 가중치를 주는
+                  이동평균선이에요. 주가가 EMA 위에 있으면 "최근 흐름이 상승 쪽"이라고 볼 수 있어서,
+                  하락 추세 중에 나온 도지(반전 신호 후보)를 걸러내는 데 씁니다. 기간(N)을 늘리면
+                  더 긴 흐름(느긋한 대세 추세)을, 줄이면 더 짧은 흐름(민감한 최근 추세)을 봅니다.
+                  <b> 꺼두면 이 조건 자체를 검사하지 않고</b>(추세와 무관하게 도지 패턴만으로 판단),
+                  하락 추세 중 반등 시도까지 후보에 포함되어 후보 수는 늘지만 다소 위험할 수 있어요.
+                </p>
+              )}
+              <label className="str-field sf-num" style={{ maxWidth: 200, marginTop: 8 }}>
+                <span className="sb-k">EMA 기간(봉 개수) <span className="hint">(50~300, 기본 200)</span></span>
+                <input type="text" inputMode="numeric" value={screenCritForm.emaPeriod}
+                  disabled={!screenCritForm.emaTrendEnabled}
+                  onChange={(e) => setScreenCritForm({ ...screenCritForm, emaPeriod: e.target.value })} />
+              </label>
+            </div>
+
+            {/* ② 일목균형표 구름대 필터 */}
+            <div className="crit-card">
+              <div className="crit-head">
+                <label className="radio">
+                  <input type="checkbox" checked={screenCritForm.cloudEnabled}
+                    onChange={(e) => setScreenCritForm({ ...screenCritForm, cloudEnabled: e.target.checked })} />
+                  <b>구름대(일목균형표) 필터</b>
+                </label>
+                <button className="mini" onClick={() => toggleCritDetail("cloud")}>{openCritDetail.has("cloud") ? "▾ 자세히" : "▸ 자세히"}</button>
+              </div>
+              <p className="hint">주가가 일목균형표의 구름(선행스팬) 위에 있을 때만 후보로 인정해요(추세 이중 확인).</p>
+              {openCritDetail.has("cloud") && (
+                <p className="hint crit-detail">
+                  일목균형표의 "구름"은 미래 시점에 미리 그려두는 지지/저항대예요. 주가가 구름 위에
+                  있으면 상승 추세, 구름 안이나 아래면 애매하거나 하락 추세로 봅니다. EMA 필터와
+                  같은 목적(하락 추세에서의 섣부른 반전 신호 배제)이지만 계산 방식이 달라서, 둘 다
+                  켜두면 "이중 확인"이 되어 더 신중해지고(후보 수는 줄어듦), 하나만 켜두면 그만큼
+                  덜 깐깐해집니다. <b>꺼두면 구름 위치와 무관하게</b> 통과시킵니다.
+                </p>
+              )}
+            </div>
+
+            {/* ③ 도지 꼬리 비율 */}
+            <div className="crit-card">
+              <div className="crit-head"><b>도지 꼬리 비율(항상 켜짐)</b></div>
+              <p className="hint">도지 캔들의 위/아래 꼬리가 몸통 대비 최소 이 비율 이상이어야 인정해요.</p>
+              <button className="mini" onClick={() => toggleCritDetail("wick")}>{openCritDetail.has("wick") ? "▾ 자세히" : "▸ 자세히"}</button>
+              {openCritDetail.has("wick") && (
+                <p className="hint crit-detail">
+                  "도지"는 시가와 종가가 거의 같아 몸통이 작은 캔들을 뜻하는데, 몸통만 작다고 다
+                  의미 있는 반전 신호는 아니에요 — 위아래로 삐죽 나온 "꼬리"(고가/저가가 시가·종가에서
+                  얼마나 멀리 갔다 왔는지)가 충분히 길어야 "한번 크게 흔들렸다가 원위치로 돌아왔다"는
+                  의미 있는 신호가 됩니다. 이 비율을 높이면(예: 30%) 꼬리가 더 긴, 더 확실한 도지만
+                  인정하고(후보는 줄지만 신뢰도↑), 낮추면(예: 5%) 웬만한 몸통 작은 캔들도 다 인정해서
+                  후보는 늘지만 애매한 신호도 섞입니다. 이 조건은 도지 판정의 핵심이라 끌 수는 없고
+                  비율만 조절할 수 있어요.
+                </p>
+              )}
+              <label className="str-field sf-num" style={{ maxWidth: 200, marginTop: 8 }}>
+                <span className="sb-k">최소 꼬리 비율 <span className="hint">(0~40%, 기본 10%)</span></span>
+                <input type="text" inputMode="decimal" value={screenCritForm.dojiWickMinRatio}
+                  onChange={(e) => setScreenCritForm({ ...screenCritForm, dojiWickMinRatio: e.target.value })} />
+              </label>
+            </div>
+
+            {/* ④ 도지 신선도(유효 시간) */}
+            <div className="crit-card">
+              <div className="crit-head">
+                <label className="radio">
+                  <input type="checkbox" checked={screenCritForm.dojiMaxAgeEnabled}
+                    onChange={(e) => setScreenCritForm({ ...screenCritForm, dojiMaxAgeEnabled: e.target.checked })} />
+                  <b>도지 신선도(유효 시간) 제한</b>
+                </label>
+                <button className="mini" onClick={() => toggleCritDetail("freshness")}>{openCritDetail.has("freshness") ? "▾ 자세히" : "▸ 자세히"}</button>
+              </div>
+              <p className="hint">도지가 나타난 뒤 이 시간(분) 안에만 "아직 유효한" 신호로 인정해요.</p>
+              {openCritDetail.has("freshness") && (
+                <p className="hint crit-detail">
+                  도지는 나타난 직후에는 "반전 시도"라는 의미가 있지만, 시간이 많이 지나면 이미 다른
+                  흐름으로 넘어갔을 수 있어 뒤늦게 진입하는 게 위험해질 수 있어요. 이 값(분)을 넘긴
+                  도지는 "너무 오래돼 이미 늦은 신호"로 보고 후보에서 제외합니다. 값을 늘리면 오래된
+                  도지도 계속 유효하다고 보고(후보 수↑, 다만 뒤늦은 진입 위험도 같이 커짐), 줄이면
+                  아주 갓 나온 도지만 인정합니다(후보 수↓, 더 신선한 신호만). <b>꺼두면 시간 제한 없이</b>
+                  아무리 오래된 도지도 계속 유효한 것으로 봅니다.
+                </p>
+              )}
+              <label className="str-field sf-num" style={{ maxWidth: 200, marginTop: 8 }}>
+                <span className="sb-k">유효 시간(분) <span className="hint">(10~180분, 기본 40분)</span></span>
+                <input type="text" inputMode="numeric" value={screenCritForm.dojiMaxAgeMinutes}
+                  disabled={!screenCritForm.dojiMaxAgeEnabled}
+                  onChange={(e) => setScreenCritForm({ ...screenCritForm, dojiMaxAgeMinutes: e.target.value })} />
+              </label>
+            </div>
+
+            {/* ⑤ 다음봉 확인 */}
+            <div className="crit-card">
+              <div className="crit-head">
+                <label className="radio">
+                  <input type="checkbox" checked={screenCritForm.nextCandleConfirmEnabled}
+                    onChange={(e) => setScreenCritForm({ ...screenCritForm, nextCandleConfirmEnabled: e.target.checked })} />
+                  <b>다음봉 확인 후 확정</b>
+                </label>
+                <button className="mini" onClick={() => toggleCritDetail("nextCandle")}>{openCritDetail.has("nextCandle") ? "▾ 자세히" : "▸ 자세히"}</button>
+              </div>
+              <p className="hint">도지 다음 5분봉까지 확인한 뒤에야 "확정"으로 인정해요(성급한 진입 방지).</p>
+              {openCritDetail.has("nextCandle") && (
+                <p className="hint crit-detail">
+                  도지가 나타난 바로 그 순간엔 아직 "관찰(🟡)" 단계일 뿐이에요. 다음 5분봉이 마감될
+                  때까지 기다려서, 그 다음 봉이 실제로 반전 방향으로 움직였는지까지 확인한 뒤에야
+                  "확정(🔴)"으로 승격시킵니다 — 헛다리(가짜 신호)에 진입하는 걸 줄이는 안전장치예요.
+                  <b> 꺼두면 관찰 단계를 곧바로 확정으로 승격</b>시켜, 다음 봉을 기다리지 않고 더 빠르게
+                  진입 후보가 되지만, 그만큼 다음 봉의 확인 없이 진입하므로 성급할 수 있어요.
+                </p>
+              )}
+            </div>
+
+            {/* ⑥ ETF/레버리지 제외 */}
+            <div className="crit-card">
+              <div className="crit-head">
+                <label className="radio">
+                  <input type="checkbox" checked={screenCritForm.excludeEtf}
+                    onChange={(e) => setScreenCritForm({ ...screenCritForm, excludeEtf: e.target.checked })} />
+                  <b>ETF·레버리지 상품 제외</b>
+                </label>
+                <button className="mini" onClick={() => toggleCritDetail("etf")}>{openCritDetail.has("etf") ? "▾ 자세히" : "▸ 자세히"}</button>
+              </div>
+              <p className="hint">ETF·레버리지 상품은 스크리닝 후보에서 아예 제외해요(개별 종목 위주로 스크리닝).</p>
+              {openCritDetail.has("etf") && (
+                <p className="hint crit-detail">
+                  ETF(상장지수펀드)·레버리지/인버스 상품은 여러 종목을 묶어 추종하거나 배율까지 곱해
+                  움직이기 때문에, 개별 종목 하나의 실제 수급(도지·거래량 등)을 보는 이 스크리닝
+                  기법과 성격이 달라요. 켜두면 이런 상품들을 후보에서 빼고 순수 개별 종목만 남깁니다.
+                  <b> 꺼두면 ETF·레버리지 상품도 다른 종목과 똑같이 스크리닝 대상에 포함</b>됩니다.
+                </p>
+              )}
+            </div>
+
+            <div className="form-row" style={{ marginTop: 12 }}>
+              <button className="btn btn-start" onClick={saveScreenCriteriaUI}>스크리닝 기준 저장</button>
+              {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
+            </div>
           </section>
         </main>
       )}
