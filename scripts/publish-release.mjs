@@ -190,7 +190,22 @@ async function main() {
       body: JSON.stringify({
         tag_name: TAG,
         name: `Capri ${TAG}`,
-        body: `Capri ${VERSION} 배포`,
+        // [v0.35.0] "이 응용 프로그램이 이 Mac에서 지원되지 않습니다" 오류(인텔 맥에서 arm64용
+        //   dmg를 잘못 받아 설치하려 할 때 뜨는 macOS 표준 메시지) 재발 방지 — 릴리스 페이지에
+        //   어떤 파일을 받아야 하는지 한 줄로 안내한다. dmg 4종(윈도우 exe 1개 + 맥 arm64/Intel
+        //   각 dmg+zip)이 그냥 나열만 되면 비전공자가 고르기 어렵다.
+        body: [
+          `Capri ${VERSION} 배포`,
+          "",
+          "**다운로드 전 확인하세요**",
+          "- 윈도우: `Capri-Setup-" + VERSION + ".exe`",
+          "- 맥(Apple Silicon, M1/M2/M3 이후): `Capri-" + VERSION + "-arm64.dmg`",
+          "- 맥(Intel, M1 이전): `Capri-" + VERSION + ".dmg`" + " (arm64 표시 없는 쪽)",
+          "- 내 맥이 어느 쪽인지 모르겠다면: 왼쪽 위 🍎 메뉴 → \"이 Mac에 관하여\" → 칩이 " +
+            "\"Apple M...\"이면 Apple Silicon용, \"Intel...\"이면 Intel용을 받으세요.",
+          "- 잘못된 쪽을 받으면 \"이 응용 프로그램이 이 Mac에서 지원되지 않습니다\"라는 오류가 뜹니다" +
+            "(앱이 고장난 게 아니라 파일을 잘못 받은 것 — 위 표에서 맞는 쪽을 다시 받으면 됩니다).",
+        ].join("\n"),
         draft: false,
         prerelease: false,
       }),
