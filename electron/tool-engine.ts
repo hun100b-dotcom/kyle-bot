@@ -60,6 +60,7 @@ import {
 } from "../lib/toss";
 import { createMockTossServer } from "../mocks/toss-mock";
 import { canAutoEnter, isLossLimitBreached, type AutoTradeLimits } from "../lib/auto-risk";
+import { guessWarrantTickers } from "../lib/warrant"; // [v0.36.0] 워런트 의심 종목 코멘트용
 
 // -----------------------------------------------------------------------------
 // 타입: 화면과 주고받는 모양
@@ -543,6 +544,9 @@ export interface ScreenResult {
   n5m: number; //            합성한 5분봉 수
   evidence: ScreenEvidence | null; // 판정 근거(펼침용)
   note?: string; //          데이터 부족·오류 등 사유
+  /** [v0.36.0] 워런트 의심 코멘트(확정/관찰 후보만 확인 — 티커 추측 방식이라 100% 정확하진 않음,
+   *  "차단"이 아니라 화면에 경고만 표시하는 용도. 없으면 확인 안 됨/문제 없음). */
+  warrantWarning?: string | null;
 }
 
 /** 스캔 진행 상황(진행률 바) */
@@ -4015,6 +4019,10 @@ export class ToolEngine extends EventEmitter {
           const cloudGateOk = !cloudEnabled || aboveCloud;
           const status = applyScreenGates(pat.status, { priceInBand, emaGateOk, cloudGateOk, nextCandleConfirmEnabled });
           const proximityPct = pat.sessionHigh && Number.isFinite(price) ? ((price - pat.sessionHigh) / pat.sessionHigh) * 100 : null;
+          // [v0.36.0] 워런트 의심 확인 — 확정/관찰 후보만(API 호출 절약, 어차피 나머지는 진입
+          //   대상이 아니라 확인할 의미가 없다). 차단하지 않고 코멘트만 붙인다(위 파일 상단 이유).
+          const warrantWarning =
+            status === "confirmed" || status === "watch" ? await this.checkWarrantWarning(rk.symbol, price) : null;
 
           results.push({
             rank: rk.rank,
@@ -4033,6 +4041,7 @@ export class ToolEngine extends EventEmitter {
             n1m: oneMin.length,
             n5m: candles5m.length,
             evidence: this.buildEvidence(sessionStart, pat, { priceInBand, aboveEma, aboveCloud }),
+            warrantWarning,
           });
         } catch (err) {
           // 한 종목 실패가 전체 스캔을 죽이지 않게(개별 오류는 '데이터 부족'류로 표시)
@@ -4050,6 +4059,28 @@ export class ToolEngine extends EventEmitter {
     } finally {
       this.screenBusy = false;
     }
+  }
+
+  /**
+   * [v0.36.0] 워런트 의심 확인 — 흔한 접미사(W/.WS/-WT/WS)로 워런트 티커를 추측해 실제로
+   *   시세가 있는지 조회하고, 있으면서 그 가격이 본주 현재가보다 낮으면 경고 문구를 만든다.
+   *   [오너 지시] 추측 방식이라 틀릴 수 있어 "차단"이 아니라 코멘트 용도 — 실패(시세 없음)는
+   *   그냥 "워런트 없음/확인 안 됨"으로 조용히 넘어간다(에러 아님).
+   */
+  private async checkWarrantWarning(symbol: string, price: number): Promise<string | null> {
+    if (!Number.isFinite(price)) return null;
+    for (const guess of guessWarrantTickers(symbol)) {
+      try {
+        const wp = await getPrice(guess);
+        if (Number.isFinite(wp.price) && wp.price < price) {
+          return `⚠️ 워런트 의심(확인 필요): ${guess} 시세가 $${wp.price}로 본주 현재가($${price})보다 낮습니다 — 진입 전 직접 확인하세요.`;
+        }
+        return null; // 워런트로 보이는 티커는 찾았지만 가격이 본주보다 낮지 않음 → 경고 없음
+      } catch {
+        // 이 추측은 실존하는 종목이 아님 — 다음 추측 시도
+      }
+    }
+    return null; // 어떤 추측도 안 맞음 — 워런트 없음/확인 불가(경고 없음)
   }
 
   /**

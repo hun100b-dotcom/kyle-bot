@@ -18,7 +18,7 @@ import "./App.css";
 import TodayReport from "./TodayReport"; // [v0.9.1] 오늘의 매매 리포트 화면
 import { useTabOrder } from "./useTabOrder"; // [v0.9.2] 탭 순서 드래그로 변경
 import { restoreInputsFromSaved } from "../lib/split-restore"; // [v0.9.3] 옛 기록도 계산기로 불러오기
-import { summarizeAutoHistory } from "../lib/auto-research"; // [v0.33.0] 자동매매기록 → 연구탭 통계(순수 함수)
+import { summarizeAutoHistory, summarizeGroupHistory } from "../lib/auto-research"; // [v0.33.0/v0.35.0] 연구탭 통계(순수 함수)
 
 /** 앱이 가진 모든 탭(리프 단위 — 실제 콘텐츠를 가리키는 값. paneTab 렌더 가드는 전부 이 id 기준). */
 // [v0.12.0] 탭 통폐합 9→7: '매매분석'은 체결강도 탭 하위로, '기록(journal)'은 설정 탭 하위(고급/진단)로 이동.
@@ -789,6 +789,24 @@ function App() {
   // [v0.30.0] "자동매매기록" 탭 — 자동매매가 낸 매매 전체 이력(영속 로그).
   const [autoHistory, setAutoHistory] = useState<AutoTradeHistoryEntry[]>([]);
   const [autoHistoryBusy, setAutoHistoryBusy] = useState(false);
+  // [v0.35.0] 매매연구 탭 — "내 데이터"/"그룹 전체" 전환. 그룹 데이터는 볼 때만 받아온다(자동 로드 안 함).
+  const [researchView, setResearchView] = useState<"mine" | "group">("mine");
+  const [groupMembers, setGroupMembers] = useState<{ email: string; history: AutoTradeHistoryEntry[] }[] | null>(null);
+  const [groupResearchBusy, setGroupResearchBusy] = useState(false);
+  const [groupResearchMsg, setGroupResearchMsg] = useState("");
+  async function loadGroupResearch() {
+    if (groupResearchBusy) return;
+    setGroupResearchBusy(true);
+    try {
+      const r = await window.kyletool.groupTradesPull();
+      setGroupMembers(r.members);
+      setGroupResearchMsg(r.ok ? r.message : `⚠️ ${r.message}`);
+    } catch (e) {
+      setGroupResearchMsg(`⚠️ 불러오기 실패: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setGroupResearchBusy(false);
+    }
+  }
   async function loadAutoHistory() {
     setAutoHistoryBusy(true);
     try {
@@ -2764,6 +2782,11 @@ ${msg}
                                 {r.proximityPct != null ? `${r.proximityPct >= 0 ? "+" : ""}${r.proximityPct.toFixed(2)}%` : "—"}
                               </td>
                             </tr>
+                            {r.warrantWarning && (
+                              <tr className="evid-row">
+                                <td colSpan={9}><p className="hint danger" style={{ margin: 0 }}>{r.warrantWarning}</p></td>
+                              </tr>
+                            )}
                             {open && r.evidence && (
                               <tr className="evid-row">
                                 <td colSpan={9}><ScreenEvidenceView ev={r.evidence} price={r.price} /></td>
@@ -3427,6 +3450,11 @@ ${msg}
                                   )}
                                 </td>
                               </tr>
+                              {r.warrantWarning && (
+                                <tr className="evid-row">
+                                  <td colSpan={5}><p className="hint danger" style={{ margin: 0 }}>{r.warrantWarning}</p></td>
+                                </tr>
+                              )}
                               {open && r.evidence && (
                                 <tr className="evid-row">
                                   <td colSpan={5}><ScreenEvidenceView ev={r.evidence} price={r.price} /></td>
@@ -3720,18 +3748,96 @@ ${msg}
       {paneTab === "research" && (
         <main className="grid">
           <section className="card wide">
-            <h2>매매연구 <span className="hint">(내 자동매매기록을 모아 승률·종목별/시간대별 성적 분석)</span></h2>
+            <h2>매매연구 <span className="hint">(자동매매기록을 모아 승률·종목별/시간대별 성적 분석)</span></h2>
             <p className="hint">
               [자동매매기록] 탭의 데이터를 그대로 모아 계산합니다(새 데이터를 따로 쌓지 않음 — 원본은
-              하나). 오너 개인 계정의 매매만 대상이에요.
+              하나).
             </p>
+            {/* [v0.35.0] 오너 지시(2026-09-28) — 비공개 그룹(공동개발자·동업자, 가입 자체가 동의 전제)
+                전원의 기록을 실명으로 함께 볼 수 있게. 비식별화 없음: 이메일 그대로 노출. */}
             <div className="form-row">
-              <button className="mini" disabled={autoHistoryBusy} onClick={() => void loadAutoHistory()}>
-                {autoHistoryBusy ? "불러오는 중…" : "↻ 새로고침"}
+              <button className={researchView === "mine" ? "mini active" : "mini"} onClick={() => setResearchView("mine")}>내 데이터</button>
+              <button
+                className={researchView === "group" ? "mini active" : "mini"}
+                onClick={() => { setResearchView("group"); if (groupMembers === null) void loadGroupResearch(); }}
+              >
+                그룹 전체
               </button>
             </div>
 
-            {autoHistory.length === 0 ? (
+            {researchView === "mine" && (
+              <div className="form-row">
+                <button className="mini" disabled={autoHistoryBusy} onClick={() => void loadAutoHistory()}>
+                  {autoHistoryBusy ? "불러오는 중…" : "↻ 새로고침"}
+                </button>
+              </div>
+            )}
+
+            {researchView === "group" ? (
+              <>
+                <div className="form-row">
+                  <button className="mini" disabled={groupResearchBusy} onClick={() => void loadGroupResearch()}>
+                    {groupResearchBusy ? "불러오는 중…" : "↻ 그룹 데이터 새로고침"}
+                  </button>
+                  {groupResearchMsg && <span className={groupResearchMsg.startsWith("⚠") ? "err" : "hint"}>{groupResearchMsg}</span>}
+                </div>
+                {groupMembers === null || groupMembers.length === 0 ? (
+                  <div className="result-empty hint">
+                    {groupResearchBusy
+                      ? "불러오는 중…"
+                      : "아직 그룹에 공유된 기록이 없어요(각자 로그인해서 자동매매를 한 번이라도 돌리면 자동으로 모입니다)."}
+                  </div>
+                ) : (() => {
+                  const g = summarizeGroupHistory(groupMembers);
+                  return (
+                    <>
+                      <p className="hint">
+                        그룹 {g.memberCount}명의 기록을 실명(로그인 이메일) 그대로 모았습니다 — 비공개 그룹
+                        전원 동의 전제, 비식별화하지 않습니다.
+                      </p>
+                      {g.headline && (
+                        <p className="hint" style={{ fontSize: 14 }}>💡 <b>{g.headline}</b></p>
+                      )}
+                      {g.overall.n < 10 && (
+                        <p className="hint">⚠️ 그룹 전체 승/패 표본이 {g.overall.n}건뿐이에요 — 아직 참고용으로만 보세요.</p>
+                      )}
+                      <div className="sum-cards">
+                        <div className="sum-card">
+                          <span className="sum-k">그룹 승/패 표본</span>
+                          <b className="sum-v">{g.overall.n}건</b>
+                          <span className="sum-sub">회원 {g.memberCount}명</span>
+                        </div>
+                        <div className="sum-card">
+                          <span className="sum-k">그룹 승률</span>
+                          <b className="sum-v">{g.overall.winRate != null ? `${g.overall.winRate}%` : "—"}</b>
+                          <span className="sum-sub">익절 {g.overall.wins} · 손절 {g.overall.losses}</span>
+                        </div>
+                        <div className={`sum-card ${pnlClass(g.overall.n ? g.overall.totalPnlUsd : null)}`}>
+                          <span className="sum-k">그룹 누적 실현손익</span>
+                          <b className="sum-v">{g.overall.n ? `${g.overall.totalPnlUsd >= 0 ? "+" : ""}$${g.overall.totalPnlUsd}` : "—"}</b>
+                        </div>
+                      </div>
+
+                      <h3>회원별 리더보드 <span className="hint">(누적손익 큰 순, 실명)</span></h3>
+                      <table className="result-table screen-table">
+                        <thead><tr><th>회원(이메일)</th><th>건수</th><th>승률</th><th>누적손익</th><th>평균수익률</th></tr></thead>
+                        <tbody>
+                          {g.byMember.map((m) => (
+                            <tr key={m.email} className="screen-row">
+                              <td><b>{m.email}</b></td>
+                              <td>{m.n}건 ({m.wins}승 {m.losses}패) <span className="hint small">전체기록 {m.totalEntries}건</span></td>
+                              <td>{m.winRate != null ? `${m.winRate}%` : "—"}</td>
+                              <td className={pnlClass(m.totalPnlUsd)}>{m.totalPnlUsd >= 0 ? "+" : ""}${m.totalPnlUsd}</td>
+                              <td>{m.avgPnlPct != null ? `${m.avgPnlPct >= 0 ? "+" : ""}${m.avgPnlPct}%` : "—"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </>
+                  );
+                })()}
+              </>
+            ) : autoHistory.length === 0 ? (
               <div className="result-empty hint">
                 {autoHistoryBusy ? "불러오는 중…" : "아직 자동매매기록이 없어요. 자동매매를 한 번이라도 켜서 매매가 나가면 여기서 연구할 수 있습니다."}
               </div>

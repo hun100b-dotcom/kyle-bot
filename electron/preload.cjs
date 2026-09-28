@@ -100,6 +100,8 @@ contextBridge.exposeInMainWorld("kyletool", {
   tradeSyncPull: () => ipcRenderer.invoke("tool:tradesync:pull"), // [v0.24.0] 로그인 시 자동 호출됨
   autoStateSyncPush: () => ipcRenderer.invoke("tool:autostatesync:push"), // [v0.31.0] 자동매매 기록 동기화
   autoStateSyncPull: () => ipcRenderer.invoke("tool:autostatesync:pull"), // [v0.31.0] 로그인 시 자동 호출됨
+  groupTradesPush: () => ipcRenderer.invoke("tool:grouptrades:push"), // [v0.35.0] 그룹 공유(평문)
+  groupTradesPull: () => ipcRenderer.invoke("tool:grouptrades:pull"), // [v0.35.0] 그룹 전원 기록 받기
   tradesStats: () => ipcRenderer.invoke("tool:trades:stats"),
   tradesClose: (id, exitPrice, kind) => ipcRenderer.invoke("tool:trades:close", id, exitPrice, kind),
   tradesDelete: (id) => ipcRenderer.invoke("tool:trades:delete", id),
