@@ -190,7 +190,10 @@ export function installKyleTool(): ToolEngine {
     autoTradeStart: () => Promise.resolve(e.startAutoTrade()),
     autoTradeStop: () => Promise.resolve(e.stopAutoTrade()),
     autoTradeStatus: () => Promise.resolve(e.getAutoTradeStatus()),
+    reconcileAutoPositionsNow: () => e.reconcileAutoPositionsNow(), // [v0.45.0]
     saveAutoTradeSettings: (input: Parameters<ToolEngine["saveAutoTradeSettings"]>[0]) => Promise.resolve(e.saveAutoTradeSettings(input)),
+    getSystemPauseStatus: () => Promise.resolve(e.getSystemPauseStatus()), // [v0.44.0]
+    saveSystemPauseEnabled: (enabled: boolean) => Promise.resolve(e.saveSystemPauseEnabled(enabled)), // [v0.44.0]
     saveAutoScanSettings: (input: Parameters<ToolEngine["saveAutoScanSettings"]>[0]) => Promise.resolve(e.saveAutoScanSettings(input)),
     autoScanNow: () => e.autoScanNow(),
     autoTradeHistory: () => Promise.resolve(e.getAutoTradeHistory()),

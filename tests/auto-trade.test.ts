@@ -18,10 +18,11 @@
 //   이미 순수 함수/기존 테스트로 커버돼 있다.
 // =============================================================================
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Settings, DateTime } from "luxon";
 import {
   ToolEngine, computeSeedQty, newlyConfirmedSymbols, applyScreenGates,
   type AutoPosition, type JournalEntry, type NotifyEvent, type ScreenResult,
@@ -44,6 +45,34 @@ function waitForOcoJournal(eng: ToolEngine, timeoutMs = 5000): Promise<JournalEn
     eng.on("journal", onEntry);
   });
 }
+
+/** [v0.45.0] summary에 특정 문자열이 포함된 저널이 뜰 때까지 기다린다(세션 선택 테스트용). */
+function waitForJournalContaining(eng: ToolEngine, needle: string, timeoutMs = 5000): Promise<JournalEntry> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      eng.off("journal", onEntry);
+      reject(new Error(`시간 안에 "${needle}" 포함 저널이 나오지 않음(${timeoutMs}ms)`));
+    }, timeoutMs);
+    function onEntry(e: JournalEntry) {
+      if (e.summary.includes(needle)) {
+        clearTimeout(timer);
+        eng.off("journal", onEntry);
+        resolve(e);
+      }
+    }
+    eng.on("journal", onEntry);
+  });
+}
+
+/** [v0.44.0/v0.45.0] 주어진 KST 시각으로 DateTime.now()가 고정되게 만든다(tests/system-pause.test.ts와 동일 패턴). */
+function freezeKst(year: number, month: number, day: number, hour: number, minute = 0) {
+  const target = DateTime.fromObject({ year, month, day, hour, minute }, { zone: "Asia/Seoul" }).toMillis();
+  Settings.now = () => target;
+}
+
+afterEach(() => {
+  Settings.now = () => Date.now(); // 항상 원상 복구(다른 테스트로 새지 않게)
+});
 
 describe("자동매매 상태 관리 — v0.26.0", () => {
   it("엔진을 처음 만들면 자동매매는 꺼진 상태고 한도는 공장값(3종목/5%/30%)이다", () => {
@@ -432,6 +461,79 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
     }
   }, 10_000);
 
+  it("[v0.45.0] reconcileAutoPositionsNow — 오너 보고 '지금 감시 중 포지션이 실시간 연동 안 됨' — 자동매매가 꺼져 있어도(positions만 있으면) 즉시 재확인해 최신 상태를 준다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const entry = await eng.placeEntry({ symbol: "AAPL", price: 2.1, quantity: 3 });
+      const buyOrderId = (entry.detail as { tossOrderId: string }).tossOrderId;
+
+      const engAny = eng as unknown as { autoTradePositions: AutoPosition[] };
+      engAny.autoTradePositions.push({
+        symbol: "AAPL", entry: 2.1, tp: 2.5, sl: 1.8, quantity: 3,
+        enteredAtMs: Date.now(), status: "watching", conditionalOrderId: null, buyOrderId,
+      });
+
+      // [핵심] autoTradeEnabled가 false인 상태(자동매매를 안 켰거나 이미 꺼진 상태)에서도
+      // — 화면의 "지금 감시 중" 표는 enabled와 무관하게 positions만 있으면 뜨므로 — 이 메서드는
+      // 여전히 동작해야 한다(이전 버그: enabled를 조건으로 걸어 두면 이 경우 조용히 아무 일도
+      // 안 하는 채로 옛 상태를 그대로 돌려줬을 것이다).
+      expect(eng.getAutoTradeStatus().enabled).toBe(false);
+
+      const ocoPromise = waitForOcoJournal(eng);
+      const status = await eng.reconcileAutoPositionsNow();
+      await ocoPromise;
+
+      const pos = status.positions.find((p) => p.symbol === "AAPL");
+      expect(pos?.status).toBe("active");
+      expect(pos?.conditionalOrderId).not.toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it("[v0.45.0] 매매진행할 장 선택 — 지금 세션의 토글을 꺼 두면 스캔·진입 없이 그 사이클만 건너뛴다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      // 정규장(본장)만 끄고 나머지 3개(데이·프리·애프터)는 공장값(켜짐) 그대로 둔다.
+      const saved = eng.saveAutoScanSettings({ regularEnabled: false });
+      expect(saved.autoScanRegularEnabled).toBe(false);
+      expect(saved.autoScanDayEnabled).toBe(true); // 다른 3개는 안 건드렸으니 그대로 켜짐
+
+      freezeKst(2026, 7, 16, 23, 0); // 목요일 23:00 KST = 정규장(tests/session.test.ts와 동일 시각)
+
+      const skipPromise = waitForJournalContaining(eng, "정규장(본장)");
+      eng.startAutoTrade();
+      const j = await skipPromise;
+      expect(j.summary).toContain("건너뜁니다");
+
+      // 실제로 스캔 자체가 안 돌았어야 한다(건너뛴 것이지, 스캔했는데 후보가 없던 게 아님).
+      expect(eng.getAutoTradeStatus().lastScan).toBeNull();
+      eng.stopAutoTrade();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it("[v0.45.0] 매매진행할 장 선택 — 지금 세션이 켜져 있으면(공장값 전부 켜짐) 평소대로 스캔이 실제로 돈다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.saveAutoScanSettings({ count: 10 }); // 스캔 대상을 최소치로 줄여 테스트를 빠르게
+      freezeKst(2026, 7, 16, 23, 0); // 정규장 — 공장값은 4개 전부 켜짐이라 막히지 않아야 함
+
+      eng.startAutoTrade();
+      // autoScanNow()가 진행 중이던 첫 사이클의 완료를 실제로 기다렸다가 최신 상태를 주므로
+      // (v0.45.0의 다른 버그 수정과 동일한 메커니즘), 이 반환값으로 "스캔이 끝났는지"를 확인한다.
+      const status = await eng.autoScanNow();
+      expect(status.lastScan).not.toBeNull(); // 세션 게이트에 막히지 않고 실제로 스캔까지 돌았다
+      eng.stopAutoTrade();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it("[v0.30.1] 자동매매 포지션 파일이 없거나 깨져 있어도 엔진 생성이 죽지 않고 빈 목록으로 시작한다", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
@@ -443,6 +545,32 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+describe("[v0.45.0 버그 수정] 자동매매 시작 직후 '지금 새로고침' 경합 — 이제는 실제로 기다렸다가 최신 결과를 준다", () => {
+  // [오너 보고] "자동매매 시작을 눌러도 자동 스크리너 스크리닝 진행안함, 새로고침 눌러도
+  //   눌리기만 함". 원인: startAutoTrade()가 첫 사이클을 "발사 후 신경 안 씀"으로 돌리고 곧장
+  //   반환하는데, 화면(toggleAutoTrade)이 그 직후 곧바로 autoScanNow()(=새로고침과 동일 함수)를
+  //   또 부른다. 예전엔 "이미 진행 중"이면 그 자리에서 즉시 옛(텅 빈) 상태를 반환해버려 오너
+  //   눈엔 "눌러도 아무 일도 안 일어남"으로 보였다. 이제는 진행 중인 사이클을 실제로 기다린다.
+  it("startAutoTrade() 직후 autoScanNow()를 부르면, 첫 사이클이 끝날 때까지 기다렸다가 결과를 돌려준다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.saveAutoScanSettings({ count: 10 }); // 스캔 대상을 최소치로 줄여 테스트를 빠르게
+      eng.startAutoTrade(); // 내부에서 첫 사이클을 발사 후 신경 안 씀으로 시작(runAutoTradeTick)
+      // 오너가 실제로 겪은 순서 그대로: 시작 직후 곧바로 "지금 새로고침"을 누른 것과 동일.
+      const status = await eng.autoScanNow();
+      expect(status.enabled).toBe(true);
+      // autoScanNow()가 진짜로 첫 사이클의 완료까지 기다렸다면, 그 사이클 안의 스캔(scanScreener)도
+      // 이미 끝나 있어야 한다 — screenBusy가 풀렸는지를 "취소할 스캔이 없다"는 응답으로 확인한다
+      // (고치기 전이었다면 이 시점에도 여전히 스캔이 진행 중이었을 것 — ok:true가 나왔을 것이다).
+      expect(eng.cancelScreenerScan().ok).toBe(false);
+      eng.stopAutoTrade();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
 
 describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에 자동매매를 켰을 때의 안전장치", () => {
@@ -910,4 +1038,58 @@ describe("[v0.41.0] cancelAutoPosition — 지금 감시 중인 포지션을 사
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+// =============================================================================
+// [v0.45.0 — 오너 요청] "각 사용자가 어떤 기준·필터로 자동매매를 진행했는지도 연구탭 데이터에
+//   모이게" — capri_group_trades로 그룹 전체가 함께 보는 AutoTradeHistoryEntry에 진입 시점
+//   스크리닝·리스크 설정 스냅샷(criteriaSnapshot)을 함께 남긴다.
+// =============================================================================
+describe("[v0.45.0] AutoTradeHistoryEntry.criteriaSnapshot — 진입 시점 설정 스냅샷", () => {
+  type EngineInternals = {
+    autoTradePositions: AutoPosition[];
+    addAutoTradeHistory: (pos: AutoPosition, criteriaSnapshot?: Record<string, unknown>) => void;
+  };
+
+  it("addAutoTradeHistory에 넘긴 스냅샷이 getAutoTradeHistory()에 그대로 저장된다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const engAny = eng as unknown as EngineInternals;
+      const enteredAtMs = Date.now();
+      const pos: AutoPosition = {
+        symbol: "AAPL", entry: 2.1, tp: 2.5, sl: 1.8, quantity: 3, enteredAtMs,
+        status: "watching", conditionalOrderId: null,
+      };
+      engAny.autoTradePositions.push(pos);
+      engAny.addAutoTradeHistory(pos, {
+        bodyRatio: 0.3,
+        emaTrendEnabled: true,
+        emaPeriod: 200,
+        cloudEnabled: false, // 이 매매는 구름 필터를 끈 상태로 진입했다는 걸 기록에서 알 수 있어야 함
+        dojiWickMinRatio: 0.1,
+        dojiMaxAgeEnabled: true,
+        dojiMaxAgeMinutes: 40,
+        nextCandleConfirmEnabled: true,
+        excludeEtf: true,
+        session: "regular",
+        maxPositions: 3,
+        maxLossPct: 5,
+        maxInvestPct: 30,
+        watchMinutes: 10,
+      });
+
+      const rec = eng.getAutoTradeHistory().find((h) => h.id === `AAPL@2.1@${enteredAtMs}`);
+      expect(rec?.criteriaSnapshot?.cloudEnabled).toBe(false);
+      expect(rec?.criteriaSnapshot?.session).toBe("regular");
+      expect(rec?.criteriaSnapshot?.maxInvestPct).toBe(30);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  // [참고] 실제 autoTradeTick(스캔→확정→진입) 경로 전체를 통해 스냅샷이 채워지는지까지는 여기서
+  //   시뮬레이션하지 않는다 — 이 파일 맨 위 설명대로, 목 서버 캔들 모양상 "확정" 판정이 결정적으로
+  //   나오지 않아 그런 테스트는 비결정적이다. 대신 electron/tool-engine.ts의 autoTradeTick 호출부가
+  //   이 함수에 정확히 무엇을 넘기는지는 타입 체크(AutoTradeHistoryEntry["criteriaSnapshot"])가
+  //   보장하고, addAutoTradeHistory 자체의 동작(넘긴 값을 그대로 저장하는지)은 위에서 직접 검증했다.
 });

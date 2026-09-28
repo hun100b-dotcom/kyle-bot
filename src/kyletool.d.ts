@@ -121,6 +121,9 @@ interface ToolSettings {
    *  조절도 안 됐던 것을 오너 요청으로 노출/조절 가능하게 했다. */
   autoTradeWatchMinutes: number;
   autoTradeEnabled: boolean;
+  /** [v0.44.0] 시스템 휴무 시간대(매일 05:00~17:00 KST — 스크리닝·주문·자동매매 전부 정지) 기능
+   *  켜짐 여부. 다른 자동매매 토글과 달리 이건 재시작해도 유지된다(안전장치). */
+  systemPauseEnabled: boolean;
   // [v0.28.0] 자동매매용 스크리너 조건(4개, 전부 수정 가능 — 메뉴얼 스크리너와 같은 항목)
   autoScanCount: number;
   autoScanPriceMin: number;
@@ -135,6 +138,11 @@ interface ToolSettings {
   autoScanDojiMaxAgeMinutes: number;
   autoScanNextCandleConfirmEnabled: boolean;
   autoScanExcludeEtf: boolean;
+  /** [v0.45.0] "매매진행할 장" 선택 — 자동매매가 신규 진입을 시도할 세션(전부 켜짐/꺼짐). */
+  autoScanDayEnabled: boolean;
+  autoScanPreEnabled: boolean;
+  autoScanRegularEnabled: boolean;
+  autoScanAfterEnabled: boolean;
 }
 
 /** [v0.26.0] 자동매매가 지금 감시·보유 중인 포지션 하나. */
@@ -162,6 +170,8 @@ interface AutoTradeStatus {
   lastCycleAt: string | null;
   /** [v0.27.0] 이번 사이클에서 스캔한 결과("스크리닝 결과" 탭이 그대로 보여줌). 아직 안 돌았으면 null. */
   lastScan: ScreenRun | null;
+  /** [v0.45.0] 가장 최근 스캔 실패(취소 제외) 기록. 성공하면 즉시 null로 지워진다. */
+  lastScanError: { message: string; atMs: number } | null;
   /** [v0.29.0] 다음 사이클 예정 시각(ms, epoch) — "다음 스캔까지 N분 N초" 카운트다운용. 꺼져 있으면 null. */
   nextCycleAtMs: number | null;
   /** [v0.35.0] "확정인데 왜 안 사졌지?"에 답하는 사유 — 종목코드 → 한 줄 설명. 매 사이클 새로 채워짐. */
@@ -186,6 +196,26 @@ interface AutoTradeHistoryEntry {
   pnlUsd: number | null;
   pnlPct: number | null;
   note: string;
+  conditionalOrderId?: string | null;
+  buyOrderId?: string | null;
+  /** [v0.45.0] 이 매매가 실제로 어떤 스크리닝·리스크 설정으로 진입됐는지의 스냅샷(자동매매만,
+   *  electron/tool-engine.ts의 AutoTradeHistoryEntry.criteriaSnapshot 주석 참고). */
+  criteriaSnapshot?: {
+    bodyRatio: number;
+    emaTrendEnabled: boolean;
+    emaPeriod: number;
+    cloudEnabled: boolean;
+    dojiWickMinRatio: number;
+    dojiMaxAgeEnabled: boolean;
+    dojiMaxAgeMinutes: number;
+    nextCandleConfirmEnabled: boolean;
+    excludeEtf: boolean;
+    session: "day" | "pre" | "regular" | "after" | "closed";
+    maxPositions: number;
+    maxLossPct: number;
+    maxInvestPct: number;
+    watchMinutes: number;
+  };
 }
 
 /** [v0.3.0] orderCapacity(capacity) 응답 — 주문가능/보유 + 세션 시드 제안 */
@@ -647,7 +677,13 @@ interface KyletoolBridge {
   autoTradeStart(): Promise<AutoTradeStatus>;
   autoTradeStop(): Promise<AutoTradeStatus>;
   autoTradeStatus(): Promise<AutoTradeStatus>;
+  /** [v0.45.0] 감시 중인 포지션을 지금 바로 재확인(체결·익절/손절 발동 여부)하고 최신 상태를 돌려준다. */
+  reconcileAutoPositionsNow(): Promise<AutoTradeStatus>;
   saveAutoTradeSettings(input: { maxPositions?: number; maxLossPct?: number; maxInvestPct?: number; watchMinutes?: number }): Promise<ToolSettings>;
+  /** [v0.44.0] 지금 "시스템 휴무 시간대(또는 휴장)"인지 + 왜 + 언제 재개되는지. */
+  getSystemPauseStatus(): Promise<{ paused: boolean; reason: string | null; resumesAtMs: number | null }>;
+  /** [v0.44.0] 시스템 휴무 시간대(05:00~17:00 KST) 기능을 켜고 끈다. */
+  saveSystemPauseEnabled(enabled: boolean): Promise<ToolSettings>;
   // [v0.28.0] 자동매매용 스크리너 조건 저장 + 수동 새로고침(5분 기다리지 않고 지금 훑기)
   // [v0.33.0] "스크리닝 기준" 탭에서 8개 조건(켜짐/꺼짐 + 수치)이 추가됨 — 전부 선택 항목(안 보내면 이전값 유지)
   saveAutoScanSettings(input: {
@@ -663,6 +699,11 @@ interface KyletoolBridge {
     dojiMaxAgeMinutes?: number;
     nextCandleConfirmEnabled?: boolean;
     excludeEtf?: boolean;
+    // [v0.45.0] "매매진행할 장" 선택
+    dayEnabled?: boolean;
+    preEnabled?: boolean;
+    regularEnabled?: boolean;
+    afterEnabled?: boolean;
   }): Promise<ToolSettings>;
   autoScanNow(): Promise<AutoTradeStatus>;
   /** [v0.30.0] 자동매매기록 — 자동매매가 낸 매매의 전체 생애주기 로그(읽기 전용, 최신순). */

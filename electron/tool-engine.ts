@@ -20,7 +20,7 @@ import { EventEmitter } from "node:events";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { DateTime } from "luxon";
-import { getSession, getSessionStart, getMarketStatus, isOrderFrozen, type Session } from "../lib/session";
+import { getSession, getSessionStart, getMarketStatus, isOrderFrozen, isInDailyPauseWindow, type Session } from "../lib/session";
 import { calcSplit3, calcOrderbook, calcCandle, roundPrice, getTick, type SplitOrder } from "../lib/calc";
 import { encryptSecret, decryptSecret, encryptJson, decryptJson } from "../lib/keysync"; // [v0.8.0] 키 기기 간 동기화(클라이언트 암호화) + [v0.10.0] 매매 이력용
 import { classifyTicks, strengthFromTicks, strengthFromVolumes, updateStrengthWindow, isWindowCapped, analyzeStrengthSeries, type Side, type StrengthSignals, type WindowBufferEntry } from "../lib/strength";
@@ -766,6 +766,9 @@ export interface AutoTradeStatus {
   lastCycleAt: string | null;
   /** [v0.27.0] 이번 사이클에서 스캔한 결과(스크리닝 결과 탭이 그대로 보여줌) — 아직 한 번도 안 돌았으면 null. */
   lastScan: ScreenRun | null;
+  /** [v0.45.0] 가장 최근 스캔 실패(취소 제외) 기록 — 성공하면 즉시 지워진다. "왜 결과가 안 뜨지?"에
+   *  답하려고 화면에 바로 보여준다(예전엔 저널에만 조용히 남아 오너가 원인을 볼 수 없었다). */
+  lastScanError: { message: string; atMs: number } | null;
   /** [v0.29.0] 다음 사이클 예정 시각(ms, epoch) — 화면의 "다음 스캔까지 N분 N초" 카운트다운용.
    *  자동매매가 꺼져 있거나 아직 한 번도 안 돌았으면 null. */
   nextCycleAtMs: number | null;
@@ -807,6 +810,29 @@ export interface AutoTradeHistoryEntry {
    *  있어야 getOrder/getConditionalOrder로 실제 체결·발동 여부를 물어볼 수 있다). */
   conditionalOrderId?: string | null;
   buyOrderId?: string | null;
+  /** [v0.45.0 — 오너 요청 "각 사용자가 어떤 기준으로 자동매매를 진행했는지도 연구 데이터에
+   *  모이게"] 이 매매가 실제로 어떤 스크리닝·리스크 설정으로 진입됐는지의 스냅샷. 오너들이
+   *  설정을 수시로 바꾸고(버전 이력은 안 남음) capri_group_trades는 이 기록을 그룹 전체가
+   *  실명으로 함께 보므로, "이 사람은 이런 스타일(공격적 투입비율·느슨한 필터 등)로 이런
+   *  성적을 냈다"를 나중에도 정확히 복기하려면 매매 시점에 찍어 함께 저장해야 한다(최신
+   *  설정을 나중에 조인하면 그사이 바뀐 값으로 잘못 덮어써 보이는 문제가 생긴다). 자동매매가
+   *  낸 매매만 채워진다(수동 매매는 스크리닝 조건 자체가 없어 undefined). */
+  criteriaSnapshot?: {
+    bodyRatio: number;
+    emaTrendEnabled: boolean;
+    emaPeriod: number;
+    cloudEnabled: boolean;
+    dojiWickMinRatio: number;
+    dojiMaxAgeEnabled: boolean;
+    dojiMaxAgeMinutes: number;
+    nextCandleConfirmEnabled: boolean;
+    excludeEtf: boolean;
+    session: Session; // 진입 당시 세션(day/pre/regular/after)
+    maxPositions: number;
+    maxLossPct: number;
+    maxInvestPct: number;
+    watchMinutes: number;
+  };
 }
 
 // -----------------------------------------------------------------------------
@@ -897,6 +923,14 @@ export class ToolEngine extends EventEmitter {
   private autoTradeMaxPositions = 3; //  동시 보유 최대 종목 수(오너 기본값)
   private autoTradeMaxLossPct = 5; //    최대손실 한도(시드 대비 %) — 넘으면 자동매매 자동 중단
   private autoTradeMaxInvestPct = 30; // 종목 1개당 배정하는 시드 대비 투입 비율(%) — 종목 수로 나누지 않음
+  // [v0.44.0] 오너 결정 — 매일 05:00~17:00 KST(데이마켓+애프터 구간, 토스 합성시세)는 스크리닝·
+  //   수동 주문·자동매매를 전부 멈춘다. 재개는 정확히 17:00(프리마켓 시작)이다. "켜짐" 여부는
+  //   다른 자동매매 토글과 달리 껐다 켜도 유지한다(안전장치라 기본 켜짐을 지키는 게 맞음).
+  private systemPauseEnabled = true;
+  private static readonly SYSTEM_PAUSE_START_HOUR = 5; // KST
+  private static readonly SYSTEM_PAUSE_END_HOUR = 17; //  KST
+  /** 직전 자동매매 사이클이 일시정지 상태였는지 — 전환(진입/해제) 시점에만 정리 작업을 하기 위해. */
+  private autoTradeWasPaused = false;
   // [v0.28.0] 자동매매가 5분마다 스스로 돌리는 스크리너의 조건 — 메뉴얼 스크리너와 같은 4항목을
   //   오너가 똑같이 조절할 수 있게 한다(공장값은 메뉴얼 스크리너 기본값과 동일).
   private autoScanCount = 60; //      스캔할 거래량 상위 종목 수(10~200)
@@ -914,6 +948,18 @@ export class ToolEngine extends EventEmitter {
   private autoScanDojiMaxAgeMinutes = 40; //  도지가 이보다 오래되면 배제(10~180분)
   private autoScanNextCandleConfirmEnabled = true; // 도지 다음 봉까지 음봉이어야 "확정" — 끄면 도지만으로 확정
   private autoScanExcludeEtf = true; //       ETF·ETN 등(일반 주식 아닌 것) 제외 여부
+  // [v0.45.0 — 오너 요청 "매매진행할 장 선택"] 자동매매가 어느 장(세션)에서 신규 진입을 시도할지
+  //   오너가 직접 고른다. 스크리닝 조건(위 8개)과 달리 "후보를 어떻게 고르나"가 아니라 "언제
+  //   사도 되나"를 정하는 것이라 자동매매 사이클(autoTradeTick) 맨 앞에서 별도로 검사한다 —
+  //   [v0.44.0] 시스템 휴무 시간대(05:00~17:00 KST, 스크리닝·계산기·자동매매 전부 정지)와는
+  //   다른 축의 제어다: 휴무 시간대는 "이 시계 구간엔 아예 아무것도 안 한다"는 오너의 고정
+  //   결정이고, 여기는 "휴무 시간대가 아닌 나머지 시간 중에서도 어떤 장(세션) 타입일 때만
+  //   자동매매가 사도 되는지"를 세션 단위로 더 세밀하게 고르는 것 — 둘 다 켜져 있으면 두 조건을
+  //   모두 통과해야 진입한다. 기본값은 4개 전부 켜짐(지금까지의 동작과 동일, 회귀 없음).
+  private autoScanDayEnabled = true; //     데이마켓
+  private autoScanPreEnabled = true; //     프리마켓
+  private autoScanRegularEnabled = true; // 정규장(본장)
+  private autoScanAfterEnabled = true; //   애프터마켓
 
   // [v0.26.0] 자동매매 켜짐 자체(스위치)는 절대 저장 안 함 — 앱을 새로 켤 때마다 오너가 직접
   //   다시 켜야 한다(오너 결정, 안전 원칙). 그러나 "지금 감시 중인 포지션"은 다르다 — [v0.30.1
@@ -926,6 +972,16 @@ export class ToolEngine extends EventEmitter {
   private autoTradeEnabled = false;
   private autoTradeTimer: ReturnType<typeof setInterval> | null = null;
   private autoTradeTickBusy = false; // 한 사이클이 겹쳐 실행되지 않게
+  /** [v0.45.0 버그 수정 — 오너 보고 "자동매매 시작해도 스크리닝이 간헐적으로 안 돎"]
+   *  원인: startAutoTrade()가 `void this.autoTradeTick()`으로 첫 사이클을 "발사 후 신경 안 씀"으로
+   *  돌리고 곧바로 반환하는데, 화면(App.tsx toggleAutoTrade)은 그 직후 곧바로 autoScanNow()(=
+   *  "지금 새로고침"과 동일 함수)를 또 호출한다. 이때 방금 발사한 첫 사이클이 아직 끝나지
+   *  않았으면(거의 항상 — 스캔은 네트워크 왕복이 많아 수 초~수십 초 걸림) autoScanNow()는
+   *  "이미 진행 중"이라며 그 자리에서 **그냥 옛(비어 있는) 상태를 즉시 반환하고 끝나버렸다** —
+   *  오너 눈에는 "새로고침을 눌러도 아무 일도 안 일어남"으로 보였다. 이 필드에 "지금 도는 사이클"의
+   *  프라미스를 저장해 두면, 나중에 "이미 진행 중"을 만난 쪽이 그 프라미스가 끝날 때까지 실제로
+   *  기다렸다가 **최신** 결과를 돌려줄 수 있다(runAutoTradeTick 참고). */
+  private autoTradeTickPromise: Promise<void> | null = null;
   private autoTradeRealizedPnlUsd = 0; // 이번 자동매매 실행 동안 누적 실현손익(달러, 손실이면 음수)
   private autoTradePositions: AutoPosition[] = []; // 지금 자동매매로 감시·보유 중인 포지션(파일로 영속)
   private autoTradeUsedKeys = new Set<string>(); // `${symbol}@${entry}` — 같은 종목 같은 타점 재진입 방지(파일로 영속)
@@ -940,6 +996,11 @@ export class ToolEngine extends EventEmitter {
   //   버려지던 것을 "스크리닝 결과" 탭에 노출한다 — 오너 피드백: 사유 문자열 같은 별도 추적은
   //   불필요, lastScan만 있으면 화면(프론트)이 positions와 대조해 진입여부를 계산할 수 있다).
   private autoTradeLastScan: ScreenRun | null = null;
+  /** [v0.45.0 — 오너 보고 "간헐적으로 스크리닝이 안 도는데 이유를 모르겠다"] 스캔 실패(취소 제외)가
+   *  일어나면 여기 기록해 화면에 바로 보여준다. 예전엔 실패해도 저널(기본 접힘)에만 조용히
+   *  남아, 오너가 "스크리닝 결과" 탭에서 그저 텅 빈 화면만 계속 보게 됐다(진짜 원인은 안 보이고
+   *  "안 돈다"로만 보임). 성공하면 즉시 null로 지운다. */
+  private autoTradeLastScanError: { message: string; atMs: number } | null = null;
   /** [v0.32.0] "관찰 확정" 알림을 중복으로 보내지 않기 위해, 직전 스캔에서 이미 확정 상태였던
    *  종목을 기억해 둔다(재시작하면 초기화돼도 무해 — 다시 확정되면 또 한 번 알려도 문제 없음). */
   private autoScanNotifiedConfirmed = new Set<string>();
@@ -1016,6 +1077,16 @@ export class ToolEngine extends EventEmitter {
     this.loadEnv();
     // [개발 검증용] E2E 등 자동 검증은 절대 실서버를 건드리면 안 되므로 연습 모드 강제.
     if (opts?.forceMock) this.mode = "mock";
+    // [v0.45.0] 테스트 엔진은 시스템 휴무 시간대(05:00~17:00 KST) 기능을 항상 꺼진 채로
+    //   시작한다(loadEnv가 복원한 값이 있어도 덮어씀) — 이 기능은 실제 벽시계 시각(DateTime.now())
+    //   을 보는데, 테스트는 하루 중 언제 돌지 알 수 없다(예: 마침 낮 12시에 테스트를 돌리면 이
+    //   기능 때문에 무관한 테스트까지 전부 막혀버린다). [주의] process.env는 같은 테스트 프로세스의
+    //   여러 테스트 파일이 공유해(persistEnv가 process.env[k]=v로 전역에 씀), "저장된 값이 있으면
+    //   보존"처럼 조건을 걸면 다른 테스트가 먼저 저장한 값이 새어 들어와 무의미해진다 — 그래서
+    //   무조건 끈다. 실제 앱(forceMock 없이 생성)은 이 줄과 무관하게 항상 기본 켜짐을 유지한다.
+    //   이 기능의 "저장이 재시작해도 유지되는지"는 tests/system-pause.test.ts가 .env 파일 내용을
+    //   직접 읽어 검증한다(새 엔진의 getSettings()로는 검증할 수 없음 — 매번 강제로 꺼지므로).
+    if (opts?.forceMock) this.systemPauseEnabled = false;
     this.loadJournal();
     this.loadRationales();
     this.loadSplits();
@@ -1073,6 +1144,8 @@ export class ToolEngine extends EventEmitter {
     // [v0.42.0] 저장된 미체결 자동취소 기준(분) 복원.
     const awm = Number(process.env.AUTO_WATCH_MINUTES);
     if (Number.isFinite(awm) && awm > 0) this.autoTradeWatchMinutes = Math.round(awm);
+    // [v0.44.0] 저장된 시스템 휴무 시간대 기능 켜짐 여부 복원(기본 켜짐 — 명시적으로 껐을 때만 꺼짐).
+    if (process.env.SYSTEM_PAUSE_ENABLED === "false") this.systemPauseEnabled = false;
     // [v0.28.0] 저장된 자동매매 스크리너 조건 복원(4개 전부 오너가 수정 가능).
     const asc = Number(process.env.AUTO_SCAN_COUNT);
     if (Number.isFinite(asc) && asc > 0) this.autoScanCount = Math.round(asc);
@@ -1100,6 +1173,15 @@ export class ToolEngine extends EventEmitter {
     else if (process.env.AUTO_SCAN_NEXT_CANDLE_CONFIRM_ENABLED === "true") this.autoScanNextCandleConfirmEnabled = true;
     if (process.env.AUTO_SCAN_EXCLUDE_ETF === "false") this.autoScanExcludeEtf = false;
     else if (process.env.AUTO_SCAN_EXCLUDE_ETF === "true") this.autoScanExcludeEtf = true;
+    // [v0.45.0] 저장된 "매매진행할 장" 선택 복원(4개 전부 오너가 수정 가능).
+    if (process.env.AUTO_SCAN_DAY_ENABLED === "false") this.autoScanDayEnabled = false;
+    else if (process.env.AUTO_SCAN_DAY_ENABLED === "true") this.autoScanDayEnabled = true;
+    if (process.env.AUTO_SCAN_PRE_ENABLED === "false") this.autoScanPreEnabled = false;
+    else if (process.env.AUTO_SCAN_PRE_ENABLED === "true") this.autoScanPreEnabled = true;
+    if (process.env.AUTO_SCAN_REGULAR_ENABLED === "false") this.autoScanRegularEnabled = false;
+    else if (process.env.AUTO_SCAN_REGULAR_ENABLED === "true") this.autoScanRegularEnabled = true;
+    if (process.env.AUTO_SCAN_AFTER_ENABLED === "false") this.autoScanAfterEnabled = false;
+    else if (process.env.AUTO_SCAN_AFTER_ENABLED === "true") this.autoScanAfterEnabled = true;
     // [v0.8.1] 저장된 로그인 세션 복원(리프레시 토큰만). access token 은 필요 시 갱신한다.
     if (process.env.CAPRI_AUTH_REFRESH) this.authRefreshToken = process.env.CAPRI_AUTH_REFRESH;
     if (process.env.CAPRI_AUTH_EMAIL) this.authEmail = process.env.CAPRI_AUTH_EMAIL;
@@ -1130,6 +1212,7 @@ export class ToolEngine extends EventEmitter {
       autoTradeMaxInvestPct: this.autoTradeMaxInvestPct,
       autoTradeWatchMinutes: this.autoTradeWatchMinutes, // [v0.42.0] 장기간 미체결 자동취소 기준(분)
       autoTradeEnabled: this.autoTradeEnabled,
+      systemPauseEnabled: this.systemPauseEnabled, // [v0.44.0] 시스템 휴무 시간대(05:00~17:00 KST) 기능
       // [v0.28.0] 자동매매 스크리너 조건(4개)
       autoScanCount: this.autoScanCount,
       autoScanPriceMin: this.autoScanPriceMin,
@@ -1144,6 +1227,11 @@ export class ToolEngine extends EventEmitter {
       autoScanDojiMaxAgeMinutes: this.autoScanDojiMaxAgeMinutes,
       autoScanNextCandleConfirmEnabled: this.autoScanNextCandleConfirmEnabled,
       autoScanExcludeEtf: this.autoScanExcludeEtf,
+      // [v0.45.0] "매매진행할 장" 선택
+      autoScanDayEnabled: this.autoScanDayEnabled,
+      autoScanPreEnabled: this.autoScanPreEnabled,
+      autoScanRegularEnabled: this.autoScanRegularEnabled,
+      autoScanAfterEnabled: this.autoScanAfterEnabled,
     };
   }
 
@@ -1195,6 +1283,71 @@ export class ToolEngine extends EventEmitter {
   }
 
   /**
+   * [v0.44.0] 시스템 휴무 시간대(매일 05:00~17:00 KST) 기능을 켜고 끈다. 시간대 자체(05/17시)는
+   *   오너가 명시적으로 정한 값이라 이번 버전에서는 고정값 — 껐다/켰다만 오너가 조절한다.
+   */
+  saveSystemPauseEnabled(enabled: boolean) {
+    this.systemPauseEnabled = enabled;
+    this.persistEnv();
+    this.addJournal({
+      kind: "info",
+      symbol: "-",
+      summary: `⏸ 시스템 휴무 시간대(05:00~17:00 KST) 기능을 ${enabled ? "켰습니다" : "껐습니다"}.`,
+    });
+    return this.getSettings();
+  }
+
+  /**
+   * [v0.44.0] 지금 "시스템 휴무 시간대(또는 휴장)"인지, 왜인지, 언제 재개되는지 한 번에 알려준다.
+   *   화면 배너·주문 차단 안내 문구가 공용으로 쓴다.
+   *
+   * [판정 순서]
+   *   ① 오늘 KST 05:00~17:00(고정) 안이면 — "지정된 휴무 시간대"로 즉시 확정(제일 흔한 경우).
+   *   ② 그 시간대 밖인데도 lib/session.ts의 getMarketStatus가 "closed"라고 하면 — 주말·미국
+   *      공휴일이다(평소엔 이 바깥 구간은 항상 프리/정규/애프터 중 하나라 "closed"가 안 나온다 —
+   *      세션 표의 유일한 "장 시간 아님" 갭(08:50~09:00)도 이미 ①의 05~17 구간 안에 있다). 오너가
+   *      요청한 "휴장일 전면 중지"는 이 경로로 자동으로 이미 커버된다 — 별도 한국/미국 휴장일
+   *      캘린더를 새로 만들 필요가 없다(카프리는 한국 증시가 아니라 토스를 통한 미국 증시를
+   *      거래하므로, "장이 실제로 열리는가"는 전적으로 이미 구현된 미국 증시 달력이 결정한다).
+   */
+  getSystemPauseStatus(): { paused: boolean; reason: string | null; resumesAtMs: number | null } {
+    if (!this.systemPauseEnabled) return { paused: false, reason: null, resumesAtMs: null };
+    const now = DateTime.now().setZone("Asia/Seoul");
+
+    if (isInDailyPauseWindow(now, ToolEngine.SYSTEM_PAUSE_START_HOUR, ToolEngine.SYSTEM_PAUSE_END_HOUR)) {
+      // 정의상 지금은 항상 [시작시, 종료시) 사이이므로(자정을 넘지 않는 고정값), 재개는 항상 "오늘
+      // 종료시각"이다.
+      const resumesAt = now.set({ hour: ToolEngine.SYSTEM_PAUSE_END_HOUR, minute: 0, second: 0, millisecond: 0 });
+      return {
+        paused: true,
+        reason: `지정된 휴무 시간대(05:00~17:00 KST) — 토스 데이마켓 합성시세 구간을 피하려는 오너 설정`,
+        resumesAtMs: resumesAt.toMillis(),
+      };
+    }
+
+    const market = getMarketStatus(now);
+    if (market.session === "closed" && market.closedReason) {
+      return {
+        paused: true,
+        reason: `휴장 — ${market.closedReason}`,
+        resumesAtMs: market.nextOpen ? market.nextOpen.toMillis() : null,
+      };
+    }
+    return { paused: false, reason: null, resumesAtMs: null };
+  }
+
+  /**
+   * [v0.44.0] 신규 진입 주문·스크리닝처럼 "휴무 시간대엔 하면 안 되는 행동" 앞에서 공용으로 부른다.
+   *   막혀 있으면 오너가 이해할 수 있는 이유+재개 시각과 함께 예외를 던진다.
+   */
+  private assertNotSystemPaused(action: string): void {
+    const st = this.getSystemPauseStatus();
+    if (!st.paused) return;
+    const resume = st.resumesAtMs != null ? DateTime.fromMillis(st.resumesAtMs).setZone("Asia/Seoul").toFormat("MM-dd HH:mm") : "미정";
+    throw new Error(`${st.reason} — 지금은 ${action}을(를) 할 수 없습니다(재개 예정: ${resume}).`);
+  }
+
+  /**
    * [v0.28.0] 자동매매가 5분마다 스스로 돌리는 스크리너의 조건 4개(스캔 종목수·가격 하한/상한·
    *   도지 몸통비율 상한) 저장. 메뉴얼 스크리너와 같은 항목이지만 별도로 저장한다 — 자동매매는
    *   사람이 매번 값을 넣어주는 메뉴얼 스크리너와 달리 무인으로 반복 실행되므로, 오너가 "자동매매용"
@@ -1215,6 +1368,11 @@ export class ToolEngine extends EventEmitter {
     dojiMaxAgeMinutes?: number;
     nextCandleConfirmEnabled?: boolean;
     excludeEtf?: boolean;
+    // [v0.45.0] "매매진행할 장" 선택 — 전부 선택(안 보내면 이전값 유지).
+    dayEnabled?: boolean;
+    preEnabled?: boolean;
+    regularEnabled?: boolean;
+    afterEnabled?: boolean;
   }) {
     if (typeof input.count === "number" && Number.isFinite(input.count) && input.count > 0) {
       this.autoScanCount = Math.round(Math.min(200, Math.max(10, input.count)));
@@ -1242,7 +1400,17 @@ export class ToolEngine extends EventEmitter {
     }
     if (typeof input.nextCandleConfirmEnabled === "boolean") this.autoScanNextCandleConfirmEnabled = input.nextCandleConfirmEnabled;
     if (typeof input.excludeEtf === "boolean") this.autoScanExcludeEtf = input.excludeEtf;
+    if (typeof input.dayEnabled === "boolean") this.autoScanDayEnabled = input.dayEnabled;
+    if (typeof input.preEnabled === "boolean") this.autoScanPreEnabled = input.preEnabled;
+    if (typeof input.regularEnabled === "boolean") this.autoScanRegularEnabled = input.regularEnabled;
+    if (typeof input.afterEnabled === "boolean") this.autoScanAfterEnabled = input.afterEnabled;
     this.persistEnv();
+    const sessionsOn = [
+      this.autoScanDayEnabled && "데이",
+      this.autoScanPreEnabled && "프리",
+      this.autoScanRegularEnabled && "본장",
+      this.autoScanAfterEnabled && "애프터",
+    ].filter(Boolean).join("·") || "없음(!)";
     this.addJournal({
       kind: "info",
       symbol: "-",
@@ -1251,7 +1419,8 @@ export class ToolEngine extends EventEmitter {
         `도지 몸통상한 ${Math.round(this.autoScanBodyRatio * 100)}% · EMA${this.autoScanEmaPeriod} ${this.autoScanEmaTrendEnabled ? "ON" : "OFF"} · ` +
         `구름 ${this.autoScanCloudEnabled ? "ON" : "OFF"} · 꼬리비율 ${Math.round(this.autoScanDojiWickMinRatio * 100)}% · ` +
         `신선도 ${this.autoScanDojiMaxAgeEnabled ? `${this.autoScanDojiMaxAgeMinutes}분` : "OFF"} · ` +
-        `다음봉확인 ${this.autoScanNextCandleConfirmEnabled ? "ON" : "OFF"} · ETF제외 ${this.autoScanExcludeEtf ? "ON" : "OFF"}`,
+        `다음봉확인 ${this.autoScanNextCandleConfirmEnabled ? "ON" : "OFF"} · ETF제외 ${this.autoScanExcludeEtf ? "ON" : "OFF"} · ` +
+        `매매 진행할 장: ${sessionsOn}`,
     });
     return this.getSettings();
   }
@@ -1288,20 +1457,29 @@ export class ToolEngine extends EventEmitter {
    *   호출한다 — 스캔은 물론 진입 시도·`skipReasons`까지 전부 실제 로직 그대로 돌고, "다음
    *   자동 스캔까지" 타이머도 이 수동 새로고침이 끝난 시점 기준으로 5분 뒤로 다시 맞춘다(5분
    *   주기 자체는 그대로 유지 — 타이머를 없애는 게 아니라 기준 시각만 지금으로 당김). 마침
-   *   다른 사이클이 이미 진행 중이면(흔치 않음) 새로 겹쳐 돌리지 않고 그 결과를 그대로
-   *   보여준다. 자동매매가 꺼져 있을 때는 예전 그대로 "켜면 뭐가 나올지" 미리보기만 한다
-   *   (진입 게이트가 애초에 "자동매매가 꺼져 있습니다"로 막으므로 진입 시도 자체가 의미 없음).
+   *   다른 사이클이 이미 진행 중이면 새로 겹쳐 돌리지 않되, **그 사이클이 끝날 때까지 기다렸다가**
+   *   최신 결과를 돌려준다(자동매매가 꺼져 있을 때는 예전 그대로 "켜면 뭐가 나올지" 미리보기만
+   *   한다 — 진입 게이트가 애초에 "자동매매가 꺼져 있습니다"로 막으므로 진입 시도 자체가 의미 없음).
+   *
+   *   [v0.45.0 버그 수정 — 오너 보고 "자동매매 시작을 눌러도 스크리닝이 진행 안 함"]
+   *   startAutoTrade()가 시작하자마자 이 함수와 똑같은 일(스캔+진입 시도)을 하는 첫 사이클을
+   *   이미 발사해 둔 상태에서, 화면이 곧바로 이 함수를 또 부른다(오너가 "시작"을 누르면 자동
+   *   스크리너 탭도 바로 도는 것처럼 보여주려고). 예전엔 이때 "이미 진행 중"이라며 **그 자리에서
+   *   즉시** 옛(텅 빈) 상태를 돌려주고 끝나버려, 오너 눈에는 "눌러도 아무 일도 안 일어남"으로
+   *   보였다(거의 항상 이 순서로 겹침 — 실제로는 "간헐적"이 아니라 "거의 매번"에 가까웠다).
+   *   이제는 진행 중인 사이클의 완료를 실제로 기다린 뒤 그 결과를 돌려준다.
    */
   async autoScanNow(): Promise<AutoTradeStatus> {
     if (this.autoTradeEnabled) {
       if (this.autoTradeTickBusy) {
-        this.addJournal({ kind: "info", symbol: "-", summary: "🤖 자동매매: 마침 사이클이 진행 중이라 그 결과를 그대로 보여드립니다." });
+        this.addJournal({ kind: "info", symbol: "-", summary: "🤖 자동매매: 마침 사이클이 진행 중이라 끝나는 대로 최신 결과를 보여드립니다." });
+        if (this.autoTradeTickPromise) await this.autoTradeTickPromise;
       } else {
         await this.autoTradeTick(); // 스캔+진입 시도+skipReasons까지 실제 사이클과 완전히 동일
         if (this.autoTradeTimer) {
           // 5분 주기 자체는 유지하되, 기준 시각을 이 수동 새로고침이 끝난 지금으로 다시 맞춘다.
           clearInterval(this.autoTradeTimer);
-          this.autoTradeTimer = setInterval(() => void this.autoTradeTick(), ToolEngine.AUTO_TRADE_INTERVAL_MS);
+          this.autoTradeTimer = setInterval(() => this.runAutoTradeTick(), ToolEngine.AUTO_TRADE_INTERVAL_MS);
         }
       }
       return this.getAutoTradeStatus();
@@ -1310,15 +1488,18 @@ export class ToolEngine extends EventEmitter {
       await this.prepareBackend();
       const run = await this.scanScreener(this.buildAutoScanOpts());
       this.autoTradeLastScan = run;
+      this.autoTradeLastScanError = null; // [v0.45.0]
       const cand = run.results.filter((r) => r.status === "confirmed" || r.status === "watch").length;
       this.addJournal({ kind: "info", symbol: "-", summary: `🤖 자동매매 스크리너 수동 새로고침(미리보기) — 후보 ${cand}개` });
     } catch (e) {
       // [v0.43.0] 오너가 취소 버튼을 눌러 멈춘 경우는 "실패"가 아니다 — 문구를 구분한다.
       const msg = String(e).replace(/^Error:\s*/, "");
+      const isCancel = msg.includes("취소");
+      if (!isCancel) this.autoTradeLastScanError = { message: msg, atMs: Date.now() }; // [v0.45.0]
       this.addJournal({
         kind: "info",
         symbol: "-",
-        summary: msg.includes("취소") ? "🤖 자동매매 스크리너 수동 새로고침을 오너가 직접 취소했습니다." : `🤖 자동매매 스크리너 수동 새로고침 실패 — ${msg}`,
+        summary: isCancel ? "🤖 자동매매 스크리너 수동 새로고침을 오너가 직접 취소했습니다." : `🤖 자동매매 스크리너 수동 새로고침 실패 — ${msg}`,
       });
     }
     return this.getAutoTradeStatus();
@@ -1359,6 +1540,7 @@ export class ToolEngine extends EventEmitter {
       `AUTO_MAX_LOSS_PCT=${this.autoTradeMaxLossPct}`,
       `AUTO_MAX_INVEST_PCT=${this.autoTradeMaxInvestPct}`,
       `AUTO_WATCH_MINUTES=${this.autoTradeWatchMinutes}`, // [v0.42.0] 장기간 미체결 자동취소 기준(분)
+      `SYSTEM_PAUSE_ENABLED=${this.systemPauseEnabled ? "true" : "false"}`, // [v0.44.0] 시스템 휴무 시간대 기능
       // --- [v0.28.0] 자동매매 스크리너 조건(4개) ---
       `AUTO_SCAN_COUNT=${this.autoScanCount}`,
       `AUTO_SCAN_PRICE_MIN=${this.autoScanPriceMin}`,
@@ -1373,6 +1555,11 @@ export class ToolEngine extends EventEmitter {
       `AUTO_SCAN_DOJI_MAX_AGE_MINUTES=${this.autoScanDojiMaxAgeMinutes}`,
       `AUTO_SCAN_NEXT_CANDLE_CONFIRM_ENABLED=${this.autoScanNextCandleConfirmEnabled}`,
       `AUTO_SCAN_EXCLUDE_ETF=${this.autoScanExcludeEtf}`,
+      // --- [v0.45.0] "매매진행할 장" 선택 ---
+      `AUTO_SCAN_DAY_ENABLED=${this.autoScanDayEnabled}`,
+      `AUTO_SCAN_PRE_ENABLED=${this.autoScanPreEnabled}`,
+      `AUTO_SCAN_REGULAR_ENABLED=${this.autoScanRegularEnabled}`,
+      `AUTO_SCAN_AFTER_ENABLED=${this.autoScanAfterEnabled}`,
       // --- [v0.8.1] 로그인 세션(리프레시 토큰만 로컬 저장 → 재시작해도 로그인 유지). 비밀번호·마스터 비번은 저장 안 함. ---
       `CAPRI_AUTH_REFRESH=${this.authRefreshToken ?? ""}`,
       `CAPRI_AUTH_EMAIL=${this.authEmail ?? ""}`,
@@ -2327,6 +2514,7 @@ export class ToolEngine extends EventEmitter {
     /** [v0.2.10] 이 주문의 매매기법 근거(화면이 함께 보냄). 없어도 주문은 정상 진행된다. */
     rationale?: RationaleInput;
   }): Promise<JournalEntry> {
+    this.assertNotSystemPaused("신규 진입 주문"); // [v0.44.0]
     const symbol = spec.symbol.toUpperCase();
     const cur = await this.orderGate(symbol, [spec.price]);
     // [B4] 매수 가능 금액 초과면 여기서 막는다(실서버에서만 검사).
@@ -2587,6 +2775,7 @@ export class ToolEngine extends EventEmitter {
    *   그 조건주문 번호가 뭔지"를 알아야 포지션을 추적할 수 있어 이렇게 분리했다.
    */
   private async placeBracketCore(spec: BracketSpec): Promise<{ entryJournal: JournalEntry; watchPromise: Promise<WatchAndBracketResult> | null }> {
+    this.assertNotSystemPaused("신규 진입 주문"); // [v0.44.0] 수동 브라켓 주문 + 자동매매 진입 공용 경로
     const symbol = spec.symbol.toUpperCase();
     const cur = await this.orderGate(symbol, [spec.price]);
     await this.assertAffordable(spec.price, spec.quantity);
@@ -3278,8 +3467,10 @@ export class ToolEngine extends EventEmitter {
     }
   }
 
-  /** 새 진입이 접수될 때 한 줄 추가("watching" 상태). */
-  private addAutoTradeHistory(pos: AutoPosition): void {
+  /** 새 진입이 접수될 때 한 줄 추가("watching" 상태).
+   *  [v0.45.0] criteriaSnapshot — 자동매매 진입일 때만 호출부(autoTradeTick)가 "지금 이 순간의
+   *  스크리닝·리스크 설정"을 함께 넘긴다(수동 매매 경로는 이 함수를 호출하지 않음). */
+  private addAutoTradeHistory(pos: AutoPosition, criteriaSnapshot?: AutoTradeHistoryEntry["criteriaSnapshot"]): void {
     try {
       this.autoTradeHistory.push({
         id: `${pos.symbol}@${pos.entry}@${pos.enteredAtMs}`,
@@ -3297,6 +3488,7 @@ export class ToolEngine extends EventEmitter {
         note: "매수 주문 접수 — 체결 대기 중",
         conditionalOrderId: pos.conditionalOrderId,
         buyOrderId: pos.buyOrderId,
+        criteriaSnapshot,
       });
       this.persistAutoTradeHistory();
     } catch {
@@ -4038,6 +4230,7 @@ export class ToolEngine extends EventEmitter {
    */
   async scanScreener(opts: ScreenOpts = {}): Promise<ScreenRun> {
     if (this.screenBusy) throw new Error("이미 스캔이 진행 중입니다. 끝날 때까지 기다려 주세요.");
+    this.assertNotSystemPaused("스크리닝"); // [v0.44.0] 수동 스크리너 + 자동매매 스캔 공용 경로
     this.screenBusy = true;
     this.screenCancelRequested = false; // [v0.43.0] 새 스캔 시작 — 이전 취소 요청 잔재 제거
     // [v0.28.0] 상한 0.5→0.8로 확대(오너 지시) — 자동매매용 스크리너 화면에서 더 깐깐하지 않은
@@ -4380,6 +4573,7 @@ export class ToolEngine extends EventEmitter {
     this.autoTradeEnabled = true;
     this.autoTradeRealizedPnlUsd = 0; // "이번 실행" 누적손익만 초기화(손실한도 계산 기준)
     this.autoTradeSeedSnapshotUsd = null; // [v0.40.0] "이번 실행"의 시드를 새로 스냅샷 뜬다(resolveSeedUsd 참고)
+    this.autoTradeWasPaused = false; // [v0.44.0] 이번 실행의 휴무 전환 감지를 새로 시작(지금 상태를 첫 틱이 다시 판정)
     // [v0.30.1 긴급수정] autoTradePositions/autoTradeUsedKeys는 더 이상 여기서 비우지 않는다.
     //   예전엔 "시작"을 누를 때마다 무조건 빈 목록으로 시작했는데, 그러면 재시작 후 파일에서
     //   복구해 온 "실제로 토스에 아직 살아있는 포지션"까지 함께 버려져 추적을 영영 잃어버렸다
@@ -4387,6 +4581,7 @@ export class ToolEngine extends EventEmitter {
     //   이제 "시작"은 "이어서 감시"를 의미한다 — 아래에서 남아있던 포지션 수를 안내한다.
     const carried = this.autoTradePositions.length;
     this.autoTradeLastScan = null; // 지난번 실행의 스캔 결과가 화면에 남아 헷갈리지 않게 초기화
+    this.autoTradeLastScanError = null; // [v0.45.0] 마찬가지로 지난번 실행의 실패 기록도 초기화
     this.addJournal({
       kind: "info",
       symbol: "-",
@@ -4397,8 +4592,8 @@ export class ToolEngine extends EventEmitter {
         `5분마다 탐색(삼분할 1분할 타점만, 이 프로그램이 켜져 있는 동안만 작동)` +
         (carried > 0 ? ` · ⏪ 이전에 감시하던 ${carried}종목을 그대로 이어받아 감시합니다(재시작·업데이트에도 유지됨)` : ""),
     });
-    void this.autoTradeTick(); // 시작하자마자 한 번 즉시 돌리고(이어받은 포지션도 곧바로 재확인됨)
-    this.autoTradeTimer = setInterval(() => void this.autoTradeTick(), ToolEngine.AUTO_TRADE_INTERVAL_MS); // 이후 5분마다
+    this.runAutoTradeTick(); // 시작하자마자 한 번 즉시 돌리고(이어받은 포지션도 곧바로 재확인됨)
+    this.autoTradeTimer = setInterval(() => this.runAutoTradeTick(), ToolEngine.AUTO_TRADE_INTERVAL_MS); // 이후 5분마다
     return this.getAutoTradeStatus();
   }
 
@@ -4432,11 +4627,34 @@ export class ToolEngine extends EventEmitter {
       watchMinutes: this.autoTradeWatchMinutes, // [v0.42.0] 장기간 미체결 자동취소 기준(분)
       lastCycleAt: this.autoTradeLastCycleAt,
       lastScan: this.autoTradeLastScan,
+      lastScanError: this.autoTradeLastScanError, // [v0.45.0]
       nextCycleAtMs:
         this.autoTradeEnabled && this.autoTradeLastCycleAtMs != null ? this.autoTradeLastCycleAtMs + ToolEngine.AUTO_TRADE_INTERVAL_MS : null,
       skipReasons: { ...this.autoTradeSkipReasons },
       seedUsdSnapshot: this.seedBasis === "auto" ? this.autoTradeSeedSnapshotUsd : this.seedFixedUsd,
     };
+  }
+
+  /**
+   * [v0.45.0 — 오너 보고 "지금 감시 중인 자동매매 포지션이 실시간 연동 안 됨"] "익절/손절
+   *   등록됨"이 실제로는 이미 팔렸는데도 계속 그대로 보이는 문제의 근본 원인: 포지션 상태
+   *   (watching↔active↔청산)는 5분 사이클의 reconcileAutoPositions()만 갱신하는데, 화면은
+   *   20초마다 getAutoTradeStatus()(그 사이클이 마지막으로 남긴 값을 그대로 돌려주는 스냅샷,
+   *   그 자체로는 아무것도 다시 확인하지 않음)만 불렀다 — 그래서 최대 5분까지 옛 상태가 보일 수
+   *   있었다. reconcileAutoPositions 자체는 보유 포지션 수만큼만 조회하므로(보통 3개 이하)
+   *   가볍다 — 5분마다 최대 200종목을 훑는 스크리닝과는 비교가 안 될 정도로 저렴해, 더 자주
+   *   불러도 안전하다. [자동매매 현황] 탭의 "🔄 지금 확인" 버튼과, 포지션이 있는 동안의 20초
+   *   자동 갱신 둘 다 이제 이 메서드를 쓴다(아래 App.tsx 참고).
+   */
+  async reconcileAutoPositionsNow(): Promise<AutoTradeStatus> {
+    // [주의] autoTradeEnabled를 조건으로 걸지 않는다 — 오너가 방금 자동매매를 껐어도 그 전에
+    //   넣어둔 감시 포지션(watching/active)은 화면에 계속 남아 있고, 그 상태를 지금 바로
+    //   확인하고 싶을 수 있다("지금 감시 중" 표는 enabled와 무관하게 positions만 보고 뜬다).
+    //   마침 5분 사이클이 돌고 있을 때만(그 사이클이 이미 reconcile 중이므로) 겹쳐 부르지 않는다.
+    if (!this.autoTradeTickBusy) {
+      await this.reconcileAutoPositions();
+    }
+    return this.getAutoTradeStatus();
   }
 
   /**
@@ -4717,6 +4935,19 @@ export class ToolEngine extends EventEmitter {
   }
 
   /**
+   * [v0.45.0] autoTradeTick을 "발사 후 신경 안 씀"으로 돌리는 모든 자리(시작 즉시 1회, 5분 타이머)
+   *   가 공용으로 쓴다 — 실행 중인 프라미스를 autoTradeTickPromise에 저장해 두면, 다른 경로
+   *   (autoScanNow)가 "지금 마침 도는 중"을 만났을 때 그 자리에서 포기하지 않고 끝날 때까지
+   *   기다렸다가 최신 결과를 돌려줄 수 있다(위 필드 주석 참고 — 이게 "시작 눌러도 스크리닝이
+   *   안 도는 것처럼 보이던" 버그의 실제 원인이었다).
+   */
+  private runAutoTradeTick(): void {
+    this.autoTradeTickPromise = this.autoTradeTick().finally(() => {
+      this.autoTradeTickPromise = null;
+    });
+  }
+
+  /**
    * 자동매매 한 사이클(시작 즉시 1회 + 이후 5분마다).
    *   [재진입 방지] 한 사이클이 오래 걸려도(스캔에 수십 초) 다음 타이머 틱과 겹치지 않게 막는다.
    */
@@ -4727,7 +4958,60 @@ export class ToolEngine extends EventEmitter {
     this.autoTradeLastCycleAtMs = Date.now(); // [v0.29.0] 카운트다운은 문자열이 아니라 ms 기준으로 계산해야 정확함
     try {
       await this.prepareBackend();
-      await this.reconcileAutoPositions(); // ①빈자리 먼저 확인(같은 사이클 안에 채우기 위해)
+      await this.reconcileAutoPositions(); // ①빈자리 먼저 확인(같은 사이클 안에 채우기 위해) — 일시정지 중에도 계속
+
+      // [v0.44.0] 시스템 휴무 시간대(또는 휴장)면 신규 스캔·진입을 전부 건너뛴다. 기존에 이미
+      //   체결된(익절/손절 등록된) 포지션은 위 reconcileAutoPositions가 계속 감시하므로 그대로 둔다
+      //   — 이 검사는 오직 "새로 사는 것"만 막는다.
+      const pauseStatus = this.getSystemPauseStatus();
+      if (pauseStatus.paused) {
+        if (!this.autoTradeWasPaused) {
+          // 방금 막 일시정지 구간에 들어온 순간(전환 시점)에만: 아직 체결 안 된(watching) 자동매매
+          //   진입 주문을 전량 취소한다("미체결 주문 전량 취소" 오너 요청). 이미 체결돼 익절/손절이
+          //   걸린(active) 포지션은 절대 건드리지 않는다 — 보유 종목을 강제로 파는 게 아니다.
+          const watching = this.autoTradePositions.filter((p) => p.status === "watching");
+          let cancelled = 0;
+          for (const p of watching) {
+            const r = await this.cancelAutoPosition(p.symbol, p.entry, p.enteredAtMs).catch((e) => ({ ok: false, message: String(e) }));
+            if (r.ok) cancelled++;
+          }
+          this.addJournal({
+            kind: "info",
+            symbol: "-",
+            summary:
+              `⏸ ${pauseStatus.reason} — 자동매매 신규 진입을 멈춥니다` +
+              (cancelled > 0 ? ` (아직 체결 안 된 진입 주문 ${cancelled}건을 취소했습니다)` : "") +
+              `. 이미 체결된 포지션의 익절/손절 감시는 계속됩니다.`,
+            notify: true,
+            notifyTitle: "⏸ 자동매매 일시정지",
+          });
+          this.autoTradeWasPaused = true;
+        }
+        return;
+      } else if (this.autoTradeWasPaused) {
+        this.addJournal({ kind: "info", symbol: "-", summary: "▶ 휴무 시간대(또는 휴장)가 끝나 자동매매를 다시 정상 진행합니다." });
+        this.autoTradeWasPaused = false;
+      }
+
+      // [v0.45.0 — 오너 요청 "매매진행할 장 선택"] 휴무 시간대와는 별도로, 오너가 스크리닝
+      //   기준 탭에서 고른 세션(데이/프리/본장/애프터)에만 신규 진입을 시도한다. 이번 사이클이
+      //   해당하는 세션이 꺼져 있으면 스캔·진입 없이 건너뛴다(기존 감시 포지션은 계속 지켜봄).
+      const nowSession = getSession(DateTime.now().setZone("Asia/Seoul"));
+      const sessionAllowed =
+        nowSession === "day" ? this.autoScanDayEnabled
+        : nowSession === "pre" ? this.autoScanPreEnabled
+        : nowSession === "regular" ? this.autoScanRegularEnabled
+        : nowSession === "after" ? this.autoScanAfterEnabled
+        : false; // "closed"(장 시간 아님)는 애초에 거래 대상이 아님
+      if (!sessionAllowed) {
+        const sessionKo = { day: "데이마켓", pre: "프리마켓", regular: "정규장(본장)", after: "애프터마켓", closed: "장 마감 시간대" }[nowSession];
+        this.addJournal({
+          kind: "info",
+          symbol: "-",
+          summary: `🤖 자동매매: 지금은 ${sessionKo}인데 [스크리닝 기준]에서 이 장을 꺼 두어 이번 사이클은 건너뜁니다(기존 감시 포지션은 계속됩니다).`,
+        });
+        return;
+      }
 
       const seedUsd = await this.resolveSeedUsd();
       if (isLossLimitBreached(this.autoTradeRealizedPnlUsd, seedUsd, this.autoTradeMaxLossPct)) {
@@ -4767,14 +5051,17 @@ export class ToolEngine extends EventEmitter {
         // [v0.28.0→v0.33.0] 오너가 "스크리닝 기준" 탭에서 조절한 조건을 그대로 쓴다(전부).
         run = await this.scanScreener(this.buildAutoScanOpts()); // ③빈자리를 "현재 스크리닝으로 탐색된 다른 종목"으로 채움
         this.autoTradeLastScan = run; // [v0.27.0] 버리지 않고 보관 → "스크리닝 결과" 탭이 그대로 보여줌
+        this.autoTradeLastScanError = null; // [v0.45.0] 성공했으니 이전 실패 기록은 지운다
       } catch (e) {
         // [v0.43.0] 오너가 스크리닝 취소 버튼을 눌러 멈춘 경우는 "실패"가 아니라 요청한 결과다 —
         //   문구를 구분해 저널이 헷갈리지 않게 한다. 이번 사이클은 신규 진입 없이 건너뛴다(안전).
         const msg = String(e).replace(/^Error:\s*/, "");
+        const isCancel = msg.includes("취소");
+        if (!isCancel) this.autoTradeLastScanError = { message: msg, atMs: Date.now() }; // [v0.45.0]
         this.addJournal({
           kind: "info",
           symbol: "-",
-          summary: msg.includes("취소")
+          summary: isCancel
             ? "🤖 자동매매: 오너가 스크리닝을 취소해 이번 사이클은 신규 진입 없이 건너뜁니다(기존 포지션 감시는 계속됩니다)."
             : `🤖 자동매매: 이번 사이클 스크리닝 실패 — ${msg}`,
         });
@@ -4889,7 +5176,25 @@ export class ToolEngine extends EventEmitter {
         };
         this.autoTradePositions.push(posDraft);
         this.saveAutoPositions(); // [v0.30.1] 재시작해도 이 포지션을 잃어버리지 않게 즉시 저장
-        this.addAutoTradeHistory(posDraft); // [v0.30.0] 자동매매기록 — 접수 즉시 한 줄 남김
+        // [v0.45.0] 이 매매가 실제로 어떤 설정으로 진입됐는지 스냅샷을 함께 남긴다(그룹 연구용 —
+        //   위 AutoTradeHistoryEntry.criteriaSnapshot 주석 참고). nowSession은 위 "매매진행할 장"
+        //   게이트에서 이미 계산해 둔 값을 그대로 재사용한다.
+        this.addAutoTradeHistory(posDraft, {
+          bodyRatio: this.autoScanBodyRatio,
+          emaTrendEnabled: this.autoScanEmaTrendEnabled,
+          emaPeriod: this.autoScanEmaPeriod,
+          cloudEnabled: this.autoScanCloudEnabled,
+          dojiWickMinRatio: this.autoScanDojiWickMinRatio,
+          dojiMaxAgeEnabled: this.autoScanDojiMaxAgeEnabled,
+          dojiMaxAgeMinutes: this.autoScanDojiMaxAgeMinutes,
+          nextCandleConfirmEnabled: this.autoScanNextCandleConfirmEnabled,
+          excludeEtf: this.autoScanExcludeEtf,
+          session: nowSession,
+          maxPositions: this.autoTradeMaxPositions,
+          maxLossPct: this.autoTradeMaxLossPct,
+          maxInvestPct: this.autoTradeMaxInvestPct,
+          watchMinutes: this.autoTradeWatchMinutes,
+        }); // [v0.30.0] 자동매매기록 — 접수 즉시 한 줄 남김
 
         try {
           const { entryJournal, watchPromise } = await this.placeBracketCore({

@@ -144,6 +144,12 @@ body {
 .tk-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--border); display: block; }
 .tk-dots i.on { background: var(--blue); }
 
+/* [v0.44.0] 시스템 휴무 시간대(05:00~17:00 KST) 배너 — 위 로테이션 위젯과 같은 줄 스타일을
+   재사용하되, "지금 멈춰 있다"는 게 한눈에 보이게 파랑 대신 경고색(호박색)으로. */
+.pause-banner {
+  max-width: none; border-color: var(--amber); background: color-mix(in srgb, var(--amber) 14%, transparent);
+}
+
 /* ===== 버튼 ===== */
 .btn {
   padding: 10px 16px; border-radius: var(--r-sm); border: 1px solid var(--border);
@@ -708,6 +714,9 @@ ul.hint { padding-left: 18px; }
 .evid-chip { font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border); }
 .evid-chip.pass { background: #14331f; color: #6ee7a0; border-color: #1f5a37; }
 .evid-chip.fail { background: #331b1b; color: #ff9d9d; border-color: #5a2020; }
+/* [v0.45.0] 오너가 "스크리닝 기준" 탭에서 꺼 둔 조건 — 값은 정직하게 보여주되(참고용), 초록/빨강
+   합격·불합격 색과 구분되게 회색으로 톤을 낮춰 "지금 이 조건은 판정에 안 쓰인다"를 표시한다. */
+.evid-chip.off { background: var(--panel2); color: var(--muted); border-color: var(--border); opacity: 0.75; }
 .evid-table { width: auto; border: none; }
 .evid-table td { border: none; padding: 3px 10px 3px 0; font-size: 13px; }
 .evid-table td:first-child { color: var(--muted); white-space: nowrap; }

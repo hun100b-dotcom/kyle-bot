@@ -361,14 +361,37 @@ function phaseBadge(phase: StrengthSignals["phase"]): { txt: string; cls: string
 }
 
 /**
- * [v0.6.1] ScreenEvidenceView — 스크리너 판정 근거(펼침).
- *   기준 도지 캔들·다음 봉(하이킨아시 OHLC), 세션 최고점, 5개 필터 통과/실패를 사람이 눈으로
+ * [v0.6.1→v0.45.0] ScreenEvidenceView — 스크리너 판정 근거(펼침).
+ *   기준 도지 캔들·다음 봉(하이킨아시 OHLC), 세션 최고점, 필터 통과/실패를 사람이 눈으로
  *   검증할 수 있게 보여준다. "이 도지를 기준으로 잡았고 다음 음봉이 이거"를 확인하는 화면.
+ *
+ *   [v0.45.0 버그 수정 — 오너 보고 "구름대 필터를 꺼도 근거에 구름대가 그대로 남아있음"]
+ *   엔진(scanScreener)은 EMA·구름·도지신선도·다음봉확인 조건을 꺼도(오너가 "스크리닝 기준"
+ *   탭에서 끔) 그 실제 지표값(위인지 아닌지)은 항상 정직하게 계산해 evidence에 담아준다
+ *   (판정에는 안 쓰지만 참고용으로는 여전히 유용하다는 설계 — 값 자체는 버그가 아니다). 문제는
+ *   화면이 이 칩들을 전부 "지금 판정에 쓰이는 합격/불합격 조건"처럼 초록/빨강으로 똑같이
+ *   그려서, 꺼 둔 조건인지 켜진 조건인지 구분이 안 갔다는 것 — 오너 눈엔 "꺼도 여전히 걸리는
+ *   것처럼" 보였다. 이제 disabled로 넘긴 항목은 회색 "off" 칩으로 구분해, 값은 그대로 보여주되
+ *   "지금 이건 판정에 안 쓰입니다"가 한눈에 보이게 한다.
  */
-function ScreenEvidenceView({ ev, price }: { ev: ScreenEvidence; price: number | null }) {
-  const chip = (ok: boolean, label: string) => (
-    <span className={`evid-chip ${ok ? "pass" : "fail"}`}>{ok ? "✓" : "✗"} {label}</span>
-  );
+function ScreenEvidenceView({
+  ev,
+  price,
+  disabled,
+}: {
+  ev: ScreenEvidence;
+  price: number | null;
+  /** 오너가 꺼 둔 조건 키(스크리닝 기준 탭 기준) — 넘긴 키는 통과/실패와 무관하게 회색 "off" 칩으로. */
+  disabled?: Partial<Record<"aboveEma" | "aboveCloud" | "recentDoji" | "nextBearish", boolean>>;
+}) {
+  const chip = (ok: boolean, label: string, key?: keyof NonNullable<typeof disabled>) => {
+    const isOff = key != null && disabled?.[key];
+    return (
+      <span className={`evid-chip ${isOff ? "off" : ok ? "pass" : "fail"}`}>
+        {ok ? "✓" : "✗"} {label}{isOff && " (꺼짐·참고용)"}
+      </span>
+    );
+  };
   const candleLine = (c: EvidenceCandle | null) =>
     c ? `${c.time} · 시$${c.open} 고$${c.high} 저$${c.low} 종$${c.close} · ${c.bearish ? "음봉 ▼" : "양봉 ▲"}` : "(아직 없음)";
   return (
@@ -376,12 +399,12 @@ function ScreenEvidenceView({ ev, price }: { ev: ScreenEvidence; price: number |
       <div className="evid-note">※ 하이킨아시(平均足) 캔들 기준 · <b>완성된(마감된) 5분봉만 판정</b>(형성 중 봉 제외) · 시각 KST</div>
       <div className="evid-filters">
         {chip(ev.filters.priceBand, "현재가 $1~9")}
-        {chip(ev.filters.aboveEma, "현재가>EMA200")}
-        {chip(ev.filters.aboveCloud, "현재가>구름top")}
+        {chip(ev.filters.aboveEma, "현재가>EMA200", "aboveEma")}
+        {chip(ev.filters.aboveCloud, "현재가>구름top", "aboveCloud")}
         {chip(ev.filters.firstDoji, "최고점 후 첫 음봉 도지")}
         {chip(ev.filters.bothWicks, "위·아래 꼬리 둘 다(망치형 아님)")}
-        {chip(ev.filters.recentDoji, "도지 발생 20분 이내")}
-        {chip(ev.filters.nextBearish, "다음 봉도 음봉")}
+        {chip(ev.filters.recentDoji, "도지 발생 20분 이내", "recentDoji")}
+        {chip(ev.filters.nextBearish, "다음 봉도 음봉", "nextBearish")}
       </div>
       <table className="evid-table">
         <tbody>
@@ -599,6 +622,8 @@ function App() {
   const [analysisBusy, setAnalysisBusy] = useState(false);
   // [v0.6.0] 종목 스크리너(탐색). 결과·진행률·스캔중 여부·도지 몸통비율 슬라이더.
   const [screenRun, setScreenRun] = useState<ScreenRun | null>(null);
+  // [v0.44.0] 시스템 휴무 시간대(05:00~17:00 KST) — 켜져 있으면 배너로 항상 보여준다(탭 무관).
+  const [systemPause, setSystemPause] = useState<{ paused: boolean; reason: string | null; resumesAtMs: number | null } | null>(null);
   const [screenBusy, setScreenBusy] = useState(false);
   const [screenProg, setScreenProg] = useState<ScreenProgress | null>(null);
   // [v0.43.0] 스크리닝 취소 버튼 — 요청을 보냈으면 협조적 취소가 실제로 멈출 때까지(screenBusy가
@@ -771,6 +796,11 @@ function App() {
     dojiMaxAgeMinutes: "40",
     nextCandleConfirmEnabled: true,
     excludeEtf: true,
+    // [v0.45.0] "매매진행할 장" 선택 — 기본 4개 전부 켜짐(지금까지의 동작과 동일).
+    dayEnabled: true,
+    preEnabled: true,
+    regularEnabled: true,
+    afterEnabled: true,
   });
   // [v0.33.0] 조건별 "자세히" 펼침 상태 — 코멘트는 항상 보이고, 상세 설명만 펼쳐야 보인다.
   const [openCritDetail, setOpenCritDetail] = useState<Set<string>>(new Set());
@@ -795,6 +825,7 @@ function App() {
   const [autoHistoryBusy, setAutoHistoryBusy] = useState(false);
   // [v0.41.0 — 오너 요청] "지금 감시 중" 포지션을 직접 취소하는 버튼의 진행 상태(포지션 키 단위).
   const [autoCancelBusyKey, setAutoCancelBusyKey] = useState<string | null>(null);
+  const [reconcileBusy, setReconcileBusy] = useState(false); // [v0.45.0] "🔄 지금 확인" 버튼 눌림 상태
   async function doCancelAutoPosition(p: AutoPosition) {
     const key = `${p.symbol}@${p.entry}@${p.enteredAtMs}`;
     if (!confirm(`${p.symbol} 자동매매 포지션을 취소할까요?\n(매수 체결 대기 중이면 매수 주문을, 이미 체결됐으면 익절/손절 조건주문을 취소합니다.)`)) return;
@@ -905,6 +936,10 @@ function App() {
         dojiMaxAgeMinutes: String(s.autoScanDojiMaxAgeMinutes ?? 40),
         nextCandleConfirmEnabled: s.autoScanNextCandleConfirmEnabled ?? true,
         excludeEtf: s.autoScanExcludeEtf ?? true,
+        dayEnabled: s.autoScanDayEnabled ?? true,
+        preEnabled: s.autoScanPreEnabled ?? true,
+        regularEnabled: s.autoScanRegularEnabled ?? true,
+        afterEnabled: s.autoScanAfterEnabled ?? true,
       });
       // [v0.3.0] 실서버면 켜자마자 상단 바(예수금·손익)와 기본 종목 시세를 자동 로드한다.
       if (s.mode === "live") {
@@ -1030,13 +1065,21 @@ function App() {
     return () => clearInterval(id);
   }, [autoRefresh, tab, showTwoCol, tabL, tabR]);
 
-  // [v0.26.0] 자동매매가 켜져 있는 동안만 현황(포지션·누적손익)을 20초마다 새로고침.
+  // [v0.26.0→v0.45.0] 자동매매가 켜져 있는 동안만 현황(포지션·누적손익)을 20초마다 새로고침.
   //   꺼져 있을 땐 돌 이유가 없다(자율 동작 최소화 원칙 — 위 702번째 줄 주석 참고).
+  //   [v0.45.0 — 오너 보고 "지금 감시 중인 포지션이 실시간 연동 안 됨"] 예전엔 그냥 스냅샷만
+  //   다시 읽어와, 실제 체결·청산 여부는 5분 사이클이 확인할 때까지 최대 5분간 옛 상태("익절/
+  //   손절 등록됨" 등)가 그대로 보였다. 감시 중인 포지션이 있을 때는(보통 3개 이하라 저렴)
+  //   reconcileAutoPositionsNow()로 실제 체결/발동 여부까지 매번 다시 확인해, 최악의 지연이
+  //   5분에서 20초로 줄어든다. 포지션이 없으면 예전처럼 가벼운 스냅샷만 읽는다.
   useEffect(() => {
     if (!autoStatus?.enabled) return;
-    const id = setInterval(() => void window.kyletool.autoTradeStatus().then(setAutoStatus), 20_000);
+    const hasPositions = (autoStatus.positions?.length ?? 0) > 0;
+    const id = setInterval(() => {
+      void (hasPositions ? window.kyletool.reconcileAutoPositionsNow() : window.kyletool.autoTradeStatus()).then(setAutoStatus);
+    }, 20_000);
     return () => clearInterval(id);
-  }, [autoStatus?.enabled]);
+  }, [autoStatus?.enabled, autoStatus?.positions?.length]);
 
   // [v0.29.0] 자동 스크리너 탭의 카운트다운용 — 자동매매가 켜져 있는 동안만 1초마다 화면을 흘려보낸다
   //   (오너 요청: "몇 분 후 스크리닝 진행 표시 필요" — 언제 다음 스캔이 도는지 눈에 보이게).
@@ -1055,6 +1098,15 @@ function App() {
     const id = setInterval(poll, 15_000);
     return () => clearInterval(id);
   }, [autoStatus?.enabled, autoStatus?.positions.length]);
+
+  // [v0.44.0] 시스템 휴무 시간대 배너용 — 탭·자동매매 켜짐 여부와 무관하게 항상 30초마다 확인한다
+  //   (수동 도구도 이 시간대엔 막히므로, 자동매매가 꺼져 있어도 오너가 알고 있어야 한다).
+  useEffect(() => {
+    const poll = () => void window.kyletool.getSystemPauseStatus().then(setSystemPause).catch(() => {});
+    poll();
+    const id = setInterval(poll, 30_000);
+    return () => clearInterval(id);
+  }, []);
 
   // [v0.30.0] 로테이션 전환 — 포지션이 2개 이상일 때만 3.5초마다 다음 종목으로 넘긴다.
   useEffect(() => {
@@ -2034,21 +2086,8 @@ ${msg}
     setTimeout(() => setSavedMsg(""), 4000);
   }
 
-  /** [v0.28.0] 자동매매 스크리너 조건 4개(스캔 종목수·가격 하한/상한·도지 몸통비율 상한) 저장. */
-  async function saveAutoScanSettingsUI() {
-    const scanCount = toNum(autoScanForm.scanCount);
-    const pMin = toNum(autoScanForm.priceMin);
-    const pMax = toNum(autoScanForm.priceMax);
-    if (scanCount === null || scanCount <= 0 || pMin === null || pMin < 0 || pMax === null || pMax < 0) {
-      setSavedMsg("⚠️ 스캔 종목수·가격 하한/상한을 올바른 숫자로 입력하세요.");
-      setTimeout(() => setSavedMsg(""), 4000);
-      return;
-    }
-    const s = await window.kyletool.saveAutoScanSettings({ count: scanCount, priceMin: pMin, priceMax: pMax, bodyRatio: autoScanBodyRatio });
-    setSettings(s);
-    setSavedMsg(`자동매매 스크리너 조건 저장됨 — 종목수 ${s.autoScanCount} · $${s.autoScanPriceMin}~$${s.autoScanPriceMax} · 도지 몸통상한 ${Math.round(s.autoScanBodyRatio * 100)}%`);
-    setTimeout(() => setSavedMsg(""), 4000);
-  }
+  // [v0.45.0] saveAutoScanSettingsUI (자동 스크리너 탭 전용 저장 버튼)는 제거했다 — 도지 몸통비율
+  //   등 조건 편집은 이제 saveScreenCriteriaUI([스크리닝 기준] 탭) 한 곳으로만 한다(중복 UI 정리).
 
   /** [v0.33.0] "스크리닝 기준" 탭 — 추가 8개 조건(켜짐/꺼짐 + 수치) 저장.
    *  Key Point(오너 요청): 여기서 저장한 값은 saveAutoScanSettings → autoScanEmaPeriod 등 필드로
@@ -2085,6 +2124,10 @@ ${msg}
       dojiMaxAgeMinutes,
       nextCandleConfirmEnabled: screenCritForm.nextCandleConfirmEnabled,
       excludeEtf: screenCritForm.excludeEtf,
+      dayEnabled: screenCritForm.dayEnabled,
+      preEnabled: screenCritForm.preEnabled,
+      regularEnabled: screenCritForm.regularEnabled,
+      afterEnabled: screenCritForm.afterEnabled,
     });
     setSettings(s);
     // 저장 직후 입력칸을 서버가 실제로 보정한 값(clamp 결과)으로 다시 맞춘다 — 예: 500분을
@@ -2100,6 +2143,10 @@ ${msg}
       dojiMaxAgeMinutes: String(s.autoScanDojiMaxAgeMinutes),
       nextCandleConfirmEnabled: s.autoScanNextCandleConfirmEnabled,
       excludeEtf: s.autoScanExcludeEtf,
+      dayEnabled: s.autoScanDayEnabled,
+      preEnabled: s.autoScanPreEnabled,
+      regularEnabled: s.autoScanRegularEnabled,
+      afterEnabled: s.autoScanAfterEnabled,
     });
     setSavedMsg("스크리닝 기준 저장됨 — 다음 자동 스캔부터(또는 [자동 스크리너] 탭의 [🔄 지금 새로고침]으로 즉시) 반영돼요.");
     setTimeout(() => setSavedMsg(""), 4000);
@@ -2345,6 +2392,22 @@ ${msg}
           </button>
         </div>
       </header>
+
+      {/* [v0.44.0] 시스템 휴무 시간대(05:00~17:00 KST, 또는 휴장) 배너 — 탭·자동매매 켜짐 여부와
+          무관하게 항상 보인다(수동 도구도 이 시간대엔 막히므로 오너가 항상 알 수 있어야 함). */}
+      {systemPause?.paused && (
+        <div className="ticker-row">
+          <div className="topbar-ticker pause-banner" title="이 시간대엔 스크리닝·수동 주문·자동매매 신규 진입이 모두 막힙니다(취소·조회는 그대로 됩니다).">
+            <span className="tk-bot">⏸</span>
+            <span>{systemPause.reason}</span>
+            {systemPause.resumesAtMs != null && (
+              <span className="tk-status">
+                재개 {new Date(systemPause.resumesAtMs).toLocaleString("ko-KR", { timeZone: "Asia/Seoul", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })} KST
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* [v0.30.0→v0.40.0] 오너 요청 — "어떤 탭에서든" 자동매매 보유종목의 수익률·금액·현황을
           로테이션으로. [v0.40.0] 예전엔 상단바(.topbar)의 브랜드 배지 줄과 킬스위치 버튼 사이에
@@ -3376,13 +3439,32 @@ ${msg}
 
               {autoStatus && autoStatus.positions.length > 0 && (
                 <>
-                  <h3>지금 감시 중인 자동매매 포지션</h3>
+                  <div className="row" style={{ gap: 8, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
+                    <h3 style={{ margin: 0 }}>지금 감시 중인 자동매매 포지션</h3>
+                    {/* [v0.45.0] 최대 5분(다음 자동 사이클)까지 기다리지 않고 지금 바로 체결·
+                        익절/손절 발동 여부를 다시 확인한다(보유 종목이 보통 3개 이하라 가볍다). */}
+                    <button
+                      className="mini"
+                      disabled={reconcileBusy}
+                      onClick={async () => {
+                        setReconcileBusy(true);
+                        try {
+                          setAutoStatus(await window.kyletool.reconcileAutoPositionsNow());
+                        } finally {
+                          setReconcileBusy(false);
+                        }
+                      }}
+                    >
+                      {reconcileBusy ? "확인 중…" : "🔄 지금 확인"}
+                    </button>
+                  </div>
                   <p className="hint">
                     이 기기에 저장돼 있어 앱을 껐다 켜거나 업데이트해도 그대로 남아요. 로그인
                     상태면 <b>다른 기기(PC↔폰)와도 자동으로 동기화</b>됩니다(로그인 직후, 그리고
-                    [설정 → ☁️ 계정 → 지금 다시 동기화]로 언제든). 그래도 실제 주문 여부의
-                    최종 확인은 항상 [현황 → 주문 현황]에서 토스와 직접 하세요 — 그 화면은 이
-                    목록과 무관하게 항상 정확합니다.
+                    [설정 → ☁️ 계정 → 지금 다시 동기화]로 언제든). 상태(매수 체결 대기중/익절·
+                    손절 등록됨)는 20초마다 자동으로도 다시 확인하지만, 지금 바로 보고 싶으면
+                    위 버튼을 누르세요. 그래도 실제 주문 여부의 최종 확인은 항상 [현황 → 주문
+                    현황]에서 토스와 직접 하세요 — 그 화면은 이 목록과 무관하게 항상 정확합니다.
                   </p>
                   <table className="result-table">
                     <thead>
@@ -3447,38 +3529,25 @@ ${msg}
               </p>
             )}
 
-            {/* [v0.28.0] 자동매매용 스크리너 조건 — 메뉴얼 스크리너와 같은 4항목, 도지 몸통비율만 80%까지 확대 */}
-            <div className="screen-controls">
-              <label className="str-field" style={{ flex: 1, maxWidth: 360 }}>
-                <span className="sb-k">도지로 인정할 <b>몸통 크기 상한</b>: <b>{(autoScanBodyRatio * 100).toFixed(0)}%</b> <span className="hint">(작을수록 깐깐하게, 자동매매는 최대 80%까지)</span></span>
-                <input type="range" min={0.1} max={0.8} step={0.05} value={autoScanBodyRatio}
-                  onChange={(e) => setAutoScanBodyRatio(Number(e.target.value))} />
-              </label>
-              <div className="screen-filters">
-                <label className="str-field sf-num">
-                  <span className="sb-k">스캔 종목수 <span className="hint">(10~200)</span></span>
-                  <input type="text" inputMode="numeric" value={autoScanForm.scanCount}
-                    onChange={(e) => setAutoScanForm({ ...autoScanForm, scanCount: e.target.value })}
-                    onBlur={() => setAutoScanForm((f) => ({ ...f, scanCount: String(Math.min(200, Math.max(10, Math.round(toNum(f.scanCount) ?? 60)))) }))} />
-                </label>
-                <label className="str-field sf-num">
-                  <span className="sb-k">가격 하한 $</span>
-                  <input type="text" inputMode="decimal" value={autoScanForm.priceMin}
-                    onChange={(e) => setAutoScanForm({ ...autoScanForm, priceMin: e.target.value })} />
-                </label>
-                <label className="str-field sf-num">
-                  <span className="sb-k">가격 상한 $</span>
-                  <input type="text" inputMode="decimal" value={autoScanForm.priceMax}
-                    onChange={(e) => setAutoScanForm({ ...autoScanForm, priceMax: e.target.value })} />
-                </label>
-              </div>
-              <div className="form-row">
-                <button className="btn btn-start" onClick={saveAutoScanSettingsUI}>조건 저장</button>
-                <button className="mini" disabled={autoScanBusy} onClick={() => void refreshAutoScanNow()}>
-                  {autoScanBusy ? "새로고침 중…" : "🔄 지금 새로고침"}
-                </button>
-                {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
-              </div>
+            {/* [v0.45.0 — 오너 지적 "도지 몸통비율 설정이 두 탭에 중복돼 혼란"]
+                예전엔 여기(자동 스크리너)와 [스크리닝 기준] 탭 양쪽에 스캔종목수·가격대·도지
+                몸통비율 입력칸이 각각 있었다 — 같은 값을 공유하는 같은 설정인데 저장 버튼이
+                두 개라, 어느 쪽에서 바꿨는지·저장했는지 헷갈리기 쉬웠다. 이제 조건 편집은
+                [스크리닝 기준] 탭 한 곳으로 모으고, 여기는 "지금 적용된 값"을 읽기 전용으로
+                보여주기만 한다(실제로 반영되는 값은 항상 settings에서 그대로 읽으므로 두 화면이
+                서로 다른 값을 보여줄 일이 없다). */}
+            {settings && (
+              <p className="hint">
+                지금 조건: 상위 <b>{settings.autoScanCount}종목</b> · <b>${settings.autoScanPriceMin}~${settings.autoScanPriceMax}</b> ·
+                도지 몸통상한 <b>{Math.round(settings.autoScanBodyRatio * 100)}%</b> 외 EMA·구름·꼬리비율 등{" "}
+                <button className="mini ghost" onClick={() => goToTab("screenCriteria")}>[스크리닝 기준] 탭에서 전부 확인·수정</button>
+              </p>
+            )}
+            <div className="form-row">
+              <button className="mini" disabled={autoScanBusy} onClick={() => void refreshAutoScanNow()}>
+                {autoScanBusy ? "새로고침 중…" : "🔄 지금 새로고침"}
+              </button>
+              {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
             </div>
 
             {/* [v0.28.0] 진행률 바 — 자동 사이클이든 수동 새로고침이든 스캔이 도는 동안 똑같이 보여준다. */}
@@ -3498,6 +3567,17 @@ ${msg}
                   </button>
                 </div>
               </div>
+            )}
+
+            {/* [v0.45.0 — 오너 보고 "간헐적으로 스크리닝이 안 도는데 이유를 모르겠다"] 예전엔 스캔
+                실패가 저널(기본 접힘)에만 조용히 남아, 이 화면은 그냥 계속 비어 보이기만 했다.
+                이제 가장 최근 실패를 여기 바로 보여준다(성공하면 즉시 사라짐). */}
+            {autoStatus?.lastScanError && (
+              <p className="hint small danger">
+                ⚠️ 가장 최근 스크리닝 시도({new Date(autoStatus.lastScanError.atMs).toLocaleString("ko-KR", { timeZone: "Asia/Seoul", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })} KST)가
+                실패했습니다 — {autoStatus.lastScanError.message}
+                {autoStatus?.enabled && " (다음 5분 사이클에 자동으로 다시 시도합니다 — 계속 실패하면 이 메시지를 그대로 알려주세요.)"}
+              </p>
             )}
 
             {!autoStatus?.lastScan && (
@@ -3587,7 +3667,18 @@ ${msg}
                               )}
                               {open && r.evidence && (
                                 <tr className="evid-row">
-                                  <td colSpan={5}><ScreenEvidenceView ev={r.evidence} price={r.price} /></td>
+                                  <td colSpan={5}>
+                                    <ScreenEvidenceView
+                                      ev={r.evidence}
+                                      price={r.price}
+                                      disabled={{
+                                        aboveEma: settings ? !settings.autoScanEmaTrendEnabled : false,
+                                        aboveCloud: settings ? !settings.autoScanCloudEnabled : false,
+                                        recentDoji: settings ? !settings.autoScanDojiMaxAgeEnabled : false,
+                                        nextBearish: settings ? !settings.autoScanNextCandleConfirmEnabled : false,
+                                      }}
+                                    />
+                                  </td>
                                 </tr>
                               )}
                               {chartOpen && (
@@ -3630,9 +3721,10 @@ ${msg}
             <p className="hint">
               여기서 끈 조건은 스캔할 때 아예 검사하지 않고(항상 통과 취급), 켠 조건은 옆 수치를
               기준으로 실제로 걸러냅니다. 조건마다 짧은 설명이 붙어 있고, <b>[자세히]</b>를 누르면
-              더 상세한 설명을 볼 수 있어요. 아래 [저장] 버튼 하나로 이 탭의 조건 전부(10개)가
-              저장됩니다(스캔 종목수·가격대·도지 몸통비율은 [자동 스크리너] 탭과 같은 값을
-              공유해요 — 어느 쪽에서 바꿔도 똑같이 적용됩니다).
+              더 상세한 설명을 볼 수 있어요. 아래 [저장] 버튼 하나로 이 탭의 조건 전부(14개)가
+              저장됩니다 — 자동매매 스크리닝 조건 편집은 <b>이 탭 하나</b>에서만 합니다
+              ([자동 스크리너] 탭은 이제 결과를 보는 화면이라, 지금 적용된 값을 읽기 전용으로만
+              보여줘요 — 헷갈리지 않게 저장 버튼을 한 곳으로 모았습니다).
             </p>
 
             {/* ⓪ 스캔 범위(기존 4개 — v0.28.0부터 있던 조건, 항상 켜짐) */}
@@ -3661,6 +3753,44 @@ ${msg}
                 <input type="range" min={0.1} max={0.8} step={0.05} value={autoScanBodyRatio}
                   onChange={(e) => setAutoScanBodyRatio(Number(e.target.value))} />
               </label>
+            </div>
+
+            {/* [v0.45.0 — 오너 요청 "매매진행할 장 선택"] 자동매매가 신규 진입을 시도할 세션을
+                직접 고른다. [🤖 자동매매 → 자동매매 현황]의 "시스템 휴무 시간대(05:00~17:00 KST)"
+                와는 별개의 조건 — 둘 다 켜져 있으면 둘 다 통과해야 진입한다. */}
+            <div className="crit-card">
+              <div className="crit-head"><b>매매진행할 장(세션) 선택</b></div>
+              <p className="hint">
+                자동매매가 <b>어느 장에서만 신규 진입을 시도할지</b> 고릅니다. 기존 포지션 감시(익절/
+                손절)는 이 설정과 무관하게 항상 계속됩니다. [자동매매 현황]의 "시스템 휴무 시간대
+                (05:00~17:00 KST)"가 켜져 있으면 그 시간대는 여기서 뭘 켜 두든 항상 멈춰요 — 둘은
+                서로 다른 조건이라 <b>동시에 통과해야</b> 진입합니다.
+              </p>
+              <div className="screen-filters" style={{ marginTop: 8 }}>
+                <label className="radio">
+                  <input type="checkbox" checked={screenCritForm.dayEnabled}
+                    onChange={(e) => setScreenCritForm({ ...screenCritForm, dayEnabled: e.target.checked })} />
+                  데이마켓 <span className="hint">(서머 09:00~17:00 KST)</span>
+                </label>
+                <label className="radio">
+                  <input type="checkbox" checked={screenCritForm.preEnabled}
+                    onChange={(e) => setScreenCritForm({ ...screenCritForm, preEnabled: e.target.checked })} />
+                  프리마켓 <span className="hint">(서머 17:00~22:30 KST)</span>
+                </label>
+                <label className="radio">
+                  <input type="checkbox" checked={screenCritForm.regularEnabled}
+                    onChange={(e) => setScreenCritForm({ ...screenCritForm, regularEnabled: e.target.checked })} />
+                  정규장(본장) <span className="hint">(서머 22:30~다음날 05:00 KST)</span>
+                </label>
+                <label className="radio">
+                  <input type="checkbox" checked={screenCritForm.afterEnabled}
+                    onChange={(e) => setScreenCritForm({ ...screenCritForm, afterEnabled: e.target.checked })} />
+                  애프터마켓 <span className="hint">(서머 05:00~08:50 KST)</span>
+                </label>
+              </div>
+              {!screenCritForm.dayEnabled && !screenCritForm.preEnabled && !screenCritForm.regularEnabled && !screenCritForm.afterEnabled && (
+                <p className="hint small danger">⚠️ 전부 꺼져 있으면 자동매매가 어떤 장에서도 신규 진입을 하지 않습니다(기존 포지션 감시만 계속됩니다).</p>
+              )}
             </div>
 
             {/* ① EMA 추세 필터 */}
@@ -3871,7 +4001,7 @@ ${msg}
 
                   <table className="result-table screen-table">
                     <thead>
-                      <tr><th>진입시각</th><th>종목</th><th>진입가→청산가</th><th>수량</th><th>손익</th><th>상태</th><th>사유</th></tr>
+                      <tr><th>진입시각</th><th>종목</th><th>진입가→청산가</th><th>수량</th><th>손익</th><th>상태</th><th>사유</th><th>진입 당시 설정</th></tr>
                     </thead>
                     <tbody>
                       {autoHistory.map((h) => (
@@ -3887,6 +4017,20 @@ ${msg}
                           </td>
                           <td>{AUTO_HIST_STATUS_LABEL[h.status]}</td>
                           <td className="hint">{h.note}</td>
+                          {/* [v0.45.0 — 오너 요청 "각자 어떤 기준으로 진행했는지도 연구 데이터에"]
+                              이 매매가 실제로 어떤 설정으로 들어갔는지 한눈에. 이 필드가 생기기
+                              전(v0.45.0 이전)의 옛 기록은 undefined라 "—"로 보인다(정상). */}
+                          <td className="hint small">
+                            {h.criteriaSnapshot ? (
+                              <>
+                                {{ day: "데이", pre: "프리", regular: "본장", after: "애프터", closed: "장마감" }[h.criteriaSnapshot.session]} ·
+                                {" "}몸통{Math.round(h.criteriaSnapshot.bodyRatio * 100)}% ·
+                                {" "}EMA{h.criteriaSnapshot.emaTrendEnabled ? h.criteriaSnapshot.emaPeriod : "끔"} ·
+                                {" "}구름{h.criteriaSnapshot.cloudEnabled ? "켬" : "끔"} ·
+                                {" "}투입{h.criteriaSnapshot.maxInvestPct}%
+                              </>
+                            ) : "—"}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -4666,6 +4810,22 @@ ${msg}
                   }}
                 />
                 <b>주문 확인 팝업 건너뛰기</b> — 버튼을 누르면 <b>바로 전송</b>(실수 주문 위험 ↑, 권장 안 함)
+              </label>
+              {/* [v0.44.0] 시스템 휴무 시간대(05:00~17:00 KST) — 스크리닝·수동주문·자동매매 신규
+                  진입을 전부 막는 오너 결정. 기본 켜짐, 여기서만 끌 수 있다. */}
+              <label className="radio">
+                <input
+                  type="checkbox"
+                  checked={settings.systemPauseEnabled}
+                  onChange={async (e) => {
+                    setSettings(await window.kyletool.saveSystemPauseEnabled(e.target.checked));
+                    setSystemPause(await window.kyletool.getSystemPauseStatus());
+                  }}
+                />
+                <b>시스템 휴무 시간대(05:00~17:00 KST)</b> — 이 시간엔 스크리닝·수동 주문·자동매매
+                신규 진입을 전부 막습니다(토스 데이마켓 합성시세 구간을 피하기 위함, 17:00 프리마켓
+                시작과 동시에 자동 재개). 취소·조회·기존 포지션 감시는 이 시간에도 그대로 됩니다.
+                켜져 있으면 휴장일(주말·미국 공휴일)에도 똑같이 자동으로 멈춥니다.
               </label>
             </div>
           </section>

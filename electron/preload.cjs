@@ -55,7 +55,10 @@ contextBridge.exposeInMainWorld("kyletool", {
   autoTradeStart: () => ipcRenderer.invoke("tool:autoTrade:start"),
   autoTradeStop: () => ipcRenderer.invoke("tool:autoTrade:stop"),
   autoTradeStatus: () => ipcRenderer.invoke("tool:autoTrade:status"),
+  reconcileAutoPositionsNow: () => ipcRenderer.invoke("tool:autoTrade:reconcileNow"), // [v0.45.0]
   saveAutoTradeSettings: (input) => ipcRenderer.invoke("tool:autoTrade:settings", input),
+  getSystemPauseStatus: () => ipcRenderer.invoke("tool:systemPause:status"), // [v0.44.0]
+  saveSystemPauseEnabled: (enabled) => ipcRenderer.invoke("tool:systemPause:save", enabled), // [v0.44.0]
   // [v0.28.0] 자동매매용 스크리너 조건 저장 + 수동 새로고침
   saveAutoScanSettings: (input) => ipcRenderer.invoke("tool:autoTrade:scanSettings", input),
   autoScanNow: () => ipcRenderer.invoke("tool:autoTrade:scanNow"),

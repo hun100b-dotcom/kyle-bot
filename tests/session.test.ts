@@ -9,7 +9,7 @@
 
 import { describe, it, expect } from "vitest";
 import { DateTime } from "luxon";
-import { getSession, getDayMarketOpen } from "../lib/session";
+import { getSession, getDayMarketOpen, isInDailyPauseWindow } from "../lib/session";
 
 /** KST(한국시간) DateTime을 간편하게 만드는 헬퍼 */
 function kst(year: number, month: number, day: number, hour = 0, minute = 0): DateTime {
@@ -51,5 +51,27 @@ describe("getDayMarketOpen (데이마켓 개장 시각, 서머타임 자동 처�
     const afterSwitch = getDayMarketOpen(kst(2026, 3, 9));
     expect(beforeSwitch.hour).toBe(10); // 전환 전: 겨울 시각
     expect(afterSwitch.hour).toBe(9); //  전환 후: 서머 시각
+  });
+});
+
+describe("[v0.44.0] isInDailyPauseWindow (매일 반복 휴무 시간대, KST)", () => {
+  it("05:00~17:00 구간: 경계값(05:00 포함, 17:00 미포함)과 구간 안/밖", () => {
+    expect(isInDailyPauseWindow(kst(2026, 7, 16, 4, 59), 5, 17)).toBe(false); // 직전
+    expect(isInDailyPauseWindow(kst(2026, 7, 16, 5, 0), 5, 17)).toBe(true); //   시작 포함
+    expect(isInDailyPauseWindow(kst(2026, 7, 16, 12, 0), 5, 17)).toBe(true); //  한가운데
+    expect(isInDailyPauseWindow(kst(2026, 7, 16, 16, 59), 5, 17)).toBe(true); // 직전
+    expect(isInDailyPauseWindow(kst(2026, 7, 16, 17, 0), 5, 17)).toBe(false); // 종료는 미포함(재개)
+    expect(isInDailyPauseWindow(kst(2026, 7, 16, 23, 0), 5, 17)).toBe(false); // 밤(오버나이트 허용구간)
+    expect(isInDailyPauseWindow(kst(2026, 7, 16, 0, 0), 5, 17)).toBe(false); //  자정
+  });
+
+  it("자정을 넘기는 구간(예: 22~06)도 올바르게 판정한다", () => {
+    expect(isInDailyPauseWindow(kst(2026, 7, 16, 23, 0), 22, 6)).toBe(true);
+    expect(isInDailyPauseWindow(kst(2026, 7, 16, 3, 0), 22, 6)).toBe(true);
+    expect(isInDailyPauseWindow(kst(2026, 7, 16, 12, 0), 22, 6)).toBe(false);
+  });
+
+  it("시작=종료면 휴무 구간이 없다(설정 실수 방어)", () => {
+    expect(isInDailyPauseWindow(kst(2026, 7, 16, 12, 0), 5, 5)).toBe(false);
   });
 });

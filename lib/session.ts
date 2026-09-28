@@ -266,6 +266,30 @@ export function getMarketStatus(now: DateTime): MarketStatus {
 }
 
 /**
+ * [v0.44.0] isInDailyPauseWindow — 지금(now)이 오너가 지정한 "매일 반복되는 휴무 시간대"
+ *   (KST, 예: 05:00~17:00)에 들어 있는지만 순수하게 판정한다(휴장일·세션과 무관 — 그냥 시계
+ *   기준 매일 구간).
+ *
+ * [왜 필요한가 — 오너 결정]
+ *   05:00~17:00 KST는 정확히 "애프터마켓(05:00~08:50 서머) + 데이마켓(09:00~17:00)"을
+ *   덮는다. 반대로 재개 시각 17:00은 프리마켓 시작과 정확히 일치한다. 즉 오너는 시세가
+ *   토스 자체 합성(indicative)인 데이마켓 구간은 완전히 피하고, 실제 미국 정규장 유동성이
+ *   걸리는 프리마켓~정규장(오버나이트, KST 17:00~다음날 05:00)에만 거래하기로 결정했다
+ *   (수동 도구까지 포함 — 유혹을 원천 차단하려는 의도로 이해된다).
+ *
+ * @param startHour, endHour  KST 0~23시. startHour < endHour면 당일 구간(예 5~17),
+ *   startHour > endHour면 자정을 넘기는 구간(예 22~6)도 지원(향후 다른 값으로 바뀌어도
+ *   안전하게 동작하도록).
+ */
+export function isInDailyPauseWindow(now: DateTime, startHour: number, endHour: number): boolean {
+  const kst = now.setZone("Asia/Seoul");
+  const h = kst.hour + kst.minute / 60 + kst.second / 3600;
+  if (startHour === endHour) return false; // 구간 길이 0 = 휴무 없음(설정 실수 방어)
+  if (startHour < endHour) return h >= startHour && h < endHour;
+  return h >= startHour || h < endHour; // 자정을 넘기는 구간
+}
+
+/**
  * findNextOpen — 지금 이후 가장 가까운 "데이마켓 개장 시각"(KST). 휴장일은 건너뛴다.
  *   최대 10일까지만 앞을 본다(연휴가 아무리 길어도 그 안에는 열린다).
  */

@@ -294,7 +294,11 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:autoTrade:start", () => e.startAutoTrade());
   ipcMain.handle("tool:autoTrade:stop", () => e.stopAutoTrade());
   ipcMain.handle("tool:autoTrade:status", () => e.getAutoTradeStatus());
+  ipcMain.handle("tool:autoTrade:reconcileNow", () => e.reconcileAutoPositionsNow()); // [v0.45.0]
   ipcMain.handle("tool:autoTrade:settings", (_ev, input) => e.saveAutoTradeSettings(input));
+  // [v0.44.0] 시스템 휴무 시간대(05:00~17:00 KST) — 현재 상태 조회 + 기능 켜고 끄기
+  ipcMain.handle("tool:systemPause:status", () => e.getSystemPauseStatus());
+  ipcMain.handle("tool:systemPause:save", (_ev, enabled: boolean) => e.saveSystemPauseEnabled(enabled));
   // [v0.28.0] 자동매매용 스크리너 조건 저장 + 수동 새로고침(5분 기다리지 않고 지금 훑기)
   ipcMain.handle("tool:autoTrade:scanSettings", (_ev, input) => e.saveAutoScanSettings(input));
   ipcMain.handle("tool:autoTrade:scanNow", () => e.autoScanNow());
