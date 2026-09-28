@@ -762,6 +762,9 @@ export interface AutoTradeStatus {
   /** [v0.29.0] 다음 사이클 예정 시각(ms, epoch) — 화면의 "다음 스캔까지 N분 N초" 카운트다운용.
    *  자동매매가 꺼져 있거나 아직 한 번도 안 돌았으면 null. */
   nextCycleAtMs: number | null;
+  /** [v0.35.0] "스크리닝은 확정인데 왜 안 사졌지?"에 답하는 사유 — 종목코드 → 사람이 읽을 한 줄
+   *  문장. 이번 사이클에 진입을 검토했지만 안(못) 산 종목만 있고, 매 사이클 새로 채워진다. */
+  skipReasons: Record<string, string>;
 }
 
 /**
@@ -960,6 +963,10 @@ export class ToolEngine extends EventEmitter {
   /** 마지막으로 클라우드에 올린 시각(표시용) */
   private lastSyncPushAtMs: number | null = null;
   private lastAutoStatePushAtMs: number | null = null; // [v0.31.0] 자동매매 기록 업로드 쓰로틀용
+  private lastGroupPushAtMs: number | null = null; // [v0.35.0] 그룹 공유(capri_group_trades) 업로드 쓰로틀용
+  /** [v0.35.0] "스크리닝은 확정인데 왜 안 사졌지?"를 화면에서 바로 보이게 — 사이클마다 다시 채움
+   *  (지난 사이클 이유가 이번 사이클에도 그대로 남아 헷갈리는 일이 없도록 매번 초기화). */
+  private autoTradeSkipReasons: Record<string, string> = {};
 
   // 환율 캐시(토스 스펙: 1분 갱신이므로 60초 캐시)
   private fxCache: { rate: number; atMs: number; source: "toss" | "manual" } | null = null;
@@ -1504,6 +1511,12 @@ export class ToolEngine extends EventEmitter {
       if (pulledTrades?.ok && (pulledTrades.count ?? 0) > 0) extra += ` 매매 이력 ${pulledTrades.count}건도 함께 받아왔습니다.`;
       const pulledAutoState = await this.syncPullAutoState().catch(() => null);
       if (pulledAutoState?.ok && (pulledAutoState.count ?? 0) > 0) extra += ` 자동매매 기록도 함께 받아왔습니다.`;
+      // [v0.35.0] 로그인 시점까지 쌓여 있던 기존 자동매매기록도 그룹 공유 표에 곧바로 올려 둔다
+      //   (다음 매매가 나가야만 올라가면, 새로 로그인한 회원의 과거 기록이 그룹 연구탭에
+      //   한참 안 보일 수 있음 — 로그인 직후 1회는 즉시 반영).
+      void this.syncPushGroupTrades().catch(() => {
+        /* 조용히 무시 */
+      });
 
       return { ok: true, message: `로그인되었습니다(${this.authEmail}).${extra}` };
     } catch (e) {
@@ -3125,6 +3138,15 @@ export class ToolEngine extends EventEmitter {
         /* 업로드 실패는 조용히 넘어간다 */
       });
     }
+    // [v0.35.0] 그룹 공유(평문, capri_group_trades)도 같은 타이밍·쓰로틀로 함께 올린다 —
+    //   로그인만 돼 있으면 되고(비밀번호는 필요 없음 — 암호화하지 않으므로), 실패해도
+    //   조용히 무시(개인 기록은 이미 로컬+개인 클라우드에 안전하게 저장돼 있다).
+    const groupLongEnough = Date.now() - (this.lastGroupPushAtMs ?? 0) > 15_000;
+    if (groupLongEnough && this.authEmail) {
+      void this.syncPushGroupTrades().catch(() => {
+        /* 업로드 실패는 조용히 넘어간다 */
+      });
+    }
   }
 
   /** 새 진입이 접수될 때 한 줄 추가("watching" 상태). */
@@ -3368,6 +3390,60 @@ export class ToolEngine extends EventEmitter {
       };
     } catch (e) {
       return { ok: false, message: `받기 실패: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // [v0.35.0] 그룹(공동개발자·동업자) 전체 연구용 — capri_group_trades에 "평문"으로 올린다.
+  //   [오너 지시 2026-09-28] 카프리는 비공개 그룹(가입 자체가 모든 사항에 대한 동의 전제)이고
+  //   전원이 소유주(고객 없음)라, 위 syncPushAutoState/syncPullAutoState(본인만 보는 암호화
+  //   동기화)와는 완전히 별도로, "그룹 전원이 실명으로 함께 보는" 표를 하나 더 둔다.
+  //   비식별화하지 않는다 — 오너 지시 그대로 이메일을 그대로 올린다.
+  // ---------------------------------------------------------------------------
+
+  /** syncPushGroupTrades — 내 자동매매기록 전체를 평문 그대로 그룹 공유 표에 올린다(암호화 없음). */
+  async syncPushGroupTrades(): Promise<{ ok: boolean; message: string; count?: number }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요." };
+    if (!this.authEmail || !this.authUserId) return { ok: false, message: "로그인 정보가 없습니다." };
+    if (this.autoTradeHistory.length === 0) return { ok: false, message: "올릴 자동매매 기록이 없습니다." };
+
+    try {
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_trades?on_conflict=user_id`, {
+        method: "POST",
+        headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({
+          user_id: this.authUserId,
+          member_email: this.authEmail,
+          history: this.autoTradeHistory,
+          updated_at: new Date().toISOString(),
+        }),
+      });
+      if (!res.ok) return { ok: false, message: `그룹 공유 저장 실패(HTTP ${res.status}).` };
+      this.lastGroupPushAtMs = Date.now();
+      return { ok: true, message: `그룹에 자동매매 기록 ${this.autoTradeHistory.length}건을 공유했습니다.`, count: this.autoTradeHistory.length };
+    } catch (e) {
+      return { ok: false, message: `공유 실패: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+
+  /** syncPullGroupHistory — 그룹(가입 허용목록) 전원의 자동매매기록을 실명(이메일)째로 받아온다. */
+  async syncPullGroupHistory(): Promise<{ ok: boolean; message: string; members: { email: string; history: AutoTradeHistoryEntry[] }[] }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요.", members: [] };
+
+    try {
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_trades?select=member_email,history`, {
+        headers: this.authRestHeaders(token),
+      });
+      if (!res.ok) return { ok: false, message: `그룹 기록 조회 실패(HTTP ${res.status}).`, members: [] };
+      const rows = (await res.json()) as Array<{ member_email: string; history: unknown }>;
+      const members = rows
+        .filter((r) => Array.isArray(r.history))
+        .map((r) => ({ email: r.member_email, history: r.history as AutoTradeHistoryEntry[] }));
+      return { ok: true, message: `그룹 회원 ${members.length}명의 자동매매기록을 받았습니다.`, members };
+    } catch (e) {
+      return { ok: false, message: `받기 실패: ${e instanceof Error ? e.message : String(e)}`, members: [] };
     }
   }
 
@@ -4181,6 +4257,7 @@ export class ToolEngine extends EventEmitter {
       lastScan: this.autoTradeLastScan,
       nextCycleAtMs:
         this.autoTradeEnabled && this.autoTradeLastCycleAtMs != null ? this.autoTradeLastCycleAtMs + ToolEngine.AUTO_TRADE_INTERVAL_MS : null,
+      skipReasons: { ...this.autoTradeSkipReasons },
     };
   }
 
@@ -4504,21 +4581,33 @@ export class ToolEngine extends EventEmitter {
       // 나누지 않는다(이전 버전은 나눠서 저가주에서 1주만 나오는 버그가 있었음).
       const perSlotPct = this.autoTradeMaxInvestPct;
 
+      // [v0.35.0] 이번 사이클에 실제로 검토한 후보만 채운다 — 지난 사이클 사유가 남아 헷갈리지 않게.
+      this.autoTradeSkipReasons = {};
       let placed = 0;
       for (const cand of candidates) {
-        if (placed >= freeSlots) break;
-        if (cand.ema200 == null || cand.prevClose == null) continue; // 1분할 계산 불가(데이터 부족)
+        if (placed >= freeSlots) {
+          this.autoTradeSkipReasons[cand.symbol] = `이번 사이클엔 빈 자리(${freeSlots}개)를 다른 후보가 먼저 채웠습니다 — 다음 사이클에 다시 시도됩니다.`;
+          continue;
+        }
+        if (cand.ema200 == null || cand.prevClose == null) {
+          this.autoTradeSkipReasons[cand.symbol] = "가격 데이터 부족(EMA200 또는 전봉종가 확인 안 됨) — 다음 사이클에 다시 시도됩니다.";
+          continue; // 1분할 계산 불가(데이터 부족)
+        }
 
         let level1: SplitOrder;
         try {
           // [오너 지시] 삼분할 매매기법의 "1분할" 타점만 쓴다 — 가장 얕게 눌렸을 때만 자동 진입.
           level1 = calcSplit3(cand.prevClose, cand.ema200, this.defaultTpPct, this.defaultSlPct).splits[0];
         } catch {
+          this.autoTradeSkipReasons[cand.symbol] = "1분할 진입 조건 불성립(전봉종가가 EMA200 이하) — 삼분할 매매기법상 지금은 진입 대상이 아닙니다.";
           continue; // 진입 필터 불성립(전봉종가<=EMA200) — 이 종목은 건너뜀
         }
 
         const usedKey = `${cand.symbol}@${level1.entry}`;
-        if (this.autoTradeUsedKeys.has(usedKey)) continue; // [오너 지시] 동일종목 동일타점 재진입 방지
+        if (this.autoTradeUsedKeys.has(usedKey)) {
+          this.autoTradeSkipReasons[cand.symbol] = `이미 이 타점($${level1.entry})으로 진입을 완료한 적이 있습니다(동일종목 동일타점 재진입 방지).`;
+          continue; // [오너 지시] 동일종목 동일타점 재진입 방지
+        }
 
         const qty = computeSeedQty(seedUsd, perSlotPct, level1.entry, commissionRate) ?? 0;
         const gate = canAutoEnter({
@@ -4535,12 +4624,17 @@ export class ToolEngine extends EventEmitter {
           candidateQty: qty,
         });
         if (!gate.allow) {
+          this.autoTradeSkipReasons[cand.symbol] = gate.reason ?? "안전 게이트에서 거부됨.";
           // 종목 수·손실 한도처럼 "이 사이클 전체"에 적용되는 사유면 더 시도할 필요가 없다.
           if (gate.reason?.includes("종목 수") || gate.reason?.includes("손실")) break;
           continue; // 그 외(예: 예산으로 1주도 못 사는 경우)는 이 종목만 건너뛰고 다음 후보 시도
         }
 
-        this.autoTradeUsedKeys.add(usedKey);
+        // [v0.35.0 버그 수정] 예전엔 여기서(시도 직전에) usedKeys에 등록했다 — 그러면 진입이
+        //   일시적 오류(네트워크 순단 등)로 실패해도 "이미 시도했다"고 영구 기록돼, 같은 타점이
+        //   다음 사이클에도 계속 나타나는데 조용히 skip만 되고 다시는 재시도되지 않는 버그가
+        //   있었다("확정인데 왜 계속 미진입이지?"의 실제 원인 중 하나). 이제는 아래 placeBracketCore가
+        //   "성공"한 뒤에만(드라이런 포함) 기록해, 실패하면 다음 사이클에 자동으로 재시도된다.
         const posDraft: AutoPosition = {
           symbol: cand.symbol,
           entry: level1.entry,
@@ -4581,6 +4675,9 @@ export class ToolEngine extends EventEmitter {
               priceAtOrder: null, // placeBracketCore가 실제 현재가로 덮어씀(saveRationale 참고)
             },
           });
+          // [v0.35.0] 주문 접수가 여기까지 성공(예외 없이)해야만 "이미 시도했다"로 기록한다 —
+          //   실패는 이 try 블록을 못 벗어나고 catch로 가므로 절대 여기 도달하지 않는다.
+          this.autoTradeUsedKeys.add(usedKey);
           this.addJournal({
             kind: "info",
             symbol: cand.symbol,
@@ -4613,6 +4710,8 @@ export class ToolEngine extends EventEmitter {
           this.autoTradePositions = this.autoTradePositions.filter((p) => p !== posDraft);
           this.saveAutoPositions();
           const errMsg = String(e).replace(/^Error:\s*/, "");
+          // [v0.35.0] usedKeys에는 안 올렸으므로(위 성공 지점에서만 올림) 다음 사이클에 자동 재시도된다.
+          this.autoTradeSkipReasons[cand.symbol] = `방금 진입을 시도했지만 실패했습니다(${errMsg}) — 다음 사이클에 다시 시도됩니다.`;
           this.addJournal({
             kind: "info", symbol: cand.symbol, summary: `🤖 자동매매 진입 실패 ${cand.symbol}: ${errMsg}`,
             notify: true, notifyTitle: `⚠️ 진입 실패: ${cand.symbol}`,

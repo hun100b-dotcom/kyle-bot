@@ -59,6 +59,8 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
       expect(s.maxInvestPct).toBe(30);
       // [v0.27.0] 스크리닝 결과 탭이 쓰는 필드 — 아직 한 번도 스캔 안 했으면 null이어야 한다.
       expect(s.lastScan).toBeNull();
+      // [v0.35.0] "왜 미진입인지" 사유 맵 — 아직 한 사이클도 안 돌았으면 빈 객체.
+      expect(s.skipReasons).toEqual({});
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

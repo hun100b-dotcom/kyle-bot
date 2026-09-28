@@ -159,6 +159,8 @@ interface AutoTradeStatus {
   lastScan: ScreenRun | null;
   /** [v0.29.0] 다음 사이클 예정 시각(ms, epoch) — "다음 스캔까지 N분 N초" 카운트다운용. 꺼져 있으면 null. */
   nextCycleAtMs: number | null;
+  /** [v0.35.0] "확정인데 왜 안 사졌지?"에 답하는 사유 — 종목코드 → 한 줄 설명. 매 사이클 새로 채워짐. */
+  skipReasons: Record<string, string>;
 }
 
 /** [v0.30.0] 자동매매기록 한 줄 — "자동매매기록" 탭이 그대로 보여준다. */

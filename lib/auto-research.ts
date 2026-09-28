@@ -156,3 +156,55 @@ export function summarizeAutoHistory(entries: AutoTradeHistoryEntry[]): AutoRese
     headline,
   };
 }
+
+// =============================================================================
+// [v0.35.0] 그룹(공동개발자·동업자) 전체 연구 — 여러 회원의 기록을 실명으로 함께 본다
+// -----------------------------------------------------------------------------
+// [오너 지시 2026-09-28] "카프리는 비공개 그룹(동의 전제) — 투자조언·연구 목적 둘 다 유지,
+//   비식별화(익명화)는 하지 않는다. 어떤 그룹원의 어떤 스타일·성향·지속성이 어떤 영향을
+//   미치는지 연구해야 하기 때문." → 회원별 성적을 실명(이메일) 그대로 드러내는 리더보드와
+//   그룹 전체 합산 통계를 만든다. 회원 한 명 한 명의 통계는 summarizeAutoHistory를 그대로
+//   재사용한다(계산 규칙이 "나만 볼 때"와 "그룹으로 볼 때"가 절대 어긋나지 않게).
+// =============================================================================
+
+/** 회원 한 명의 원본 입력(전자우편 = 실명 식별자, 오너 지시대로 비식별화하지 않는다). */
+export interface GroupMemberInput {
+  email: string;
+  history: AutoTradeHistoryEntry[];
+}
+
+/** 회원 한 명의 리더보드 행. */
+export interface GroupMemberStat extends ResearchBucket {
+  email: string;
+  totalEntries: number; // 이 회원의 기록 전체 개수(취소·수동청산 포함)
+  headline: string | null; // 이 회원 개인 헤드라인(표본 10건 미만이면 null)
+}
+
+/** 그룹 연구탭 전체 결과. */
+export interface GroupResearchSummary {
+  memberCount: number;
+  overall: ResearchBucket; // 전원의 결정적(승/패) 매매를 하나로 합친 그룹 전체 성적
+  byMember: GroupMemberStat[]; // 누적손익 큰 순(리더보드)
+  headline: string | null;
+}
+
+/** 회원별 기록 배열을 받아 그룹 전체 리더보드 + 합산 통계를 낸다(실명 유지, 비식별화 없음). */
+export function summarizeGroupHistory(members: GroupMemberInput[]): GroupResearchSummary {
+  const byMember: GroupMemberStat[] = members
+    .map((m) => {
+      const s = summarizeAutoHistory(m.history);
+      return { email: m.email, totalEntries: s.totalEntries, headline: s.headline, ...s.overall };
+    })
+    .sort((a, b) => b.totalPnlUsd - a.totalPnlUsd);
+
+  const overall = summarizeAutoHistory(members.flatMap((m) => m.history)).overall;
+
+  let headline: string | null = null;
+  if (overall.n >= MIN_SAMPLE_FOR_HEADLINE && overall.winRate != null) {
+    const top = byMember.find((m) => m.n >= 3);
+    headline = `그룹 전체 ${overall.n}건 중 승률 ${overall.winRate}%, 누적손익 ${overall.totalPnlUsd >= 0 ? "+" : ""}$${overall.totalPnlUsd}` +
+      (top ? ` · 가장 성적 좋은 회원은 ${top.email}(${top.n}건, 승률 ${top.winRate}%)` : "");
+  }
+
+  return { memberCount: members.length, overall, byMember, headline };
+}

@@ -3414,7 +3414,18 @@ ${msg}
                                 <td>{r.status === "confirmed" ? "🔴 확정" : "🟡 관찰"}</td>
                                 <td><b>{r.symbol}</b></td>
                                 <td>{r.price != null ? usdKrw(r.price, fx) : "—"}</td>
-                                <td>{entered ? <span className="ok">✅ 진입됨</span> : <span className="hint">— 미진입</span>}</td>
+                                <td>
+                                  {entered ? (
+                                    <span className="ok">✅ 진입됨</span>
+                                  ) : (
+                                    <span className="hint">
+                                      — 미진입
+                                      {autoStatus?.skipReasons?.[r.symbol] && (
+                                        <><br /><span className="hint small">{autoStatus.skipReasons[r.symbol]}</span></>
+                                      )}
+                                    </span>
+                                  )}
+                                </td>
                               </tr>
                               {open && r.evidence && (
                                 <tr className="evid-row">
