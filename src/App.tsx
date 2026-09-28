@@ -1977,6 +1977,12 @@ ${msg}
       );
       if (!ok) return;
       setAutoStatus(await window.kyletool.autoTradeStart());
+      // [v0.32.5 — 오너 요청] "자동매매 시작"을 누르면 자동 스크리너 탭의 [🔄 지금 새로고침]도
+      // 실제로 눌린 것처럼 바로 스캔이 돌아야 한다. 엔진 안에서도 시작 즉시 첫 스캔이 돌긴
+      // 하지만(백그라운드 5분 사이클의 1회차), 화면(특히 자동 스크리너 탭)에 바로 "지금
+      // 스캔 중"이 보이지 않으면 오너가 "진짜 도는 건가?"를 확인할 길이 없었다 — 같은 버튼이
+      // 쓰는 함수를 그대로 재사용해 눌림 상태·진행률·결과가 즉시 화면에 반영되게 한다.
+      void refreshAutoScanNow();
     } finally {
       setAutoBusy(false);
       void window.kyletool.journal().then(setJournal);
