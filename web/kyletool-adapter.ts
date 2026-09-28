@@ -241,6 +241,8 @@ export function installKyleTool(): ToolEngine {
     tradeSyncPull: () => e.syncPullTrades(),
     autoStateSyncPush: () => e.syncPushAutoState(),
     autoStateSyncPull: () => e.syncPullAutoState(),
+    groupTradesPush: () => e.syncPushGroupTrades(),
+    groupTradesPull: () => e.syncPullGroupHistory(),
     tradesStats: () => Promise.resolve(e.getTradeStats()),
     tradesClose: (id: string, exitPrice: number, kind: "tp" | "sl" | "manual") => e.closeTradeManual(id, exitPrice, kind),
     tradesDelete: (id: string) => Promise.resolve(e.deleteTrade(id)),

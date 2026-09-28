@@ -694,6 +694,9 @@ interface KyletoolBridge {
   /** [v0.31.0] 자동매매 기록(포지션+이력) 기기 간 동기화 — 로그인 시 자동 호출됨. */
   autoStateSyncPush(): Promise<{ ok: boolean; message: string; count?: number }>;
   autoStateSyncPull(): Promise<{ ok: boolean; message: string; count?: number }>;
+  /** [v0.35.0] 그룹(공동개발자) 전체 연구용 공유 — 평문, 비식별화 없음(오너 지시). */
+  groupTradesPush(): Promise<{ ok: boolean; message: string; count?: number }>;
+  groupTradesPull(): Promise<{ ok: boolean; message: string; members: { email: string; history: AutoTradeHistoryEntry[] }[] }>;
   tradesStats(): Promise<TradeStats>;
   tradesClose(id: string, exitPrice: number, kind: "tp" | "sl" | "manual"): Promise<StrengthTrade[]>;
   tradesDelete(id: string): Promise<StrengthTrade[]>;

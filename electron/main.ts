@@ -307,6 +307,9 @@ function registerIpc(e: ToolEngine): void {
   // [v0.31.0] 자동매매 기록(포지션+이력) 기기 간 동기화
   ipcMain.handle("tool:autostatesync:push", () => e.syncPushAutoState());
   ipcMain.handle("tool:autostatesync:pull", () => e.syncPullAutoState());
+  // [v0.35.0] 그룹(공동개발자) 전체 연구용 공유 — 평문, 본인 것만 올리고 전원 것을 받아온다
+  ipcMain.handle("tool:grouptrades:push", () => e.syncPushGroupTrades());
+  ipcMain.handle("tool:grouptrades:pull", () => e.syncPullGroupHistory());
   ipcMain.handle("tool:trades:stats", () => e.getTradeStats());
   ipcMain.handle("tool:trades:close", (_ev, id: string, exitPrice: number, kind: "tp" | "sl" | "manual") => e.closeTradeManual(id, exitPrice, kind));
   ipcMain.handle("tool:trades:delete", (_ev, id: string) => e.deleteTrade(id));
