@@ -2007,16 +2007,29 @@ ${msg}
    *  Key Point(오너 요청): 여기서 저장한 값은 saveAutoScanSettings → autoScanEmaPeriod 등 필드로
    *  바로 들어가고, buildAutoScanOpts()가 그 필드들을 그대로 scanScreener 옵션으로 넘기므로
    *  "화면에서 끈 조건은 실제 스캔에서도 꺼진다"가 우회 경로 없이 보장된다(electron/tool-engine.ts). */
+  /** [v0.37.1] 오너 지적("스크리닝 기준이 모든 항목이 없는 것 같은데") — 기존 4개(스캔종목수·
+   *  가격대·도지몸통비율)도 이 탭에서 같이 저장한다(같은 state를 [자동 스크리너] 탭과 공유하므로
+   *  구현은 하나, 저장 버튼만 두 군데). */
   async function saveScreenCriteriaUI() {
+    const scanCount = toNum(autoScanForm.scanCount);
+    const pMin = toNum(autoScanForm.priceMin);
+    const pMax = toNum(autoScanForm.priceMax);
     const emaPeriod = toNum(screenCritForm.emaPeriod);
     const dojiWickMinRatio = toNum(screenCritForm.dojiWickMinRatio);
     const dojiMaxAgeMinutes = toNum(screenCritForm.dojiMaxAgeMinutes);
-    if (emaPeriod === null || emaPeriod <= 0 || dojiWickMinRatio === null || dojiWickMinRatio < 0 || dojiMaxAgeMinutes === null || dojiMaxAgeMinutes <= 0) {
-      setSavedMsg("⚠️ EMA 기간·도지 꼬리비율·신선도(분)를 올바른 숫자로 입력하세요.");
+    if (
+      scanCount === null || scanCount <= 0 || pMin === null || pMin < 0 || pMax === null || pMax < 0 ||
+      emaPeriod === null || emaPeriod <= 0 || dojiWickMinRatio === null || dojiWickMinRatio < 0 || dojiMaxAgeMinutes === null || dojiMaxAgeMinutes <= 0
+    ) {
+      setSavedMsg("⚠️ 스캔 종목수·가격대·EMA 기간·도지 꼬리비율·신선도(분)를 올바른 숫자로 입력하세요.");
       setTimeout(() => setSavedMsg(""), 4000);
       return;
     }
     const s = await window.kyletool.saveAutoScanSettings({
+      count: scanCount,
+      priceMin: pMin,
+      priceMax: pMax,
+      bodyRatio: autoScanBodyRatio,
       emaTrendEnabled: screenCritForm.emaTrendEnabled,
       emaPeriod,
       cloudEnabled: screenCritForm.cloudEnabled,
@@ -2029,6 +2042,8 @@ ${msg}
     setSettings(s);
     // 저장 직후 입력칸을 서버가 실제로 보정한 값(clamp 결과)으로 다시 맞춘다 — 예: 500분을
     // 넣었어도 서버가 180분으로 잘랐으면 화면도 180으로 보여야 헷갈리지 않는다.
+    setAutoScanForm({ scanCount: String(s.autoScanCount), priceMin: String(s.autoScanPriceMin), priceMax: String(s.autoScanPriceMax) });
+    setAutoScanBodyRatio(s.autoScanBodyRatio);
     setScreenCritForm({
       emaTrendEnabled: s.autoScanEmaTrendEnabled,
       emaPeriod: String(s.autoScanEmaPeriod),
@@ -3496,13 +3511,42 @@ ${msg}
       {paneTab === "screenCriteria" && (
         <main className="grid">
           <section className="card wide">
-            <h2>스크리닝 기준 <span className="hint">(조건별로 켜고 끄거나 수치를 직접 조절)</span></h2>
+            <h2>스크리닝 기준 <span className="hint">(조건 전부를 한 곳에서 켜고 끄거나 수치 조절)</span></h2>
             <p className="hint">
               여기서 끈 조건은 스캔할 때 아예 검사하지 않고(항상 통과 취급), 켠 조건은 옆 수치를
               기준으로 실제로 걸러냅니다. 조건마다 짧은 설명이 붙어 있고, <b>[자세히]</b>를 누르면
-              더 상세한 설명을 볼 수 있어요. 스캔 종목수·가격대·도지 몸통비율 상한은 [자동 스크리너]
-              탭에서 조절할 수 있어요(이 탭은 켜고 끌 수 있는 나머지 조건 전용).
+              더 상세한 설명을 볼 수 있어요. 아래 [저장] 버튼 하나로 이 탭의 조건 전부(10개)가
+              저장됩니다(스캔 종목수·가격대·도지 몸통비율은 [자동 스크리너] 탭과 같은 값을
+              공유해요 — 어느 쪽에서 바꿔도 똑같이 적용됩니다).
             </p>
+
+            {/* ⓪ 스캔 범위(기존 4개 — v0.28.0부터 있던 조건, 항상 켜짐) */}
+            <div className="crit-card">
+              <div className="crit-head"><b>스캔 범위(항상 켜짐)</b></div>
+              <p className="hint">몇 종목을 훑을지, 어떤 가격대만 볼지, 도지로 인정할 몸통 크기 상한을 정해요.</p>
+              <div className="screen-filters" style={{ marginTop: 8 }}>
+                <label className="str-field sf-num">
+                  <span className="sb-k">스캔 종목수 <span className="hint">(10~200)</span></span>
+                  <input type="text" inputMode="numeric" value={autoScanForm.scanCount}
+                    onChange={(e) => setAutoScanForm({ ...autoScanForm, scanCount: e.target.value })} />
+                </label>
+                <label className="str-field sf-num">
+                  <span className="sb-k">가격 하한 $</span>
+                  <input type="text" inputMode="decimal" value={autoScanForm.priceMin}
+                    onChange={(e) => setAutoScanForm({ ...autoScanForm, priceMin: e.target.value })} />
+                </label>
+                <label className="str-field sf-num">
+                  <span className="sb-k">가격 상한 $</span>
+                  <input type="text" inputMode="decimal" value={autoScanForm.priceMax}
+                    onChange={(e) => setAutoScanForm({ ...autoScanForm, priceMax: e.target.value })} />
+                </label>
+              </div>
+              <label className="str-field" style={{ marginTop: 8 }}>
+                <span className="sb-k">도지로 인정할 <b>몸통 크기 상한</b>: <b>{(autoScanBodyRatio * 100).toFixed(0)}%</b> <span className="hint">(작을수록 깐깐하게, 최대 80%)</span></span>
+                <input type="range" min={0.1} max={0.8} step={0.05} value={autoScanBodyRatio}
+                  onChange={(e) => setAutoScanBodyRatio(Number(e.target.value))} />
+              </label>
+            </div>
 
             {/* ① EMA 추세 필터 */}
             <div className="crit-card">
