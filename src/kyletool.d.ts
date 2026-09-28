@@ -385,6 +385,8 @@ interface ScreenResult {
   n5m: number;
   evidence: ScreenEvidence | null;
   note?: string;
+  /** [v0.36.0] 워런트 의심 코멘트(확정/관찰 후보만, 티커 추측 방식 — 차단 아님, 표시 전용). */
+  warrantWarning?: string | null;
 }
 interface ScreenProgress {
   phase: "ranking" | "scanning" | "done";

@@ -2782,6 +2782,11 @@ ${msg}
                                 {r.proximityPct != null ? `${r.proximityPct >= 0 ? "+" : ""}${r.proximityPct.toFixed(2)}%` : "—"}
                               </td>
                             </tr>
+                            {r.warrantWarning && (
+                              <tr className="evid-row">
+                                <td colSpan={9}><p className="hint danger" style={{ margin: 0 }}>{r.warrantWarning}</p></td>
+                              </tr>
+                            )}
                             {open && r.evidence && (
                               <tr className="evid-row">
                                 <td colSpan={9}><ScreenEvidenceView ev={r.evidence} price={r.price} /></td>
@@ -3445,6 +3450,11 @@ ${msg}
                                   )}
                                 </td>
                               </tr>
+                              {r.warrantWarning && (
+                                <tr className="evid-row">
+                                  <td colSpan={5}><p className="hint danger" style={{ margin: 0 }}>{r.warrantWarning}</p></td>
+                                </tr>
+                              )}
                               {open && r.evidence && (
                                 <tr className="evid-row">
                                   <td colSpan={5}><ScreenEvidenceView ev={r.evidence} price={r.price} /></td>
