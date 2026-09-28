@@ -715,6 +715,8 @@ interface KyletoolBridge {
   conditionals(): Promise<CondOrder[]>;
   cancelOrder(id: string): Promise<JournalEntry>;
   cancelConditional(id: string): Promise<JournalEntry>;
+  /** [v0.41.0] 자동매매가 지금 감시 중인 포지션 하나를 즉시 직접 취소한다. */
+  cancelAutoPosition(symbol: string, entry: number, enteredAtMs: number): Promise<{ ok: boolean; message: string }>;
 
   mockSetPrice(symbol: string, price: number): Promise<boolean>;
 

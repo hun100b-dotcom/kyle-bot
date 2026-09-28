@@ -20,6 +20,27 @@ import electronUpdater from "electron-updater";
 
 const { autoUpdater } = electronUpdater;
 
+// =============================================================================
+// [v0.41.0 긴급 방어] 처리되지 않은 예외/거부가 앱 전체를 죽이지 않게 한다.
+// -----------------------------------------------------------------------------
+//   [오너 실사용 보고] "여러 사용자가 동시에 스크리너를 실행하면 다운된다." 조사 결과,
+//   이 메인 프로세스(Electron main)에는 uncaughtException/unhandledRejection에 대한
+//   전역 안전망이 전혀 없었다 — Node.js는 기본적으로 처리 안 된 예외·프라미스 거부가
+//   생기면 프로세스 자체를 종료한다. 자동매매 사이클(autoTradeTick)은 이미 자체
+//   try/catch로 감싸져 있어 안전하지만, 스크리너·시세 조회 등 다른 비동기 경로 어딘가에서
+//   (특히 부하가 커지는 동시 실행·요청 한도(429) 상황에서 나타나기 쉬운 예상 못한 응답
+//   모양·네트워크 순단 등으로) 단 한 곳이라도 놓친 예외가 나면 앱 전체가 조용히 죽어버릴
+//   수 있었다 — "여러 사용자가 동시에 쓰면 더 잘 죽는다"는 보고와 정확히 들어맞는 취약점.
+//   이제 두 이벤트를 전역으로 잡아 로그만 남기고 계속 실행한다(어떤 개별 비동기 작업이
+//   실패해도 앱 자체는 살아있어야 한다는 원칙 — 자동매매 안전장치와 같은 철학).
+// =============================================================================
+process.on("uncaughtException", (err) => {
+  console.error("[capri][uncaughtException] 처리 안 된 예외 — 앱은 계속 실행됩니다:", err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[capri][unhandledRejection] 처리 안 된 프라미스 거부 — 앱은 계속 실행됩니다:", reason);
+});
+
 let engine: ToolEngine | null = null;
 let win: BrowserWindow | null = null;
 
@@ -324,6 +345,9 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:orders:conditionals", () => e.conditionals());
   ipcMain.handle("tool:orders:cancel", (_ev, id: string) => e.cancelNormalOrder(id));
   ipcMain.handle("tool:orders:cancelConditional", (_ev, id: string) => e.cancelConditional(id));
+  ipcMain.handle("tool:auto:cancelPosition", (_ev, symbol: string, entry: number, enteredAtMs: number) =>
+    e.cancelAutoPosition(symbol, entry, enteredAtMs),
+  );
 
   ipcMain.handle("tool:mockSetPrice", (_ev, symbol: string, price: number) => e.mockSetPrice(symbol, price));
 

@@ -789,6 +789,20 @@ function App() {
   // [v0.30.0] "자동매매기록" 탭 — 자동매매가 낸 매매 전체 이력(영속 로그).
   const [autoHistory, setAutoHistory] = useState<AutoTradeHistoryEntry[]>([]);
   const [autoHistoryBusy, setAutoHistoryBusy] = useState(false);
+  // [v0.41.0 — 오너 요청] "지금 감시 중" 포지션을 직접 취소하는 버튼의 진행 상태(포지션 키 단위).
+  const [autoCancelBusyKey, setAutoCancelBusyKey] = useState<string | null>(null);
+  async function doCancelAutoPosition(p: AutoPosition) {
+    const key = `${p.symbol}@${p.entry}@${p.enteredAtMs}`;
+    if (!confirm(`${p.symbol} 자동매매 포지션을 취소할까요?\n(매수 체결 대기 중이면 매수 주문을, 이미 체결됐으면 익절/손절 조건주문을 취소합니다.)`)) return;
+    setAutoCancelBusyKey(key);
+    try {
+      const r = await window.kyletool.cancelAutoPosition(p.symbol, p.entry, p.enteredAtMs);
+      setSyncMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      if (r.ok) setAutoStatus(await window.kyletool.autoTradeStatus());
+    } finally {
+      setAutoCancelBusyKey(null);
+    }
+  }
   // [v0.35.0] 매매연구 탭 — "내 데이터"/"그룹 전체" 전환. 그룹 데이터는 볼 때만 받아온다(자동 로드 안 함).
   const [researchView, setResearchView] = useState<"mine" | "group">("mine");
   const [groupMembers, setGroupMembers] = useState<{ email: string; history: AutoTradeHistoryEntry[] }[] | null>(null);
@@ -3322,19 +3336,32 @@ ${msg}
                   </p>
                   <table className="result-table">
                     <thead>
-                      <tr><th>종목</th><th>진입가</th><th>익절가</th><th>손절가</th><th>수량</th><th>상태</th></tr>
+                      <tr><th>종목</th><th>진입가</th><th>익절가</th><th>손절가</th><th>수량</th><th>상태</th><th>취소</th></tr>
                     </thead>
                     <tbody>
-                      {autoStatus.positions.map((p) => (
-                        <tr key={`${p.symbol}@${p.entry}`}>
+                      {autoStatus.positions.map((p) => {
+                        const key = `${p.symbol}@${p.entry}@${p.enteredAtMs}`;
+                        return (
+                        <tr key={key}>
                           <td>{p.symbol}</td>
                           <td>${p.entry}</td>
                           <td>${p.tp}</td>
                           <td>${p.sl}</td>
                           <td>{p.quantity}</td>
                           <td>{p.status === "active" ? "익절/손절 등록됨" : "매수 체결 대기중"}</td>
+                          <td>
+                            <button
+                              className="mini"
+                              disabled={autoCancelBusyKey === key || status?.killSwitch}
+                              title="이 자동매매 포지션을 지금 바로 취소합니다(매수 대기 중이면 매수 주문을, 체결됐으면 익절/손절 조건주문을 취소)"
+                              onClick={() => void doCancelAutoPosition(p)}
+                            >
+                              {autoCancelBusyKey === key ? "취소 중…" : "✕ 취소"}
+                            </button>
+                          </td>
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                 </>

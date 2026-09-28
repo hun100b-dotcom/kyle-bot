@@ -1484,7 +1484,21 @@ export class ToolEngine extends EventEmitter {
     return { message: raw, notAllowed: false };
   }
 
-  /** [v0.8.1] 회원가입. [v0.24.0] 허용목록에 있는 이메일만 가입되고, 성공하면 바로 로그인·자동 동기화까지 된다. */
+  /**
+   * [v0.8.1→v0.41.0] 회원가입. [v0.24.0] 허용목록에 있는 이메일만 가입되고, 성공하면
+   *   바로 로그인·자동 동기화까지 된다.
+   *   [v0.41.0 버그 수정 — 오너 실사용 보고: "가입 실패(HTTP 500) 에러가 발생하며
+   *   승인 대기 목록에 신규 사용자가 나타나지 않는다"] 이 HTTP 500 자체는 실제로는
+   *   버그가 아니라 허용목록 가입 게이트(마이그레이션의 `capri_auth_gate` 트리거,
+   *   `raise exception` → Supabase Auth가 이걸 일반 500으로 감싸 돌려줌)가 "아직 승인
+   *   안 된 이메일"을 정상적으로 막은 것이다(explainSignupError가 이미 이 500을
+   *   친절한 문구로 바꿔 보여주고 있었음). 진짜 문제는 그 다음 단계 — 예전엔 "승인
+   *   대기열에 올리기"(requestAccess)가 화면의 별도 버튼을 오너가 다시 눌러야만
+   *   실행됐는데, 그 버튼 존재를 모르고 넘어가면 신청 자체가 하나도 안 남아 "승인 대기
+   *   목록이 텅 빔"으로 이어졌다. 이제 가입이 허용목록 문제로 막히면 이 함수가 자동으로
+   *   승인 요청까지 접수한다 — 오너가 별도로 버튼을 누를 필요가 없다(화면의 버튼은
+   *   자동 접수가 실패했을 때 다시 시도하는 용도로만 남겨둔다).
+   */
   async authSignUp(email: string, password: string): Promise<{ ok: boolean; needsConfirm: boolean; message: string; canRequestAccess?: boolean }> {
     try {
       const res = await fetch(`${ToolEngine.SUPABASE_URL}/auth/v1/signup`, {
@@ -1496,6 +1510,14 @@ export class ToolEngine extends EventEmitter {
       if (!res.ok) {
         const raw = String(data.msg ?? data.error_description ?? data.error ?? `가입 실패(HTTP ${res.status})`);
         const explained = ToolEngine.explainSignupError(raw);
+        if (explained.notAllowed) {
+          // [v0.41.0] 오너가 별도로 버튼을 안 눌러도 승인 대기열에 자동으로 올라가게 한다.
+          const req = await this.requestAccess(email).catch((e) => ({ ok: false, message: String(e) }));
+          const suffix = req.ok
+            ? " 승인 요청을 자동으로 접수했습니다 — 운영자 승인을 기다려 주세요."
+            : ` (승인 요청 자동 접수는 실패했습니다: ${req.message} — 아래 버튼으로 직접 다시 시도하세요.)`;
+          return { ok: false, needsConfirm: false, message: explained.message + suffix, canRequestAccess: !req.ok };
+        }
         return { ok: false, needsConfirm: false, message: explained.message, canRequestAccess: explained.notAllowed };
       }
       // [v0.8.2] 서버에 자동확인이 걸려 있어 가입하면 보통 바로 세션이 온다 → 즉시 로그인 상태.
@@ -2769,6 +2791,44 @@ export class ToolEngine extends EventEmitter {
     }
     await cancelConditionalOrder(id);
     return this.addJournal({ kind: "cancel", symbol: "-", summary: `조건주문 취소 ${id}` });
+  }
+
+  /**
+   * [v0.41.0 — 오너 요청 "자동매매 주문건에 대해 취소할 수 있는 버튼 추가"] 자동매매가
+   *   지금 감시 중인 포지션 하나를 사람이 즉시 직접 취소한다. `watching`(매수 체결
+   *   대기 중)이면 매수 주문 자체를(`cancelNormalOrder`), `active`(익절/손절 등록됨)면
+   *   조건주문(OCO)을(`cancelConditional`) 취소한다 — 둘 다 킬스위치·드라이런을 이미
+   *   각자 처리하므로 여기서 다시 검사하지 않는다. 취소가 실제로 성공했을 때만 이
+   *   기기의 감시 목록에서 즉시 빼고 기록도 "사람이 직접 취소"로 남긴다(다음 5분
+   *   재확인을 기다리지 않음 — 오너가 지금 당장 빼고 싶어서 누른 버튼이므로).
+   */
+  async cancelAutoPosition(symbol: string, entry: number, enteredAtMs: number): Promise<{ ok: boolean; message: string }> {
+    const pos = this.autoTradePositions.find((p) => p.symbol === symbol && p.entry === entry && p.enteredAtMs === enteredAtMs);
+    if (!pos) return { ok: false, message: "이미 사라진 포지션입니다(새로고침해 보세요)." };
+    try {
+      if (pos.status === "active" && pos.conditionalOrderId) {
+        await this.cancelConditional(pos.conditionalOrderId);
+      } else if (pos.buyOrderId) {
+        await this.cancelNormalOrder(pos.buyOrderId);
+      } else {
+        return { ok: false, message: "취소할 주문 번호를 찾을 수 없습니다 — [현황 → 주문 현황] 탭에서 직접 확인해 주세요." };
+      }
+    } catch (e) {
+      return { ok: false, message: `취소 실패: ${String(e).replace(/^Error:\s*/, "")}` };
+    }
+    this.autoTradeActiveWatches.delete(`${symbol}@${entry}@${enteredAtMs}`);
+    this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
+    this.saveAutoPositions();
+    this.updateAutoTradeHistory(symbol, entry, enteredAtMs, {
+      status: "closed_manual",
+      exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
+      note: "오너가 [자동매매 현황]에서 직접 취소함",
+    });
+    this.addJournal({
+      kind: "cancel", symbol, summary: `🤖 자동매매 포지션 직접 취소: ${symbol}`,
+      notify: true, notifyTitle: `취소됨: ${symbol}`,
+    });
+    return { ok: true, message: `${symbol} 취소를 완료했습니다.` };
   }
 
   // --------------------------------------------------------------------------

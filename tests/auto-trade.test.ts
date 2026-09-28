@@ -839,3 +839,53 @@ describe("[v0.40.0] auto 모드 시드 스냅샷 — 이번 실행 동안 고정
     }
   });
 });
+
+// =============================================================================
+// [v0.41.0 — 오너 요청] "자동매매 주문건에 대해 취소 할 수 있는 버튼 추가"
+// =============================================================================
+describe("[v0.41.0] cancelAutoPosition — 지금 감시 중인 포지션을 사람이 즉시 직접 취소", () => {
+  type EngineInternals = {
+    autoTradePositions: AutoPosition[];
+    addAutoTradeHistory: (pos: AutoPosition) => void;
+  };
+
+  it("watching 포지션은 매수 주문 자체를 취소하고 목록·기록에서 즉시 정리한다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const engAny = eng as unknown as EngineInternals;
+      // 목 서버 AAPL 현재가(2.05)보다 낮게 걸어 즉시 체결되지 않게(watching 유지) 한다.
+      const entryJournal = await eng.placeEntry({ symbol: "AAPL", price: 1.5, quantity: 3 });
+      const buyOrderId = (entryJournal.detail as { tossOrderId: string }).tossOrderId;
+      const enteredAtMs = Date.now();
+      const pos: AutoPosition = {
+        symbol: "AAPL", entry: 1.5, tp: 1.8, sl: 1.2, quantity: 3, enteredAtMs,
+        status: "watching", conditionalOrderId: null, buyOrderId,
+      };
+      engAny.autoTradePositions.push(pos);
+      engAny.addAutoTradeHistory(pos); // 실제 흐름(autoTradeTick)처럼 기록도 함께 남겨 둔다
+
+      const res = await eng.cancelAutoPosition("AAPL", 1.5, enteredAtMs);
+      expect(res.ok).toBe(true);
+      expect(eng.getAutoTradeStatus().positions).toEqual([]); // 감시 목록에서 즉시 빠짐(5분 재확인 안 기다림)
+
+      const rec = eng.getAutoTradeHistory().find((h) => h.id === `AAPL@1.5@${enteredAtMs}`);
+      expect(rec?.status).toBe("closed_manual");
+      expect(rec?.note).toContain("직접 취소");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("이미 사라진(존재하지 않는) 포지션을 취소하려 하면 실패로 알려준다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const res = await eng.cancelAutoPosition("GHOST", 1, Date.now());
+      expect(res.ok).toBe(false);
+      expect(res.message).toContain("사라진");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

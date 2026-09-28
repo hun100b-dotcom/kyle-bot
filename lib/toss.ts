@@ -473,7 +473,24 @@ interface RequestOptions {
  *   [실제 스펙] 토스는 성공 응답을 { result: 실제데이터 } 로 감쌉니다. 그 껍질을 여기서
  *   한 번에 벗겨, 각 함수는 알맹이(result)만 받게 합니다.
  */
-async function tossFetch<T>(path: string, opts: RequestOptions = {}, isRetry = false): Promise<T> {
+/** 지정한 ms만큼 기다린다(429 재시도용 짧은 대기). */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * tossFetch — [v0.41.0 버그 수정] 예전엔 429(요청 한도 초과)를 받으면 그 즉시 예외를
+ *   던지고 끝이었다 — 스크리너처럼 짧은 시간에 여러 종목을 연달아 조회하는 경로(특히
+ *   여러 사용자가 동시에 실행해 전체 요청량이 늘어나는 상황)에서 이 예외가 자동매매
+ *   사이클을 통째로 실패시키거나(스크리너가 "다운된 것처럼" 멈춤), 잡아주는 코드가 없는
+ *   경로를 타면 처리되지 않은 예외로 앱까지 위협할 수 있었다(electron/main.ts의 전역
+ *   안전망은 별개로 이번에 추가했지만, 애초에 여기서 자연스럽게 회복하는 게 먼저다).
+ *   이제 429를 받으면 서버가 알려준 Retry-After(초)만큼(없으면 800ms) 딱 한 번만
+ *   기다렸다 재시도한다(무한 재시도 금지 — 위 401 재시도와 같은 원칙). 그래도 안 되면
+ *   그제서야 평소처럼 예외를 던져 호출부(스크리너의 종목별 try/catch 등)가 그 종목만
+ *   건너뛰고 계속 진행할 수 있게 한다.
+ */
+async function tossFetch<T>(path: string, opts: RequestOptions = {}, isRetry = false, isRateLimitRetry = false): Promise<T> {
   const cfg = getConfig();
   const token = await getAccessToken();
 
@@ -508,6 +525,15 @@ async function tossFetch<T>(path: string, opts: RequestOptions = {}, isRetry = f
   if (res.status === 401 && !isRetry) {
     clearTokenCache();
     return tossFetch<T>(path, opts, true);
+  }
+
+  // [v0.41.0] 429(요청 한도 초과) — 서버가 알려준 Retry-After(초)만큼(없으면 800ms)
+  //   기다렸다 딱 한 번만 재시도. 그래도 429면 그때는 평소처럼 예외로 넘겨 호출부가
+  //   그 종목/요청만 건너뛰고 계속 진행하게 한다(무한 재시도 금지 — 401과 같은 원칙).
+  if (res.status === 429 && !isRateLimitRetry) {
+    const retryAfterSec = Number(res.headers.get("retry-after"));
+    await sleep(Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? retryAfterSec * 1000 : 800);
+    return tossFetch<T>(path, opts, isRetry, true);
   }
 
   if (!res.ok) throw new Error(`토스 API 실패 [${opts.method ?? "GET"} ${path}]: HTTP ${res.status} ${await safeText(res)}`);

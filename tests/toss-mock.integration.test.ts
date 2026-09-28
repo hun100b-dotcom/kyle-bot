@@ -41,6 +41,7 @@ afterAll(async () => {
 beforeEach(() => {
   clearTokenCache();
   mock.setPrice("AAPL", 2.05);
+  mock.state.rateLimitRemaining = 0; // [v0.41.0] 429 재현 테스트가 다른 테스트로 새지 않게 매번 초기화
 });
 
 describe("① 토큰 발급 → 캐싱 → 재발급 + 응답 번역", () => {
@@ -176,6 +177,23 @@ describe("⑥ 거부/타임아웃 시 어댑터가 안전하게 에러 처리", 
     await expect(getPrice("SLOW")).rejects.toThrow(/타임아웃/);
     delete process.env.TOSS_TIMEOUT_MS;
   });
+
+  // [v0.41.0 — 오너 실사용 보고: "여러 사용자가 동시에 스크리너를 실행하면 다운된다"]
+  //   원인 조사 결과 tossFetch()가 429(요청 한도 초과)를 받으면 그 즉시 예외를 던지고
+  //   끝이었다 — 부하가 늘어나는 동시 실행 상황에서 이 예외가 스크리너 전체를 실패시킬
+  //   수 있었다. 이제 429는 한 번 자동으로 재시도(backoff)한 뒤 성공하면 정상 응답으로
+  //   이어져야 한다.
+  it("429(요청 한도 초과)를 한 번 받아도 자동으로 재시도해 결국 성공한다", async () => {
+    mock.state.rateLimitRemaining = 1; // 다음 인증된 요청 딱 1번만 429
+    const p = await getPrice("AAPL"); // 첫 시도 429 → 재시도 성공
+    expect(p.price).toBe(2.05);
+    expect(mock.state.rateLimitRemaining).toBe(0); // 429를 실제로 한 번 소비했는지 확인
+  }, 10_000);
+
+  it("429가 두 번 연속이면(재시도 1회 소진) 그때는 예외로 넘겨 호출부가 건너뛸 수 있게 한다", async () => {
+    mock.state.rateLimitRemaining = 2; // 재시도까지 합쳐 총 2번 모두 429
+    await expect(getPrice("AAPL")).rejects.toThrow(/429/);
+  }, 10_000);
 });
 
 describe("⑦ 주문 전 사전검증(preflightBuyCheck)", () => {

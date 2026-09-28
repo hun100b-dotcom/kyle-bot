@@ -63,6 +63,10 @@ export interface MockState {
   prices: Record<string, number>;
   conditionals: Map<string, MockConditional>; // 조건주문 저장소
   fxRate: number; // USD→KRW 환율(연습용 고정값, setFxRate로 조작 가능)
+  /** [v0.41.0] 429(요청 한도 초과) 재현용 — 이 값이 0보다 크면 인증된 요청 하나마다
+   *  1씩 깎으면서 429를 돌려주고, 0이 되면 평소대로 응답한다. 재시도(backoff) 로직
+   *  테스트에서 `state.rateLimitRemaining = 1`처럼 직접 설정해 쓴다. */
+  rateLimitRemaining: number;
 }
 
 const INITIAL_PRICES: Record<string, number> = { AAPL: 2.05, PARTIAL: 2.05, REJECT: 2.05, SLOW: 2.05 };
@@ -150,6 +154,7 @@ export function createMockTossServer() {
     prices: { ...INITIAL_PRICES },
     conditionals: new Map(),
     fxRate: 1390.5, // 연습용 기본 환율: 1 USD = 1,390.5 KRW
+    rateLimitRemaining: 0,
   };
 
   const server = http.createServer(async (req, res) => {
@@ -171,6 +176,13 @@ export function createMockTossServer() {
     const auth = req.headers["authorization"];
     if (!auth || !auth.startsWith("Bearer ")) {
       return sendJson(res, 401, { error: "unauthorized" });
+    }
+
+    // [v0.41.0] 429(요청 한도 초과) 재현 — rateLimitRemaining이 남아있으면 그만큼 이 응답부터 429.
+    if (state.rateLimitRemaining > 0) {
+      state.rateLimitRemaining -= 1;
+      res.setHeader("Retry-After", "0"); // 테스트가 빠르게 끝나도록 0초로(실서버는 실제 값을 줌)
+      return sendJson(res, 429, { error: "rate_limit_exceeded" });
     }
 
     // ---------- 2) 시세 ----------

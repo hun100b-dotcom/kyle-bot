@@ -199,6 +199,7 @@ export function installKyleTool(): ToolEngine {
     conditionals: () => e.conditionals(),
     cancelOrder: (id: string) => e.cancelNormalOrder(id),
     cancelConditional: (id: string) => e.cancelConditional(id),
+    cancelAutoPosition: (symbol: string, entry: number, enteredAtMs: number) => e.cancelAutoPosition(symbol, entry, enteredAtMs),
 
     // ── 현황(보유·주문·포지션·근거) ────────────────────────────
     positions: () => e.positions(),
