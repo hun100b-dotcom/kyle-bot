@@ -890,6 +890,17 @@ function App() {
   //   것처럼 보이게 한다. 지금까지 이 오류(autoUpdater "error" 이벤트)가 화면에 전혀
   //   연결돼 있지 않아 원인을 알 수 없었다 — 이제 여기 보여준다.
   const [updateErr, setUpdateErr] = useState<string | null>(null);
+  // [v0.46.0] "재시작하고 적용"을 눌러도 반응이 없다는 오너 보고 재조사 — quitAndInstall이
+  //   메인 프로세스에서 예외 없이 "접수됨"만 돌려주고(setImmediate로 실제 설치는 뒤에서
+  //   진행), macOS 애드혹 서명(인증서 없이 서명 흉내만 낸 상태 — electron-builder.yml의
+  //   identity: "-")에서는 Squirrel.Mac(맥 자동 업데이트 적용 엔진)이 옛 버전과 새 버전의
+  //   서명이 안 맞으면 조용히 아무 것도 안 하고 끝나는 경우가 있다. 이때 JS 쪽엔 어떤
+  //   오류 이벤트도 안 온다 — "버튼이 안 눌리는 것처럼 보인다"는 보고의 진짜 정체.
+  //   실제로 설치가 성공하면 앱 프로세스 자체가 꺼지므로, 반대로 "몇 초가 지나도 앱이
+  //   여전히 켜져 있다"는 사실 자체가 "조용히 실패했다"는 확실한 증거가 된다 — 이 신호를
+  //   화면 타이머로 직접 감지해 안내한다.
+  const [updateInstalling, setUpdateInstalling] = useState(false);
+  const [updateInstallStuck, setUpdateInstallStuck] = useState(false);
 
   useEffect(() => {
     refreshStatus();
@@ -1137,6 +1148,37 @@ function App() {
       const detail = r.error ? `\n\n(자세히: ${r.error})` : "";
       alert(`업데이트 다운로드에 실패했습니다. 인터넷 연결을 확인하고 나중에 다시 시도하세요. (앱은 계속 사용 가능합니다)${detail}`);
     }
+  }
+
+  /** [v0.46.0] "재시작하고 적용" 버튼 — macOS 애드혹 서명 환경에서 조용히 실패하는 경우를
+   *  감지하기 위한 타이머(watchdog)를 같이 건다. 실제로 설치·재시작이 성공하면 이 함수의
+   *  나머지 코드가 실행될 새도 없이 앱 프로세스가 꺼지므로, 8초가 지나도 여전히 이 타이머
+   *  콜백이 실행된다는 것 자체가 "조용한 실패"의 증거다(정상이면 그 전에 이미 꺼져 있어야
+   *  한다). Windows는 이 문제가 없지만(서명 없이도 NSIS 원클릭 재설치가 항상 됨) 굳이
+   *  분기하지 않는다 — 정상 재시작되는 플랫폼에선 8초 안에 이미 앱이 꺼져 있어 콜백 자체가
+   *  실행되지 않으므로 아무 영향이 없다.
+   */
+  async function startInstallUpdate() {
+    setUpdateInstalling(true);
+    setUpdateInstallStuck(false);
+    const watchdog = setTimeout(() => {
+      setUpdateInstalling(false);
+      setUpdateInstallStuck(true);
+    }, 8000);
+    const r = await window.kyletool.installUpdate();
+    if (!r.ok) {
+      clearTimeout(watchdog);
+      setUpdateInstalling(false);
+      // [v0.32.2] 예전엔 실패해도 화면에 아무 신호가 없어 "버튼이 안 눌린다"처럼
+      // 보였다 — 다운로드 실패 처리(startDownloadUpdate)와 같은 방식으로 맞춘다.
+      const detail = r.error ? `\n\n(자세히: ${r.error})` : "";
+      alert(
+        `재시작·적용에 실패했습니다. 앱은 계속 사용 가능합니다 — ` +
+          `[주문현황] 등 기존 기능엔 영향 없습니다. 한 번 더 눌러보거나, 그래도 안 되면 ` +
+          `설치 파일을 새로 받아 직접 설치해 주세요: https://github.com/hun100b-dotcom/kyle-bot-releases/releases${detail}`,
+      );
+    }
+    // r.ok===true 인 경우: 위 watchdog이 판단을 대신한다(정상 성공이면 곧 앱이 꺼진다).
   }
 
   async function refreshStatus() {
@@ -4991,25 +5033,23 @@ ${msg}
               </p>
             )}
 
+            {updateInstallStuck && (
+              <p className="hint small danger">
+                ⚠️ "재시작하고 적용"이 정상적으로 이어지지 않았습니다 — macOS에서는 이 앱이
+                (유료 애플 개발자 인증서가 아닌) 간이 서명 상태라, 자동 재설치 엔진이 옛 버전과
+                새 버전의 서명이 안 맞으면 오류 표시 없이 그냥 멈추는 경우가 있습니다(앱 자체엔
+                문제 없음 — [주문현황] 등 기존 기능은 정상 동작합니다). 지금은{" "}
+                <a href="https://github.com/hun100b-dotcom/kyle-bot-releases/releases" target="_blank" rel="noreferrer">
+                  릴리스 페이지
+                </a>
+                에서 새 dmg 파일을 받아 직접 설치해 주세요(기존 설정·매매 기록은 그대로 남습니다).
+              </p>
+            )}
+
             <div className="form-row">
               {updateReady ? (
-                <button
-                  className="btn btn-start"
-                  onClick={async () => {
-                    // [v0.32.2] 예전엔 실패해도 화면에 아무 신호가 없어 "버튼이 안 눌린다"처럼
-                    // 보였다 — 다운로드 실패 처리(startDownloadUpdate)와 같은 방식으로 맞춘다.
-                    const r = await window.kyletool.installUpdate();
-                    if (!r.ok) {
-                      const detail = r.error ? `\n\n(자세히: ${r.error})` : "";
-                      alert(
-                        `재시작·적용에 실패했습니다. 앱은 계속 사용 가능합니다 — ` +
-                          `[주문현황] 등 기존 기능엔 영향 없습니다. 한 번 더 눌러보거나, 그래도 안 되면 ` +
-                          `설치 파일을 새로 받아 직접 설치해 주세요: https://github.com/hun100b-dotcom/kyle-bot-releases/releases${detail}`,
-                      );
-                    }
-                  }}
-                >
-                  ↻ 재시작하고 적용
+                <button className="btn btn-start" onClick={startInstallUpdate} disabled={updateInstalling}>
+                  {updateInstalling ? "적용 확인 중…" : "↻ 재시작하고 적용"}
                 </button>
               ) : updateProgress != null ? (
                 <button className="btn" disabled>
