@@ -117,6 +117,9 @@ interface ToolSettings {
   autoTradeMaxPositions: number;
   autoTradeMaxLossPct: number;
   autoTradeMaxInvestPct: number;
+  /** [v0.42.0] 장기간 미체결 자동취소 기준(분) — 전부터 있던 값이지만 하드코딩이라 화면에 안 보이고
+   *  조절도 안 됐던 것을 오너 요청으로 노출/조절 가능하게 했다. */
+  autoTradeWatchMinutes: number;
   autoTradeEnabled: boolean;
   // [v0.28.0] 자동매매용 스크리너 조건(4개, 전부 수정 가능 — 메뉴얼 스크리너와 같은 항목)
   autoScanCount: number;
@@ -154,6 +157,8 @@ interface AutoTradeStatus {
   maxPositions: number;
   maxLossPct: number;
   maxInvestPct: number;
+  /** [v0.42.0] 장기간 미체결 자동취소 기준(분). */
+  watchMinutes: number;
   lastCycleAt: string | null;
   /** [v0.27.0] 이번 사이클에서 스캔한 결과("스크리닝 결과" 탭이 그대로 보여줌). 아직 안 돌았으면 null. */
   lastScan: ScreenRun | null;
@@ -642,7 +647,7 @@ interface KyletoolBridge {
   autoTradeStart(): Promise<AutoTradeStatus>;
   autoTradeStop(): Promise<AutoTradeStatus>;
   autoTradeStatus(): Promise<AutoTradeStatus>;
-  saveAutoTradeSettings(input: { maxPositions?: number; maxLossPct?: number; maxInvestPct?: number }): Promise<ToolSettings>;
+  saveAutoTradeSettings(input: { maxPositions?: number; maxLossPct?: number; maxInvestPct?: number; watchMinutes?: number }): Promise<ToolSettings>;
   // [v0.28.0] 자동매매용 스크리너 조건 저장 + 수동 새로고침(5분 기다리지 않고 지금 훑기)
   // [v0.33.0] "스크리닝 기준" 탭에서 8개 조건(켜짐/꺼짐 + 수치)이 추가됨 — 전부 선택 항목(안 보내면 이전값 유지)
   saveAutoScanSettings(input: {

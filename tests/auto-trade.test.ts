@@ -168,19 +168,41 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
       const eng = new ToolEngine(dir, { forceMock: true });
-      const saved = eng.saveAutoTradeSettings({ maxPositions: 5, maxLossPct: 8, maxInvestPct: 50 });
+      const saved = eng.saveAutoTradeSettings({ maxPositions: 5, maxLossPct: 8, maxInvestPct: 50, watchMinutes: 20 });
       expect(saved.autoTradeMaxPositions).toBe(5);
       expect(saved.autoTradeMaxLossPct).toBe(8);
       expect(saved.autoTradeMaxInvestPct).toBe(50);
+      expect(saved.autoTradeWatchMinutes).toBe(20);
 
       const eng2 = new ToolEngine(dir, { forceMock: true });
       const s2 = eng2.getSettings();
       expect(s2.autoTradeMaxPositions).toBe(5);
       expect(s2.autoTradeMaxLossPct).toBe(8);
       expect(s2.autoTradeMaxInvestPct).toBe(50);
+      expect(s2.autoTradeWatchMinutes).toBe(20);
       // [안전 원칙] "켜짐" 자체는 절대 저장되지 않는다 — 재시작하면 항상 꺼진 채 시작.
       expect(s2.autoTradeEnabled).toBe(false);
       expect(eng2.getAutoTradeStatus().enabled).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("[v0.42.0] 미체결 자동취소 기준(분) — 저장 시 1~60분으로 보정된다", () => {
+    // ⚠️ process.env는 테스트 프로세스 전체가 공유하므로(persistEnv가 process.env[k]=v로 복원),
+    //   "새 엔진의 공장값이 10분"이라고 단정하지 않는다(다른 테스트가 먼저 저장한 값이 새어 들어올
+    //   수 있음 — 위 "재시작해도 유지된다" 테스트와 같은 이유). 대신 이 테스트 안에서 알려진 값을
+    //   먼저 저장해 기준선을 만든 뒤 클램프 동작만 검증한다.
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      expect(eng.saveAutoTradeSettings({ watchMinutes: 15 }).autoTradeWatchMinutes).toBe(15);
+      expect(eng.getAutoTradeStatus().watchMinutes).toBe(15);
+
+      // 범위 밖 값은 1~60분으로 보정(0이나 음수는 무시해 이전값 유지, 너무 큰 값은 60분으로 클램프).
+      expect(eng.saveAutoTradeSettings({ watchMinutes: 100 }).autoTradeWatchMinutes).toBe(60);
+      expect(eng.saveAutoTradeSettings({ watchMinutes: 0 }).autoTradeWatchMinutes).toBe(60); // 무시 → 이전값 유지
+      expect(eng.saveAutoTradeSettings({ watchMinutes: 25 }).autoTradeWatchMinutes).toBe(25);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

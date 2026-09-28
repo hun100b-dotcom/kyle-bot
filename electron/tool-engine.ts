@@ -760,6 +760,9 @@ export interface AutoTradeStatus {
   maxPositions: number;
   maxLossPct: number;
   maxInvestPct: number;
+  /** [v0.42.0] 장기간 미체결 자동취소 기준(분) — 오너 요청("이 기준이 뭔지, 조절도 하고 싶다")으로
+   *  하드코딩값을 화면에서 직접 보고 바꿀 수 있게 노출한다. */
+  watchMinutes: number;
   lastCycleAt: string | null;
   /** [v0.27.0] 이번 사이클에서 스캔한 결과(스크리닝 결과 탭이 그대로 보여줌) — 아직 한 번도 안 돌았으면 null. */
   lastScan: ScreenRun | null;
@@ -936,11 +939,14 @@ export class ToolEngine extends EventEmitter {
    *  종목을 기억해 둔다(재시작하면 초기화돼도 무해 — 다시 확정되면 또 한 번 알려도 문제 없음). */
   private autoScanNotifiedConfirmed = new Set<string>();
   private static readonly AUTO_TRADE_INTERVAL_MS = 5 * 60_000; // "기본적으로 5분마다"(오너 지시)
-  /** [v0.29.0] 자동매매 진입 주문의 체결 감시 최대 시간 — 오너 요청(2026-09-25) "장시간 미체결 대책":
-   *  수동 버튼(기본 15분, 사람이 지켜보며 직접 판단)보다 짧게 잡아, 5분 사이클 기준 최대 2회 안에
-   *  포기 여부가 결정되게 한다. 시간초과 시 watchAndBracket이 자동으로 취소하고(cancelOnTimeout),
-   *  빈 자리는 다음 사이클 스크리닝이 새 후보로 채운다. */
-  private static readonly AUTO_TRADE_WATCH_MINUTES = 10;
+  /** [v0.29.0→v0.42.0] 자동매매 진입 주문의 체결 감시 최대 시간 — 오너 요청(2026-09-25) "장시간
+   *  미체결 대책": 수동 버튼(기본 15분, 사람이 지켜보며 직접 판단)보다 짧게 잡아, 5분 사이클 기준
+   *  최대 2회 안에 포기 여부가 결정되게 한다. 시간초과 시 watchAndBracket이 자동으로 취소하고
+   *  (cancelOnTimeout), 빈 자리는 다음 사이클 스크리닝이 새 후보로 채운다.
+   *  [v0.42.0] 오너 요청("장기간 미체결 자동 취소 기준 조절") — 하드코딩(고정 10분)이라 오너가
+   *  화면에서 실제 기준값조차 볼 수 없던 문제를 고쳤다. 이제 [🤖 자동매매 → 자동매매 현황]에서
+   *  직접 조회/수정 가능한 값으로 바뀌었다(기본값은 기존과 동일한 10분 — 동작 변화 없음, 가시성만 추가).*/
+  private autoTradeWatchMinutes = 10;
   /** [v0.29.0] 사이클 시작 시각(ms) — 자동 스크리너 탭의 "다음 스캔까지" 카운트다운 계산용. */
   private autoTradeLastCycleAtMs: number | null = null;
 
@@ -1059,6 +1065,9 @@ export class ToolEngine extends EventEmitter {
     if (Number.isFinite(alp) && alp > 0) this.autoTradeMaxLossPct = alp;
     const aip = Number(process.env.AUTO_MAX_INVEST_PCT);
     if (Number.isFinite(aip) && aip > 0) this.autoTradeMaxInvestPct = aip;
+    // [v0.42.0] 저장된 미체결 자동취소 기준(분) 복원.
+    const awm = Number(process.env.AUTO_WATCH_MINUTES);
+    if (Number.isFinite(awm) && awm > 0) this.autoTradeWatchMinutes = Math.round(awm);
     // [v0.28.0] 저장된 자동매매 스크리너 조건 복원(4개 전부 오너가 수정 가능).
     const asc = Number(process.env.AUTO_SCAN_COUNT);
     if (Number.isFinite(asc) && asc > 0) this.autoScanCount = Math.round(asc);
@@ -1114,6 +1123,7 @@ export class ToolEngine extends EventEmitter {
       autoTradeMaxPositions: this.autoTradeMaxPositions,
       autoTradeMaxLossPct: this.autoTradeMaxLossPct,
       autoTradeMaxInvestPct: this.autoTradeMaxInvestPct,
+      autoTradeWatchMinutes: this.autoTradeWatchMinutes, // [v0.42.0] 장기간 미체결 자동취소 기준(분)
       autoTradeEnabled: this.autoTradeEnabled,
       // [v0.28.0] 자동매매 스크리너 조건(4개)
       autoScanCount: this.autoScanCount,
@@ -1148,7 +1158,12 @@ export class ToolEngine extends EventEmitter {
    * [v0.26.0] 자동매매 한도 3개(최대 종목 수·최대손실 한도·최대 투입 비율) 저장.
    *   0 이하·비정상 값은 무시(이전값 유지). "켜짐" 여부는 여기서 다루지 않는다(startAutoTrade 참고).
    */
-  saveAutoTradeSettings(input: { maxPositions?: number; maxLossPct?: number; maxInvestPct?: number }) {
+  saveAutoTradeSettings(input: {
+    maxPositions?: number;
+    maxLossPct?: number;
+    maxInvestPct?: number;
+    watchMinutes?: number; // [v0.42.0] 장기간 미체결 자동취소 기준(분) — 여기서 함께 저장
+  }) {
     if (typeof input.maxPositions === "number" && Number.isFinite(input.maxPositions) && input.maxPositions > 0) {
       this.autoTradeMaxPositions = Math.round(input.maxPositions);
     }
@@ -1158,11 +1173,18 @@ export class ToolEngine extends EventEmitter {
     if (typeof input.maxInvestPct === "number" && Number.isFinite(input.maxInvestPct) && input.maxInvestPct > 0) {
       this.autoTradeMaxInvestPct = input.maxInvestPct;
     }
+    if (typeof input.watchMinutes === "number" && Number.isFinite(input.watchMinutes) && input.watchMinutes > 0) {
+      // 1~60분으로 보정(0이나 음수, 비정상적으로 큰 값 방지 — 5분 사이클 감안 시 60분 넘으면 사실상
+      // "자동 취소 안 함"과 다를 바 없어 의미가 퇴색된다).
+      this.autoTradeWatchMinutes = Math.round(Math.min(60, Math.max(1, input.watchMinutes)));
+    }
     this.persistEnv();
     this.addJournal({
       kind: "info",
       symbol: "-",
-      summary: `자동매매 한도 저장 — 최대 ${this.autoTradeMaxPositions}종목 · 최대손실 시드대비 ${this.autoTradeMaxLossPct}% · 총 투입한도 시드대비 ${this.autoTradeMaxInvestPct}%`,
+      summary:
+        `자동매매 한도 저장 — 최대 ${this.autoTradeMaxPositions}종목 · 최대손실 시드대비 ${this.autoTradeMaxLossPct}% · ` +
+        `총 투입한도 시드대비 ${this.autoTradeMaxInvestPct}% · 미체결 자동취소 ${this.autoTradeWatchMinutes}분`,
     });
     return this.getSettings();
   }
@@ -1325,6 +1347,7 @@ export class ToolEngine extends EventEmitter {
       `AUTO_MAX_POSITIONS=${this.autoTradeMaxPositions}`,
       `AUTO_MAX_LOSS_PCT=${this.autoTradeMaxLossPct}`,
       `AUTO_MAX_INVEST_PCT=${this.autoTradeMaxInvestPct}`,
+      `AUTO_WATCH_MINUTES=${this.autoTradeWatchMinutes}`, // [v0.42.0] 장기간 미체결 자동취소 기준(분)
       // --- [v0.28.0] 자동매매 스크리너 조건(4개) ---
       `AUTO_SCAN_COUNT=${this.autoScanCount}`,
       `AUTO_SCAN_PRICE_MIN=${this.autoScanPriceMin}`,
@@ -4341,6 +4364,7 @@ export class ToolEngine extends EventEmitter {
       summary:
         `🤖 자동매매 시작 — 최대 ${this.autoTradeMaxPositions}종목 · 최대손실 한도 시드대비 ${this.autoTradeMaxLossPct}% · ` +
         `종목당 투입 시드대비 ${this.autoTradeMaxInvestPct}%(최대 동시 투입 합계 최대 ${(this.autoTradeMaxInvestPct * this.autoTradeMaxPositions).toFixed(0)}%) · ` +
+        `미체결 자동취소 ${this.autoTradeWatchMinutes}분 · ` +
         `5분마다 탐색(삼분할 1분할 타점만, 이 프로그램이 켜져 있는 동안만 작동)` +
         (carried > 0 ? ` · ⏪ 이전에 감시하던 ${carried}종목을 그대로 이어받아 감시합니다(재시작·업데이트에도 유지됨)` : ""),
     });
@@ -4376,6 +4400,7 @@ export class ToolEngine extends EventEmitter {
       maxPositions: this.autoTradeMaxPositions,
       maxLossPct: this.autoTradeMaxLossPct,
       maxInvestPct: this.autoTradeMaxInvestPct,
+      watchMinutes: this.autoTradeWatchMinutes, // [v0.42.0] 장기간 미체결 자동취소 기준(분)
       lastCycleAt: this.autoTradeLastCycleAt,
       lastScan: this.autoTradeLastScan,
       nextCycleAtMs:
@@ -4840,7 +4865,8 @@ export class ToolEngine extends EventEmitter {
             expireDate: this.autoTradeExpireDate(),
             // [v0.29.0 — 오너 요청 "장시간 미체결 대책"] 자동매매만 짧은 감시시간+자동취소를 쓴다
             //  (수동 버튼은 기존 그대로 15분+취소안함 — 위 BracketSpec.cancelOnTimeout 주석 참고).
-            watchMinutes: ToolEngine.AUTO_TRADE_WATCH_MINUTES,
+            //  [v0.42.0] 하드코딩 상수 대신 오너가 설정 가능한 인스턴스 필드를 쓴다.
+            watchMinutes: this.autoTradeWatchMinutes,
             cancelOnTimeout: true,
             rationale: {
               technique: "split3",

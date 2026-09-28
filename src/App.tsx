@@ -730,10 +730,11 @@ function App() {
     fixed: "",
   });
   // [v0.26.0] 자동매매 한도 입력칸(설정 탭) + 현재 현황(켜짐 여부·포지션·누적손익).
-  const [autoForm, setAutoForm] = useState<{ maxPositions: string; maxLossPct: string; maxInvestPct: string }>({
+  const [autoForm, setAutoForm] = useState<{ maxPositions: string; maxLossPct: string; maxInvestPct: string; watchMinutes: string }>({
     maxPositions: "3",
     maxLossPct: "5",
     maxInvestPct: "30",
+    watchMinutes: "10", // [v0.42.0] 장기간 미체결 자동취소 기준(분) — 기존 하드코딩값과 동일한 기본값
   });
   const [autoStatus, setAutoStatus] = useState<AutoTradeStatus | null>(null);
   const [autoBusy, setAutoBusy] = useState(false);
@@ -882,6 +883,7 @@ function App() {
         maxPositions: String(s.autoTradeMaxPositions ?? 3),
         maxLossPct: String(s.autoTradeMaxLossPct ?? 5),
         maxInvestPct: String(s.autoTradeMaxInvestPct ?? 30),
+        watchMinutes: String(s.autoTradeWatchMinutes ?? 10),
       });
       // [v0.28.0] 저장된 자동매매 스크리너 조건을 입력칸 초기값으로.
       setAutoScanForm({
@@ -1985,19 +1987,28 @@ ${msg}
     setTimeout(() => setSavedMsg(""), 4000);
   }
 
-  /** [v0.26.0] 자동매매 한도 3개(최대 종목 수·최대손실 한도·최대 투입 비율) 저장. */
+  /** [v0.26.0→v0.42.0] 자동매매 한도 4개(최대 종목 수·최대손실 한도·최대 투입 비율·미체결 자동취소 기준) 저장. */
   async function saveAutoSettings() {
     const maxPositions = toNum(autoForm.maxPositions);
     const maxLossPct = toNum(autoForm.maxLossPct);
     const maxInvestPct = toNum(autoForm.maxInvestPct);
-    if (maxPositions === null || maxPositions <= 0 || maxLossPct === null || maxLossPct <= 0 || maxInvestPct === null || maxInvestPct <= 0) {
-      setSavedMsg("⚠️ 자동매매 한도 3개 모두 0보다 큰 숫자로 입력하세요.");
+    const watchMinutes = toNum(autoForm.watchMinutes);
+    if (
+      maxPositions === null || maxPositions <= 0 ||
+      maxLossPct === null || maxLossPct <= 0 ||
+      maxInvestPct === null || maxInvestPct <= 0 ||
+      watchMinutes === null || watchMinutes <= 0
+    ) {
+      setSavedMsg("⚠️ 자동매매 한도 4개 모두 0보다 큰 숫자로 입력하세요.");
       setTimeout(() => setSavedMsg(""), 4000);
       return;
     }
-    const s = await window.kyletool.saveAutoTradeSettings({ maxPositions, maxLossPct, maxInvestPct });
+    const s = await window.kyletool.saveAutoTradeSettings({ maxPositions, maxLossPct, maxInvestPct, watchMinutes });
     setSettings(s);
-    setSavedMsg(`자동매매 한도 저장됨 — 최대 ${s.autoTradeMaxPositions}종목 · 손실한도 ${s.autoTradeMaxLossPct}% · 투입한도 ${s.autoTradeMaxInvestPct}%`);
+    setSavedMsg(
+      `자동매매 한도 저장됨 — 최대 ${s.autoTradeMaxPositions}종목 · 손실한도 ${s.autoTradeMaxLossPct}% · ` +
+      `투입한도 ${s.autoTradeMaxInvestPct}% · 미체결 자동취소 ${s.autoTradeWatchMinutes}분`,
+    );
     setTimeout(() => setSavedMsg(""), 4000);
   }
 
@@ -3288,6 +3299,9 @@ ${msg}
                 <label>최대 투입 비율 (시드 대비 %, 종목 1개당 배정 비율)
                   <input type="text" inputMode="decimal" value={autoForm.maxInvestPct} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxInvestPct: e.target.value })} placeholder="30" />
                 </label>
+                <label>장기간 미체결 자동취소 기준 (분)
+                  <input type="text" inputMode="numeric" value={autoForm.watchMinutes} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, watchMinutes: e.target.value })} placeholder="10" />
+                </label>
                 <button className="btn btn-start" onClick={saveAutoSettings}>한도 저장</button>
                 {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
               </div>
@@ -3295,6 +3309,14 @@ ${msg}
                 예) 최대 투입 30% → 종목 1개당 예산은 시드의 30%(종목 수로 나누지 않습니다 — 3종목이면 최대
                 동시 투입 합계는 시드의 최대 90%까지 커질 수 있습니다). 손실 한도는 이번 자동매매 실행 동안
                 누적된 실현손익(달러) 기준으로, 시드 대비 %를 넘으면 자동매매가 스스로 멈춥니다.
+              </p>
+              <p className="hint small">
+                ⏱ <b>장기간 미체결 자동취소 기준</b>이란: 자동매매가 진입 주문(매수)을 넣었는데 이 시간
+                (기본 10분, 1~60분 사이로 조절 가능)이 지나도 체결이 안 되면, 아직 안 산 부분만
+                자동으로 취소하고 그 자리를 다음 5분 사이클의 새 후보에게 넘겨줍니다(이미 일부라도
+                체결됐다면 그 수량은 보호를 위해 익절/손절을 그대로 걸어 둡니다). 너무 짧게 잡으면
+                조금만 기다리면 체결될 주문도 성급하게 취소될 수 있고, 너무 길게 잡으면(60분 근처)
+                자리가 오래 묶여 다른 후보가 기회를 못 잡을 수 있습니다.
               </p>
               <p className="hint small">
                 🔒 여러 기기에서 동시에 자동매매를 켜도(예: PC와 폰 양쪽에서 자동매매 시작, 또는
