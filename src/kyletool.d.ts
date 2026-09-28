@@ -161,6 +161,9 @@ interface AutoTradeStatus {
   nextCycleAtMs: number | null;
   /** [v0.35.0] "확정인데 왜 안 사졌지?"에 답하는 사유 — 종목코드 → 한 줄 설명. 매 사이클 새로 채워짐. */
   skipReasons: Record<string, string>;
+  /** [v0.40.0] auto 모드에서 "이번 실행" 동안 고정해 쓰는 시드 스냅샷(달러). fixed 모드거나
+   *  아직 계산 전이면 null. */
+  seedUsdSnapshot: number | null;
 }
 
 /** [v0.30.0] 자동매매기록 한 줄 — "자동매매기록" 탭이 그대로 보여준다. */

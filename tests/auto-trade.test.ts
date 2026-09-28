@@ -61,6 +61,8 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
       expect(s.lastScan).toBeNull();
       // [v0.35.0] "왜 미진입인지" 사유 맵 — 아직 한 사이클도 안 돌았으면 빈 객체.
       expect(s.skipReasons).toEqual({});
+      // [v0.40.0] 시드 스냅샷 — 아직 계산 전이면 null.
+      expect(s.seedUsdSnapshot).toBeNull();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -745,5 +747,95 @@ describe("[v0.33.0] applyScreenGates — 토글이 실제 최종 판정에 반�
 
   it("다음 봉 확인을 꺼도 하드 게이트(가격대 등)가 막혀 있으면 여전히 none이다", () => {
     expect(applyScreenGates("watch", { priceInBand: false, emaGateOk: true, cloudGateOk: true, nextCandleConfirmEnabled: false })).toBe("none");
+  });
+});
+
+// =============================================================================
+// [v0.40.0 버그 수정] "투입 시드 비율에 맞지않게 적게 투입되고있음"(오너 실사용 보고)
+// -----------------------------------------------------------------------------
+//   auto 모드(seedBasis="auto")는 예전엔 5분 사이클마다 매번 "지금 이 순간의 매수가능금액"을
+//   새로 조회했다. 자동매매 자신이 이미 진입해서 현금을 써버리면, 다음 사이클의 "종목당 시드
+//   대비 N%" 계산은 이미 줄어든 잔여 현금을 기준으로 다시 N%를 매기게 돼, 슬롯을 거듭할수록
+//   실제 투입액이 오너가 설정한 비율보다 작아졌다(예: 30%×3종목=최대 90% 의도였는데 실제로는
+//   65~70%선). 이제 auto 모드는 "이번 자동매매 실행" 동안 딱 한 번만 조회하고 그 값을 스냅샷으로
+//   고정해 재사용한다(electron/tool-engine.ts의 resolveSeedUsd/autoTradeSeedSnapshotUsd 참고).
+//   목 서버(mocks/toss-mock.ts)는 매수가능금액을 항상 고정값($10000)으로 응답하므로 "매 호출마다
+//   진짜로 달라지는지"는 흉내낼 수 없다 — 대신 스냅샷을 직접 다른 값으로 덮어써 두고
+//   resolveSeedUsd가 "다시 조회"하는 대신 그 값을 그대로 돌려주는지로 캐시 동작 자체를 검증한다.
+// =============================================================================
+describe("[v0.40.0] auto 모드 시드 스냅샷 — 이번 실행 동안 고정, 매 사이클 다시 줄어들지 않는다", () => {
+  type EngineInternals = {
+    autoTradeSeedSnapshotUsd: number | null;
+    resolveSeedUsd: () => Promise<number | null>;
+    prepareBackend: () => Promise<void>;
+  };
+
+  it("처음 호출하면 실계좌 매수가능금액을 조회해 스냅샷으로 저장한다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const engAny = eng as unknown as EngineInternals;
+      await engAny.prepareBackend();
+      expect(engAny.autoTradeSeedSnapshotUsd).toBeNull(); // 아직 한 번도 조회 안 함
+      const seed = await engAny.resolveSeedUsd();
+      expect(seed).toBe(10000); // 목 서버 고정 매수가능금액
+      expect(engAny.autoTradeSeedSnapshotUsd).toBe(10000); // 스냅샷에 저장됨
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("두 번째 호출부터는 실계좌를 다시 조회하지 않고 스냅샷 값을 그대로 돌려준다(핵심 — 버그 재발 방지)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const engAny = eng as unknown as EngineInternals;
+      await engAny.prepareBackend();
+      await engAny.resolveSeedUsd(); // 첫 호출 — 스냅샷 $10000으로 채워짐
+
+      // 실제로는 자동매매가 이 사이에 진입을 해서 잔액이 줄었다고 가정 — 스냅샷을 직접
+      // 다른 값으로 바꿔 둔다(목 서버는 항상 $10000만 응답하므로, 이 수동 조작이 "진짜로
+      // 다시 조회했는지 vs 캐시를 썼는지"를 구분하는 유일한 방법이다).
+      engAny.autoTradeSeedSnapshotUsd = 4321;
+      const seed2 = await engAny.resolveSeedUsd();
+      // 다시 조회했다면 목 서버 고정값($10000)이 나왔을 것 — 캐시를 썼다면 방금 넣어둔 4321이 나와야 한다.
+      expect(seed2).toBe(4321);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("startAutoTrade()는 스냅샷을 초기화해 '이번 실행'에 새로 조회하게 한다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const engAny = eng as unknown as EngineInternals;
+      await engAny.prepareBackend();
+      await engAny.resolveSeedUsd();
+      expect(engAny.autoTradeSeedSnapshotUsd).toBe(10000);
+
+      eng.startAutoTrade(); // 상태 전환 자체만 확인(백그라운드 스캔은 fire-and-forget, 기존 패턴과 동일)
+      expect(engAny.autoTradeSeedSnapshotUsd).toBeNull(); // 새 실행을 위해 초기화됐어야 함
+      eng.stopAutoTrade();
+      await new Promise((r) => setTimeout(r, 50)); // 백그라운드 스캔 잔여분 안전하게 흘려보냄
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it("getAutoTradeStatus().seedUsdSnapshot는 auto 모드에서 스냅샷 값을, fixed 모드에서 고정값을 그대로 보여준다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const engAny = eng as unknown as EngineInternals;
+      await engAny.prepareBackend();
+      await engAny.resolveSeedUsd();
+      expect(eng.getAutoTradeStatus().seedUsdSnapshot).toBe(10000);
+
+      eng.saveSeedSettings({ seedBasis: "fixed", seedFixedUsd: 777 });
+      expect(eng.getAutoTradeStatus().seedUsdSnapshot).toBe(777); // fixed 모드는 스냅샷과 무관하게 고정값 그대로
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

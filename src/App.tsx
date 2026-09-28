@@ -2261,36 +2261,6 @@ ${msg}
           )}
         </div>
 
-        {/* [v0.30.0] 오너 요청 — "어떤 탭에서든" 자동매매 보유종목의 수익률·금액·현황을 로테이션으로.
-            상단바는 paneTab과 무관하게(탭 콘텐츠 밖에서) 항상 렌더되므로 여기 두면 저절로 고정된다. */}
-        {autoStatus?.enabled && autoStatus.positions.length > 0 && (() => {
-          const positions = autoStatus.positions;
-          const idx = tickerIdx % positions.length;
-          const p = positions[idx];
-          const hRow = autoPosHold.find((h) => h.symbol === p.symbol);
-          const statusLabel = p.status === "active" ? "익절/손절 등록됨" : "매수 체결 대기중";
-          return (
-            <div className="topbar-ticker" title="자동매매로 보유 중인 종목을 돌아가며 보여줍니다(수익률·평가손익·상태)">
-              <span className="tk-bot">🤖</span>
-              <span className="tk-sym" key={p.symbol}>{p.symbol}</span>
-              {hRow?.pnlRate != null ? (
-                <span className={`tk-pnl ${pnlClass(hRow.pnlRate)}`}>
-                  {hRow.pnlRate >= 0 ? "+" : ""}{hRow.pnlRate.toFixed(2)}%
-                  {hRow.pnlAmt != null && <span className="tk-amt"> ({hRow.pnlAmt >= 0 ? "+" : ""}${hRow.pnlAmt.toFixed(2)})</span>}
-                </span>
-              ) : (
-                <span className="tk-pnl hint">—</span>
-              )}
-              <span className="tk-status">{statusLabel}</span>
-              {positions.length > 1 && (
-                <span className="tk-dots">
-                  {positions.map((_, i) => <i key={i} className={i === idx ? "on" : ""} />)}
-                </span>
-              )}
-            </div>
-          );
-        })()}
-
         <div className="controls">
           {/* [v0.15.0] 2컬럼 토글 — 넓은 화면에서만 보인다. 켜면 좌/우 두 탭을 나란히 본다. */}
           {isWide && (
@@ -2328,6 +2298,42 @@ ${msg}
           </button>
         </div>
       </header>
+
+      {/* [v0.30.0→v0.40.0] 오너 요청 — "어떤 탭에서든" 자동매매 보유종목의 수익률·금액·현황을
+          로테이션으로. [v0.40.0] 예전엔 상단바(.topbar)의 브랜드 배지 줄과 킬스위치 버튼 사이에
+          끼워 넣었는데, 데스크톱 창 너비에 따라 [비상 정지] 버튼과 겹쳐 보이는 문제가 있었다
+          (좁은 화면 전용으로만 "자기 줄로 내리기"가 돼 있었음 — 오너 스크린샷으로 확인).
+          아예 처음부터 상단바 전체 너비를 쓰는 별도 줄로 빼서, 창 너비와 무관하게 다른 요소와
+          절대 안 겹치게 했다. */}
+      {autoStatus?.enabled && autoStatus.positions.length > 0 && (() => {
+        const positions = autoStatus.positions;
+        const idx = tickerIdx % positions.length;
+        const p = positions[idx];
+        const hRow = autoPosHold.find((h) => h.symbol === p.symbol);
+        const statusLabel = p.status === "active" ? "익절/손절 등록됨" : "매수 체결 대기중";
+        return (
+          <div className="ticker-row">
+            <div className="topbar-ticker" title="자동매매로 보유 중인 종목을 돌아가며 보여줍니다(수익률·평가손익·상태)">
+              <span className="tk-bot">🤖</span>
+              <span className="tk-sym" key={p.symbol}>{p.symbol}</span>
+              {hRow?.pnlRate != null ? (
+                <span className={`tk-pnl ${pnlClass(hRow.pnlRate)}`}>
+                  {hRow.pnlRate >= 0 ? "+" : ""}{hRow.pnlRate.toFixed(2)}%
+                  {hRow.pnlAmt != null && <span className="tk-amt"> ({hRow.pnlAmt >= 0 ? "+" : ""}${hRow.pnlAmt.toFixed(2)})</span>}
+                </span>
+              ) : (
+                <span className="tk-pnl hint">—</span>
+              )}
+              <span className="tk-status">{statusLabel}</span>
+              {positions.length > 1 && (
+                <span className="tk-dots">
+                  {positions.map((_, i) => <i key={i} className={i === idx ? "on" : ""} />)}
+                </span>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ===== 탭 2단(2컬럼일 땐 숨김 — 각 패널의 드롭다운으로 탭을 고른다) =====
           [v0.27.0] 1단: 매매방식·성격으로 묶은 그룹 4개(메뉴얼/자동매매/현황/설정) — 드래그로 순서 변경.
@@ -3240,6 +3246,22 @@ ${msg}
                 </span>
               </div>
               {status?.killSwitch && <p className="hint small danger">킬 스위치(🛑 비상 정지)가 켜져 있어 자동매매를 시작할 수 없습니다.</p>}
+              {/* [v0.40.0] "투입 시드 비율에 맞지 않게 적게 투입됨" 버그 이후 — 지금 실제로 몇 %를
+                  계산하는지 화면에서 바로 확인할 수 있게 기준 시드 금액을 그대로 보여준다. */}
+              {autoStatus?.enabled && (
+                <p className="hint small">
+                  {autoStatus.seedUsdSnapshot != null ? (
+                    <>
+                      💰 이번 실행 기준 시드: <b>${autoStatus.seedUsdSnapshot.toFixed(2)}</b>
+                      (자동매매를 시작한 시점에 한 번만 조회해 고정 — 진입할 때마다 다시 줄어든
+                      잔액을 기준으로 재계산하지 않습니다). 종목 1개당 예산 ≈ ${(autoStatus.seedUsdSnapshot * autoStatus.maxInvestPct / 100).toFixed(2)}
+                      (시드의 {autoStatus.maxInvestPct}%).
+                    </>
+                  ) : (
+                    "💰 이번 실행 기준 시드: 아직 계산 전(다음 사이클에 조회됩니다)."
+                  )}
+                </p>
+              )}
 
               <h3>한도 설정 (전부 직접 수정 가능)</h3>
               <div className="form-row">

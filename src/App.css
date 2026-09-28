@@ -123,7 +123,13 @@ body {
 
 .controls { display: flex; gap: 8px; }
 
-/* [v0.30.0] 오너 요청 — 자동매매 보유종목 로테이션 위젯(상단바에 고정, 모든 탭에서 보임) */
+/* [v0.30.0→v0.40.0] 오너 요청 — 자동매매 보유종목 로테이션 위젯(모든 탭에서 보임).
+   [v0.40.0] 상단바(.topbar)와 같은 줄에 끼워 넣으면 창 너비에 따라 [비상 정지] 버튼과
+   겹쳐 보이는 문제가 있어(오너 보고), 상단바 바로 아래에 전용 줄로 뺐다 — 창 너비와
+   무관하게 다른 요소와 겹칠 일이 없다. */
+.ticker-row {
+  display: flex; padding: 6px 20px; border-bottom: 1px solid var(--border); background: var(--panel);
+}
 .topbar-ticker {
   display: flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 999px;
   border: 1px solid var(--blue); background: color-mix(in srgb, var(--blue) 12%, transparent);
@@ -929,8 +935,10 @@ html, body { overflow-x: hidden; }
   }
   .topbar .brand::-webkit-scrollbar { display: none; }
   .topbar .badge { font-size: 10px; flex: 0 0 auto; white-space: nowrap; }
-  /* [v0.30.0] 좁은 화면에서는 브랜드/컨트롤 줄과 겹치지 않게 로테이션 위젯을 자기 줄로 내린다. */
-  .topbar-ticker { flex: 1 1 100%; max-width: none; order: 3; }
+  /* [v0.40.0] 로테이션 위젯은 이제 상단바가 아니라 전용 줄(.ticker-row)이라 항상 이미 자기
+     줄이다 — 좁은 화면에서는 그 줄 안에서 풀폭으로 늘려 글자가 덜 잘리게만 한다. */
+  .ticker-row { padding: 6px calc(12px + var(--safe-right)) 6px calc(12px + var(--safe-left)); }
+  .topbar-ticker { max-width: none; flex: 1 1 auto; }
   .controls { flex: 0 0 auto; margin-left: auto; }
   .controls { gap: 6px; }
   .controls .btn { min-height: 40px; }

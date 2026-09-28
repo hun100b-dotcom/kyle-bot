@@ -769,6 +769,10 @@ export interface AutoTradeStatus {
   /** [v0.35.0] "스크리닝은 확정인데 왜 안 사졌지?"에 답하는 사유 — 종목코드 → 사람이 읽을 한 줄
    *  문장. 이번 사이클에 진입을 검토했지만 안(못) 산 종목만 있고, 매 사이클 새로 채워진다. */
   skipReasons: Record<string, string>;
+  /** [v0.40.0] auto 모드에서 "이번 실행" 동안 고정해 쓰는 시드 스냅샷(달러) — 투입 금액 계산의
+   *  실제 기준값을 화면에서 바로 확인할 수 있게 노출한다. fixed 모드거나 아직 한 번도 계산을
+   *  시도한 적 없으면(예: 자동매매를 아직 안 켰음) null. */
+  seedUsdSnapshot: number | null;
 }
 
 /**
@@ -869,6 +873,8 @@ export class ToolEngine extends EventEmitter {
   // 시드 기준: "auto"=매수가능금액(예수금)을 시드로, "fixed"=오너가 정한 고정 금액을 시드로.
   private seedBasis: "auto" | "fixed" = "auto";
   private seedFixedUsd: number | null = null;
+  // [v0.40.0] auto 모드 전용 — "이번 자동매매 실행" 동안 고정하는 시드 스냅샷(resolveSeedUsd 참고).
+  private autoTradeSeedSnapshotUsd: number | null = null;
 
   // [v0.8.3] 기본 손익비(익절%/손절%). 공장 초기값 2/10. 사용자가 저장하면 그 값을 계산기 초기값으로 쓴다.
   private defaultTpPct = 2;
@@ -4261,6 +4267,7 @@ export class ToolEngine extends EventEmitter {
     if (this.autoTradeEnabled) return this.getAutoTradeStatus();
     this.autoTradeEnabled = true;
     this.autoTradeRealizedPnlUsd = 0; // "이번 실행" 누적손익만 초기화(손실한도 계산 기준)
+    this.autoTradeSeedSnapshotUsd = null; // [v0.40.0] "이번 실행"의 시드를 새로 스냅샷 뜬다(resolveSeedUsd 참고)
     // [v0.30.1 긴급수정] autoTradePositions/autoTradeUsedKeys는 더 이상 여기서 비우지 않는다.
     //   예전엔 "시작"을 누를 때마다 무조건 빈 목록으로 시작했는데, 그러면 재시작 후 파일에서
     //   복구해 온 "실제로 토스에 아직 살아있는 포지션"까지 함께 버려져 추적을 영영 잃어버렸다
@@ -4314,17 +4321,39 @@ export class ToolEngine extends EventEmitter {
       nextCycleAtMs:
         this.autoTradeEnabled && this.autoTradeLastCycleAtMs != null ? this.autoTradeLastCycleAtMs + ToolEngine.AUTO_TRADE_INTERVAL_MS : null,
       skipReasons: { ...this.autoTradeSkipReasons },
+      seedUsdSnapshot: this.seedBasis === "auto" ? this.autoTradeSeedSnapshotUsd : this.seedFixedUsd,
     };
   }
 
-  /** 시드 기준 금액(달러) — orderCapacity와 동일 규칙: auto=매수가능금액, fixed=오너가 정한 고정 금액. */
+  /**
+   * 시드 기준 금액(달러) — orderCapacity와 동일 규칙: auto=매수가능금액, fixed=오너가 정한 고정 금액.
+   *
+   * [v0.40.0 버그 수정 — 오너 실사용 보고 "투입 시드 비율에 맞지않게 적게 투입되고있음"]
+   *   auto 모드는 예전엔 자동매매 사이클(5분)마다 매번 "지금 이 순간의 매수가능금액"을 새로
+   *   조회했다. 그런데 자동매매 자신이 이미 진입해서 현금을 써버리면, 그 다음 사이클이 "종목당
+   *   시드 대비 N%"를 계산할 때는 이미 줄어든 잔여 현금을 기준으로 다시 N%를 매기게 된다.
+   *   `lib/auto-risk.ts`의 "종목 1개당 N%, 최대 종목수만큼 있으면 최대 N%×종목수까지"라는 설계
+   *   (예: 30%×3종목=최대 90%)는 매 슬롯이 "같은 시드"를 기준으로 독립적으로 N%씩 배정된다는
+   *   전제인데, 매 사이클 새로 조회하면 실제로는 (30% of 원금) + (30% of 원금-1차분) + (30% of
+   *   원금-1,2차분) 식으로 갈수록 작아져 — 예를 들어 3종목이면 합계가 90%가 아니라 대략
+   *   65~70% 선까지밖에 안 된다(1차 이후 슬롯일수록 더 적게 투입되는 게 오너가 겪은 증상).
+   *   [수정] auto 모드는 "이번 자동매매 실행"(시작~정지) 동안 딱 한 번만 조회하고, 그 값을
+   *   스냅샷(`autoTradeSeedSnapshotUsd`)으로 고정해 재사용한다 — 이제 모든 슬롯이 정말로 "같은
+   *   시드"를 기준으로 계산되어 오너가 설정한 비율(N%×최대종목수)이 그대로 지켜진다. 오너가
+   *   자동매매를 껐다 다시 켜면(startAutoTrade) 그때 새로 스냅샷을 뜬다 — 마스터 스위치 자체가
+   *   재시작마다 다시 켜야 하는 것과 같은 "이번 실행" 단위 원칙. fixed 모드는 원래도 오너가
+   *   직접 고정한 값이라 이 문제와 무관해 그대로 둔다.
+   */
   private async resolveSeedUsd(): Promise<number | null> {
     if (this.seedBasis === "fixed") return this.seedFixedUsd;
+    if (this.autoTradeSeedSnapshotUsd != null) return this.autoTradeSeedSnapshotUsd;
     try {
       const bp = await getBuyingPower("USD");
-      return Number.isFinite(bp.buyingPowerUsd) ? bp.buyingPowerUsd : null;
+      if (!Number.isFinite(bp.buyingPowerUsd)) return null;
+      this.autoTradeSeedSnapshotUsd = bp.buyingPowerUsd; // 이번 실행 동안 고정
+      return this.autoTradeSeedSnapshotUsd;
     } catch {
-      return null;
+      return null; // 실패하면 스냅샷을 남기지 않는다 — 다음 사이클에 다시 시도(자가 복구)
     }
   }
 
