@@ -18,7 +18,7 @@ import "./App.css";
 import TodayReport from "./TodayReport"; // [v0.9.1] 오늘의 매매 리포트 화면
 import { useTabOrder } from "./useTabOrder"; // [v0.9.2] 탭 순서 드래그로 변경
 import { restoreInputsFromSaved } from "../lib/split-restore"; // [v0.9.3] 옛 기록도 계산기로 불러오기
-import { summarizeAutoHistory, summarizeGroupHistory } from "../lib/auto-research"; // [v0.33.0/v0.35.0] 연구탭 통계(순수 함수)
+import { summarizeAutoHistory, summarizeGroupHistory, summarizeByCriteria, autoHistoryToCsv, type RawHistoryRow } from "../lib/auto-research"; // [v0.33.0/v0.35.0/v0.49.0] 연구탭 통계(순수 함수)
 
 /** 앱이 가진 모든 탭(리프 단위 — 실제 콘텐츠를 가리키는 값. paneTab 렌더 가드는 전부 이 id 기준). */
 // [v0.12.0] 탭 통폐합 9→7: '매매분석'은 체결강도 탭 하위로, '기록(journal)'은 설정 탭 하위(고급/진단)로 이동.
@@ -176,6 +176,20 @@ function fmtHoldMin(min: number): string {
   if (h < 24) return m ? `${h}시간 ${m}분` : `${h}시간`;
   const d = Math.floor(h / 24), rh = h % 24;
   return rh ? `${d}일 ${rh}시간` : `${d}일`;
+}
+
+/** [v0.49.0] Raw Data 탭 "CSV로 내보내기" — 문자열을 브라우저 표준 방식(Blob + 임시 <a> 클릭)으로
+ *  이 기기에 저장한다. 서버로 아무것도 보내지 않는다 — 전부 오너 PC 안에서 끝난다. 맨 앞의
+ *  BOM(﻿)은 엑셀에서 한글이 깨져 보이는 걸 막기 위한 것(엑셀은 BOM 없는 UTF-8 CSV를 종종
+ *  다른 인코딩으로 오해한다). */
+function downloadCsv(filename: string, csv: string) {
+  const blob = new Blob([`﻿${csv}`], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 /** [v0.29.0] 밀리초 → "N분 N초"(자동 스크리너 탭의 "다음 스캔까지" 카운트다운 표시용). */
@@ -843,10 +857,15 @@ function App() {
     }
   }
   // [v0.35.0] 매매연구 탭 — "내 데이터"/"그룹 전체" 전환. 그룹 데이터는 볼 때만 받아온다(자동 로드 안 함).
-  const [researchView, setResearchView] = useState<"mine" | "group">("mine");
+  // [v0.49.0] "raw" = Raw Data 탭(criteriaSnapshot 필드별 성적 비교 + CSV 원본 내보내기).
+  const [researchView, setResearchView] = useState<"mine" | "group" | "raw">("mine");
   const [groupMembers, setGroupMembers] = useState<{ email: string; history: AutoTradeHistoryEntry[] }[] | null>(null);
   const [groupResearchBusy, setGroupResearchBusy] = useState(false);
   const [groupResearchMsg, setGroupResearchMsg] = useState("");
+  // [v0.49.0] Raw Data 탭 안에서만 쓰는 원본 소스 선택("내 데이터"/"그룹 전체" 중 어느 쪽 원본을 볼지).
+  //   위 researchView와 별도로 두는 이유: Raw Data를 보다가도 groupMembers는 그대로 유지돼야
+  //   (다시 안 눌러도) 곧바로 전환할 수 있게.
+  const [rawSource, setRawSource] = useState<"mine" | "group">("mine");
   async function loadGroupResearch() {
     if (groupResearchBusy) return;
     setGroupResearchBusy(true);
@@ -4201,6 +4220,14 @@ ${msg}
               >
                 그룹 전체
               </button>
+              {/* [v0.49.0] Raw Data — 원본을 그대로(가공 없이) 보고 CSV로 꺼내가는 탭.
+                  전환할 때 rawSource가 이미 "group"이면 groupMembers도 같이 채워 둔다. */}
+              <button
+                className={researchView === "raw" ? "mini active" : "mini"}
+                onClick={() => { setResearchView("raw"); if (rawSource === "group" && groupMembers === null) void loadGroupResearch(); }}
+              >
+                Raw Data
+              </button>
             </div>
 
             {researchView === "mine" && (
@@ -4211,7 +4238,140 @@ ${msg}
               </div>
             )}
 
-            {researchView === "group" ? (
+            {/* ===== Raw Data (v0.49.0 신규) =====
+                [오너 지시 2026-09-29] "criteriaSnapshot 필드별로 그룹화한 성적 집계" +
+                "원본 데이터를 플랫 테이블로 + CSV 내보내기(앱 안에서 상관관계·회귀 분석까지
+                시도하지 말 것)". 표본이 매우 적은 비공개 그룹이라, 아래 경고 문구는 절대
+                빼지 않는다 — "N%p 높인다" 식 확정적 인과 결론은 여기서 보여주지 않는다,
+                "참고용 경향"이라고만 말한다. */}
+            {researchView === "raw" ? (
+              <>
+                <div className="warn-box">
+                  ⚠️ <b>통계적 유의성 경고</b> — 카프리는 비공개 소규모 그룹(개발자 3명 내외로
+                  알려짐)이라 아래 숫자는 전부 표본이 매우 적습니다. "설정별 성적 비교"는
+                  참고용 경향일 뿐, <b>"이 설정이 승률을 몇 %p 높인다" 같은 확정적 인과
+                  결론이 아닙니다.</b> 표본이 한두 건만 바뀌어도 숫자가 크게 흔들릴 수 있어요
+                  — 진짜 통계 분석(상관관계·회귀 등)이 필요하면 아래 CSV를 받아 Excel·
+                  Sheets·Python에서 직접 해 보세요(이 화면은 집계만 보여줍니다).
+                </div>
+
+                <div className="form-row">
+                  <button className={rawSource === "mine" ? "mini active" : "mini"} onClick={() => setRawSource("mine")}>내 데이터 원본</button>
+                  <button
+                    className={rawSource === "group" ? "mini active" : "mini"}
+                    onClick={() => { setRawSource("group"); if (groupMembers === null) void loadGroupResearch(); }}
+                  >
+                    그룹 전체 원본
+                  </button>
+                  {rawSource === "mine" ? (
+                    <button className="mini" disabled={autoHistoryBusy} onClick={() => void loadAutoHistory()}>
+                      {autoHistoryBusy ? "불러오는 중…" : "↻ 새로고침"}
+                    </button>
+                  ) : (
+                    <button className="mini" disabled={groupResearchBusy} onClick={() => void loadGroupResearch()}>
+                      {groupResearchBusy ? "불러오는 중…" : "↻ 그룹 데이터 새로고침"}
+                    </button>
+                  )}
+                </div>
+
+                {(() => {
+                  const rows: RawHistoryRow[] = rawSource === "mine"
+                    ? autoHistory.map((entry) => ({ entry }))
+                    : (groupMembers ?? []).flatMap((m) => m.history.map((entry) => ({ email: m.email, entry })));
+                  const busy = rawSource === "mine" ? autoHistoryBusy : groupResearchBusy;
+
+                  if (rows.length === 0) {
+                    return (
+                      <div className="result-empty hint">
+                        {busy ? "불러오는 중…" : "아직 원본 데이터가 없어요."}
+                      </div>
+                    );
+                  }
+
+                  const criteria = summarizeByCriteria(rows.map((r) => r.entry));
+
+                  return (
+                    <>
+                      <div className="form-row">
+                        <button
+                          className="mini"
+                          onClick={() => downloadCsv(
+                            `capri_autotrade_${rawSource}_${new Date().toISOString().slice(0, 10)}.csv`,
+                            autoHistoryToCsv(rows),
+                          )}
+                        >
+                          ⬇ CSV로 내보내기 ({rows.length}행)
+                        </button>
+                      </div>
+
+                      <h3>설정별 성적 비교 <span className="hint">(참고용 경향 · 승/패로 마감된 매매 {criteria.sampleSize}건 기준)</span></h3>
+                      {criteria.sampleSize === 0 ? (
+                        <div className="result-empty hint">아직 승/패로 마감됐고 진입 당시 설정이 남아있는 매매가 없어요(v0.45.0 이전 기록은 설정이 없습니다).</div>
+                      ) : (
+                        <div className="criteria-breakdowns">
+                          {criteria.breakdowns.map((b) => (
+                            <div key={b.field} className="criteria-breakdown">
+                              <h4>{b.title}</h4>
+                              <table className="result-table screen-table">
+                                <thead><tr><th>설정값</th><th>건수</th><th>승률</th><th>누적손익</th><th>평균수익률</th></tr></thead>
+                                <tbody>
+                                  {b.groups.map((g) => (
+                                    <tr key={g.label} className="screen-row">
+                                      <td>{g.label}</td>
+                                      <td>{g.n}건 ({g.wins}승 {g.losses}패)</td>
+                                      <td>{g.winRate != null ? `${g.winRate}%` : "—"}</td>
+                                      <td className={pnlClass(g.totalPnlUsd)}>{g.totalPnlUsd >= 0 ? "+" : ""}${g.totalPnlUsd}</td>
+                                      <td>{g.avgPnlPct != null ? `${g.avgPnlPct >= 0 ? "+" : ""}${g.avgPnlPct}%` : "—"}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      <h3>원본 데이터 <span className="hint">({rows.length}행 — 진입 당시 설정 포함, 취소·드라이런 포함 전체)</span></h3>
+                      <div className="raw-table-scroll">
+                        <table className="result-table screen-table raw-table">
+                          <thead>
+                            <tr>
+                              {rawSource === "group" && <th>회원</th>}
+                              <th>진입시각</th><th>종목</th><th>상태</th><th>손익</th><th>세션</th>
+                              <th>구름</th><th>EMA</th><th>도지유효</th><th>캔들확인</th><th>ETF제외</th>
+                              <th>최대종목</th><th>최대손실%</th><th>최대투입%</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {rows.map(({ email, entry: h }) => {
+                              const c = h.criteriaSnapshot;
+                              return (
+                                <tr key={`${email ?? ""}:${h.id}`} className="screen-row">
+                                  {rawSource === "group" && <td className="hint small">{email}</td>}
+                                  <td>{h.enteredAt}</td>
+                                  <td><b>{h.symbol}</b></td>
+                                  <td>{AUTO_HIST_STATUS_LABEL[h.status]}</td>
+                                  <td className={pnlClass(h.pnlUsd)}>{h.pnlUsd != null ? `${h.pnlUsd >= 0 ? "+" : ""}$${h.pnlUsd.toFixed(2)}` : "—"}</td>
+                                  <td>{c ? { day: "데이", pre: "프리", regular: "본장", after: "애프터", closed: "장마감" }[c.session] : "—"}</td>
+                                  <td>{c ? (c.cloudEnabled ? "켬" : "끔") : "—"}</td>
+                                  <td>{c ? (c.emaTrendEnabled ? `켬(${c.emaPeriod})` : "끔") : "—"}</td>
+                                  <td>{c ? (c.dojiMaxAgeEnabled ? `켬(${c.dojiMaxAgeMinutes}분)` : "끔") : "—"}</td>
+                                  <td>{c ? (c.nextCandleConfirmEnabled ? "켬" : "끔") : "—"}</td>
+                                  <td>{c ? (c.excludeEtf ? "켬" : "끔") : "—"}</td>
+                                  <td>{c?.maxPositions ?? "—"}</td>
+                                  <td>{c?.maxLossPct ?? "—"}</td>
+                                  <td>{c?.maxInvestPct ?? "—"}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  );
+                })()}
+              </>
+            ) : researchView === "group" ? (
               <>
                 <div className="form-row">
                   <button className="mini" disabled={groupResearchBusy} onClick={() => void loadGroupResearch()}>

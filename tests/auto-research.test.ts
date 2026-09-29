@@ -7,8 +7,29 @@
 // =============================================================================
 
 import { describe, it, expect } from "vitest";
-import { summarizeAutoHistory, summarizeGroupHistory } from "../lib/auto-research";
+import { summarizeAutoHistory, summarizeGroupHistory, summarizeByCriteria, autoHistoryToCsv } from "../lib/auto-research";
 import type { AutoTradeHistoryEntry } from "../electron/tool-engine";
+
+/** criteriaSnapshot 기본값 — 테스트마다 필요한 필드만 덮어써서 쓴다. */
+function criteria(o: Partial<NonNullable<AutoTradeHistoryEntry["criteriaSnapshot"]>> = {}): AutoTradeHistoryEntry["criteriaSnapshot"] {
+  return {
+    bodyRatio: 0.5,
+    emaTrendEnabled: false,
+    emaPeriod: 20,
+    cloudEnabled: false,
+    dojiWickMinRatio: 0.3,
+    dojiMaxAgeEnabled: false,
+    dojiMaxAgeMinutes: 5,
+    nextCandleConfirmEnabled: false,
+    excludeEtf: false,
+    session: "day",
+    maxPositions: 3,
+    maxLossPct: 5,
+    maxInvestPct: 20,
+    watchMinutes: 10,
+    ...o,
+  };
+}
 
 function entry(o: Partial<AutoTradeHistoryEntry>): AutoTradeHistoryEntry {
   return {
@@ -152,5 +173,108 @@ describe("summarizeGroupHistory — 그룹 리더보드(실명, 비식별화 없
       { email: "rookie@capri.dev", history: Array.from({ length: 2 }, () => entry({ status: "closed_loss", pnlUsd: -1 })) },
     ]);
     expect(g.headline).toContain("ace@capri.dev");
+  });
+});
+
+// =============================================================================
+// [v0.49.0] Raw Data 탭 — summarizeByCriteria / autoHistoryToCsv
+// =============================================================================
+describe("summarizeByCriteria — criteriaSnapshot 필드별 성적 비교", () => {
+  it("cloudEnabled on/off 두 그룹으로 정확히 나뉘고, 각 그룹 승률·손익이 따로 집계된다", () => {
+    const s = summarizeByCriteria([
+      entry({ status: "closed_win", pnlUsd: 10, criteriaSnapshot: criteria({ cloudEnabled: true }) }),
+      entry({ status: "closed_loss", pnlUsd: -4, criteriaSnapshot: criteria({ cloudEnabled: true }) }),
+      entry({ status: "closed_win", pnlUsd: 3, criteriaSnapshot: criteria({ cloudEnabled: false }) }),
+    ]);
+    const cloud = s.breakdowns.find((b) => b.field === "cloudEnabled")!;
+    const on = cloud.groups.find((g) => g.label === "켬")!;
+    const off = cloud.groups.find((g) => g.label === "끔")!;
+    expect(on.n).toBe(2);
+    expect(on.wins).toBe(1);
+    expect(on.totalPnlUsd).toBe(6); // 10 + -4
+    expect(off.n).toBe(1);
+    expect(off.totalPnlUsd).toBe(3);
+    // "켬"이 "끔"보다 먼저 오는 고정 순서
+    expect(cloud.groups.map((g) => g.label)).toEqual(["켬", "끔"]);
+  });
+
+  it("session별로 갈라지고 표시 순서는 데이→프리→본장→애프터→장마감 고정이다", () => {
+    const s = summarizeByCriteria([
+      entry({ status: "closed_win", criteriaSnapshot: criteria({ session: "regular" }) }),
+      entry({ status: "closed_win", criteriaSnapshot: criteria({ session: "day" }) }),
+      entry({ status: "closed_loss", criteriaSnapshot: criteria({ session: "pre" }) }),
+    ]);
+    const session = s.breakdowns.find((b) => b.field === "session")!;
+    expect(session.groups.map((g) => g.label)).toEqual(["데이", "프리", "본장"]);
+  });
+
+  it("maxInvestPct는 구간(버킷)으로 묶이고 구간 오름차순으로 표시된다", () => {
+    const s = summarizeByCriteria([
+      entry({ status: "closed_win", criteriaSnapshot: criteria({ maxInvestPct: 45 }) }), // "30~50%"
+      entry({ status: "closed_win", criteriaSnapshot: criteria({ maxInvestPct: 5 }) }), // "10% 미만"
+      entry({ status: "closed_loss", criteriaSnapshot: criteria({ maxInvestPct: 60 }) }), // "50% 이상"
+    ]);
+    const invest = s.breakdowns.find((b) => b.field === "maxInvestPct")!;
+    expect(invest.groups.map((g) => g.label)).toEqual(["10% 미만", "30~50%", "50% 이상"]);
+  });
+
+  it("criteriaSnapshot이 없는 기록(v0.45.0 이전·수동매매)은 집계에서 조용히 빠진다", () => {
+    const s = summarizeByCriteria([
+      entry({ status: "closed_win", criteriaSnapshot: undefined }),
+      entry({ status: "closed_win", criteriaSnapshot: criteria() }),
+    ]);
+    expect(s.sampleSize).toBe(1);
+  });
+
+  it("수동청산·취소·드라이런은 승패가 없으므로 표본에서 제외된다", () => {
+    const s = summarizeByCriteria([
+      entry({ status: "closed_manual", criteriaSnapshot: criteria() }),
+      entry({ status: "cancelled", criteriaSnapshot: criteria() }),
+      entry({ status: "dryrun", criteriaSnapshot: criteria() }),
+    ]);
+    expect(s.sampleSize).toBe(0);
+    s.breakdowns.forEach((b) => expect(b.groups).toEqual([]));
+  });
+
+  it("표본이 하나도 없으면 에러 없이 빈 그룹들을 돌려준다", () => {
+    const s = summarizeByCriteria([]);
+    expect(s.sampleSize).toBe(0);
+    expect(s.breakdowns.length).toBeGreaterThan(0); // 필드 목록 자체는 항상 나온다
+    s.breakdowns.forEach((b) => expect(b.groups).toEqual([]));
+  });
+});
+
+describe("autoHistoryToCsv — Raw Data 탭 CSV 내보내기", () => {
+  it("헤더 + 행이 criteriaSnapshot까지 펼쳐진 컬럼으로 나온다", () => {
+    const csv = autoHistoryToCsv([
+      { entry: entry({ symbol: "AAPL", status: "closed_win", pnlUsd: 5, criteriaSnapshot: criteria({ cloudEnabled: true, session: "day" }) }) },
+    ]);
+    const lines = csv.split("\n");
+    expect(lines[0]).toBe(
+      "email,id,symbol,status,enteredAt,exitedAt,entry,exitPrice,quantity,pnlUsd,pnlPct,note," +
+      "bodyRatio,emaTrendEnabled,emaPeriod,cloudEnabled,dojiWickMinRatio," +
+      "dojiMaxAgeEnabled,dojiMaxAgeMinutes,nextCandleConfirmEnabled,excludeEtf,session," +
+      "maxPositions,maxLossPct,maxInvestPct,watchMinutes"
+    );
+    expect(lines[1]).toContain("AAPL");
+    expect(lines[1]).toContain("true"); // cloudEnabled
+    expect(lines[1]).toContain("day");
+  });
+
+  it("그룹 원본일 때만 email이 채워지고, 내 데이터 원본이면 빈 칸이다", () => {
+    const csv = autoHistoryToCsv([
+      { email: "a@capri.dev", entry: entry({ status: "closed_win" }) },
+      { entry: entry({ status: "closed_win" }) },
+    ]);
+    const [, row1, row2] = csv.split("\n");
+    expect(row1.startsWith("a@capri.dev,")).toBe(true);
+    expect(row2.startsWith(",")).toBe(true); // email 칸이 비어 있음
+  });
+
+  it("쉼표·줄바꿈·큰따옴표가 든 값은 CSV 규칙대로 큰따옴표로 감싼다", () => {
+    const csv = autoHistoryToCsv([
+      { entry: entry({ note: '사유: "익절, 완료"', status: "closed_win" }) },
+    ]);
+    expect(csv).toContain('"사유: ""익절, 완료"""');
   });
 });

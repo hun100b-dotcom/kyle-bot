@@ -208,3 +208,150 @@ export function summarizeGroupHistory(members: GroupMemberInput[]): GroupResearc
 
   return { memberCount: members.length, overall, byMember, headline };
 }
+
+// =============================================================================
+// [v0.49.0] "Raw Data" 탭 — criteriaSnapshot 필드별 성적 비교 + CSV 원본 내보내기
+// -----------------------------------------------------------------------------
+// [오너 지시 2026-09-29] "criteriaSnapshot 필드별로 그룹화한 성적 집계를 제공(cloudEnabled
+//   on/off, session별, maxInvestPct 구간별 등)" + "원본 데이터를 CSV로 내보내는 버튼(앱
+//   안에서 상관관계·회귀 분석까지 시도하지 말 것 — Excel/Sheets/Python에서 하도록 유도)".
+//
+// [통계적 유의성 경고 — 왜 여기서부터 강조하는가] 카프리는 비공개 그룹(개발자 3명 내외로
+//   알려짐)이라 어느 필드로 쪼개도 표본이 금방 한 자릿수로 줄어든다. 이 함수 자체는 그냥
+//   집계일 뿐 "유의미하다/아니다"를 판단하지 않는다 — 그 판단(및 "확정적 인과 결론 금지"
+//   문구 표시)은 반드시 화면(App.tsx의 Raw Data 탭)이 sampleSize를 보고 매번 함께 보여줘야
+//   한다. summarizeAutoHistory의 MIN_SAMPLE_FOR_HEADLINE(10건)과 같은 기준을 그대로 쓴다.
+// =============================================================================
+
+type CriteriaSnapshot = NonNullable<AutoTradeHistoryEntry["criteriaSnapshot"]>;
+
+/** criteriaSnapshot 필드 하나를 쪼갠 그룹 하나의 성적(라벨 + 공통 통계). */
+export interface CriteriaGroupStat extends ResearchBucket {
+  label: string; // 예: "켬" / "끔" / "데이" / "10~20%"
+}
+
+/** criteriaSnapshot 필드 하나를 기준으로 나눈 성적 비교표. */
+export interface CriteriaBreakdown {
+  field: string; // criteriaSnapshot의 실제 필드명(예: "cloudEnabled") — 화면 key·디버그용
+  title: string; // 화면에 보여줄 한글 제목
+  groups: CriteriaGroupStat[];
+}
+
+/** Raw Data 탭 "설정별 성적 비교" 섹션 전체 결과. */
+export interface CriteriaResearchSummary {
+  sampleSize: number; // 승/패로 마감 + criteriaSnapshot이 있는 표본 수(신뢰도 판단 기준)
+  breakdowns: CriteriaBreakdown[];
+}
+
+const SESSION_ORDER: Record<CriteriaSnapshot["session"], number> = { day: 0, pre: 1, regular: 2, after: 3, closed: 4 };
+const SESSION_LABEL: Record<CriteriaSnapshot["session"], string> = { day: "데이", pre: "프리", regular: "본장", after: "애프터", closed: "장마감" };
+
+type Acc = { n: number; wins: number; losses: number; totalPnlUsd: number; pctSum: number; pctN: number };
+function newAcc(): Acc {
+  return { n: 0, wins: 0, losses: 0, totalPnlUsd: 0, pctSum: 0, pctN: 0 };
+}
+
+/** 그룹 라벨 + 정렬 순서(작을수록 앞). 불리언은 "켬"이 먼저, 구간은 낮은 구간이 먼저 오도록. */
+interface GroupKey {
+  label: string;
+  sortKey: number;
+}
+
+function boolKey(v: boolean): GroupKey {
+  return v ? { label: "켬", sortKey: 0 } : { label: "끔", sortKey: 1 };
+}
+
+/** 퍼센트 값을 오름차순 경계(edges)로 구간화. 예: edges=[10,20,30,50] →
+ *  "10% 미만" / "10~20%" / "20~30%" / "30~50%" / "50% 이상". */
+function bucketPct(v: number, edges: number[]): GroupKey {
+  for (let i = 0; i < edges.length; i++) {
+    if (v < edges[i]) {
+      const lo = i === 0 ? null : edges[i - 1];
+      return { label: lo == null ? `${edges[i]}% 미만` : `${lo}~${edges[i]}%`, sortKey: i };
+    }
+  }
+  return { label: `${edges[edges.length - 1]}% 이상`, sortKey: edges.length };
+}
+
+/** 값 그대로가 이해하기 쉬운 정수 필드(최대 종목 수 등)는 구간 없이 값 그대로 그룹핑. */
+function exactCountKey(v: number, unit: string): GroupKey {
+  return { label: `${v}${unit}`, sortKey: v };
+}
+
+/** decisive(승/패로 마감된) 기록만으로 하나의 필드를 기준 그룹핑한다. criteriaSnapshot이 없는
+ *  기록(v0.45.0 이전 옛 기록·수동 매매)은 이 집계에서 조용히 제외한다. */
+function buildBreakdown(decisive: AutoTradeHistoryEntry[], field: string, title: string, keyFn: (c: CriteriaSnapshot) => GroupKey): CriteriaBreakdown {
+  const acc = new Map<string, Acc & { sortKey: number }>();
+  for (const e of decisive) {
+    if (!e.criteriaSnapshot) continue;
+    const { label, sortKey } = keyFn(e.criteriaSnapshot);
+    const a = acc.get(label) ?? { ...newAcc(), sortKey };
+    a.n++;
+    if (e.status === "closed_win") a.wins++; else a.losses++;
+    if (e.pnlUsd != null) a.totalPnlUsd += e.pnlUsd;
+    if (e.pnlPct != null) { a.pctSum += e.pnlPct; a.pctN++; }
+    acc.set(label, a);
+  }
+  const groups: CriteriaGroupStat[] = [...acc.entries()]
+    .sort((x, y) => x[1].sortKey - y[1].sortKey)
+    .map(([label, a]) => ({ label, ...finalize(a) }));
+  return { field, title, groups };
+}
+
+/** 자동매매기록을 criteriaSnapshot 필드별(구름대 필터·EMA·세션·투입비율 등)로 쪼개 승률·손익을
+ *  비교한다. 승/패로 마감된 매매만 대상(수동청산·취소·드라이런은 애초에 승패가 없어 제외 —
+ *  summarizeAutoHistory의 decisive 정의와 동일). 여러 회원 기록을 합쳐 넘겨도(그룹 전체 보기)
+ *  그대로 동작한다 — 이 함수는 "누가 냈는지"를 보지 않고 설정값만 본다. */
+export function summarizeByCriteria(entries: AutoTradeHistoryEntry[]): CriteriaResearchSummary {
+  const decisive = entries.filter((e) => (e.status === "closed_win" || e.status === "closed_loss") && e.criteriaSnapshot);
+  const breakdowns: CriteriaBreakdown[] = [
+    buildBreakdown(decisive, "cloudEnabled", "구름대 필터", (c) => boolKey(c.cloudEnabled)),
+    buildBreakdown(decisive, "emaTrendEnabled", "EMA 추세 필터", (c) => boolKey(c.emaTrendEnabled)),
+    buildBreakdown(decisive, "dojiMaxAgeEnabled", "도지 유효시간 제한", (c) => boolKey(c.dojiMaxAgeEnabled)),
+    buildBreakdown(decisive, "nextCandleConfirmEnabled", "다음 캔들 확인", (c) => boolKey(c.nextCandleConfirmEnabled)),
+    buildBreakdown(decisive, "excludeEtf", "ETF 제외", (c) => boolKey(c.excludeEtf)),
+    buildBreakdown(decisive, "session", "매매 세션", (c) => ({ label: SESSION_LABEL[c.session], sortKey: SESSION_ORDER[c.session] })),
+    buildBreakdown(decisive, "maxInvestPct", "최대 투입 비율(시드 대비)", (c) => bucketPct(c.maxInvestPct, [10, 20, 30, 50])),
+    buildBreakdown(decisive, "maxLossPct", "최대 손실 한도(시드 대비)", (c) => bucketPct(c.maxLossPct, [5, 10, 20])),
+    buildBreakdown(decisive, "maxPositions", "최대 종목 수", (c) => exactCountKey(c.maxPositions, "개")),
+  ];
+  return { sampleSize: decisive.length, breakdowns };
+}
+
+/** Raw Data 탭 한 행. 그룹 전체 보기일 때만 email이 채워진다(내 데이터 보기는 undefined). */
+export interface RawHistoryRow {
+  email?: string;
+  entry: AutoTradeHistoryEntry;
+}
+
+/** CSV 한 줄에 안전하게 넣기 위한 이스케이프(쉼표·줄바꿈·큰따옴표 포함 시 큰따옴표로 감싸기). */
+function csvCell(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  const s = String(v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+/** [오너 지시 2026-09-29] "앱 안에서 상관관계·회귀 분석까지 시도하지 말 것" — 이 함수는
+ *  criteriaSnapshot까지 펼친 평평한(flat) 표를 CSV 문자열로만 만들어 준다. 실제 통계 분석
+ *  (상관관계·회귀 등)은 오너가 Excel/Sheets/Python에서 직접 한다는 전제. */
+export function autoHistoryToCsv(rows: RawHistoryRow[]): string {
+  const headers = [
+    "email", "id", "symbol", "status", "enteredAt", "exitedAt", "entry", "exitPrice", "quantity",
+    "pnlUsd", "pnlPct", "note",
+    "bodyRatio", "emaTrendEnabled", "emaPeriod", "cloudEnabled", "dojiWickMinRatio",
+    "dojiMaxAgeEnabled", "dojiMaxAgeMinutes", "nextCandleConfirmEnabled", "excludeEtf", "session",
+    "maxPositions", "maxLossPct", "maxInvestPct", "watchMinutes",
+  ];
+  const lines = [headers.join(",")];
+  for (const { email, entry: e } of rows) {
+    const c = e.criteriaSnapshot;
+    lines.push([
+      email ?? "", e.id, e.symbol, e.status, e.enteredAt, e.exitedAt ?? "", e.entry, e.exitPrice ?? "", e.quantity,
+      e.pnlUsd ?? "", e.pnlPct ?? "", e.note,
+      c?.bodyRatio ?? "", c?.emaTrendEnabled ?? "", c?.emaPeriod ?? "", c?.cloudEnabled ?? "", c?.dojiWickMinRatio ?? "",
+      c?.dojiMaxAgeEnabled ?? "", c?.dojiMaxAgeMinutes ?? "", c?.nextCandleConfirmEnabled ?? "", c?.excludeEtf ?? "", c?.session ?? "",
+      c?.maxPositions ?? "", c?.maxLossPct ?? "", c?.maxInvestPct ?? "", c?.watchMinutes ?? "",
+    ].map(csvCell).join(","));
+  }
+  return lines.join("\n");
+}

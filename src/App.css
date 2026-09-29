@@ -1095,3 +1095,17 @@ body:has(.update-banner) .topbar {
   border-radius: 8px;
   padding: 6px 10px;
 }
+
+/* [v0.49.0] "매매연구 → Raw Data" 탭 — criteriaSnapshot 필드별 성적 비교 카드 + 원본 표.
+   설정별 성적 비교는 필드가 9개라 카드 여러 장을 나란히 두되, 좁은 화면에선 한 줄로 접힌다. */
+.criteria-breakdowns {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+  margin: 10px 0 18px;
+}
+.criteria-breakdown h4 { margin: 0 0 6px; font-size: 13px; color: var(--muted); font-weight: 600; }
+.criteria-breakdown .result-table { font-size: 12px; }
+/* 원본 데이터 표는 컬럼이 많아(13개+) 카드 폭을 넘기 쉬우므로, 데스크톱에서도 가로 스크롤을 허용 */
+.raw-table-scroll { overflow-x: auto; max-width: 100%; }
+.raw-table { white-space: nowrap; }
