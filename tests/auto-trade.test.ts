@@ -509,7 +509,13 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
       expect(j.summary).toContain("건너뜁니다");
 
       // 실제로 스캔 자체가 안 돌았어야 한다(건너뛴 것이지, 스캔했는데 후보가 없던 게 아님).
-      expect(eng.getAutoTradeStatus().lastScan).toBeNull();
+      const status = eng.getAutoTradeStatus();
+      expect(status.lastScan).toBeNull();
+      // [v0.48.0] 오류가 아니라 "정상 스킵"이라는 사유가 화면에 보이도록 채워져야 한다
+      // (오너 보고 "새로고침해도 반응 없어 보인다" — 저널에만 남고 화면엔 안 보이던 문제).
+      expect(status.lastCycleSkipReason).not.toBeNull();
+      expect(status.lastCycleSkipReason?.message).toContain("정규장(본장)");
+      expect(status.lastScanError).toBeNull(); // 오류 배너와는 별개 — 동시에 뜨면 안 됨
       eng.stopAutoTrade();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -528,6 +534,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
       // (v0.45.0의 다른 버그 수정과 동일한 메커니즘), 이 반환값으로 "스캔이 끝났는지"를 확인한다.
       const status = await eng.autoScanNow();
       expect(status.lastScan).not.toBeNull(); // 세션 게이트에 막히지 않고 실제로 스캔까지 돌았다
+      expect(status.lastCycleSkipReason).toBeNull(); // [v0.48.0] 실제로 스캔했으니 스킵 사유는 없어야 함
       eng.stopAutoTrade();
     } finally {
       rmSync(dir, { recursive: true, force: true });

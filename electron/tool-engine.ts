@@ -781,6 +781,12 @@ export interface AutoTradeStatus {
   /** [v0.45.0] 가장 최근 스캔 실패(취소 제외) 기록 — 성공하면 즉시 지워진다. "왜 결과가 안 뜨지?"에
    *  답하려고 화면에 바로 보여준다(예전엔 저널에만 조용히 남아 오너가 원인을 볼 수 없었다). */
   lastScanError: { message: string; atMs: number } | null;
+  /** [v0.48.0 — 오너 보고 "자동매매 시작해도/새로고침해도 반응 없어 보인다"] 휴무 시간대·
+   *  세션 미활성처럼 "오류는 아니지만 이번 사이클엔 의도적으로 스캔을 안 했다"는 사유.
+   *  이런 경우 lastScan/lastScanError는 그대로라(새로 스캔한 게 없으니) 화면이 "아무 반응
+   *  없는 것처럼" 보였다 — 정상 스킵과 오류를 구분해 항상 화면에 이유를 보여주기 위한 필드.
+   *  실제로 스캔이 한 번이라도 진행되면 즉시 지워진다. */
+  lastCycleSkipReason: { message: string; atMs: number } | null;
   /** [v0.29.0] 다음 사이클 예정 시각(ms, epoch) — 화면의 "다음 스캔까지 N분 N초" 카운트다운용.
    *  자동매매가 꺼져 있거나 아직 한 번도 안 돌았으면 null. */
   nextCycleAtMs: number | null;
@@ -1013,6 +1019,11 @@ export class ToolEngine extends EventEmitter {
    *  남아, 오너가 "스크리닝 결과" 탭에서 그저 텅 빈 화면만 계속 보게 됐다(진짜 원인은 안 보이고
    *  "안 돈다"로만 보임). 성공하면 즉시 null로 지운다. */
   private autoTradeLastScanError: { message: string; atMs: number } | null = null;
+  /** [v0.48.0] 휴무 시간대·세션 미활성처럼 "오류가 아니라 이번 사이클을 의도적으로 건너뜀"
+   *  사유. lastScan/lastScanError만으로는 이런 정상 스킵이 화면에 전혀 안 보였다(오너 보고:
+   *  "자동매매 시작해도/새로고침해도 반응이 없어 보인다" — 실제로는 저널에만 조용히 남던
+   *  스킵 사유). 실제로 스캔이 한 번이라도 진행되면 이 필드는 즉시 지운다. */
+  private autoTradeLastCycleSkipReason: { message: string; atMs: number } | null = null;
   /** [v0.32.0] "관찰 확정" 알림을 중복으로 보내지 않기 위해, 직전 스캔에서 이미 확정 상태였던
    *  종목을 기억해 둔다(재시작하면 초기화돼도 무해 — 다시 확정되면 또 한 번 알려도 문제 없음). */
   private autoScanNotifiedConfirmed = new Set<string>();
@@ -4657,6 +4668,7 @@ export class ToolEngine extends EventEmitter {
       lastCycleAt: this.autoTradeLastCycleAt,
       lastScan: this.autoTradeLastScan,
       lastScanError: this.autoTradeLastScanError, // [v0.45.0]
+      lastCycleSkipReason: this.autoTradeLastCycleSkipReason, // [v0.48.0]
       nextCycleAtMs:
         this.autoTradeEnabled && this.autoTradeLastCycleAtMs != null ? this.autoTradeLastCycleAtMs + ToolEngine.AUTO_TRADE_INTERVAL_MS : null,
       skipReasons: { ...this.autoTradeSkipReasons },
@@ -5016,6 +5028,7 @@ export class ToolEngine extends EventEmitter {
           });
           this.autoTradeWasPaused = true;
         }
+        this.autoTradeLastCycleSkipReason = { message: `${pauseStatus.reason} — 신규 진입만 멈춤(기존 포지션 감시는 계속)`, atMs: Date.now() };
         return;
       } else if (this.autoTradeWasPaused) {
         this.addJournal({ kind: "info", symbol: "-", summary: "▶ 휴무 시간대(또는 휴장)가 끝나 자동매매를 다시 정상 진행합니다." });
@@ -5039,8 +5052,12 @@ export class ToolEngine extends EventEmitter {
           symbol: "-",
           summary: `🤖 자동매매: 지금은 ${sessionKo}인데 [스크리닝 기준]에서 이 장을 꺼 두어 이번 사이클은 건너뜁니다(기존 감시 포지션은 계속됩니다).`,
         });
+        this.autoTradeLastCycleSkipReason = { message: `지금은 ${sessionKo}인데 [스크리닝 기준]에서 이 장이 꺼져 있어 건너뜀`, atMs: Date.now() };
         return;
       }
+      // [v0.48.0] 위 두 관문(휴무 시간대·세션 선택)을 모두 통과해 실제로 스캔을 시도하는
+      //   지점 — 여기까지 왔다는 건 "정상 스킵"이 아니라는 뜻이므로 지난 스킵 사유를 지운다.
+      this.autoTradeLastCycleSkipReason = null;
 
       const seedUsd = await this.resolveSeedUsd();
       if (isLossLimitBreached(this.autoTradeRealizedPnlUsd, seedUsd, this.autoTradeMaxLossPct)) {

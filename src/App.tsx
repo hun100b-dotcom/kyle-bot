@@ -860,9 +860,23 @@ function App() {
       setGroupResearchBusy(false);
     }
   }
+  /**
+   * [v0.48.0 버그 수정 — 오너 보고 "자동매매기록 탭도 실시간 연동 안 됨, 새로고침해도 그대로"]
+   *   예전엔 이 함수가 로컬에 이미 저장돼 있는 기록 파일만 다시 읽어왔다(`autoTradeHistory()`).
+   *   그런데 기록의 상태(보유 중/익절/손절 등)는 오직 reconcileAutoPositions 계열 함수가 토스에
+   *   실제로 물어봐야만 갱신되는데, 이 탭의 "새로고침" 버튼은 그 조회를 한 번도 부르지 않았다
+   *   — 그래서 아무리 눌러도 "이미 저장된(어쩌면 오래된) 값"만 다시 보여줄 뿐이었다(코드
+   *   리뷰·헤드리스 클릭 테스트로는 "버튼 자체는 정상 반응"이라 못 잡았던 진짜 원인 — 버튼은
+   *   정상이었고, 그 버튼이 부르는 함수가 토스에 확인을 안 했던 것). 이제 로컬 기록을 다시
+   *   읽기 전에 먼저 reconcileAutoPositionsNow()로 지금 감시 중인 포지션의 실제 토스 상태를
+   *   한 번 확실히 확인한 뒤(그 결과가 updateAutoTradeHistory를 통해 기록 파일에도 반영됨),
+   *   그 갱신된 기록을 불러온다 — 이제 이 버튼을 누르면 진짜로 "지금 토스 기준 최신 상태"가
+   *   보인다.
+   */
   async function loadAutoHistory() {
     setAutoHistoryBusy(true);
     try {
+      await window.kyletool.reconcileAutoPositionsNow().catch(() => {}); // 실패해도 기록 조회는 계속 진행
       setAutoHistory(await window.kyletool.autoTradeHistory());
     } finally {
       setAutoHistoryBusy(false);
@@ -1080,19 +1094,29 @@ function App() {
     return () => clearInterval(id);
   }, [autoRefresh, tab, showTwoCol, tabL, tabR]);
 
-  // [v0.26.0→v0.45.0] 자동매매가 켜져 있는 동안만 현황(포지션·누적손익)을 20초마다 새로고침.
-  //   꺼져 있을 땐 돌 이유가 없다(자율 동작 최소화 원칙 — 위 702번째 줄 주석 참고).
-  //   [v0.45.0 — 오너 보고 "지금 감시 중인 포지션이 실시간 연동 안 됨"] 예전엔 그냥 스냅샷만
-  //   다시 읽어와, 실제 체결·청산 여부는 5분 사이클이 확인할 때까지 최대 5분간 옛 상태("익절/
-  //   손절 등록됨" 등)가 그대로 보였다. 감시 중인 포지션이 있을 때는(보통 3개 이하라 저렴)
-  //   reconcileAutoPositionsNow()로 실제 체결/발동 여부까지 매번 다시 확인해, 최악의 지연이
-  //   5분에서 20초로 줄어든다. 포지션이 없으면 예전처럼 가벼운 스냅샷만 읽는다.
+  // [v0.26.0→v0.45.0→v0.48.0] 현황(포지션·누적손익)을 20초마다 새로고침.
+  //   [v0.48.0 긴급 수정 — 오너 보고 "익절/손절 완료된 종목이 계속 감시 중으로 남아있다,
+  //   실시간 연동이 안 된다"] 예전엔 이 폴링 전체가 "자동매매 켜짐"(enabled)에 걸려 있었다.
+  //   그런데 마스터 스위치는 앱을 새로 켤 때마다 항상 꺼진 채로 시작한다(설계 원칙 — CLAUDE.md
+  //   "마스터 스위치는 절대 저장 안 함"). 그 사이에 감시 중이던 포지션이 실제로 토스에서
+  //   익절/손절돼도, 오너가 자동매매를 다시 켜거나 [🔄 지금 확인] 버튼을 손으로 누르기
+  //   전까지는 이 화면이 그 사실을 영원히 모른 채 옛 상태("익절/손절 등록됨")를 계속
+  //   보여주고 있었다 — 이게 "실시간 연동이 안 된다"는 보고의 진짜 원인이었다. 익절/손절
+  //   자체는 토스 서버의 조건주문이 마스터 스위치와 무관하게 항상 지켜주므로 실제 계좌는
+  //   안전했지만, **화면이 그 사실을 반영 못 해 오너가 실제 상태를 믿을 수 없게 만든 것**이
+  //   진짜 문제였다.
+  //   이제 "감시할 포지션이 있으면" 마스터 스위치와 무관하게 계속 재확인한다
+  //   (reconcileAutoPositionsNow는 새 주문을 내지 않는 순수 조회 함수라 상시 폴링해도
+  //   안전 규칙에 위배되지 않는다 — 신규 진입 게이트는 이 폴링과 완전히 별개로 항상
+  //   지켜진다). 포지션이 없고 자동매매도 꺼져 있으면 폴링할 이유가 없어 그대로 멈춘다.
   useEffect(() => {
-    if (!autoStatus?.enabled) return;
-    const hasPositions = (autoStatus.positions?.length ?? 0) > 0;
-    const id = setInterval(() => {
+    const hasPositions = (autoStatus?.positions?.length ?? 0) > 0;
+    if (!autoStatus?.enabled && !hasPositions) return;
+    const tick = () => {
       void (hasPositions ? window.kyletool.reconcileAutoPositionsNow() : window.kyletool.autoTradeStatus()).then(setAutoStatus);
-    }, 20_000);
+    };
+    tick(); // [v0.48.0] 20초를 기다리지 않고 이 탭에 들어오거나 상태가 바뀐 즉시 한 번 바로 확인
+    const id = setInterval(tick, 20_000);
     return () => clearInterval(id);
   }, [autoStatus?.enabled, autoStatus?.positions?.length]);
 
@@ -3623,6 +3647,19 @@ ${msg}
                 ⚠️ 가장 최근 스크리닝 시도({new Date(autoStatus.lastScanError.atMs).toLocaleString("ko-KR", { timeZone: "Asia/Seoul", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })} KST)가
                 실패했습니다 — {autoStatus.lastScanError.message}
                 {autoStatus?.enabled && " (다음 5분 사이클에 자동으로 다시 시도합니다 — 계속 실패하면 이 메시지를 그대로 알려주세요.)"}
+              </p>
+            )}
+
+            {/* [v0.48.0 — 오너 보고 "자동매매 시작해도/새로고침해도 반응이 없어 보인다"] 휴무
+                시간대·세션 미활성처럼 "오류는 아니지만 이번엔 의도적으로 스캔을 건너뜀"인
+                경우가 지금까지는 화면 어디에도 안 보였다(저널에만 조용히 남음) — 그래서
+                실제로는 정상 동작 중이어도 "눌러도 반응이 없다"처럼 보였다. 이제 정확한
+                사유를 여기 바로 보여준다(오류색이 아니라 안내색 — 문제가 아니라 설계대로
+                건너뛴 것이므로). 실제로 스캔이 한 번이라도 진행되면 즉시 사라진다. */}
+            {autoStatus?.lastCycleSkipReason && !autoStatus?.lastScanError && (
+              <p className="hint small">
+                ℹ️ 방금 사이클({new Date(autoStatus.lastCycleSkipReason.atMs).toLocaleString("ko-KR", { timeZone: "Asia/Seoul", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })} KST)은
+                건너뛰었습니다 — {autoStatus.lastCycleSkipReason.message}. (오류가 아닙니다 — 다음 사이클에 조건이 바뀌면 정상적으로 스캔합니다.)
               </p>
             )}
 
