@@ -124,12 +124,14 @@ export function installKyleTool(): ToolEngine {
     screener: new Set<(v: unknown) => void>(),
     trades: new Set<(v: unknown) => void>(),
     notify: new Set<(v: unknown) => void>(),
+    groupSync: new Set<(v: unknown) => void>(),
   };
   e.on("journal", (v: unknown) => subs.journal.forEach((f) => f(v)));
   e.on("strength", (v: unknown) => subs.strength.forEach((f) => f(v)));
   e.on("screener:progress", (v: unknown) => subs.screener.forEach((f) => f(v)));
   e.on("trades", (v: unknown) => subs.trades.forEach((f) => f(v)));
   e.on("notify", (v: unknown) => subs.notify.forEach((f) => f(v))); // [v0.32.0] 관찰 확정·주문 알림
+  e.on("groupSync", (v: unknown) => subs.groupSync.forEach((f) => f(v))); // [v0.56.0] 그룹 실시간 동기화
 
   const api = {
     // ── 상태·설정 ──────────────────────────────────────────────
@@ -248,6 +250,13 @@ export function installKyleTool(): ToolEngine {
     autoStateSyncPull: () => e.syncPullAutoState(),
     groupTradesPush: () => e.syncPushGroupTrades(),
     groupTradesPull: () => e.syncPullGroupHistory(),
+    groupSyncEnsure: () => { e.startGroupSyncLoop(); return Promise.resolve({ ok: true }); },
+    onGroupSync: (cb: (v: unknown) => void) => {
+      subs.groupSync.add(cb);
+      return () => subs.groupSync.delete(cb);
+    },
+    groupChatSend: (body: string) => e.sendGroupChatMessage(body),
+    groupChatList: () => e.getGroupChatMessages(),
     tradesStats: () => Promise.resolve(e.getTradeStats()),
     tradesClose: (id: string, exitPrice: number, kind: "tp" | "sl" | "manual") => e.closeTradeManual(id, exitPrice, kind),
     tradesDelete: (id: string) => Promise.resolve(e.deleteTrade(id)),

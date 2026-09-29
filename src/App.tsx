@@ -33,7 +33,11 @@ import { summarizeAutoHistory, summarizeGroupHistory, summarizeByCriteria, autoH
 //   조건들의 활성/비활성·수치를 전부 메뉴얼로 조절하고, 조건별 설명도 펼쳐 볼 수 있게.
 // [v0.33.0] 자동매매 그룹에 "매매연구"(research) 서브탭 신설 — 오너 요청: 자동매매기록을 취합해
 //   승률·종목별/시간대별 성적 같은 매매연구를 할 수 있게.
-const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "autoControl", "autoScan", "screenCriteria", "autoHistory", "research", "orders", "journal", "settings"] as const;
+// [v0.56.0] "그룹원 관리"(groupManage) 탭 신설 — 예전엔 [설정] 안에 가입 승인·이메일 직접 등록이
+//   묻혀 있었다. 오너 요청("그룹원 관리 탭을 통해 승인·수기등록·근황 파악, 채팅까지")에 따라
+//   독립 탭으로 빼고, 그룹원 근황 현황판·채팅을 새로 추가했다. 같은 이유로 "기록"(journal, 예전엔
+//   설정 하위)도 "서버 로그"로 이름을 바꿔 독립 탭으로 뺐다(카테고리 토글 필터 추가, 아래 참고).
+const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "autoControl", "autoScan", "screenCriteria", "autoHistory", "research", "orders", "groupManage", "journal", "settings"] as const;
 type TabId = (typeof ALL_TABS)[number];
 
 /** [v0.27.0] 상단 1단 — 매매방식·성격으로 묶은 그룹. 그룹 버튼을 누르면 하위 탭(2단)이 펼쳐진다. */
@@ -43,16 +47,16 @@ const TOP_GROUP_LABEL: Record<TopGroupId, string> = { manual: "메뉴얼", auto:
 const GROUP_CHILDREN: Record<TopGroupId, TabId[]> = {
   manual: ["calc", "screener", "splits"],
   auto: ["autoControl", "autoScan", "screenCriteria", "autoHistory", "research"],
-  status: ["report", "strength", "orders"],
+  status: ["report", "strength", "orders", "groupManage", "journal"],
   settings: ["settings"],
 };
 const TOP_GROUPS: TopGroupId[] = ["manual", "auto", "status", "settings"];
-/** 리프 탭 → 소속 그룹(역방향 조회용. journal은 화면에 독립 탭으로 없지만 설정 하위 콘텐츠라 settings로 매핑). */
+/** 리프 탭 → 소속 그룹(역방향 조회용). */
 const TAB_GROUP: Record<TabId, TopGroupId> = {
   calc: "manual", screener: "manual", splits: "manual",
   autoControl: "auto", autoScan: "auto", screenCriteria: "auto", autoHistory: "auto", research: "auto",
-  report: "status", strength: "status", orders: "status",
-  journal: "settings", settings: "settings",
+  report: "status", strength: "status", orders: "status", groupManage: "status", journal: "status",
+  settings: "settings",
 };
 
 /** 탭에 보여 줄 이름 */
@@ -68,7 +72,8 @@ const TAB_LABEL: Record<TabId, string> = {
   autoHistory: "자동매매기록",
   research: "매매연구",
   orders: "주문 현황",
-  journal: "기록",
+  groupManage: "👥 그룹원 관리",
+  journal: "서버 로그",
   settings: "설정",
 };
 
@@ -97,6 +102,12 @@ const AUTO_HIST_STATUS_LABEL: Record<AutoTradeHistoryEntry["status"], string> = 
   cancelled: "⏱ 장시간 미체결 자동취소",
   oco_failed: "⚠️ 보호주문 등록 실패",
   dryrun: "🧪 드라이런(연습)",
+};
+
+/** [v0.56.0] "서버 로그" 탭 카테고리 토글 순서 + 아이콘. */
+const JOURNAL_CATEGORIES: JournalCategory[] = ["주문", "인증", "동기화", "자동매매", "시스템", "오류"];
+const JOURNAL_CATEGORY_ICON: Record<JournalCategory, string> = {
+  주문: "🧾", 인증: "🔐", 동기화: "☁️", 자동매매: "🤖", 시스템: "⚙️", 오류: "⚠️",
 };
 
 /**
@@ -655,7 +666,6 @@ function App() {
   //   스캔에 검토된 전체 종목(확정/관찰뿐 아니라 탈락·데이터부족까지) 목록의 펼침 여부.
   //   종목 수가 많으면(최대 200개) 화면이 지저분해지므로 기본은 접힘.
   const [showAllAutoScanResults, setShowAllAutoScanResults] = useState(false);
-  const [showJournal, setShowJournal] = useState(false); // [v0.12.0] 설정 하위 '고급·진단' 기록 펼침
   // [v0.14.0] 손익 색 관습: false=미국식(이익 초록/손실 빨강, 기본), true=한국식(이익 빨강/손실 파랑).
   //   화면 전용 취향이라 이 기기에만 저장(localStorage). CSS 토큰(data-pnl) 한 곳만 바꾸면 전체가 뒤집힌다.
   const [pnlKr, setPnlKr] = useState<boolean>(() => {
@@ -676,6 +686,8 @@ function App() {
   const [chartBusy, setChartBusy] = useState<Set<string>>(new Set());
   const [chartErr, setChartErr] = useState<Record<string, string>>({});
   const [journal, setJournal] = useState<JournalEntry[]>([]);
+  // [v0.56.0] "서버 로그" 탭 카테고리 토글 필터 — 빈 Set이면 "전체 보기"(필터 없음).
+  const [journalCategoryFilter, setJournalCategoryFilter] = useState<Set<JournalCategory>>(new Set());
   // [v0.4.0] 내 삼분할 기록(여러 종목 동시 운용). 저장 목록 + 저장 시 메모 입력칸.
   const [splits, setSplits] = useState<SavedSplit[]>([]);
   const [splitMemo, setSplitMemo] = useState(""); // 계산기에서 [기록 저장] 누를 때 함께 남길 메모
@@ -872,6 +884,11 @@ function App() {
   const [groupMembers, setGroupMembers] = useState<{ email: string; history: AutoTradeHistoryEntry[] }[] | null>(null);
   const [groupResearchBusy, setGroupResearchBusy] = useState(false);
   const [groupResearchMsg, setGroupResearchMsg] = useState("");
+  // [v0.56.0] 그룹 채팅 — [👥 그룹원 관리] 탭.
+  const [groupChat, setGroupChat] = useState<GroupChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatErr, setChatErr] = useState("");
   // [v0.49.0] Raw Data 탭 안에서만 쓰는 원본 소스 선택("내 데이터"/"그룹 전체" 중 어느 쪽 원본을 볼지).
   //   위 researchView와 별도로 두는 이유: Raw Data를 보다가도 groupMembers는 그대로 유지돼야
   //   (다시 안 눌러도) 곧바로 전환할 수 있게.
@@ -887,6 +904,34 @@ function App() {
       setGroupResearchMsg(`⚠️ 불러오기 실패: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setGroupResearchBusy(false);
+    }
+  }
+
+  // [v0.56.0] 그룹 채팅 — [👥 그룹원 관리] 탭에서 쓴다.
+  async function loadGroupChat() {
+    if (chatBusy) return;
+    setChatBusy(true);
+    try {
+      const r = await window.kyletool.groupChatList();
+      if (r.ok) setGroupChat(r.chat);
+    } finally {
+      setChatBusy(false);
+    }
+  }
+  async function doSendChat() {
+    const text = chatInput.trim();
+    if (!text || chatBusy) return;
+    setChatBusy(true);
+    try {
+      const r = await window.kyletool.groupChatSend(text);
+      if (r.ok) {
+        setChatInput("");
+        await loadGroupChat();
+      } else {
+        setChatErr(r.message);
+      }
+    } finally {
+      setChatBusy(false);
     }
   }
   /**
@@ -1038,6 +1083,11 @@ function App() {
     });
     // [v0.7.0] 매매 시 자동 기록된 트레이드가 갱신되면 목록·요약 새로고침
     const offTrd = window.kyletool.onTrades?.(() => void loadAnalysis());
+    // [v0.56.0] "그룹 전체 실시간 동기화" — 로그인 상태면 3분마다 자동으로 push+pull이 돈다
+    //   (groupSyncEnsure는 이미 돌고 있으면 아무 일도 안 하므로 마운트 때 불러도 안전). 받아온
+    //   최신 그룹 기록은 이벤트로 들어오는 대로 화면(매매연구·그룹원 관리 탭)에 바로 반영한다.
+    void window.kyletool.groupSyncEnsure?.();
+    const offGroupSync = window.kyletool.onGroupSync?.((members) => setGroupMembers(members));
     // 업데이트 이벤트 구독(있음/진행률/완료/오류).
     // [v0.32.3] 예전엔 오류를 "조용히 무시"했다(앱이 죽지 않는 건 맞지만, 그 대가로
     //   업데이트가 실패해도 오너가 원인을 전혀 알 수 없었다 — "버튼이 안 눌린다"는 보고의
@@ -1059,6 +1109,7 @@ function App() {
       offScr?.();
       offTrd?.();
       offUpd?.();
+      offGroupSync?.();
     };
   }, []);
 
@@ -1094,6 +1145,8 @@ function App() {
     // [v0.30.0] 자동매매기록 탭을 열 때 최신 기록을 불러온다.
     // [v0.33.0] 매매연구 탭도 같은 기록(autoHistory)을 재료로 통계를 내므로 똑같이 불러온다.
     else if (t === "autoHistory" || t === "research") void loadAutoHistory();
+    // [v0.56.0] 그룹원 관리 탭을 열 때 근황(그룹 기록)·채팅을 바로 불러온다.
+    else if (t === "groupManage") { void loadGroupResearch(); void loadGroupChat(); }
   };
   // [v0.15.0] 2컬럼이 켜지거나 좌/우 패널 탭이 바뀌면 그 탭들의 데이터를 로드한다(1컬럼과 동일한 지연 로딩).
   useEffect(() => {
@@ -2435,6 +2488,10 @@ ${msg}
 
   if (!status) return <div className="loading">Capri 매매도구를 불러오는 중…</div>;
   const isMock = status.mode === "mock";
+  // [v0.56.0] "서버 로그" 탭 — 카테고리 토글이 비어 있으면 전체, 아니면 고른 것만(최신이 위).
+  const filteredJournal = (journalCategoryFilter.size === 0 ? journal : journal.filter((j) => journalCategoryFilter.has(j.category ?? "시스템")))
+    .slice()
+    .reverse();
 
   return (
     <div className="app">
@@ -5017,46 +5074,10 @@ ${msg}
               다른 기기에서는 같은 계정으로 <b>로그인만</b> 하면 키와 매매 이력을 자동으로 받습니다.
               로그인을 안 쓰면 기존처럼 이 기기 안에만 저장됩니다.
             </p>
-
-            {/* [v0.24.0][운영자 전용] 로그인한 이메일이 운영자일 때만 보인다(서버도 RLS로 한 번 더 확인). */}
+            {/* [v0.56.0] 가입 승인·이메일 직접 등록은 [현황 → 👥 그룹원 관리] 탭으로 옮겼다
+                (오너 요청 — 예전엔 여기 설정 안에 묻혀 있었음). */}
             {authState.isOwner && (
-              <div className="settings-block">
-                <h3>📋 가입 승인 대기 ({accessRequests.length}건)</h3>
-                <p className="hint small">
-                  사용 신청이 들어오면 여기 쌓입니다. PC가 꺼져 있어도, 폰으로 로그인만 하면 이 화면에서 바로 처리할 수 있어요.
-                </p>
-                <button className="mini" onClick={loadAccessRequests}>🔄 새로고침</button>
-                {accessRequests.length === 0 ? (
-                  <p className="hint">대기 중인 요청이 없습니다.</p>
-                ) : (
-                  accessRequests.map((r) => (
-                    <div key={r.email} className="form-row">
-                      <span>{r.email}</span>
-                      <button className="btn btn-start" disabled={reqActionBusy === r.email} onClick={() => doApproveRequest(r.email)}>✅ 승인</button>
-                      <button className="mini" disabled={reqActionBusy === r.email} onClick={() => doRejectRequest(r.email)}>거절</button>
-                    </div>
-                  ))
-                )}
-                {/* [v0.53.0 — 오너 요청] 대기 목록에 없어도(요청 자체가 안 남았거나, 미리
-                    등록해 두고 싶을 때) 이메일을 직접 입력해 바로 허용목록에 추가한다. */}
-                <p className="hint small" style={{ marginTop: 12 }}>
-                  또는 요청 목록에 없어도 이메일을 직접 입력해 바로 등록할 수 있어요:
-                </p>
-                <div className="form-row">
-                  <input
-                    type="email"
-                    placeholder="example@gmail.com"
-                    value={directAddEmail}
-                    disabled={directAddBusy}
-                    onChange={(e) => setDirectAddEmail(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter") void doDirectAddEmail(); }}
-                  />
-                  <button className="btn btn-start" disabled={directAddBusy} onClick={() => void doDirectAddEmail()}>
-                    {directAddBusy ? "등록 중…" : "➕ 이메일 등록"}
-                  </button>
-                </div>
-                {directAddMsg && <p className={directAddMsg.startsWith("✅") ? "ok" : "hint"}>{directAddMsg}</p>}
-              </div>
+              <p className="hint small">📋 가입 승인 대기 관리는 [현황 → 👥 그룹원 관리] 탭에서 할 수 있어요.</p>
             )}
           </section>
 
@@ -5212,22 +5233,154 @@ ${msg}
               </label>
             </div>
           </section>
+        </main>
+      )}
 
-          {/* ── ⑥ 고급 · 진단 (도구 기록) — 문제 생겼을 때만 보는 진단 로그. 기본 접힘. ── */}
+      {/* [v0.56.0] "서버 로그" — 예전엔 [설정] 안에 접혀 있던 "고급·도구 기록"을 독립 탭으로
+          뺐다. 카테고리 토글(오너 지시 "카테고리화 토글로 원하는 데이터를 식별")을 추가해
+          문제 확인이 쉽도록 고도화했다. */}
+      {paneTab === "journal" && (
+        <main className="pane">
           <section className="card wide">
-            <button className="mini ghost" onClick={() => setShowJournal((v) => !v)}>
-              {showJournal ? "▾" : "▸"} 🛠 고급 · 도구 기록 (문제 확인용 상세 기록)
-            </button>
-            {showJournal && (
-              <div className="logbox tall" style={{ marginTop: 8 }}>
-                {journal.length === 0 && <div className="logline hint">아직 기록이 없습니다.</div>}
-                {[...journal].reverse().map((j, i) => (
-                  <div key={i} className="logline">
-                    <span className="log-ts">{j.ts}</span> {j.summary}
+            <h2>🛠 서버 로그 (문제 확인용 상세 기록)</h2>
+            <p className="hint">
+              카프리가 실제로 한 일(주문·인증·동기화·자동매매·오류 등)을 시간순으로 전부 남깁니다.
+              아래 카테고리 토글로 원하는 것만 골라 볼 수 있어요(전부 꺼짐 = 전체 표시).
+            </p>
+            <div className="form-row" style={{ flexWrap: "wrap", gap: 8 }}>
+              {JOURNAL_CATEGORIES.map((c) => (
+                <label key={c} className="radio" style={{ cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={journalCategoryFilter.has(c)}
+                    onChange={(e) => {
+                      setJournalCategoryFilter((prev) => {
+                        const next = new Set(prev);
+                        if (e.target.checked) next.add(c); else next.delete(c);
+                        return next;
+                      });
+                    }}
+                  />
+                  <span>{JOURNAL_CATEGORY_ICON[c]} {c}</span>
+                </label>
+              ))}
+              {journalCategoryFilter.size > 0 && (
+                <button className="mini" onClick={() => setJournalCategoryFilter(new Set())}>전체 보기(필터 해제)</button>
+              )}
+            </div>
+            <div className="logbox tall" style={{ marginTop: 8 }}>
+              {filteredJournal.length === 0 && <div className="logline hint">해당하는 기록이 없습니다.</div>}
+              {filteredJournal.map((j, i) => (
+                <div key={i} className="logline">
+                  <span className="log-ts">{j.ts}</span>{" "}
+                  <span className="hint small">[{JOURNAL_CATEGORY_ICON[j.category ?? "시스템"]} {j.category ?? "시스템"}]</span>{" "}
+                  {j.summary}
+                </div>
+              ))}
+            </div>
+          </section>
+        </main>
+      )}
+
+      {/* [v0.56.0] "그룹원 관리" — 가입 승인·이메일 직접 등록(예전엔 설정 안에 있었음)을
+          독립 탭으로 빼고, 그룹원 근황 현황판·그룹 채팅을 새로 추가했다(오너 요청). */}
+      {paneTab === "groupManage" && (
+        <main className="pane">
+          {authState.isOwner && (
+            <section className="card wide">
+              <h2>📋 가입 승인 대기 ({accessRequests.length}건)</h2>
+              <p className="hint">
+                사용 신청이 들어오면 여기 쌓입니다. PC가 꺼져 있어도, 폰으로 로그인만 하면 이 화면에서 바로 처리할 수 있어요.
+              </p>
+              <button className="mini" onClick={loadAccessRequests}>🔄 새로고침</button>
+              {accessRequests.length === 0 ? (
+                <p className="hint">대기 중인 요청이 없습니다.</p>
+              ) : (
+                accessRequests.map((r) => (
+                  <div key={r.email} className="form-row">
+                    <span>{r.email}</span>
+                    <button className="btn btn-start" disabled={reqActionBusy === r.email} onClick={() => doApproveRequest(r.email)}>✅ 승인</button>
+                    <button className="mini" disabled={reqActionBusy === r.email} onClick={() => doRejectRequest(r.email)}>거절</button>
                   </div>
-                ))}
+                ))
+              )}
+              <p className="hint small" style={{ marginTop: 12 }}>
+                또는 요청 목록에 없어도 이메일을 직접 입력해 바로 등록할 수 있어요:
+              </p>
+              <div className="form-row">
+                <input
+                  type="email"
+                  placeholder="example@gmail.com"
+                  value={directAddEmail}
+                  disabled={directAddBusy}
+                  onChange={(e) => setDirectAddEmail(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") void doDirectAddEmail(); }}
+                />
+                <button className="btn btn-start" disabled={directAddBusy} onClick={() => void doDirectAddEmail()}>
+                  {directAddBusy ? "등록 중…" : "➕ 이메일 등록"}
+                </button>
               </div>
+              {directAddMsg && <p className={directAddMsg.startsWith("✅") ? "ok" : "hint"}>{directAddMsg}</p>}
+            </section>
+          )}
+
+          <section className="card wide">
+            <h2>👥 그룹원 근황</h2>
+            <p className="hint">
+              그룹 전체 자동매매기록을 3분마다 자동으로 서로 주고받습니다(로그인 상태일 때만).
+              로그인만 하고 아직 매매 기록을 한 번도 안 올린 그룹원은 "아직 기록 없음"으로 보여요.
+            </p>
+            <button className="mini" disabled={groupResearchBusy} onClick={() => void loadGroupResearch()}>🔄 지금 새로고침</button>
+            {groupMembers === null ? (
+              <p className="hint">아직 안 받아왔습니다 — 위 새로고침을 눌러 주세요(로그인 필요).</p>
+            ) : groupMembers.length === 0 ? (
+              <p className="hint">그룹원 기록이 아직 없습니다.</p>
+            ) : (
+              <table className="result-table">
+                <thead>
+                  <tr><th>이메일</th><th>기록 건수</th><th>마지막 매매</th></tr>
+                </thead>
+                <tbody>
+                  {groupMembers.map((m) => {
+                    const last = m.history[0]; // getAutoTradeHistory와 동일 관례: 최신이 앞
+                    return (
+                      <tr key={m.email}>
+                        <td>{m.email}</td>
+                        <td>{m.history.length}건</td>
+                        <td>{last ? `${last.symbol} · ${last.enteredAt}` : "아직 기록 없음"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             )}
+          </section>
+
+          <section className="card wide">
+            <h2>💬 그룹 채팅</h2>
+            <p className="hint">가입 허용목록에 있는 그룹원 전원이 실명으로 함께 보는 대화방입니다.</p>
+            <button className="mini" disabled={chatBusy} onClick={() => void loadGroupChat()}>🔄 새로고침</button>
+            <div className="logbox tall" style={{ marginTop: 8 }}>
+              {groupChat.length === 0 && <div className="logline hint">아직 메시지가 없습니다.</div>}
+              {groupChat.map((m) => (
+                <div key={m.id} className="logline">
+                  <span className="log-ts">{DateTime.fromISO(m.createdAt).setZone("Asia/Seoul").toFormat("MM-dd HH:mm")}</span>{" "}
+                  <b>{m.email}</b>: {m.body}
+                </div>
+              ))}
+            </div>
+            <div className="form-row" style={{ marginTop: 8 }}>
+              <input
+                style={{ flex: 1 }}
+                placeholder="메시지 입력…"
+                value={chatInput}
+                disabled={chatBusy}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") void doSendChat(); }}
+              />
+              <button className="btn btn-start" disabled={chatBusy || !chatInput.trim()} onClick={() => void doSendChat()}>전송</button>
+            </div>
+            {chatErr && <p className="hint">⚠️ {chatErr}</p>}
           </section>
         </main>
       )}

@@ -106,6 +106,14 @@ contextBridge.exposeInMainWorld("kyletool", {
   autoStateSyncPull: () => ipcRenderer.invoke("tool:autostatesync:pull"), // [v0.31.0] 로그인 시 자동 호출됨
   groupTradesPush: () => ipcRenderer.invoke("tool:grouptrades:push"), // [v0.35.0] 그룹 공유(평문)
   groupTradesPull: () => ipcRenderer.invoke("tool:grouptrades:pull"), // [v0.35.0] 그룹 전원 기록 받기
+  groupSyncEnsure: () => ipcRenderer.invoke("tool:groupsync:ensure"), // [v0.56.0] 실시간 자동 동기화 시작(이미 돌면 무해)
+  onGroupSync: (cb) => {
+    const h = (_ev, members) => cb(members);
+    ipcRenderer.on("tool:groupSyncEvent", h);
+    return () => ipcRenderer.removeListener("tool:groupSyncEvent", h);
+  },
+  groupChatSend: (body) => ipcRenderer.invoke("tool:groupchat:send", body), // [v0.56.0] 그룹 채팅
+  groupChatList: () => ipcRenderer.invoke("tool:groupchat:list"),
   tradesStats: () => ipcRenderer.invoke("tool:trades:stats"),
   tradesClose: (id, exitPrice, kind) => ipcRenderer.invoke("tool:trades:close", id, exitPrice, kind),
   tradesDelete: (id) => ipcRenderer.invoke("tool:trades:delete", id),

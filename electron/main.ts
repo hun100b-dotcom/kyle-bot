@@ -352,6 +352,13 @@ function registerIpc(e: ToolEngine): void {
   // [v0.35.0] 그룹(공동개발자) 전체 연구용 공유 — 평문, 본인 것만 올리고 전원 것을 받아온다
   ipcMain.handle("tool:grouptrades:push", () => e.syncPushGroupTrades());
   ipcMain.handle("tool:grouptrades:pull", () => e.syncPullGroupHistory());
+  // [v0.56.0] "그룹 전체 실시간 동기화" — 로그인 상태면 3분마다 자동으로 push+pull을 돈다.
+  //   화면이 켜질 때마다(마운트 시) 불러도 안전(이미 돌고 있으면 아무 일도 안 함).
+  ipcMain.handle("tool:groupsync:ensure", () => { e.startGroupSyncLoop(); return { ok: true }; });
+  e.on("groupSync", (members) => win?.webContents.send("tool:groupSyncEvent", members));
+  // [v0.56.0] 그룹 채팅 — 가입 허용목록 전원이 실명으로 함께 쓰는 대화방.
+  ipcMain.handle("tool:groupchat:send", (_ev, body: string) => e.sendGroupChatMessage(body));
+  ipcMain.handle("tool:groupchat:list", () => e.getGroupChatMessages());
   ipcMain.handle("tool:trades:stats", () => e.getTradeStats());
   ipcMain.handle("tool:trades:close", (_ev, id: string, exitPrice: number, kind: "tp" | "sl" | "manual") => e.closeTradeManual(id, exitPrice, kind));
   ipcMain.handle("tool:trades:delete", (_ev, id: string) => e.deleteTrade(id));

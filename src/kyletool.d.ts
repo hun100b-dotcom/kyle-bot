@@ -80,11 +80,15 @@ interface DailyReport {
   truncated?: boolean;
 }
 
+/** [v0.56.0] "서버 로그" 탭의 카테고리 토글 필터가 쓰는 대분류. */
+type JournalCategory = "주문" | "인증" | "동기화" | "자동매매" | "시스템" | "오류";
+
 interface JournalEntry {
   ts: string;
   kind: "entry" | "oco" | "oto" | "cancel" | "dryrun" | "info";
   symbol: string;
   summary: string;
+  category?: JournalCategory;
 }
 
 /** [v0.32.0] 자동매매 관찰 확정·주문 알림 — PC/폰이 각자 Notification API로 띄운다. */
@@ -180,6 +184,14 @@ interface AutoTradeStatus {
   /** [v0.40.0] auto 모드에서 "이번 실행" 동안 고정해 쓰는 시드 스냅샷(달러). fixed 모드거나
    *  아직 계산 전이면 null. */
   seedUsdSnapshot: number | null;
+}
+
+/** [v0.56.0] 그룹 채팅 메시지 한 줄(capri_group_chat). */
+interface GroupChatMessage {
+  id: number;
+  email: string;
+  body: string;
+  createdAt: string; // ISO(UTC) — 화면에서 로컬 시각으로 변환해 표시
 }
 
 /** [v0.30.0] 자동매매기록 한 줄 — "자동매매기록" 탭이 그대로 보여준다. */
@@ -760,6 +772,13 @@ interface KyletoolBridge {
   /** [v0.35.0] 그룹(공동개발자) 전체 연구용 공유 — 평문, 비식별화 없음(오너 지시). */
   groupTradesPush(): Promise<{ ok: boolean; message: string; count?: number }>;
   groupTradesPull(): Promise<{ ok: boolean; message: string; members: { email: string; history: AutoTradeHistoryEntry[] }[] }>;
+  /** [v0.56.0] "그룹 전체 실시간 동기화" — 로그인 상태면 3분마다 자동으로 push+pull. 마운트 시
+   *  아무 때나 불러도 안전(이미 돌고 있으면 아무 일도 안 함). 결과는 onGroupSync로 받는다. */
+  groupSyncEnsure(): Promise<{ ok: boolean }>;
+  onGroupSync(cb: (members: { email: string; history: AutoTradeHistoryEntry[] }[]) => void): () => void;
+  /** [v0.56.0] 그룹 채팅 — 가입 허용목록 전원이 실명으로 함께 쓰는 대화방. */
+  groupChatSend(body: string): Promise<{ ok: boolean; message: string }>;
+  groupChatList(): Promise<{ ok: boolean; message: string; chat: GroupChatMessage[] }>;
   tradesStats(): Promise<TradeStats>;
   tradesClose(id: string, exitPrice: number, kind: "tp" | "sl" | "manual"): Promise<StrengthTrade[]>;
   tradesDelete(id: string): Promise<StrengthTrade[]>;

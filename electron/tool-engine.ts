@@ -261,6 +261,10 @@ export interface CondOrderRow {
   isOpen: boolean; //              진행 중(삭제 가능) 여부
 }
 
+/** [v0.56.0] "서버 로그" 탭의 카테고리 토글 필터가 쓰는 대분류.
+ *  addJournal이 kind·summary 문구로 자동 판정해 채운다(호출부를 일일이 안 고쳐도 되게). */
+export type JournalCategory = "주문" | "인증" | "동기화" | "자동매매" | "시스템" | "오류";
+
 /** 주문/기록 저널 한 줄(파일로 영속) */
 export interface JournalEntry {
   ts: string;
@@ -274,6 +278,28 @@ export interface JournalEntry {
   notify?: boolean;
   /** notify=true일 때 알림 제목(짧게). 없으면 addJournal이 일반 제목으로 채운다. */
   notifyTitle?: string;
+  /** [v0.56.0 — 오너 지시 "서버 로그의 기능 고도화... 카테고리화 토글로 원하는 데이터를
+   *  식별할 수 있게"] addJournal이 자동으로 채운다(호출부에서 명시적으로 안 넣어도 됨). */
+  category?: JournalCategory;
+}
+
+/**
+ * [v0.56.0] classifyJournalEntry — 저널 한 줄을 6개 대분류 중 하나로 자동 분류한다.
+ *   호출부(수백 곳)를 일일이 고쳐 카테고리를 명시하게 하는 대신, kind와 summary 문구만으로
+ *   합리적으로 추정한다(순수 함수라 테스트 가능). 오너가 "서버 로그" 탭에서 카테고리 토글로
+ *   필요한 것만 골라 보고 싶다는 요청에 따른 것 — 완벽한 분류가 목적이 아니라, 지금까지
+ *   전부 "기타"로 뭉뚱그려 보이던 것을 실전에서 쓸 만한 수준으로 나누는 것이 목적이다.
+ *   우선순위: ①오류(문구에 실패·오류 표시) → ②주문(kind 기준, 가장 명확) → ③문구 키워드로
+ *   인증/동기화/자동매매 순서로 추정 → ④나머지는 시스템.
+ */
+export function classifyJournalEntry(e: Pick<JournalEntry, "kind" | "summary">): JournalCategory {
+  const s = e.summary;
+  if (/⚠️|실패|오류/.test(s)) return "오류";
+  if (e.kind === "entry" || e.kind === "oco" || e.kind === "oto" || e.kind === "cancel" || e.kind === "dryrun") return "주문";
+  if (/로그인|로그아웃|가입|승인|CAPRI_NOT_ALLOWED/.test(s)) return "인증";
+  if (/동기화|그룹|공유|클라우드|받았습니다|채팅/.test(s)) return "동기화";
+  if (/자동매매|스크리닝|스캔|관찰 확정|킬 스위치/.test(s)) return "자동매매";
+  return "시스템";
 }
 
 /** [v0.32.0] addJournal이 notify:true인 저널마다 함께 내보내는 알림 이벤트.
@@ -283,6 +309,14 @@ export interface NotifyEvent {
   body: string;
   symbol: string;
   ts: string;
+}
+
+/** [v0.56.0] 그룹 채팅 메시지 한 줄(capri_group_chat). */
+export interface GroupChatMessage {
+  id: number;
+  email: string;
+  body: string;
+  createdAt: string; // ISO(UTC) — 화면에서 로컬 시각으로 변환해 표시
 }
 
 // -----------------------------------------------------------------------------
@@ -1088,6 +1122,11 @@ export class ToolEngine extends EventEmitter {
   private lastSyncPushAtMs: number | null = null;
   private lastAutoStatePushAtMs: number | null = null; // [v0.31.0] 자동매매 기록 업로드 쓰로틀용
   private lastGroupPushAtMs: number | null = null; // [v0.35.0] 그룹 공유(capri_group_trades) 업로드 쓰로틀용
+  /** [v0.56.0] "그룹 전체 실시간 동기화" — 로그인해 있는 동안 주기적으로 내 기록을 올리고
+   *  그룹 전체 기록을 받아온다(버튼을 눌러야만 동작하던 걸 자동화). 로그인 안 돼 있으면
+   *  절대 안 돈다(startGroupSyncLoop 참고). */
+  private groupSyncTimer: ReturnType<typeof setInterval> | null = null;
+  private static readonly GROUP_SYNC_INTERVAL_MS = 3 * 60_000; // 3분마다
   /** [v0.35.0] "스크리닝은 확정인데 왜 안 사졌지?"를 화면에서 바로 보이게 — 사이클마다 다시 채움
    *  (지난 사이클 이유가 이번 사이클에도 그대로 남아 헷갈리는 일이 없도록 매번 초기화). */
   private autoTradeSkipReasons: Record<string, string> = {};
@@ -1859,6 +1898,8 @@ export class ToolEngine extends EventEmitter {
       void this.syncPushGroupTrades().catch(() => {
         /* 조용히 무시 */
       });
+      // [v0.56.0] "그룹 전체 실시간 동기화" — 로그인한 순간부터 3분마다 자동으로 올리고/받아온다.
+      this.startGroupSyncLoop();
 
       return { ok: true, message: `로그인되었습니다(${this.authEmail}).${extra}` };
     } catch (e) {
@@ -1868,6 +1909,7 @@ export class ToolEngine extends EventEmitter {
 
   /** 로그아웃 — 세션 지우고 저장에서도 제거(토스 키/설정은 그대로 남는다). */
   authSignOut(): { ok: boolean } {
+    this.stopGroupSyncLoop(); // [v0.56.0] 로그아웃하면 그룹 자동 동기화도 즉시 멈춘다.
     this.authAccessToken = null;
     this.authRefreshToken = null;
     this.authEmail = null;
@@ -3822,12 +3864,44 @@ export class ToolEngine extends EventEmitter {
   //   비식별화하지 않는다 — 오너 지시 그대로 이메일을 그대로 올린다.
   // ---------------------------------------------------------------------------
 
-  /** syncPushGroupTrades — 내 자동매매기록 전체를 평문 그대로 그룹 공유 표에 올린다(암호화 없음). */
+  /**
+   * syncPushGroupTrades — 내 자동매매기록 전체를 평문 그대로 그룹 공유 표에 올린다(암호화 없음).
+   *
+   * [v0.56.0 긴급 수정] capri_group_trades는 `user_id` 기준 "행 전체"를 통째로 덮어쓰는
+   *   업서트(on_conflict=user_id)다. 카프리는 과거에 "로그인 비밀번호 하나로 통합"해서 쓰던
+   *   시절이 있었고(CLAUDE.md 참고), 지금도 같은 계정을 여러 기기에서 같이 쓰는 경우가 있을 수
+   *   있는데 — 그런 상황에서 기기 A가 자기 로컬 기록(예: 10건)만으로 이 행을 덮어쓰면, 기기
+   *   B가 조금 전에 올려 둔 기록(A가 모르는 것)이 통째로 사라진다. "그룹 전체 실시간 동기화"를
+   *   철저히 하려면 이 쓰기 경합이 데이터를 잃어버리면 안 된다. 그래서 올리기 전에 서버에 이미
+   *   있는 내용을 먼저 받아와, 이 기기가 모르는 기록(다른 기기가 남긴 것)은 살려 두고 합쳐서
+   *   올린다. 같은 id(종목@진입가@진입시각)가 양쪽에 있으면 **"더 진행된 상태"가 이긴다**
+   *   (watching(0) < active(1) < 끝난 상태(2)) — 단순 "이 기기가 무조건 최신"으로 덮어쓰면,
+   *   이 기기가 옛 상태(예: watching)를 여태 못 받아온 사이 다른 기기가 이미 그 매매를
+   *   closed로 끝내고 올려 둔 걸 되돌려 버리는 사고가 날 수 있다(2차 검토에서 발견 — 상태
+   *   전이는 절대 거꾸로 안 간다는 성질을 이용해 항상 안전한 쪽으로만 병합). 이 규칙은
+   *   `syncPullAutoState`(개인용 기기 간 동기화)가 이미 쓰는 것과 완전히 같은 함수
+   *   (`mergeAutoHistory`, lib/auto-state-sync.ts)를 그대로 재사용한다 — 새 규칙을 또
+   *   만들지 않는다.
+   */
   async syncPushGroupTrades(): Promise<{ ok: boolean; message: string; count?: number }> {
     const token = await this.ensureAccessToken();
     if (!token) return { ok: false, message: "먼저 로그인하세요." };
     if (!this.authEmail || !this.authUserId) return { ok: false, message: "로그인 정보가 없습니다." };
     if (this.autoTradeHistory.length === 0) return { ok: false, message: "올릴 자동매매 기록이 없습니다." };
+
+    let merged: AutoTradeHistoryEntry[] = this.autoTradeHistory;
+    try {
+      const existing = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_trades?user_id=eq.${this.authUserId}&select=history`, {
+        headers: this.authRestHeaders(token),
+      });
+      if (existing.ok) {
+        const rows = (await existing.json()) as Array<{ history: unknown }>;
+        const remoteHistory = Array.isArray(rows[0]?.history) ? (rows[0].history as AutoTradeHistoryEntry[]) : [];
+        merged = mergeAutoHistory(this.autoTradeHistory, remoteHistory);
+      }
+    } catch {
+      // 병합용 조회 실패 — 이 기기가 아는 기록만으로라도 올린다(완전 실패보단 낫다).
+    }
 
     try {
       const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_trades?on_conflict=user_id`, {
@@ -3836,13 +3910,13 @@ export class ToolEngine extends EventEmitter {
         body: JSON.stringify({
           user_id: this.authUserId,
           member_email: this.authEmail,
-          history: this.autoTradeHistory,
+          history: merged,
           updated_at: new Date().toISOString(),
         }),
       });
       if (!res.ok) return { ok: false, message: `그룹 공유 저장 실패(HTTP ${res.status}).` };
       this.lastGroupPushAtMs = Date.now();
-      return { ok: true, message: `그룹에 자동매매 기록 ${this.autoTradeHistory.length}건을 공유했습니다.`, count: this.autoTradeHistory.length };
+      return { ok: true, message: `그룹에 자동매매 기록 ${merged.length}건을 공유했습니다.`, count: merged.length };
     } catch (e) {
       return { ok: false, message: `공유 실패: ${e instanceof Error ? e.message : String(e)}` };
     }
@@ -3865,6 +3939,84 @@ export class ToolEngine extends EventEmitter {
       return { ok: true, message: `그룹 회원 ${members.length}명의 자동매매기록을 받았습니다.`, members };
     } catch (e) {
       return { ok: false, message: `받기 실패: ${e instanceof Error ? e.message : String(e)}`, members: [] };
+    }
+  }
+
+  /**
+   * [v0.56.0] "그룹 전체 실시간 동기화" — 오너 지시: 버튼을 눌러야만 올리고/받던 걸 자동화.
+   *   로그인해 있는 동안(자동매매 켜짐 여부와 무관) 3분마다 스스로 ①내 기록을 올리고(있으면)
+   *   ②그룹 전체 기록을 받아와 "groupSync" 이벤트로 화면에 뿌린다. 실계좌 주문과 무관한
+   *   "내 기록 공유"일 뿐이라 자동매매급 안전장치는 필요 없지만, 그래도 앱이 켜져 있는 동안만
+   *   돈다는 원칙(자동매매와 동일)은 지킨다 — 로그아웃하면 즉시 멈춘다.
+   */
+  startGroupSyncLoop(): void {
+    if (this.groupSyncTimer) return; // 이미 돌고 있음
+    if (!this.authAccessToken && !this.authRefreshToken) return; // 로그인 안 돼 있으면 시작 안 함
+    void this.groupSyncTick(); // 기다리지 않고 즉시 1회(다음 3분을 기다리지 않게)
+    this.groupSyncTimer = setInterval(() => void this.groupSyncTick(), ToolEngine.GROUP_SYNC_INTERVAL_MS);
+  }
+
+  stopGroupSyncLoop(): void {
+    if (this.groupSyncTimer) {
+      clearInterval(this.groupSyncTimer);
+      this.groupSyncTimer = null;
+    }
+  }
+
+  private async groupSyncTick(): Promise<void> {
+    try {
+      if (this.autoTradeHistory.length > 0) await this.syncPushGroupTrades();
+      const pulled = await this.syncPullGroupHistory();
+      if (pulled.ok) this.emit("groupSync", pulled.members);
+    } catch {
+      // 한 사이클 실패는 조용히 넘어간다 — 다음 3분에 다시 시도(자가 복구, 자동매매 사이클과 동일 원칙).
+    }
+  }
+
+  // -----------------------------------------------------------------------------
+  // [v0.56.0] 그룹 채팅 — 오너 지시: "그룹원끼리의 근황 현황파악 가능하도록 CHAT 기능도 도입".
+  //   capri_group_trades와 같은 원칙(비공개 그룹, 실명, 비식별화 없음) — 가입 허용목록에 있는
+  //   사람이면 누구나 전체 대화를 보고 쓸 수 있다(마이그레이션의 RLS 정책 참고).
+  // -----------------------------------------------------------------------------
+
+  /** sendGroupChatMessage — 그룹 채팅에 메시지 한 줄을 남긴다. */
+  async sendGroupChatMessage(body: string): Promise<{ ok: boolean; message: string }> {
+    const text = body.trim();
+    if (!text) return { ok: false, message: "빈 메시지는 보낼 수 없습니다." };
+    if (text.length > 2000) return { ok: false, message: "메시지가 너무 깁니다(2000자 이하)." };
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요." };
+    if (!this.authEmail || !this.authUserId) return { ok: false, message: "로그인 정보가 없습니다." };
+    try {
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_chat`, {
+        method: "POST",
+        headers: { ...this.authRestHeaders(token), Prefer: "return=minimal" },
+        body: JSON.stringify({ user_id: this.authUserId, member_email: this.authEmail, body: text }),
+      });
+      if (!res.ok) return { ok: false, message: `채팅 전송 실패(HTTP ${res.status}).` };
+      return { ok: true, message: "전송했습니다." };
+    } catch (e) {
+      return { ok: false, message: `전송 실패: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+
+  /** getGroupChatMessages — 최근 그룹 채팅을 오래된순으로 받아온다(최대 200개). */
+  async getGroupChatMessages(): Promise<{ ok: boolean; message: string; chat: GroupChatMessage[] }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요.", chat: [] };
+    try {
+      const res = await fetch(
+        `${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_chat?select=id,member_email,body,created_at&order=created_at.desc&limit=200`,
+        { headers: this.authRestHeaders(token) },
+      );
+      if (!res.ok) return { ok: false, message: `채팅 조회 실패(HTTP ${res.status}).`, chat: [] };
+      const rows = (await res.json()) as Array<{ id: number; member_email: string; body: string; created_at: string }>;
+      const chat: GroupChatMessage[] = rows
+        .map((r) => ({ id: r.id, email: r.member_email, body: r.body, createdAt: r.created_at }))
+        .reverse(); // 서버는 최신순으로 주므로, 화면(위→아래 시간순) 표시를 위해 뒤집는다.
+      return { ok: true, message: `메시지 ${chat.length}건을 받았습니다.`, chat };
+    } catch (e) {
+      return { ok: false, message: `조회 실패: ${e instanceof Error ? e.message : String(e)}`, chat: [] };
     }
   }
 
@@ -5763,7 +5915,11 @@ export class ToolEngine extends EventEmitter {
   }
 
   private addJournal(e: Omit<JournalEntry, "ts">): JournalEntry {
-    const entry: JournalEntry = { ts: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"), ...e };
+    const entry: JournalEntry = {
+      ts: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
+      ...e,
+      category: e.category ?? classifyJournalEntry(e),
+    };
     this.journal.push(entry);
     if (this.journal.length > 1000) this.journal.shift();
     // 원자적 저장(임시 파일 → 교체): 쓰다 만 파일 방지
