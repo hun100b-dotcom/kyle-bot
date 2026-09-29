@@ -735,8 +735,20 @@ export interface BracketSpec {
 export type WatchAndBracketResult =
   | { status: "oco_registered"; conditionalOrderId: string }
   | { status: "oco_failed"; error: string }
+  /** [v0.54.0 긴급 수정 — 오너 보고 "장시간 미체결 취소 시간 반영이 제대로 안 됨"]
+   *  폴링 도중(아직 우리 감시 마감 전) 토스가 이미 "취소됨"/"실패"로 응답하면 여기로 온다 —
+   *  킬스위치·[주문현황]에서의 직접 취소 등 **우리(타임아웃 로직) 아닌 다른 경로**로 이미
+   *  끝난 걸 뒤늦게 발견한 것이다. 예전엔 이것도 아래 `cancelled_by_timeout`과 똑같이
+   *  "cancelled"라는 같은 문자열로 뭉뚱그려 돌려줘서, onAutoBracketResolved가 실제로는
+   *  타임아웃이 아닌 취소까지도 전부 "장시간 미체결로 자동 취소"라고 잘못 기록했다 — 오너가
+   *  본 "설정한 30분이 아니라 15분 만에 취소됨"류 증상이 실은 타임아웃이 아니라 이 경로였을
+   *  가능성이 크다(같은 문자열이라 기록만 봐서는 구분이 안 됐다). */
   | { status: "cancelled" | "failed" }
   | { status: "timeout" }
+  /** [v0.54.0] 위와 달리, 우리 감시 마감 시각(watchMinutes)이 실제로 다 돼서 cancelOnTimeout
+   *  로직이 스스로 취소를 요청했고, 토스도 그 취소를 실제로 "CANCELED"로 확인해 준 경우만
+   *  이 상태를 쓴다 — "장시간 미체결로 자동 취소"라는 문구는 이제 이 경우에만 정확하다. */
+  | { status: "cancelled_by_timeout" }
   /** [v0.52.0] 장시간 미체결 자동취소(cancelOnTimeout) 경로에서 취소 API 호출 자체는
    *  예외 없이 끝났지만, 그 응답이 아직 "cancelled"가 아닌 경우(막판 체결과의 경쟁 등) —
    *  "끝났다"고 믿고 감시를 놓아버리면 실제 주문은 토스에 그대로 남는데 우리 쪽 감시
@@ -2721,7 +2733,15 @@ export class ToolEngine extends EventEmitter {
     rationale?: RationaleInput;
   }): Promise<JournalEntry> {
     const symbol = spec.symbol.toUpperCase();
-    const cur = await this.orderGate(symbol); // 사전차단용 아님(막지 않음) — 현재가 참고·경고용
+    // [v0.54.0 긴급 수정 — 오너 보고 "프로퓨사가 현재가 대비 터무니없이 높은 가격에 조건주문이
+    //   걸림"] 이 함수는 그동안 orderGate()를 가격 인자 없이 불러(`orderGate(symbol)`), [설정 →
+    //   주문 편의·안전 옵션]에서 오너가 "오입력 방지"(현재가와 너무 동떨어진 가격이면 주문을
+    //   막는 안전장치, priceGuardEnabled)를 켜 놨어도 이 OTO(예약 매수+익절) 경로만은 그 검사를
+    //   아예 받지 않았다 — placeBracketCore(수동 브라켓·자동매매 진입)는 이미
+    //   `orderGate(symbol, [spec.price])`로 진입가를 검사받고 있었는데, 이 함수만 빠져 있던
+    //   구멍이었다. 진입가·익절가 둘 다 넘겨 같은 보호를 받게 한다(켜져 있을 때만 실제로
+    //   차단되며, 기본은 여전히 꺼짐 — 오너 결정 유지, 동작 변화 없음).
+    const cur = await this.orderGate(symbol, [spec.entryPrice, spec.tpPrice]);
     // [막지 않는다] 통상 진입가는 현재가 이하, 익절가는 진입가 위다. 어긋나도 전송하고 토스 판단에 맡긴다.
     if (!(spec.tpTrigger > spec.entryTrigger)) {
       this.addJournal({
@@ -3051,7 +3071,9 @@ export class ToolEngine extends EventEmitter {
       notify: true,
       notifyTitle: `⏱ 미체결 자동 취소: ${symbol}`,
     });
-    return { status: "cancelled" };
+    // [v0.54.0] 여기가 진짜 "장시간 미체결 자동취소"다 — 위 폴링 도중 감지되는 일반 "cancelled"와
+    //   구분되는 전용 상태로 돌려줘야 onAutoBracketResolved가 정확한 사유를 기록할 수 있다.
+    return { status: "cancelled_by_timeout" };
   }
 
   // --------------------------------------------------------------------------
@@ -4980,10 +5002,20 @@ export class ToolEngine extends EventEmitter {
       this.autoTradePositions.splice(idx, 1);
       this.saveAutoPositions();
       const closedAt = DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss");
-      if (res.status === "cancelled") {
-        // [v0.29.0] watchAndBracket의 cancelOnTimeout 경로 — 장시간 미체결로 자동 취소됨.
+      if (res.status === "cancelled_by_timeout") {
+        // [v0.29.0→v0.54.0] watchAndBracket이 스스로 감시시간 만료로 취소를 "요청했고 토스가
+        //   실제로 CANCELED로 확인해 준" 경우만 — 진짜 "장시간 미체결" 사유.
         this.updateAutoTradeHistory(symbol, entry, enteredAtMs, {
           status: "cancelled", exitedAt: closedAt, note: "장시간 미체결로 자동 취소(다음 사이클에 새 후보로 대체)",
+        });
+      } else if (res.status === "cancelled") {
+        // [v0.54.0 긴급 수정 — 오너 보고 "취소 시간 반영이 제대로 안 됨"] 감시 마감 전에 폴링
+        //   도중 이미 취소/거부된 걸 발견한 경우 — 우리 타임아웃 로직이 취소한 게 아니라, 킬스위치·
+        //   [주문현황]에서의 직접 취소 등 다른 경로로 먼저 끝난 것이다. 예전엔 이것도 "cancelled"로
+        //   뭉뚱그려져 위와 똑같이 "장시간 미체결"로 잘못 기록됐다 — 이제 정직하게 구분해서 남긴다.
+        this.updateAutoTradeHistory(symbol, entry, enteredAtMs, {
+          status: "cancelled", exitedAt: closedAt,
+          note: "설정한 감시시간이 되기 전에 이미 취소된 것을 확인했습니다(킬스위치 또는 [주문현황]에서 직접 취소했을 수 있음 — 장시간 미체결 자동취소가 아닙니다)",
         });
       } else if (res.status === "oco_failed") {
         this.updateAutoTradeHistory(symbol, entry, enteredAtMs, {

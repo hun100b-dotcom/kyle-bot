@@ -18,7 +18,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ToolEngine, type JournalEntry } from "../electron/tool-engine";
+import { ToolEngine, type JournalEntry, type AutoPosition, type WatchAndBracketResult } from "../electron/tool-engine";
 
 /** 폴링 루프가 만드는 저널 항목은 시점을 예측할 수 없어 이벤트로 기다린다. */
 function waitForJournal(eng: ToolEngine, match: (e: JournalEntry) => boolean, timeoutMs = 3000): Promise<JournalEntry> {
@@ -264,4 +264,159 @@ describe("매수+익절+손절 동시 주문(브라켓) — v0.25.0", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 10_000);
+});
+
+describe("[v0.54.0 긴급 수정] placeOto — '오입력 방지' 가격가드가 예약 매수+익절 경로도 실제로 검사한다(프로퓨사 실사례 회귀)", () => {
+  // AAPL 목 서버 기본 현재가는 2.05 — 이 값 대비 터무니없이 먼 진입가/익절가를 넣어
+  // 재현한다(오너 보고: 프로퓨사가 현재가와 동떨어진 가격에 조건주문이 걸림).
+  it("오입력 방지가 켜져 있으면, 현재가와 너무 동떨어진 진입가를 넣었을 때 주문을 막는다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-oto-guard-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.setPriceGuard(true, 15); // ±15%까지만 허용
+      await expect(
+        eng.placeOto({
+          symbol: "AAPL",
+          quantity: 1,
+          entryTrigger: 40, // 현재가 2.05의 약 20배 — 명백한 오입력
+          entryPrice: 40,
+          tpTrigger: 41,
+          tpPrice: 41,
+          expireDate: "2026-12-30",
+        }),
+      ).rejects.toThrow(/오입력 방지/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("오입력 방지가 켜져 있으면, 현재가와 너무 동떨어진 익절가만 벗어나도 막는다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-oto-guard2-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.setPriceGuard(true, 15);
+      await expect(
+        eng.placeOto({
+          symbol: "AAPL",
+          quantity: 1,
+          entryTrigger: 2.0, // 진입가는 정상 범위
+          entryPrice: 2.0,
+          tpTrigger: 50, // 익절가만 터무니없이 높음
+          tpPrice: 50,
+          expireDate: "2026-12-30",
+        }),
+      ).rejects.toThrow(/오입력 방지/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("오입력 방지가 켜져 있어도, 현재가에 가까운 정상적인 가격은 그대로 통과한다(회귀 없음)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-oto-guard3-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.setPriceGuard(true, 15);
+      const j = await eng.placeOto({
+        symbol: "AAPL",
+        quantity: 1,
+        entryTrigger: 2.0,
+        entryPrice: 2.0,
+        tpTrigger: 2.1,
+        tpPrice: 2.1,
+        expireDate: "2026-12-30",
+      });
+      expect(j.kind).toBe("oto");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("오입력 방지가 꺼져 있으면(기본값) 동떨어진 가격도 그대로 전송한다(오너 결정 — 기본 동작 유지)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-oto-guard4-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      // setPriceGuard를 호출하지 않음 — 기본값(꺼짐) 그대로.
+      const j = await eng.placeOto({
+        symbol: "AAPL",
+        quantity: 1,
+        entryTrigger: 40,
+        entryPrice: 40,
+        tpTrigger: 41,
+        tpPrice: 41,
+        expireDate: "2026-12-30",
+      });
+      expect(j.kind).toBe("oto");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("[v0.54.0 긴급 수정] onAutoBracketResolved — '장시간 미체결 자동취소'와 '그 외 취소'를 서로 다른 사유로 기록한다", () => {
+  // [배경] watchAndBracket()이 두 가지 서로 다른 상황("① 우리가 감시시간(watchMinutes)이 다 돼서
+  //   직접 취소를 요청했고 토스가 실제로 CANCELED로 확인해 줌" vs "② 감시 마감 전에 폴링 도중
+  //   토스가 이미 취소/거부 상태임을 발견함 — 킬스위치나 [주문현황]에서 직접 취소했을 수 있음")을
+  //   예전엔 똑같이 `{status:"cancelled"}` 문자열 하나로 돌려줘서, onAutoBracketResolved가 ②까지도
+  //   전부 "장시간 미체결로 자동 취소"라고 잘못 기록했다(오너 보고: "취소 시간 반영이 제대로 안
+  //   됨" — 실제로는 타임아웃이 아니었는데 타임아웃이라고 적혔을 가능성). 이제 watchAndBracket이
+  //   ①은 `cancelled_by_timeout`, ②는 그대로 `cancelled`로 서로 다르게 돌려주므로, 이 테스트는
+  //   onAutoBracketResolved가 그 두 값을 받았을 때 실제로 다른 문구를 남기는지 직접 검증한다.
+  //   (watchAndBracket 자체가 두 상황에서 각각 어느 값을 돌려주는지는 위 "감시 중 진입 주문이
+  //   취소되면"/"cancelOnTimeout이 켜져 있으면" 테스트가 이미 커버한다 — 여기서는 그 결과를 받은
+  //   뒤의 "기록 문구 분기"만 별도로 고정한다.)
+  type EngineInternals = {
+    autoTradePositions: AutoPosition[];
+    addAutoTradeHistory: (pos: AutoPosition) => void;
+    onAutoBracketResolved: (symbol: string, entry: number, res: WatchAndBracketResult) => void;
+  };
+
+  function pushWatchingPosition(eng: ToolEngine, symbol: string, entry: number, enteredAtMs: number): void {
+    const engAny = eng as unknown as EngineInternals;
+    const pos: AutoPosition = {
+      symbol, entry, tp: entry * 1.2, sl: entry * 0.9, quantity: 1, enteredAtMs,
+      status: "watching", conditionalOrderId: null,
+    };
+    engAny.autoTradePositions.push(pos);
+    engAny.addAutoTradeHistory(pos); // getAutoTradeHistory가 찾을 수 있게 먼저 접수 기록을 남겨 둔다.
+  }
+
+  it("cancelled_by_timeout(진짜 타임아웃)이면 '장시간 미체결로 자동 취소'라고 기록한다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-resolve-timeout-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const engAny = eng as unknown as EngineInternals;
+      const enteredAtMs = Date.now();
+      pushWatchingPosition(eng, "TIMEOUTX", 10, enteredAtMs);
+
+      engAny.onAutoBracketResolved("TIMEOUTX", 10, { status: "cancelled_by_timeout" });
+
+      const h = eng.getAutoTradeHistory().find((e) => e.symbol === "TIMEOUTX");
+      expect(h?.note).toContain("장시간 미체결로 자동 취소");
+      expect(h?.note).not.toContain("설정한 감시시간이 되기 전");
+      // 자리도 실제로 비워져야 한다(다음 사이클에 새 후보가 그 슬롯을 쓸 수 있게).
+      expect(engAny.autoTradePositions.find((p) => p.symbol === "TIMEOUTX")).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("cancelled(감시 마감 전 다른 경로로 취소됨)이면 '장시간 미체결'이 아니라고 정직하게 기록한다(오너 보고 회귀)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-resolve-cancel-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const engAny = eng as unknown as EngineInternals;
+      const enteredAtMs = Date.now();
+      pushWatchingPosition(eng, "EARLYX", 10, enteredAtMs);
+
+      engAny.onAutoBracketResolved("EARLYX", 10, { status: "cancelled" });
+
+      const h = eng.getAutoTradeHistory().find((e) => e.symbol === "EARLYX");
+      // [핵심] 예전엔 이 경우도 "장시간 미체결로 자동 취소"라고 똑같이 적혔다 — 이제는 구분된다.
+      expect(h?.note).not.toContain("장시간 미체결로 자동 취소");
+      expect(h?.note).toContain("설정한 감시시간이 되기 전");
+      expect(engAny.autoTradePositions.find((p) => p.symbol === "EARLYX")).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
