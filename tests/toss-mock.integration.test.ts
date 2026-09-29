@@ -17,6 +17,7 @@ import {
   preflightBuyCheck,
   makeClientOrderId,
   clearTokenCache,
+  getRankings,
 } from "../lib/toss";
 import { calcSplit3 } from "../lib/calc";
 
@@ -42,6 +43,7 @@ beforeEach(() => {
   clearTokenCache();
   mock.setPrice("AAPL", 2.05);
   mock.state.rateLimitRemaining = 0; // [v0.41.0] 429 재현 테스트가 다른 테스트로 새지 않게 매번 초기화
+  mock.state.rankingsRejectType = null; // [v0.50.0] 랭킹 타입 거부 재현이 다른 테스트로 새지 않게 초기화
 });
 
 describe("① 토큰 발급 → 캐싱 → 재발급 + 응답 번역", () => {
@@ -204,5 +206,33 @@ describe("⑦ 주문 전 사전검증(preflightBuyCheck)", () => {
     expect(pf.buyingPowerUsd).toBe(10000);
     expect(pf.commissionRate).toBe(0);
     expect(pf.maxQty).toBe(4878);
+  });
+});
+
+// [v0.50.0 긴급 수정 — 오너 지적: "스크리닝을 '토스증권 거래량' 기준으로 해야 하는데
+//   계속 '거래량' 탭에서 가져오는 것 같다"] getRankings()의 기본 type을
+//   MARKET_TRADING_VOLUME(거래량) → TOSS_SECURITIES_TRADING_VOLUME(토스증권 거래량)로
+//   바꿨다. 이 값은 토스 공식 문서(네트워크 차단으로 직접 대조 불가) 대신 서드파티 공개
+//   클라이언트(github.com/kenshin579/toss-go)에서 확인한 추정값이라, "혹시 틀렸을 때
+//   자동으로 예전 값으로 폴백하는지"까지 반드시 검증해 둔다.
+describe("⑧ getRankings — '토스증권 거래량' 기준 + 거부 시 자동 폴백(v0.50.0)", () => {
+  it("기본 호출은 TOSS_SECURITIES_TRADING_VOLUME을 실제로 요청한다(더 이상 MARKET_TRADING_VOLUME 아님)", async () => {
+    const items = await getRankings(5);
+    expect(mock.state.lastRankingsType).toBe("TOSS_SECURITIES_TRADING_VOLUME");
+    expect(items.length).toBe(5);
+    expect(items[0].symbol).toBe("AAPL"); // 목 서버의 고정 순위 1위
+  });
+
+  it("서버가 TOSS_SECURITIES_TRADING_VOLUME을 거부하면(예: 추정이 틀렸던 경우) MARKET_TRADING_VOLUME으로 자동 재시도해 결국 성공한다", async () => {
+    mock.state.rankingsRejectType = "TOSS_SECURITIES_TRADING_VOLUME";
+    const items = await getRankings(5);
+    // 재시도 후 마지막으로 실제 받아들여진 type은 예전 값이어야 한다.
+    expect(mock.state.lastRankingsType).toBe("MARKET_TRADING_VOLUME");
+    expect(items.length).toBe(5); // 폴백 후에도 스캔 자체는 정상적으로 결과를 돌려받음
+  });
+
+  it("예전 값(MARKET_TRADING_VOLUME)까지 거부되면(더 물러설 곳 없음) 그대로 예외를 던진다", async () => {
+    mock.state.rankingsRejectType = "MARKET_TRADING_VOLUME";
+    await expect(getRankings(5, "MARKET_TRADING_VOLUME")).rejects.toThrow(/HTTP 400/);
   });
 });

@@ -678,17 +678,46 @@ export interface RankingItem {
   tradingVolume: number;
 }
 
+type RankingsResponse = { rankings?: Array<{ rank: number; symbol: string; price?: { lastPrice?: string }; tradingVolume?: string }> };
+
 /**
  * getRankings — 시장 거래량 상위 종목(스크리너 스캔 대상).
- *   실스펙: GET /api/v1/rankings?type=MARKET_TRADING_VOLUME&marketCountry=US&duration=realtime&count=N
+ *
+ *   [v0.50.0 긴급 수정 — 오너 지적: "스크리닝을 '토스증권 거래량' 기준으로 해야 하는데
+ *   계속 '거래량' 탭에서 가져오는 것 같다, 치명적이니 최대한 빨리"]
+ *   오너가 보내준 토스 앱 화면 캡처(전체/국내/해외 + 거래대금·토스증권 거래대금·거래량·
+ *   토스증권 거래량·급상승·급하락 6개 필터 탭)를 보면 "거래량"과 "토스증권 거래량"이
+ *   서로 다른 별개의 랭킹 기준임이 분명하다 — 지금까지 이 함수가 쓰던 `MARKET_TRADING_VOLUME`은
+ *   이름 그대로 "거래량"(시장 전체 기준) 쪽이지, 오너가 원하는 "토스증권 거래량"(토스증권
+ *   자체 체결 기준)이 아니었다.
+ *   토스 자체 개발자 문서(developers.tossinvest.com, openapi.tossinvest.com)는 이 작업
+ *   환경의 네트워크 정책상 접근 자체가 막혀 있어(EGRESS_BLOCKED) 원본 문서로 직접 대조는
+ *   못 했다 — 대신 토스증권 오픈API를 감싼 서드파티 공개 클라이언트
+ *   (github.com/kenshin579/toss-go, pkg.go.dev에 godoc으로 공개된 실제 소스코드)에서
+ *   다음 enum 상수를 확인했다:
+ *     MARKET_TRADING_VOLUME(거래량) / TOSS_SECURITIES_TRADING_VOLUME(토스증권 거래량)
+ *     MARKET_TRADING_AMOUNT(거래대금) / TOSS_SECURITIES_TRADING_AMOUNT(토스증권 거래대금)
+ *     TOP_GAINERS(급상승) / TOP_LOSERS(급하락)
+ *   오너가 캡처해 준 6개 탭과 정확히 1:1로 대응돼 신뢰도가 높다고 판단해 기본값을
+ *   `TOSS_SECURITIES_TRADING_VOLUME`으로 바꾼다. 다만 공식 문서 원문 대조를 못 했으므로,
+ *   혹시 이 값을 토스 서버가 거부하면(잘못된 값이었을 경우) 예전 값(MARKET_TRADING_VOLUME)
+ *   으로 자동으로 한 번 더 시도한다 — 추정이 틀렸다는 이유로 스크리닝 자체가 죽으면 안 되므로.
+ *
+ *   실스펙(추정): GET /api/v1/rankings?type=TOSS_SECURITIES_TRADING_VOLUME&marketCountry=US&duration=realtime&count=N
  *   응답: { rankings: [{ rank, symbol, price:{lastPrice}, tradingVolume }] }
  */
-export async function getRankings(count = 60, type = "MARKET_TRADING_VOLUME", marketCountry = "US"): Promise<RankingItem[]> {
+export async function getRankings(count = 60, type = "TOSS_SECURITIES_TRADING_VOLUME", marketCountry = "US"): Promise<RankingItem[]> {
   await priceLimiter.wait();
-  const res = await tossFetch<{ rankings?: Array<{ rank: number; symbol: string; price?: { lastPrice?: string }; tradingVolume?: string }> }>(
-    ENDPOINTS.rankings,
-    { query: { type, marketCountry, duration: "realtime", count } },
-  );
+  let res: RankingsResponse | undefined;
+  try {
+    res = await tossFetch<RankingsResponse>(ENDPOINTS.rankings, { query: { type, marketCountry, duration: "realtime", count } });
+  } catch (err) {
+    // [v0.50.0] 추정한 새 타입이 거부됐을 가능성에 대비한 안전망 — 예전에 검증된 값으로
+    // 딱 한 번만 다시 시도한다(무한 재시도 금지, 위 401/429 재시도와 같은 원칙).
+    if (type === "MARKET_TRADING_VOLUME") throw err; // 이미 예전 값이었으면 더 물러설 곳이 없다
+    console.warn(`[capri] rankings type="${type}" 요청이 실패해 이전 값(MARKET_TRADING_VOLUME)으로 재시도합니다:`, err);
+    res = await tossFetch<RankingsResponse>(ENDPOINTS.rankings, { query: { type: "MARKET_TRADING_VOLUME", marketCountry, duration: "realtime", count } });
+  }
   return (res?.rankings ?? []).map((r) => ({
     rank: r.rank,
     symbol: r.symbol,

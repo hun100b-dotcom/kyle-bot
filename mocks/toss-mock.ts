@@ -67,6 +67,13 @@ export interface MockState {
    *  1씩 깎으면서 429를 돌려주고, 0이 되면 평소대로 응답한다. 재시도(backoff) 로직
    *  테스트에서 `state.rateLimitRemaining = 1`처럼 직접 설정해 쓴다. */
   rateLimitRemaining: number;
+  /** [v0.50.0] 거래량 랭킹(rankings) API가 특정 type 값을 거부하는 상황(예: 잘못 추정한
+   *  enum 값)을 재현하기 위한 스위치. 이 값과 요청의 type이 같으면 400을 돌려준다 —
+   *  getRankings()의 "새 타입이 거부되면 예전 값으로 폴백" 안전망을 검증하는 용도.
+   *  기본은 null(아무 type도 거부 안 함 — 기존 테스트 전부 그대로 통과). */
+  rankingsRejectType: string | null;
+  /** [v0.50.0] 가장 최근 rankings 요청이 실제로 보낸 type 값(테스트 검증용). */
+  lastRankingsType: string | null;
 }
 
 const INITIAL_PRICES: Record<string, number> = { AAPL: 2.05, PARTIAL: 2.05, REJECT: 2.05, SLOW: 2.05 };
@@ -155,6 +162,8 @@ export function createMockTossServer() {
     conditionals: new Map(),
     fxRate: 1390.5, // 연습용 기본 환율: 1 USD = 1,390.5 KRW
     rateLimitRemaining: 0,
+    rankingsRejectType: null,
+    lastRankingsType: null,
   };
 
   const server = http.createServer(async (req, res) => {
@@ -266,6 +275,12 @@ export function createMockTossServer() {
 
     // [v0.6.0] 거래량 랭킹 — 스크리너 스캔 대상(가상 상위 종목).
     if (path === "/api/v1/rankings" && method === "GET") {
+      const reqType = url.searchParams.get("type");
+      state.lastRankingsType = reqType; // [v0.50.0] 테스트가 "실제로 어떤 type을 보냈는지" 검증할 수 있게
+      // [v0.50.0] 특정 type이 거부되는 상황(잘못 추정한 enum) 재현용 — 기본은 비활성.
+      if (state.rankingsRejectType && reqType === state.rankingsRejectType) {
+        return sendJson(res, 400, { error: `지원하지 않는 랭킹 타입: ${reqType}` });
+      }
       const count = Math.min(Number(url.searchParams.get("count") ?? 100) || 100, 100);
       const bases = ["AAPL", "NVDA", "TSLA", "SOFI", "AMD", "PLTR", "AMZN", "META", "MSFT", "GOOGL", "NU", "BITO"];
       const rankings = [];
