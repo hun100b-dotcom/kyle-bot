@@ -767,6 +767,14 @@ function App() {
   // [v0.24.0][운영자 전용] 대기 중인 가입 승인 요청 목록.
   const [accessRequests, setAccessRequests] = useState<Array<{ email: string; note: string | null; requestedAt: string }>>([]);
   const [reqActionBusy, setReqActionBusy] = useState<string | null>(null); // 처리 중인 이메일(버튼 개별 비활성용)
+  // [v0.53.0 — 오너 요청 "내가 직접 허용 이메일을 등록할 수 있게"] 대기 목록에 없어도(요청이
+  //   아예 안 남았거나, 미리 등록해 두고 싶을 때) 오너가 이메일을 바로 입력해 허용목록에
+  //   추가할 수 있게 한다. approveAccessRequest()는 원래도 임의 이메일을 받아들이므로
+  //   (대기 요청 존재 여부와 무관 — 있으면 그 요청도 함께 승인 처리됨), 새 엔진 함수 없이
+  //   입력칸 하나만 더하면 된다.
+  const [directAddEmail, setDirectAddEmail] = useState("");
+  const [directAddBusy, setDirectAddBusy] = useState(false);
+  const [directAddMsg, setDirectAddMsg] = useState("");
   // [v0.3.0] 세션별 시드 비율 설정 입력칸(설정 탭). 문자열 보관(입력 중 뭉개짐 방지).
   // [v0.8.3] 기본 손익비 설정 입력칸(설정 탭). 공장값 2/10, 저장하면 계산기 초기값이 됨.
   const [defForm, setDefForm] = useState<{ tp: string; sl: string }>({ tp: "2", sl: "10" });
@@ -2372,6 +2380,20 @@ ${msg}
       setSyncMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
       if (r.ok) await loadAccessRequests();
     } finally { setReqActionBusy(null); }
+  }
+  /** [v0.53.0][운영자 전용] 대기 목록에 없어도(요청이 아예 안 남았거나, 미리 등록해 두고
+   *   싶을 때) 오너가 이메일을 직접 입력해 바로 허용목록에 추가한다. approveAccessRequest는
+   *   원래도 임의 이메일을 받아들이므로(그 이메일로 남은 대기 요청이 있으면 함께 처리됨),
+   *   엔진을 새로 건드릴 필요 없이 화면에 입력칸만 더한다. */
+  async function doDirectAddEmail() {
+    const e = directAddEmail.trim();
+    if (!e || !e.includes("@")) { setDirectAddMsg("⚠️ 올바른 이메일을 입력하세요."); return; }
+    setDirectAddBusy(true); setDirectAddMsg("등록 중…");
+    try {
+      const r = await window.kyletool.approveAccessRequest(e);
+      setDirectAddMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      if (r.ok) { setDirectAddEmail(""); await loadAccessRequests(); }
+    } finally { setDirectAddBusy(false); }
   }
 
   /**
@@ -5015,6 +5037,25 @@ ${msg}
                     </div>
                   ))
                 )}
+                {/* [v0.53.0 — 오너 요청] 대기 목록에 없어도(요청 자체가 안 남았거나, 미리
+                    등록해 두고 싶을 때) 이메일을 직접 입력해 바로 허용목록에 추가한다. */}
+                <p className="hint small" style={{ marginTop: 12 }}>
+                  또는 요청 목록에 없어도 이메일을 직접 입력해 바로 등록할 수 있어요:
+                </p>
+                <div className="form-row">
+                  <input
+                    type="email"
+                    placeholder="example@gmail.com"
+                    value={directAddEmail}
+                    disabled={directAddBusy}
+                    onChange={(e) => setDirectAddEmail(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") void doDirectAddEmail(); }}
+                  />
+                  <button className="btn btn-start" disabled={directAddBusy} onClick={() => void doDirectAddEmail()}>
+                    {directAddBusy ? "등록 중…" : "➕ 이메일 등록"}
+                  </button>
+                </div>
+                {directAddMsg && <p className={directAddMsg.startsWith("✅") ? "ok" : "hint"}>{directAddMsg}</p>}
               </div>
             )}
           </section>

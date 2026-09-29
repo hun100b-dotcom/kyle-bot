@@ -736,7 +736,13 @@ export type WatchAndBracketResult =
   | { status: "oco_registered"; conditionalOrderId: string }
   | { status: "oco_failed"; error: string }
   | { status: "cancelled" | "failed" }
-  | { status: "timeout" };
+  | { status: "timeout" }
+  /** [v0.52.0] 장시간 미체결 자동취소(cancelOnTimeout) 경로에서 취소 API 호출 자체는
+   *  예외 없이 끝났지만, 그 응답이 아직 "cancelled"가 아닌 경우(막판 체결과의 경쟁 등) —
+   *  "끝났다"고 믿고 감시를 놓아버리면 실제 주문은 토스에 그대로 남는데 우리 쪽 감시
+   *  목록에서만 사라지는 사고가 난다(ALDX 실사례). 이 상태는 절대 포지션을 지우지
+   *  않고, 다음 reconcileAutoPositions 사이클이 다시 확인하게 넘긴다. */
+  | { status: "still_pending" };
 
 // -----------------------------------------------------------------------------
 // [v0.26.0] 자동매매 타입
@@ -1742,6 +1748,22 @@ export class ToolEngine extends EventEmitter {
    *   목록이 텅 빔"으로 이어졌다. 이제 가입이 허용목록 문제로 막히면 이 함수가 자동으로
    *   승인 요청까지 접수한다 — 오너가 별도로 버튼을 누를 필요가 없다(화면의 버튼은
    *   자동 접수가 실패했을 때 다시 시도하는 용도로만 남겨둔다).
+   *
+   *   [v0.53.0 긴급 수정 — 오너 실사용 보고: "동료가 가입해도 요청 목록에 하나도 안 뜬다"]
+   *   Supabase 프로젝트의 실제 auth 로그를 직접 조회해 재현: 동료(카일)가 가입을 시도하면
+   *   서버는 분명히 CAPRI_NOT_ALLOWED 예외를 500으로 감싸 돌려주는데(error_code:
+   *   "unexpected_failure"), 그 직후 승인 요청 테이블(capri_access_requests)에 insert 요청
+   *   자체가 단 한 번도 나가지 않았다(edge_logs 확인). 원인: 이 함수가 `data.msg`
+   *   필드만 보고 있었는데, GoTrue 버전에 따라 실제 필드명이 `msg`가 아닌 `message`일 수
+   *   있다 — 그러면 raw가 그 어떤 유용한 문구도 못 담고 `가입 실패(HTTP 500)`라는 안전
+   *   기본값으로 떨어져 두 정규식(CAPRI_NOT_ALLOWED / database error) 모두 매치 실패,
+   *   `notAllowed`가 false가 돼 requestAccess() 자체가 안 불렸다.
+   *   [수정] ① 가능한 필드명을 전부 모아 판정(`msg`/`message`/`error_description`/
+   *   `error`/`error_code` — 하나라도 단서가 있으면 잡아낸다). ② 오너의 명시적 지시
+   *   ("다른 사용자가 가입 버튼 누르면 무조건 바로 요청 목록에 들어오게") 반영 — 문구
+   *   인식에 또 실패하는 경우까지 대비해, HTTP 500(서버 쪽 거부)이면 사유 판별과
+   *   무관하게 일단 승인 요청부터 접수한다. 중복 접수는 requestAccess()가 이미 409를
+   *   "이미 신청하셨습니다"로 안전하게 처리하므로 부작용이 없다.
    */
   async authSignUp(email: string, password: string): Promise<{ ok: boolean; needsConfirm: boolean; message: string; canRequestAccess?: boolean }> {
     try {
@@ -1752,10 +1774,16 @@ export class ToolEngine extends EventEmitter {
       });
       const data = (await res.json()) as Record<string, unknown>;
       if (!res.ok) {
-        const raw = String(data.msg ?? data.error_description ?? data.error ?? `가입 실패(HTTP ${res.status})`);
+        // [v0.53.0] 필드명이 서버 버전마다 다를 수 있어 전부 모아 본다(하나라도 단서를 놓치면
+        //   "허용목록 문제"를 못 알아채 자동 접수가 통째로 건너뛰어진다 — 실제로 있었던 사고).
+        const candidates = [data.msg, data.message, data.error_description, data.error, data.error_code]
+          .filter((v): v is string => typeof v === "string" && v.trim().length > 0);
+        const raw = candidates.length > 0 ? candidates.join(" | ") : `가입 실패(HTTP ${res.status})`;
         const explained = ToolEngine.explainSignupError(raw);
-        if (explained.notAllowed) {
-          // [v0.41.0] 오너가 별도로 버튼을 안 눌러도 승인 대기열에 자동으로 올라가게 한다.
+        // [v0.53.0] 문구로 못 알아챘어도, 서버가 500(우리 쪽 트리거가 막았을 가능성이 가장 큰
+        //   구간)을 돌려줬으면 일단 승인 요청부터 접수한다 — 오너 지시("무조건 요청 목록에
+        //   들어오게") 반영. 중복 접수는 requestAccess()가 409로 안전하게 무시한다.
+        if (explained.notAllowed || res.status >= 500) {
           const req = await this.requestAccess(email).catch((e) => ({ ok: false, message: String(e) }));
           const suffix = req.ok
             ? " 승인 요청을 자동으로 접수했습니다 — 운영자 승인을 기다려 주세요."
@@ -2966,9 +2994,9 @@ export class ToolEngine extends EventEmitter {
     if (finalOrder?.status === "filled") {
       return this.registerOcoForFilled(symbol, finalOrder.filled_qty && finalOrder.filled_qty > 0 ? finalOrder.filled_qty : spec.quantity, spec);
     }
-    const filledQty = finalOrder?.filled_qty ?? 0;
+    let cancelResult: OrderResponse;
     try {
-      await cancelOrder(tossOrderId);
+      cancelResult = await cancelOrder(tossOrderId);
     } catch (e) {
       this.addJournal({
         kind: "info",
@@ -2979,6 +3007,32 @@ export class ToolEngine extends EventEmitter {
       });
       return { status: "timeout" };
     }
+    // [v0.52.0 긴급 수정 — ALDX 실사례: "감시 리스트에서는 빠졌는데 주문만 덩그러니 남음"]
+    //   예전엔 cancelOrder()가 예외만 안 던지면 무조건 "취소 성공"으로 믿고 감시를 끝냈다.
+    //   그런데 cancelOrder()는 실제로 취소 "직후" 토스가 돌려준 주문 상태를 그대로 준다 —
+    //   막판에 체결이 먼저 반영되면 "filled"로, 취소가 아직 실제로 안 끝났으면
+    //   "submitted"/"partial"/"unknown" 등으로 돌아올 수 있다. 이걸 확인하지 않고 바로
+    //   "cancelled"로 단정하면, 실제 주문은 토스에 그대로 남았는데 우리 쪽 감시 목록에서만
+    //   사라져 버린다(오너가 정확히 이 증상을 보고함). 이제 취소 API의 반환값(cancelResult)
+    //   자체를 진실로 삼아 분기한다 — 취소 전에 미리 봐둔 finalOrder/filledQty는 더 안 쓴다.
+    if (cancelResult.status === "filled") {
+      // 취소 요청이 도착하기 직전에 전량 체결까지 끝나버린 경우 — 보호 없이 두면 안 되므로 OCO.
+      return this.registerOcoForFilled(symbol, cancelResult.filled_qty && cancelResult.filled_qty > 0 ? cancelResult.filled_qty : spec.quantity, spec);
+    }
+    if (cancelResult.status !== "cancelled" && cancelResult.status !== "failed") {
+      // 취소 요청 자체는 받아들여졌지만(예외 없음) 아직 실제로 "취소됨"이 아니다 — 절대 여기서
+      // 감시를 놓지 않는다. 포지션을 watching 그대로 남겨, 다음 reconcileAutoPositions
+      // 사이클(orphanedWatching 경로)이 buyOrderId로 다시 확인하게 넘긴다.
+      this.addJournal({
+        kind: "info",
+        symbol,
+        summary: `⚠️ ${watchMinutes}분 초과로 취소를 요청했지만 토스 응답상 아직 '${cancelResult.status}' 상태입니다 — 감시를 계속 유지하며 다음 확인 때 다시 처리합니다. [주문현황]에서도 확인해 주세요.`,
+        notify: true,
+        notifyTitle: `⚠️ 취소 반영 지연: ${symbol}`,
+      });
+      return { status: "still_pending" };
+    }
+    const filledQty = cancelResult.filled_qty ?? 0;
     if (filledQty > 0) {
       // 일부만 체결된 채로 취소된 경우 — 그 수량은 보호(OCO) 없이 남겨두면 위험하니 반드시 걸어준다.
       this.addJournal({
@@ -4915,6 +4969,12 @@ export class ToolEngine extends EventEmitter {
         notify: true,
         notifyTitle: `🛡 보호주문 등록: ${symbol}`,
       });
+    } else if (res.status === "still_pending") {
+      // [v0.52.0] 취소가 아직 실제로 반영 안 된 상태(ALDX 실사례) — 절대 자리를 비우지 않는다.
+      //   watchAndBracket 안에서 이미 저널·알림을 남겼으니 여기서는 아무것도 더 안 하고,
+      //   포지션을 "watching" 그대로 둬서 다음 reconcileAutoPositions(5분 뒤)의
+      //   orphanedWatching 경로가 buyOrderId로 다시 확인하게 넘긴다(autoTradeActiveWatches
+      //   에서는 이미 빠졌으니 그 경로가 "재시작 후 복구"와 똑같이 집어 준다).
     } else {
       // 타임아웃/취소/실패/OCO등록실패 → 이 자리를 비운다(다음 사이클에 다시 채워질 수 있음).
       this.autoTradePositions.splice(idx, 1);

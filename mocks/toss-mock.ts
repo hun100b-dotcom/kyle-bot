@@ -92,6 +92,11 @@ export interface MockState {
   rankingsRejectType: string | null;
   /** [v0.50.0] 가장 최근 rankings 요청이 실제로 보낸 type 값(테스트 검증용). */
   lastRankingsType: string | null;
+  /** [v0.52.0] 주문 취소(POST /orders/{id}/cancel) 응답 상태를 강제로 바꿔치기하는 스위치 —
+   *  "취소 요청은 성공(예외 없음)했지만 실제 반환 상태는 CANCELED가 아닌" 경쟁 상태(막판 체결
+   *  등)를 재현한다(watchAndBracket의 cancelOnTimeout 안전망 검증용). 값이 있으면 그 값을 쓰고
+   *  한 번 쓰면 다시 null로 돌아간다(한 번만 재현). 기본은 null(예전처럼 항상 CANCELED — 회귀 없음).*/
+  cancelReturnsStatus: MockOrder["status"] | null;
 }
 
 const INITIAL_PRICES: Record<string, number> = { AAPL: 2.05, PARTIAL: 2.05, REJECT: 2.05, SLOW: 2.05 };
@@ -190,6 +195,7 @@ export function createMockTossServer() {
     rateLimitRemaining: 0,
     rankingsRejectType: null,
     lastRankingsType: null,
+    cancelReturnsStatus: null,
   };
 
   const server = http.createServer(async (req, res) => {
@@ -626,7 +632,14 @@ export function createMockTossServer() {
 
       // 취소: POST /orders/{id}/cancel (실제 스펙)
       if (action === "cancel" && method === "POST") {
-        order.status = "CANCELED";
+        // [v0.52.0] 취소 응답 상태 강제 스위치가 설정돼 있으면 그 값을(한 번만) 쓴다 —
+        //   "취소 API 호출은 성공했지만 실제로는 아직 CANCELED가 아닌" 경쟁 상태 재현용.
+        if (state.cancelReturnsStatus) {
+          order.status = state.cancelReturnsStatus;
+          state.cancelReturnsStatus = null;
+        } else {
+          order.status = "CANCELED";
+        }
         return sendResult(res, 200, toDetail(order));
       }
     }

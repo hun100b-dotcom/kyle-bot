@@ -191,6 +191,50 @@ describe("매수+익절+손절 동시 주문(브라켓) — v0.25.0", () => {
     }
   }, 10_000);
 
+  it("[v0.52.0 긴급 수정] 취소 API가 예외 없이 끝나도 실제 응답이 CANCELED가 아니면 '취소됨'으로 단정하지 않는다(ALDX 실사례 회귀)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-brk-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      // 목 서버를 먼저 깨워야 내부 mock 인스턴스가 생긴다(placeBracket 전에 스위치를 걸어 둬야 함).
+      await eng.quote("AAPL");
+      // 다음 취소 요청에 한해서만, 응답 상태를 "아직 안 끝남"(PENDING)으로 강제한다 —
+      // 막판 체결과 취소가 경합해 실제로는 안 끝났는데 우리가 예외만 안 던졌다고 믿고
+      // "취소 성공"으로 단정하던 옛 버그를 재현한다.
+      (eng as unknown as { mock: { state: { cancelReturnsStatus: string | null } } }).mock.state.cancelReturnsStatus = "PENDING";
+
+      const pendingPromise = waitForJournal(eng, (e) => e.kind === "info" && e.summary.includes("감시를 계속 유지"));
+      const entry = await eng.placeBracket({
+        symbol: "AAPL",
+        price: 1.0,
+        quantity: 1,
+        tpTrigger: 2.5,
+        tpPrice: 2.5,
+        slTrigger: 1.8,
+        slPrice: 1.79,
+        expireDate: "2026-12-30",
+        watchMinutes: 0.002,
+        pollMs: 20,
+        cancelOnTimeout: true,
+      });
+      const info = await pendingPromise;
+      // mock의 "PENDING"은 lib/toss.ts의 mapOrderStatus()를 거쳐 내부 표준값 "submitted"로 옮겨진다.
+      expect(info.summary).toContain("submitted"); // 실제로 돌아온 상태를 그대로 보여줌
+      expect(info.summary).not.toContain("다음 자동매매 사이클"); // 정상 취소 완료 문구가 아니어야 함
+
+      // 절대 청산으로 단정하지 않았으므로, OCO(익절/손절) 등록도 시도하지 않는다.
+      const journal = eng.getJournal();
+      expect(journal.some((j) => j.kind === "oco")).toBe(false);
+
+      // [핵심] 우리가 "취소됐다"고 믿은 것과 달리, 실제 주문은 여전히 미체결(OPEN) 목록에 남아있다
+      // — 이게 바로 오너가 "감시 리스트에서는 빠졌는데 주문만 덩그러니 남았다"고 본 증상의 정체.
+      const tossOrderId = (entry.detail as { tossOrderId: string }).tossOrderId;
+      const open = await eng.openOrders();
+      expect(open.some((o) => o.tossOrderId === tossOrderId)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
   it("감시 중 진입 주문이 취소되면 OCO 등록 없이 감시를 멈춘다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-brk-"));
     try {
