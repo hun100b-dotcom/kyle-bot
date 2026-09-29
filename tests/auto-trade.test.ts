@@ -908,19 +908,24 @@ describe("[v0.33.0] applyScreenGates — 토글이 실제 최종 판정에 반�
 });
 
 // =============================================================================
-// [v0.40.0 버그 수정] "투입 시드 비율에 맞지않게 적게 투입되고있음"(오너 실사용 보고)
+// [v0.40.0 버그 수정 → v0.55.0 재수정] "투입 시드 비율에 맞지않게 적게 투입되고있음"
 // -----------------------------------------------------------------------------
 //   auto 모드(seedBasis="auto")는 예전엔 5분 사이클마다 매번 "지금 이 순간의 매수가능금액"을
 //   새로 조회했다. 자동매매 자신이 이미 진입해서 현금을 써버리면, 다음 사이클의 "종목당 시드
 //   대비 N%" 계산은 이미 줄어든 잔여 현금을 기준으로 다시 N%를 매기게 돼, 슬롯을 거듭할수록
 //   실제 투입액이 오너가 설정한 비율보다 작아졌다(예: 30%×3종목=최대 90% 의도였는데 실제로는
-//   65~70%선). 이제 auto 모드는 "이번 자동매매 실행" 동안 딱 한 번만 조회하고 그 값을 스냅샷으로
-//   고정해 재사용한다(electron/tool-engine.ts의 resolveSeedUsd/autoTradeSeedSnapshotUsd 참고).
-//   목 서버(mocks/toss-mock.ts)는 매수가능금액을 항상 고정값($10000)으로 응답하므로 "매 호출마다
-//   진짜로 달라지는지"는 흉내낼 수 없다 — 대신 스냅샷을 직접 다른 값으로 덮어써 두고
-//   resolveSeedUsd가 "다시 조회"하는 대신 그 값을 그대로 돌려주는지로 캐시 동작 자체를 검증한다.
+//   65~70%선). v0.40.0은 이걸 "이번 자동매매 실행 동안 딱 한 번만 조회하고 그 값을 스냅샷으로
+//   고정"으로 막았다.
+//
+//   [v0.55.0] 그런데 "고정"을 문자 그대로 구현해서, 자동매매를 켠 뒤에 새로 입금해도(잔고가
+//   늘어도) 그 늘어난 잔고를 재시작 전까지 영영 반영 못 하는 새 버그가 생겼다(오너 실사용 보고:
+//   "잔고 $33 있는데 1주도 못 산다고 리젝됨" — 실제로는 자동매매를 켠 시점의 더 낮았던 잔고로
+//   계속 계산 중이었다). 이제 매 사이클 다시 조회하되, 스냅샷보다 "낮아지면" 무시(v0.40.0 취지
+//   유지), "높아지면"(입금 등)만 갱신한다. 목 서버(mocks/toss-mock.ts)는 매수가능금액을 항상
+//   고정값($10000)으로 응답하므로, "낮은 스냅샷은 절대 안 내려간다"/"낮게 시작하면 올라간다"
+//   두 방향을 스냅샷을 직접 다른 값으로 미리 세팅해 두고 검증한다.
 // =============================================================================
-describe("[v0.40.0] auto 모드 시드 스냅샷 — 이번 실행 동안 고정, 매 사이클 다시 줄어들지 않는다", () => {
+describe("[v0.40.0→v0.55.0] auto 모드 시드 스냅샷 — 지출로는 안 줄고, 입금으로는 늘어난다", () => {
   type EngineInternals = {
     autoTradeSeedSnapshotUsd: number | null;
     resolveSeedUsd: () => Promise<number | null>;
@@ -942,7 +947,7 @@ describe("[v0.40.0] auto 모드 시드 스냅샷 — 이번 실행 동안 고정
     }
   });
 
-  it("두 번째 호출부터는 실계좌를 다시 조회하지 않고 스냅샷 값을 그대로 돌려준다(핵심 — 버그 재발 방지)", async () => {
+  it("스냅샷보다 실제 잔고가 낮으면(지출로 줄어든 상황을 흉내) 스냅샷을 그대로 유지한다(v0.40.0 보호 유지)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
       const eng = new ToolEngine(dir, { forceMock: true });
@@ -950,13 +955,30 @@ describe("[v0.40.0] auto 모드 시드 스냅샷 — 이번 실행 동안 고정
       await engAny.prepareBackend();
       await engAny.resolveSeedUsd(); // 첫 호출 — 스냅샷 $10000으로 채워짐
 
-      // 실제로는 자동매매가 이 사이에 진입을 해서 잔액이 줄었다고 가정 — 스냅샷을 직접
-      // 다른 값으로 바꿔 둔다(목 서버는 항상 $10000만 응답하므로, 이 수동 조작이 "진짜로
-      // 다시 조회했는지 vs 캐시를 썼는지"를 구분하는 유일한 방법이다).
-      engAny.autoTradeSeedSnapshotUsd = 4321;
+      // 목 서버는 항상 $10000을 응답 — 스냅샷을 그보다 "높게" 미리 세팅해 두면(예: 이미
+      // 더 큰 시드로 실행 중이었다고 가정), 다시 조회해도 $10000(더 낮음)으로 깎이면 안 된다.
+      engAny.autoTradeSeedSnapshotUsd = 54321;
       const seed2 = await engAny.resolveSeedUsd();
-      // 다시 조회했다면 목 서버 고정값($10000)이 나왔을 것 — 캐시를 썼다면 방금 넣어둔 4321이 나와야 한다.
-      expect(seed2).toBe(4321);
+      expect(seed2).toBe(54321); // 실제 조회값(10000)보다 낮아지지 않음
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("[v0.55.0 긴급 수정 — 오너 보고 회귀] 스냅샷보다 실제 잔고가 높아지면(입금) 다음 사이클에 새 값으로 갱신한다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const engAny = eng as unknown as EngineInternals;
+      await engAny.prepareBackend();
+
+      // 자동매매를 켠 시점엔 잔고가 낮았다고 가정(예: 아직 입금 전, $33보다도 한참 적은 $5).
+      engAny.autoTradeSeedSnapshotUsd = 5;
+      const seed = await engAny.resolveSeedUsd();
+      // 목 서버 실제 조회값($10000)이 옛 스냅샷($5)보다 높으므로 이제는 갱신돼야 한다
+      // — v0.40.0 당시엔 이 경우도 무조건 옛 값(5)을 그대로 돌려줘 "1주도 못 산다"는 오사고로 이어졌다.
+      expect(seed).toBe(10000);
+      expect(engAny.autoTradeSeedSnapshotUsd).toBe(10000);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

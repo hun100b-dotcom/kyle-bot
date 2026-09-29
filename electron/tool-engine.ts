@@ -943,7 +943,8 @@ export class ToolEngine extends EventEmitter {
   // 시드 기준: "auto"=매수가능금액(예수금)을 시드로, "fixed"=오너가 정한 고정 금액을 시드로.
   private seedBasis: "auto" | "fixed" = "auto";
   private seedFixedUsd: number | null = null;
-  // [v0.40.0] auto 모드 전용 — "이번 자동매매 실행" 동안 고정하는 시드 스냅샷(resolveSeedUsd 참고).
+  // [v0.40.0→v0.55.0] auto 모드 전용 — "이번 자동매매 실행" 동안 아래로는 절대 안 낮아지고
+  //   (지출로 잔고가 줄어도 무시), 위로만(입금 등으로 잔고가 늘면) 갱신되는 시드 스냅샷(resolveSeedUsd 참고).
   private autoTradeSeedSnapshotUsd: number | null = null;
 
   // [v0.8.3] 기본 손익비(익절%/손절%). 공장 초기값 2/10. 사용자가 저장하면 그 값을 계산기 초기값으로 쓴다.
@@ -4798,16 +4799,35 @@ export class ToolEngine extends EventEmitter {
    *   재시작마다 다시 켜야 하는 것과 같은 "이번 실행" 단위 원칙. fixed 모드는 원래도 오너가
    *   직접 고정한 값이라 이 문제와 무관해 그대로 둔다.
    */
+  /**
+   * [v0.40.0] auto 모드는 "이번 자동매매 실행" 동안 시드를 고정 스냅샷으로 재사용한다 —
+   *   자동매매 자신이 진입해서 현금을 써버려도(잔여 현금이 줄어도) 종목당 배정 비율(N%)의
+   *   "기준"이 매 사이클 작아지지 않게 하기 위함이었다(자세한 배경은 docs/progress.md
+   *   v0.40.0 참고).
+   *
+   * [v0.55.0 긴급 수정 — 오너 실사용 보고 "잔고 $33 있는데 1주도 못 산다고 리젝됨"]
+   *   위 "고정"을 문자 그대로 "최초 조회값을 실행 내내 절대 안 바꿈"으로 구현했더니, 자동매매를
+   *   켠 뒤에 새로 입금(또는 다른 방식으로 잔고가 늘어남)해도 그 늘어난 잔고를 영영 반영하지
+   *   못하는 새 사고로 이어졌다 — 재시작(끄고 다시 켬)하기 전까지는 옛날의, 흔히 더 낮았던
+   *   잔고로 계속 "1주도 못 산다"며 확정 종목을 계속 건너뛴다. v0.40.0이 막으려던 건
+   *   "지출로 인한 감소"였지, "입금으로 인한 증가"가 아니었다 — 그런데 둘 다 똑같이 막아버린
+   *   것이 이번 버그의 진짜 원인이다.
+   *
+   *   이제 매 사이클 실제 매수가능금액을 다시 조회하되, 스냅샷은 절대 "낮아지지"는 않고(지출로
+   *   줄어든 실제 잔고가 스냅샷보다 낮으면 무시하고 스냅샷 유지 — v0.40.0의 원래 보호 그대로),
+   *   실제 잔고가 스냅샷보다 "높아졌을" 때만(=입금 등으로 늘어난 경우) 스냅샷을 그 새 값으로
+   *   올려 반영한다. 조회 자체가 실패하면(일시적 네트워크 오류) 기존 스냅샷을 그대로 쓴다(자가 복구).
+   */
   private async resolveSeedUsd(): Promise<number | null> {
     if (this.seedBasis === "fixed") return this.seedFixedUsd;
-    if (this.autoTradeSeedSnapshotUsd != null) return this.autoTradeSeedSnapshotUsd;
     try {
       const bp = await getBuyingPower("USD");
-      if (!Number.isFinite(bp.buyingPowerUsd)) return null;
-      this.autoTradeSeedSnapshotUsd = bp.buyingPowerUsd; // 이번 실행 동안 고정
+      if (Number.isFinite(bp.buyingPowerUsd) && (this.autoTradeSeedSnapshotUsd == null || bp.buyingPowerUsd > this.autoTradeSeedSnapshotUsd)) {
+        this.autoTradeSeedSnapshotUsd = bp.buyingPowerUsd; // 최초 조회거나, 잔고가 늘어난 경우만 갱신
+      }
       return this.autoTradeSeedSnapshotUsd;
     } catch {
-      return null; // 실패하면 스냅샷을 남기지 않는다 — 다음 사이클에 다시 시도(자가 복구)
+      return this.autoTradeSeedSnapshotUsd; // 조회 실패 — 기존 스냅샷이 있으면 그걸로, 없으면 null(다음 사이클에 재시도)
     }
   }
 
