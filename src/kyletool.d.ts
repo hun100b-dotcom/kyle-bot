@@ -440,6 +440,15 @@ interface ScreenRun {
   priceMax: number;
   excludedEtf: number;
   results: ScreenResult[];
+  // [v0.47.0] 이번 스캔에 실제로 쓰인 나머지 기준값(화면이 "그때 뭐가 켜져 있었는지" 보여줄 때 씀)
+  emaTrendEnabled: boolean;
+  emaPeriod: number;
+  cloudEnabled: boolean;
+  dojiWickMinRatio: number;
+  dojiMaxAgeEnabled: boolean;
+  dojiMaxAgeMinutes: number;
+  nextCandleConfirmEnabled: boolean;
+  excludeEtf: boolean;
 }
 
 /** [v0.25.0] 탐색 종목 차트 캔들/전체 */

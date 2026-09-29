@@ -267,6 +267,14 @@ describe("엔진 스캔 왕복(연습 모드 + 목 서버)", () => {
       // [v0.11.0] 사용한 가격대가 결과에 담긴다(화면 표시·검증용)
       expect(run.priceMin).toBe(1);
       expect(run.priceMax).toBe(9);
+      // [v0.47.0 — 오너 요청 "어떤 필터가 적용됐는지 보이게"] 옵션을 안 주면(위 호출처럼
+      //   bodyRatio/count/priceMin/priceMax만 줌) 나머지는 전부 기본값(켜짐)으로 echo돼야 한다.
+      expect(run.emaTrendEnabled).toBe(true);
+      expect(run.cloudEnabled).toBe(true);
+      expect(run.dojiMaxAgeEnabled).toBe(true);
+      expect(run.nextCandleConfirmEnabled).toBe(true);
+      expect(run.excludeEtf).toBe(true);
+      expect(run.emaPeriod).toBe(200);
       // 목 서버가 1300분치 1분봉을 주므로 5분봉 200개 이상 합성돼야 한다(데이터 부족 아님)
       const anySufficient = run.results.some((r) => r.status !== "insufficient" && r.n5m >= 200);
       expect(anySufficient).toBe(true);
@@ -304,6 +312,27 @@ describe("엔진 스캔 왕복(연습 모드 + 목 서버)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 60_000); // 12종목 페이지네이션 → 넉넉히
+
+  it("[v0.47.0] 스캔 옵션을 끄면(off) ScreenRun에 꺼진 채로 echo된다 — 화면이 '그때 뭐가 켜져 있었는지' 정확히 보여주기 위한 근거", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-scr-opts-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const run = await eng.scanScreener({
+        bodyRatio: 0.3, count: 10, priceMin: 1, priceMax: 9,
+        emaTrendEnabled: false, cloudEnabled: false, dojiMaxAgeEnabled: false,
+        nextCandleConfirmEnabled: false, excludeEtf: false, emaPeriod: 100,
+      });
+      expect(run.emaTrendEnabled).toBe(false);
+      expect(run.cloudEnabled).toBe(false);
+      expect(run.dojiMaxAgeEnabled).toBe(false);
+      expect(run.nextCandleConfirmEnabled).toBe(false);
+      expect(run.excludeEtf).toBe(false);
+      expect(run.emaPeriod).toBe(100);
+      eng.stopAllStrength();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it("[v0.43.0] cancelScreenerScan — 스캔 중이 아니면 취소할 게 없다고 알린다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-scr-cancel-"));

@@ -584,6 +584,18 @@ export interface ScreenRun {
   priceMax: number; //   [v0.11.0] 사용한 가격 상한($)
   excludedEtf: number; // [v0.6.3] ETF·레버리지·인버스로 제외한 종목 수
   results: ScreenResult[]; // 후보(confirmed·watch) + 참고 목록
+  // [v0.47.0 — 오너 요청 "어떤 필터가 적용됐는지 보이게"] bodyRatio/priceMin/priceMax 외
+  // 나머지 스크리닝 기준(켜짐/꺼짐 스위치들)도 "이번 스캔에 실제로 쓰인 값"으로 그대로
+  // echo해 둔다 — 화면(설정 탭 현재값)과는 별개로, 지나간 스캔 결과가 그때 무슨 기준으로
+  // 돌았는지 항상 정확하게(나중에 설정을 바꿔도 이 스캔 기록은 안 바뀌게) 보여주기 위함.
+  emaTrendEnabled: boolean;
+  emaPeriod: number;
+  cloudEnabled: boolean;
+  dojiWickMinRatio: number;
+  dojiMaxAgeEnabled: boolean;
+  dojiMaxAgeMinutes: number;
+  nextCandleConfirmEnabled: boolean;
+  excludeEtf: boolean;
 }
 
 /** [v0.25.0] 차트 캔들 한 개(하이킨아시, 화면 표시용) */
@@ -4380,7 +4392,24 @@ export class ToolEngine extends EventEmitter {
       // 정렬: 확정(🔴) → 관찰(🟡) → 나머지. 같은 등급이면 랭킹 순.
       const order: Record<ScreenStatus, number> = { confirmed: 0, watch: 1, none: 2, insufficient: 3 };
       results.sort((a, b) => order[a.status] - order[b.status] || a.rank - b.rank);
-      return { scannedAt: now.toFormat("MM-dd HH:mm:ss"), total, bodyRatio: br, priceMin, priceMax, excludedEtf, results };
+      return {
+        scannedAt: now.toFormat("MM-dd HH:mm:ss"),
+        total,
+        bodyRatio: br,
+        priceMin,
+        priceMax,
+        excludedEtf,
+        results,
+        // [v0.47.0] 이번 스캔에 실제로 쓰인 나머지 기준값 — 화면이 "그때 뭐가 켜져 있었는지" 정확히 보여줄 수 있게.
+        emaTrendEnabled,
+        emaPeriod,
+        cloudEnabled,
+        dojiWickMinRatio,
+        dojiMaxAgeEnabled,
+        dojiMaxAgeMinutes,
+        nextCandleConfirmEnabled,
+        excludeEtf,
+      };
     } finally {
       this.screenBusy = false;
     }

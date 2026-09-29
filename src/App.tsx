@@ -635,6 +635,10 @@ function App() {
   const [priceMin, setPriceMin] = useState("1");
   const [priceMax, setPriceMax] = useState("9");
   const [showMiss, setShowMiss] = useState(false); // '아쉽게 탈락(근접)' 펼침 여부
+  // [v0.47.0 — 오너 요청 "탈락 사유 전체 조회, 폴드 형식으로"] 자동 스크리너 탭에서 이번
+  //   스캔에 검토된 전체 종목(확정/관찰뿐 아니라 탈락·데이터부족까지) 목록의 펼침 여부.
+  //   종목 수가 많으면(최대 200개) 화면이 지저분해지므로 기본은 접힘.
+  const [showAllAutoScanResults, setShowAllAutoScanResults] = useState(false);
   const [showJournal, setShowJournal] = useState(false); // [v0.12.0] 설정 하위 '고급·진단' 기록 펼침
   // [v0.14.0] 손익 색 관습: false=미국식(이익 초록/손실 빨강, 기본), true=한국식(이익 빨강/손실 파랑).
   //   화면 전용 취향이라 이 기기에만 저장(localStorage). CSS 토큰(data-pnl) 한 곳만 바꾸면 전체가 뒤집힌다.
@@ -3743,6 +3747,58 @@ ${msg}
                       </tbody>
                     </table>
                   )}
+
+                  {/* [v0.47.0 — 오너 요청 "필터 다 껐는데 하나도 안 나와 의심스럽다 — 스크리닝
+                      검토된 모든 종목을 어떤 필터로 어떤 사유로 탈락했는지 조회 가능하게, 폴드
+                      형식으로"] 확정/관찰(후보)만 보여주던 위 표와 달리, 이번 스캔에서 실제로
+                      검토된 전체 종목(탈락·데이터부족 포함)을 하나도 빠짐없이 보여준다. 종목
+                      수가 많을 수 있어(최대 200개) 기본은 접어 두고 버튼으로 펼친다. */}
+                  <div className="near-miss" style={{ marginTop: 16 }}>
+                    <button className="mini ghost" onClick={() => setShowAllAutoScanResults((v) => !v)}>
+                      {showAllAutoScanResults ? "▾" : "▸"} 이번 스캔에서 검토한 전체 종목 보기 ({run.results.length}개 — 적용된 필터·탈락 사유 포함)
+                    </button>
+                    {showAllAutoScanResults && (
+                      <>
+                        <p className="hint" style={{ marginTop: 8 }}>
+                          이번 스캔에 실제로 적용된 필터 — 가격대 <b>${run.priceMin}~${run.priceMax}</b> ·
+                          도지 몸통상한 <b>{Math.round(run.bodyRatio * 100)}%</b> ·
+                          EMA{run.emaPeriod} 위 <b>{run.emaTrendEnabled ? "켜짐" : "꺼짐"}</b> ·
+                          이치모쿠 구름 위 <b>{run.cloudEnabled ? "켜짐" : "꺼짐"}</b> ·
+                          도지 신선도(최대 {run.dojiMaxAgeMinutes}분) <b>{run.dojiMaxAgeEnabled ? "켜짐" : "꺼짐"}</b> ·
+                          다음봉 음봉 확인 <b>{run.nextCandleConfirmEnabled ? "켜짐" : "꺼짐"}</b> ·
+                          ETF/레버리지 제외 <b>{run.excludeEtf ? "켜짐" : "꺼짐"}</b>
+                          {" — "}<button className="mini ghost" onClick={() => goToTab("screenCriteria")}>[스크리닝 기준]에서 수정</button>
+                        </p>
+                        <table className="result-table screen-table miss-table">
+                          <thead>
+                            <tr><th>순위</th><th>종목</th><th>상태</th><th>현재가</th><th>사유</th></tr>
+                          </thead>
+                          <tbody>
+                            {run.results.map((r) => {
+                              const label =
+                                r.status === "confirmed" ? "🔴 확정"
+                                : r.status === "watch" ? "🟡 관찰"
+                                : r.status === "insufficient" ? "⚪ 데이터 부족"
+                                : "⚫ 탈락";
+                              const reason =
+                                r.status === "confirmed" || r.status === "watch" ? "조건 전부 통과"
+                                : r.status === "insufficient" ? (r.note ?? "데이터 부족")
+                                : (missReasons(r).reasons.join(" · ") || "패턴 미완성");
+                              return (
+                                <tr key={r.symbol} className="screen-row" onClick={() => pickScreenSymbol(r)} title="클릭하면 계산기로 이동 + 이 종목의 전봉종가·EMA200이 자동 입력됩니다(수정 가능)">
+                                  <td>{r.rank}</td>
+                                  <td><b>{r.symbol}</b></td>
+                                  <td>{label}</td>
+                                  <td>{r.price != null ? usdKrw(r.price, fx) : "—"}</td>
+                                  <td className="miss-reasons">{reason}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </>
+                    )}
+                  </div>
                 </>
               );
             })()}
