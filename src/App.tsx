@@ -18,6 +18,8 @@ import "./App.css";
 import TodayReport from "./TodayReport"; // [v0.9.1] 오늘의 매매 리포트 화면
 import { useTabOrder } from "./useTabOrder"; // [v0.9.2] 탭 순서 드래그로 변경
 import { restoreInputsFromSaved } from "../lib/split-restore"; // [v0.9.3] 옛 기록도 계산기로 불러오기
+import { getSession } from "../lib/session"; // [v0.48.1] 자동 스크리너 탭에 "지금 세션" 켜짐/꺼짐을 바로 보여주기 위함
+import { DateTime } from "luxon";
 import { summarizeAutoHistory, summarizeGroupHistory } from "../lib/auto-research"; // [v0.33.0/v0.35.0] 연구탭 통계(순수 함수)
 
 /** 앱이 가진 모든 탭(리프 단위 — 실제 콘텐츠를 가리키는 값. paneTab 렌더 가드는 전부 이 id 기준). */
@@ -3606,6 +3608,39 @@ ${msg}
                 [스크리닝 기준] 탭 한 곳으로 모으고, 여기는 "지금 적용된 값"을 읽기 전용으로
                 보여주기만 한다(실제로 반영되는 값은 항상 settings에서 그대로 읽으므로 두 화면이
                 서로 다른 값을 보여줄 일이 없다). */}
+            {/* [v0.48.1 — 오너가 반복 보고한 "시작해도/새로고침해도 스크리너가 안 돈다"]
+                v0.48.0의 lastCycleSkipReason 배너는 "사이클이 한 번 끝난 뒤에야" 사유를
+                보여준다 — 그런데 사이클 자체가 몇 초~몇십 초 걸릴 수 있어, 그새 오너가
+                "반응이 없다"고 판단해 버리면 그 배너를 보기도 전이다. 이제 사이클이 돌기도
+                전에, 지금 이 순간 "무슨 세션이고 이 세션이 켜져 있는지"를 항상 미리 보여준다
+                — [스크리닝 기준] 탭을 따로 열어보지 않아도 이 화면만 봐도 바로 알 수 있게. */}
+            {settings && (() => {
+              const nowSession = getSession(DateTime.fromMillis(nowTick).setZone("Asia/Seoul"));
+              const sessionKo = { day: "데이마켓", pre: "프리마켓", regular: "정규장(본장)", after: "애프터마켓", closed: "장 마감 시간대" }[nowSession];
+              const sessionEnabled =
+                nowSession === "day" ? settings.autoScanDayEnabled
+                : nowSession === "pre" ? settings.autoScanPreEnabled
+                : nowSession === "regular" ? settings.autoScanRegularEnabled
+                : nowSession === "after" ? settings.autoScanAfterEnabled
+                : null; // closed는 애초에 거래 대상 아님 — on/off 의미 없음
+              return (
+                <p className={`hint small ${sessionEnabled === false ? "danger" : ""}`}>
+                  지금은 <b>{sessionKo}</b> 시간대입니다 —{" "}
+                  {sessionEnabled == null ? (
+                    "장 시간이 아니라 자동매매 신규 진입 대상이 아니에요."
+                  ) : sessionEnabled ? (
+                    <>이 장의 신규 진입 <b>켜짐</b> ✔ (정상적으로 스캔·진입을 시도합니다)</>
+                  ) : (
+                    <>
+                      이 장의 신규 진입이 <b>꺼져 있어요</b> ✘ — 그래서 지금 스캔·새로고침을 해도
+                      새 후보가 안 나옵니다(오류 아님, 기존 감시 포지션은 계속 지켜봅니다).{" "}
+                      <button className="mini ghost" onClick={() => goToTab("screenCriteria")}>[스크리닝 기준]에서 켜기</button>
+                    </>
+                  )}
+                </p>
+              );
+            })()}
+
             {settings && (
               <p className="hint">
                 지금 조건: 상위 <b>{settings.autoScanCount}종목</b> · <b>${settings.autoScanPriceMin}~${settings.autoScanPriceMax}</b> ·
