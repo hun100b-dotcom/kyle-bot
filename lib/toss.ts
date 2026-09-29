@@ -158,18 +158,49 @@ export interface ConditionalOrderRequest {
   confirmHighValueOrder?: boolean;
 }
 
-/** 조건주문 응답(우리 표준) */
+/** 조건주문 한 다리(leg) 응답. */
+export interface ConditionalLegResponse {
+  orderSide?: string;
+  triggerPrice?: number;
+  orderPrice?: number;
+  /** [v0.51.0] 실스펙 필드 — 이 다리 자체의 상태. WATCHING(감시 중)/HOLDING(대기)/COMPLETED(끝남). */
+  status?: string;
+  /** [v0.51.0] 실스펙 필드 — 이 다리가 발동돼 실제 주문으로 전환됐으면 그 주문 ID, 아니면 null.
+   *  "어느 다리가 발동됐는지"는 이 필드의 존재 여부로 판단한다(발명된 필드였던 옛 triggeredLeg
+   *  대신 — 아래 ConditionalOrderResponse 주석 참고). */
+  triggeredOrderId?: string | null;
+}
+
+/**
+ * 조건주문 응답(우리 표준).
+ *
+ * [v0.51.0 긴급 수정 — 실계좌 정합성 버그의 진짜 근본 원인]
+ *   그동안 이 타입은 `status: "TRIGGERED"|"CANCELED"|"WAITING"`, `triggeredLeg: "first"|"second"`를
+ *   기대했는데, 이 값들은 실제 토스 API 응답에 존재하지 않는 **발명된 필드/값**이었다(목 서버가
+ *   같은 발명된 값을 돌려주도록 만들어져 있어 테스트는 계속 통과했지만, 실계좌에서는 절대
+ *   맞아떨어질 수 없었다). 반면 이미 검증돼 정상 동작 중인 "주문현황" 화면 경로
+ *   (`electron/tool-engine.ts`의 `condOrdersView`, `CondOrderRow`/`CondLegView` 타입, 그리고
+ *   `src/App.tsx`의 `condStatusKo`/`legStatusKo` — 전부 실스펙을 따로 확인해 만든 코드)를 보면
+ *   실제 값은 이렇다:
+ *     - 그룹(전체 조건주문) 상태: "WATCHING"(감시 중) / "COMPLETED"(끝남 — 발동됐든 취소됐든)
+ *     - 각 다리(leg) 상태: "WATCHING" / "HOLDING" / "COMPLETED"
+ *     - 어느 다리가 발동됐는지는 그 다리의 `triggeredOrderId`가 null이 아닌지로 판단(실제
+ *       체결 주문 ID로 연결됨) — "triggeredLeg" 같은 필드는 애초에 없었다.
+ *   이 스키마 불일치 때문에 `reconcileAutoPositions()`가 실제로는 이미 끝난(COMPLETED) 포지션을
+ *   영원히 "감시 중"으로 착각했다 — 오너가 여러 버전에 걸쳐 반복 보고한 "익절/손절 완료된 종목이
+ *   계속 감시 중으로 남아있다"의 진짜 정체였다(v0.48.0의 폴링 주기 수정은 "언제 재확인하는지"는
+ *   고쳤지만 "재확인 로직 자체가 실제 값을 못 알아본다"는 이 근본 문제는 고치지 못했다).
+ */
 export interface ConditionalOrderResponse {
   conditionalOrderId: string;
   symbol?: string;
   type?: string;
+  /** 실스펙: "WATCHING" | "COMPLETED". */
   status?: string;
   quantity?: number;
-  first?: { orderSide?: string; triggerPrice?: number; orderPrice?: number };
-  second?: { orderSide?: string; triggerPrice?: number; orderPrice?: number } | null;
+  first?: ConditionalLegResponse;
+  second?: ConditionalLegResponse | null;
   expireDate?: string;
-  /** [v0.26.0] OCO/OTO 중 어느 다리가 발동됐는지(목 서버·자동매매 종료 감지용). 발동 전엔 undefined. */
-  triggeredLeg?: "first" | "second";
 }
 
 /** 환율 응답: 1 baseCurrency = rate quoteCurrency (예: 1 USD = 1,390 KRW) */
@@ -921,13 +952,18 @@ function legToBody(leg: ConditionLeg): Record<string, unknown> {
 
 /** 실제 응답의 조건주문을 우리 표준형으로 변환(문자열 숫자 → number) */
 function toConditionalResponse(raw: Record<string, unknown>): ConditionalOrderResponse {
-  const leg = (v: unknown) => {
+  // [v0.51.0] 각 다리(leg)의 실스펙 필드(status/triggeredOrderId)까지 함께 옮긴다 — 이게 빠져
+  // 있던 게 "완료된 포지션을 영원히 감시 중으로 착각하는" 버그의 직접 원인이었다(위 인터페이스
+  // 주석 참고).
+  const leg = (v: unknown): ConditionalLegResponse | undefined => {
     if (!v || typeof v !== "object") return undefined;
     const o = v as Record<string, unknown>;
     return {
       orderSide: o.orderSide as string | undefined,
       triggerPrice: o.triggerPrice != null ? Number(o.triggerPrice) : undefined,
       orderPrice: o.orderPrice != null ? Number(o.orderPrice) : undefined,
+      status: o.status as string | undefined,
+      triggeredOrderId: o.triggeredOrderId != null ? String(o.triggeredOrderId) : null,
     };
   };
   return {
@@ -939,7 +975,6 @@ function toConditionalResponse(raw: Record<string, unknown>): ConditionalOrderRe
     first: leg(raw.first),
     second: raw.second === null ? null : leg(raw.second),
     expireDate: raw.expireDate as string | undefined,
-    triggeredLeg: raw.triggeredLeg === "first" || raw.triggeredLeg === "second" ? raw.triggeredLeg : undefined,
   };
 }
 

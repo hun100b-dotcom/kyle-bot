@@ -247,6 +247,17 @@ export interface SessionPattern {
  *     4) [v0.25.0] 그 도지가 nowMs 기준 maxAgeMinutes보다 오래전 봉이면, 위 판정과 무관하게 → none.
  *        [왜?] 세션 최고점 갱신 없이 오래 옆걸음치면, 몇 시간 전에 잡힌 도지가 계속 "확정"으로 남아
  *        나온다. 그 시점 가격 흐름은 이미 다 지나간 과거라 지금 매매 근거로 쓰기엔 불확실하다.
+ *
+ *   @param nextCandleConfirmEnabled [v0.51.0 긴급 수정] 꺼져 있으면(false) 도지가 나온 즉시 confirmed —
+ *     다음 봉이 아직 없든, 이미 나왔는데 양봉이든 상관없이 "다음 봉" 자체를 더 이상 보지 않는다.
+ *     [버그였던 이전 동작] 이 파라미터가 아예 없어서, 스크리닝 기준 탭에서 "다음봉 확인"을 꺼도
+ *     electron/tool-engine.ts의 applyScreenGates()는 "아직 다음 봉이 없어 watch인" 경우만
+ *     confirmed로 승격시켜 줄 수 있었다 — 그런데 5분마다 도는 스캔은 대부분 다음 봉이 '이미'
+ *     나와 있는 시점에 맞아떨어지므로, 그 다음 봉이 우연히 양봉이면 status가 곧장 "none"으로
+ *     확정 판정 자체가 나 버렸고, applyScreenGates는 watch만 구제할 뿐 none은 손대지 않아 그대로
+ *     탈락했다(꺼도 꺼지지 않는 필터처럼 보인 실제 원인 — 스캔 타이밍에 따라 같은 도지가 어떨 땐
+ *     구제되고 어떨 땐 안 되는 식으로 들쭉날쭉했다). 이제 이 함수 자체가 토글을 알고 있어, 꺼져
+ *     있으면 다음 봉의 색과 무관하게 즉시 confirmed로 판정한다(문서화된 의도 "도지만으로 확정"과 일치).
  */
 export function scanSessionPattern(
   candles5m: Candle[],
@@ -255,6 +266,7 @@ export function scanSessionPattern(
   wickMinRatio = WICK_MIN_RATIO,
   nowMs?: number,
   maxAgeMinutes = DOJI_MAX_AGE_MINUTES,
+  nextCandleConfirmEnabled = true,
 ): SessionPattern {
   // 현재 장 봉만 추린다(원래 인덱스 매핑은 필요 없어 새 배열로 다룬다).
   const s = candles5m.filter((c) => c.time >= sessionStartMs);
@@ -298,6 +310,9 @@ export function scanSessionPattern(
   const next = s[dojiIndex + 1] ?? null;
   const base = { sessionHigh, highTime, highIndex, dojiIndex, dojiCandle, dojiBodyRatio, dojiUpperWickPct: wk.upperPct, dojiLowerWickPct: wk.lowerPct, nextCandle: next, tooOld };
   if (tooOld) return { ...base, status: "none" };
+  // [v0.51.0] "다음 봉 확인" 자체를 꺼 뒀으면, 다음 봉이 있는지·무슨 색인지 아예 보지 않고
+  //   도지 하나만으로 즉시 확정(위 함수 설명 참고 — 버그였던 이전 동작 설명 포함).
+  if (!nextCandleConfirmEnabled) return { ...base, status: "confirmed" as PatternStatus };
   if (!next) return { ...base, status: "watch" as PatternStatus }; //   다음 봉 대기
   const nextBearish = next.close < next.open;
   return { ...base, status: (nextBearish ? "confirmed" : "none") as PatternStatus };

@@ -134,6 +134,36 @@ describe("세션 패턴(scanSessionPattern)", () => {
   });
 });
 
+describe("[v0.51.0 긴급 수정] nextCandleConfirmEnabled=false — 도지만으로 즉시 확정", () => {
+  // 오너가 [스크리닝 기준] 탭에서 "다음봉 확인"을 꺼도, 스캔 타이밍에 따라(다음 봉이 이미
+  //   나왔는데 마침 양봉이면) 여전히 탈락하던 버그를 고친 회귀 테스트. 버그 상세는
+  //   lib/indicators.ts의 scanSessionPattern 문서 주석 참고.
+  const highC = c(0, 98, 100, 97, 99);
+  const dojiC = c(1 * MIN, 99, 99.5, 98.5, 98.9);
+
+  it("다음 봉이 아직 없어도(watch였을 자리) 곧바로 confirmed", () => {
+    const r = scanSessionPattern([highC, dojiC], 0, 0.3, WICK_MIN_RATIO, undefined, undefined, false);
+    expect(r.status).toBe("confirmed");
+  });
+
+  it("[핵심] 다음 봉이 이미 나왔고 양봉이어도(예전엔 none) confirmed — 꺼진 필터는 더 이상 영향 없음", () => {
+    const bull = c(2 * MIN, 98.9, 99.5, 98.8, 99.4); // 양봉(패턴상 '깨짐'이던 케이스)
+    const r = scanSessionPattern([highC, dojiC, bull], 0, 0.3, WICK_MIN_RATIO, undefined, undefined, false);
+    expect(r.status).toBe("confirmed");
+  });
+
+  it("도지 자체가 없으면 토글을 꺼도 여전히 none(구제 대상이 아님)", () => {
+    const noDoji = c(1 * MIN, 98.5, 99.5, 98, 99.3); // 몸통이 커서 도지가 아님
+    const r = scanSessionPattern([highC, noDoji], 0, 0.3, WICK_MIN_RATIO, undefined, undefined, false);
+    expect(r.status).toBe("none");
+  });
+
+  it("파라미터를 안 주면(기본 true) 예전 그대로 — 양봉이면 none(회귀 없음)", () => {
+    const bull = c(2 * MIN, 98.9, 99.5, 98.8, 99.4);
+    expect(scanSessionPattern([highC, dojiC, bull], 0, 0.3).status).toBe("none");
+  });
+});
+
 describe(`[v0.25.0/v0.29.0] 도지 신선도(기본 ${DOJI_MAX_AGE_MINUTES}분 초과 시 불합격)`, () => {
   // c0=최고점(0분), c1=도지(1분), c2=도지 다음 음봉(2분) — 위 describe와 동일한 시나리오.
   const highC = c(0, 98, 100, 97, 99);

@@ -4350,6 +4350,10 @@ export class ToolEngine extends EventEmitter {
           //   스스로 status를 none으로 강제하게 한다(실 매매엔 불확실한 과거 데이터라는 오너 지적 반영).
           // [v0.33.0] 신선도 검사를 꺼 두면(dojiMaxAgeEnabled=false) 한도를 사실상 무한대로 줘서
           //   "너무 오래됐다"는 판정 자체가 절대 나오지 않게 한다(indicators.ts 쪽 로직은 안 건드림).
+          // [v0.51.0 긴급 수정] nextCandleConfirmEnabled를 이제 여기서 직접 넘긴다 — 예전엔 이 값을
+          //   안 넘겨서(항상 true로 동작) "다음봉 확인"을 꺼도 스캔 타이밍에 따라 여전히 탈락하는
+          //   일이 있었다(자세한 이유는 scanSessionPattern 문서 참고 — 오너가 "필터를 꺼도 계속
+          //   적용되는 것 같다"고 보고한 것의 실제 원인 중 하나).
           const pat = scanSessionPattern(
             candles5m,
             sessionStartMs,
@@ -4357,6 +4361,7 @@ export class ToolEngine extends EventEmitter {
             dojiWickMinRatio,
             now.toMillis(),
             dojiMaxAgeEnabled ? dojiMaxAgeMinutes : Number.POSITIVE_INFINITY,
+            nextCandleConfirmEnabled,
           ); // HA 캔들로 패턴 판정
 
           // 화면에 보여줄 값(aboveEma/aboveCloud)은 실제 비교 결과 그대로 — 조건을 꺼도 "지표상
@@ -4768,45 +4773,56 @@ export class ToolEngine extends EventEmitter {
       } catch {
         continue; // 조회 실패는 다음 사이클에 재시도(포지션을 잃어버리지 않음)
       }
-      if (resp.status === "TRIGGERED" || resp.triggeredLeg) {
-        // 익절(first)/손절(second) 중 어느 쪽이 발동됐는지에 따라 우리가 등록해 둔 그 가격을 그대로 쓴다
-        // (실제 체결가 조회 없이도 정확 — 조건주문 지정가로 나가므로).
-        const exitPrice = resp.triggeredLeg === "second" ? pos.sl : pos.tp;
-        const pnlUsd = (exitPrice - pos.entry) * pos.quantity;
-        const pnlPct = ((exitPrice - pos.entry) / pos.entry) * 100;
-        this.autoTradeRealizedPnlUsd += pnlUsd;
-        this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
-        this.saveAutoPositions(); // [v0.30.1] 자리 비움을 즉시 파일에도 반영(재시작해도 정확)
-        const kindKo = resp.triggeredLeg === "second" ? "손절" : "익절";
-        this.addJournal({
-          kind: "info",
-          symbol: pos.symbol,
-          summary:
-            `🤖 자동매매 ${kindKo} 완료 ${pos.symbol}: 진입 $${pos.entry} → 청산 $${exitPrice} × ${pos.quantity}주 ` +
-            `(이번 실행 누적손익 $${this.autoTradeRealizedPnlUsd.toFixed(2)}) — 빈자리는 다음 확인 때 채웁니다.`,
-          notify: true,
-          notifyTitle: `${kindKo === "손절" ? "🛑" : "✅"} ${kindKo} 완료: ${pos.symbol}`,
-        });
-        this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
-          status: resp.triggeredLeg === "second" ? "closed_loss" : "closed_win",
-          exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
-          exitPrice,
-          pnlUsd: Math.round(pnlUsd * 100) / 100,
-          pnlPct: Math.round(pnlPct * 100) / 100,
-          note: `${kindKo} 발동으로 자동 청산`,
-        });
-      } else if (resp.status === "CANCELED") {
-        // 사람이 [주문현황]에서 직접 취소한 경우 — 손익 반영 없이 자리만 비운다.
-        this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
-        this.saveAutoPositions();
-        this.addJournal({ kind: "info", symbol: pos.symbol, summary: `자동매매 포지션의 조건주문이 취소돼 있어 감시를 멈춥니다: ${pos.symbol}` });
-        this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
-          status: "closed_manual",
-          exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
-          note: "사람이 [주문현황]에서 조건주문을 직접 취소함(손익 미확정)",
-        });
+      // [v0.51.0 긴급 수정] 예전엔 실제로 존재하지 않는 값(status "TRIGGERED"/"CANCELED",
+      //   triggeredLeg 필드)을 확인하고 있었다 — 실스펙은 그룹 status가 "WATCHING"(감시 중)
+      //   /"COMPLETED"(끝남)뿐이고, 어느 다리가 발동됐는지는 그 다리의 triggeredOrderId가
+      //   null이 아닌지로 판단해야 한다(lib/toss.ts의 ConditionalOrderResponse 주석 참고).
+      //   이 불일치 때문에 실계좌에서는 이 분기가 절대 안 걸려, 이미 끝난 포지션이 영원히
+      //   "감시 중"으로 남아있었다 — 오너가 반복 보고한 정합성 버그의 진짜 원인.
+      if (resp.status === "COMPLETED") {
+        const secondTriggered = resp.second?.triggeredOrderId != null;
+        const firstTriggered = resp.first?.triggeredOrderId != null;
+        if (firstTriggered || secondTriggered) {
+          // 익절(first)/손절(second) 중 어느 쪽이 발동됐는지에 따라 우리가 등록해 둔 그 가격을 그대로 쓴다
+          // (실제 체결가 조회 없이도 정확 — 조건주문 지정가로 나가므로).
+          const exitPrice = secondTriggered ? pos.sl : pos.tp;
+          const pnlUsd = (exitPrice - pos.entry) * pos.quantity;
+          const pnlPct = ((exitPrice - pos.entry) / pos.entry) * 100;
+          this.autoTradeRealizedPnlUsd += pnlUsd;
+          this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
+          this.saveAutoPositions(); // [v0.30.1] 자리 비움을 즉시 파일에도 반영(재시작해도 정확)
+          const kindKo = secondTriggered ? "손절" : "익절";
+          this.addJournal({
+            kind: "info",
+            symbol: pos.symbol,
+            summary:
+              `🤖 자동매매 ${kindKo} 완료 ${pos.symbol}: 진입 $${pos.entry} → 청산 $${exitPrice} × ${pos.quantity}주 ` +
+              `(이번 실행 누적손익 $${this.autoTradeRealizedPnlUsd.toFixed(2)}) — 빈자리는 다음 확인 때 채웁니다.`,
+            notify: true,
+            notifyTitle: `${kindKo === "손절" ? "🛑" : "✅"} ${kindKo} 완료: ${pos.symbol}`,
+          });
+          this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
+            status: secondTriggered ? "closed_loss" : "closed_win",
+            exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
+            exitPrice,
+            pnlUsd: Math.round(pnlUsd * 100) / 100,
+            pnlPct: Math.round(pnlPct * 100) / 100,
+            note: `${kindKo} 발동으로 자동 청산`,
+          });
+        } else {
+          // 어느 다리도 발동 안 했는데 그룹이 COMPLETED = 사람이 [주문현황]에서 직접 취소한 경우
+          // — 손익 반영 없이 자리만 비운다.
+          this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
+          this.saveAutoPositions();
+          this.addJournal({ kind: "info", symbol: pos.symbol, summary: `자동매매 포지션의 조건주문이 취소돼 있어 감시를 멈춥니다: ${pos.symbol}` });
+          this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
+            status: "closed_manual",
+            exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
+            note: "사람이 [주문현황]에서 조건주문을 직접 취소함(손익 미확정)",
+          });
+        }
       }
-      // WAITING(그대로 감시 중)이면 할 일 없음.
+      // WATCHING(그대로 감시 중)이면 할 일 없음.
     }
 
     // [v0.30.1 긴급수정] "이 프로세스가 직접 감시 중이 아닌" watching 포지션을 재확인한다 — 앱

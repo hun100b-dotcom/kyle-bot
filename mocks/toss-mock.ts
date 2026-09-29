@@ -40,7 +40,27 @@ interface MockOrder {
   pollCount: number; // 단건 조회 횟수(부분체결 "누적" 시연용)
 }
 
-/** 목 서버의 조건주문 한 건(실스펙 흉내: 감시 조건 1~2개) */
+/** 조건주문 한 다리(leg) — [v0.51.0] 실스펙 정합: status/triggeredOrderId를 실제처럼 갖는다. */
+interface MockCondLeg {
+  orderSide: "BUY" | "SELL";
+  triggerPrice: number;
+  orderPrice?: number;
+  status: "WATCHING" | "HOLDING" | "COMPLETED";
+  triggeredOrderId: string | null;
+}
+
+/**
+ * 목 서버의 조건주문 한 건(실스펙 흉내: 감시 조건 1~2개).
+ *
+ * [v0.51.0 긴급 수정] 예전엔 이 상태값이 "WAITING"/"TRIGGERED"/"CANCELED" +
+ *   그룹 레벨 `triggeredLeg` 필드였는데, 이건 실제 토스 API에 없는 **발명된 값**이었다
+ *   (electron/tool-engine.ts의 `reconcileAutoPositions`가 실계좌에서 이 값을 영원히 못
+ *   찾아 "이미 끝난 포지션을 계속 감시 중으로 착각"하던 정합성 버그의 원인 — 이미 검증돼
+ *   정상 동작 중인 "주문현황" 화면 경로(condOrdersView/CondOrderRow/CondLegView 타입,
+ *   src/App.tsx의 condStatusKo/legStatusKo)를 근거로 실제 값을 확인했다). 이제 목 서버도
+ *   그 실제 값(그룹 status: WATCHING/COMPLETED, 다리별 status + triggeredOrderId)을
+ *   그대로 흉내 낸다 — 테스트가 이 정합성 버그 부류를 다시 놓치지 않도록.
+ */
 interface MockConditional {
   conditionalOrderId: string;
   symbol: string;
@@ -48,11 +68,9 @@ interface MockConditional {
   quantity: number;
   orderType: "LIMIT" | "MARKET";
   expireDate: string;
-  status: "WAITING" | "TRIGGERED" | "CANCELED";
-  first: { orderSide: "BUY" | "SELL"; triggerPrice: number; orderPrice?: number };
-  second?: { orderSide: "BUY" | "SELL"; triggerPrice: number; orderPrice?: number } | null;
-  /** [v0.26.0] 발동된 다리(자동매매 종료 감지 테스트용). 발동 전엔 없음. */
-  triggeredLeg?: "first" | "second";
+  status: "WATCHING" | "COMPLETED";
+  first: MockCondLeg;
+  second?: MockCondLeg | null;
 }
 
 /** 목 서버 내부 상태(테스트에서 조작/검증 가능하게 노출) */
@@ -134,22 +152,30 @@ function limitFill(side: "BUY" | "SELL", cur: number, price: number): boolean {
 }
 
 /**
- * [v0.26.0] OCO(익절+손절) 재판정 — 대기 주문(limitFill)과 같은 원칙: 조회 시점의 현재가로
- *   "발동 조건에 닿았는지"를 다시 확인한다. first=익절(위쪽 감시가, 가격이 올라야 발동),
- *   second=손절(아래쪽 감시가, 가격이 내려야 발동) — placeOco/watchAndBracket이 항상 이 모양으로
- *   등록하므로(OCO 규칙: 둘 다 SELL, first감시가>현재가>second감시가) 이 방향으로 고정해도 된다.
- *   자동매매(startAutoTrade)가 "내 포지션이 익절/손절로 끝났는지"를 감지하는 유일한 방법이라
- *   실제 체결처럼 조회할 때마다 다시 확인해 준다(TRIGGERED가 되면 더 이상 재판정하지 않음).
+ * [v0.26.0→v0.51.0] OCO(익절+손절) 재판정 — 대기 주문(limitFill)과 같은 원칙: 조회 시점의
+ *   현재가로 "발동 조건에 닿았는지"를 다시 확인한다. first=익절(위쪽 감시가, 가격이 올라야
+ *   발동), second=손절(아래쪽 감시가, 가격이 내려야 발동) — placeOco/watchAndBracket이 항상 이
+ *   모양으로 등록하므로(OCO 규칙: 둘 다 SELL, first감시가>현재가>second감시가) 이 방향으로
+ *   고정해도 된다. 자동매매(startAutoTrade)가 "내 포지션이 익절/손절로 끝났는지"를 감지하는
+ *   유일한 방법이라 실제 체결처럼 조회할 때마다 다시 확인해 준다(COMPLETED가 되면 더 이상
+ *   재판정하지 않음).
+ *   [v0.51.0] 그룹/다리 상태를 실스펙(WATCHING/COMPLETED, 다리별 triggeredOrderId)으로 표현.
  */
-function reevaluateOco(cond: MockConditional, prices: Record<string, number>): void {
-  if (cond.status !== "WAITING" || cond.type !== "OCO" || !cond.second) return;
-  const cur = priceOf(prices, cond.symbol);
+function reevaluateOco(cond: MockConditional, state: MockState): void {
+  if (cond.status !== "WATCHING" || cond.type !== "OCO" || !cond.second) return;
+  const cur = priceOf(state.prices, cond.symbol);
   if (cur >= cond.first.triggerPrice) {
-    cond.status = "TRIGGERED";
-    cond.triggeredLeg = "first";
+    state.seq += 1;
+    cond.status = "COMPLETED";
+    cond.first.status = "COMPLETED";
+    cond.first.triggeredOrderId = `T${state.seq}`;
+    cond.second.status = "COMPLETED"; // OCO: 반대쪽(손절)은 발동 없이 함께 종료
   } else if (cur <= cond.second.triggerPrice) {
-    cond.status = "TRIGGERED";
-    cond.triggeredLeg = "second";
+    state.seq += 1;
+    cond.status = "COMPLETED";
+    cond.second.status = "COMPLETED";
+    cond.second.triggeredOrderId = `T${state.seq}`;
+    cond.first.status = "COMPLETED"; // OCO: 반대쪽(익절)은 발동 없이 함께 종료
   }
 }
 
@@ -425,9 +451,23 @@ export function createMockTossServer() {
         quantity: Number(body.quantity),
         orderType: (body.orderType ?? "LIMIT") as "LIMIT" | "MARKET",
         expireDate: String(body.expireDate),
-        status: "WAITING",
-        first: { ...first, triggerPrice: Number(first.triggerPrice), orderPrice: first.orderPrice != null ? Number(first.orderPrice) : undefined },
-        second: second ? { ...second, triggerPrice: Number(second.triggerPrice), orderPrice: second.orderPrice != null ? Number(second.orderPrice) : undefined } : null,
+        status: "WATCHING", // [v0.51.0] 실스펙: 생성 직후엔 그룹도 "감시 중"
+        first: {
+          ...first,
+          triggerPrice: Number(first.triggerPrice),
+          orderPrice: first.orderPrice != null ? Number(first.orderPrice) : undefined,
+          status: "WATCHING",
+          triggeredOrderId: null,
+        },
+        second: second
+          ? {
+              ...second,
+              triggerPrice: Number(second.triggerPrice),
+              orderPrice: second.orderPrice != null ? Number(second.orderPrice) : undefined,
+              status: "WATCHING",
+              triggeredOrderId: null,
+            }
+          : null,
       };
       state.conditionals.set(cond.conditionalOrderId, cond);
       return sendResult(res, 201, { ...cond, quantity: String(cond.quantity) });
@@ -441,7 +481,7 @@ export function createMockTossServer() {
         return sendJson(res, 400, { error: { code: "invalid-request", message: "status 필수", data: { field: "status" } } });
       }
       // [v0.26.0] 대기 주문 재판정과 같은 원칙: 목록을 조회하는 시점에 OCO 발동 조건을 다시 확인.
-      for (const c of state.conditionals.values()) reevaluateOco(c, state.prices);
+      for (const c of state.conditionals.values()) reevaluateOco(c, state);
       // 실서버 형태({ conditionalOrders, nextCursor, hasNext })로 응답.
       return sendResult(res, 200, {
         conditionalOrders: [...state.conditionals.values()].map((c) => ({ ...c, quantity: String(c.quantity) })),
@@ -456,11 +496,15 @@ export function createMockTossServer() {
       const cond = state.conditionals.get(decodeURIComponent(cm[1]));
       if (!cond) return sendJson(res, 404, { error: "not_found" });
       if (method === "GET") {
-        reevaluateOco(cond, state.prices); // [v0.26.0] 단건 조회 시점에도 재판정
+        reevaluateOco(cond, state); // [v0.26.0] 단건 조회 시점에도 재판정
         return sendResult(res, 200, { ...cond, quantity: String(cond.quantity) });
       }
       if (method === "DELETE") {
-        cond.status = "CANCELED";
+        // [v0.51.0] 실스펙엔 "CANCELED"가 없다 — 사람이 직접 취소해도 그룹 상태는 COMPLETED가 되고,
+        //   어느 다리도 triggeredOrderId가 없으므로 tool-engine.ts가 "수동 취소"로 인식한다.
+        cond.status = "COMPLETED";
+        cond.first.status = "COMPLETED";
+        if (cond.second) cond.second.status = "COMPLETED";
         return sendResult(res, 200, { conditionalOrderId: cond.conditionalOrderId, status: cond.status });
       }
     }

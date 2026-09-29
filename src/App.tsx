@@ -1916,26 +1916,38 @@ ${msg}
   }
 
   /**
-   * [v0.29.0] 스캔 전체에서 "none"(탈락) 종목들이 어느 조건에서 가장 많이 걸리는지 집계.
+   * [v0.29.0→v0.51.0] 스캔 전체에서 "none"(탈락) 종목들이 어느 조건에서 가장 많이 걸리는지 집계.
    *   [오너 지시 2026-09-25] "스크리닝 후보가 너무 안 나오는데 기준 재점검해보자 — 너무 엄격하면
    *   아예 거래가 없어". 감(느낌)으로 기준을 바꾸는 대신, 실제 스캔에서 어느 게이트가 병목인지
    *   숫자로 보여줘야 다음에 무엇을 완화할지 근거 있게 판단할 수 있다. missReasons()와 같은 판정
    *   순서(하드게이트는 각각 독립 집계, 패턴은 우선순위대로 하나만)를 그대로 재사용한다.
+   *
+   *   [v0.51.0 긴급 수정 — 오너 보고 "필터를 꺼도 탈락 사유 통계에 계속 잡힌다"]
+   *   r.aboveEma/aboveCloud/evidence.filters.nextBearish는 electron/tool-engine.ts가 "그 조건을
+   *   꺼도 지표상 실제로 어떤지는 정직하게 보여준다"는 원칙으로 넣어 둔 '원본 비교값'이다(게이트로
+   *   쓸지는 별도 결정 — buildEvidence/scanScreener 주석 참고). 그런데 이 집계 함수는 그 원본값만
+   *   보고 무조건 "탈락 사유"로 셌다 — 예를 들어 EMA200 필터를 꺼 둬도, 실제로는 그 조건 때문에
+   *   떨어진 게 하나도 없는데 "EMA200 아래 24개"처럼 찍혀, 마치 꺼도 안 꺼진 것처럼 보이는 착시를
+   *   만들었다. 이제 그 스캔(run)에서 실제로 켜져 있던 조건만 집계한다(꺼진 조건은 셀 대상에서
+   *   아예 제외 — 어차피 탈락에 영향을 안 줬으므로).
    */
-  function tallyMissReasons(results: ScreenResult[]): { label: string; count: number }[] {
+  function tallyMissReasons(
+    results: ScreenResult[],
+    run: { emaTrendEnabled: boolean; cloudEnabled: boolean; nextCandleConfirmEnabled: boolean },
+  ): { label: string; count: number }[] {
     const counts: Record<string, number> = {};
     const bump = (k: string) => { counts[k] = (counts[k] ?? 0) + 1; };
     for (const r of results) {
       if (r.status !== "none") continue;
       if (!r.priceInBand) bump("가격대 벗어남");
-      if (!r.aboveEma) bump("EMA200 아래");
-      if (!r.aboveCloud) bump("이치모쿠 구름 아래/속");
+      if (run.emaTrendEnabled && !r.aboveEma) bump("EMA200 아래");
+      if (run.cloudEnabled && !r.aboveCloud) bump("이치모쿠 구름 아래/속");
       if (r.evidence) {
         const f = r.evidence.filters;
         if (!f.firstDoji) bump("최고점 이후 음봉 도지 없음");
         else if (!f.bothWicks) bump("도지 꼬리 한쪽만(망치형 등)");
         else if (!f.recentDoji) bump("도지 발생 20분 초과(신선도 불합격)");
-        else if (!f.nextBearish) bump("도지 다음 봉이 음봉 아님(패턴 미완성)");
+        else if (run.nextCandleConfirmEnabled && !f.nextBearish) bump("도지 다음 봉이 음봉 아님(패턴 미완성)");
       }
     }
     return Object.entries(counts)
@@ -2965,7 +2977,7 @@ ${msg}
                   </p>
                   {/* [v0.29.0] 탈락 사유 통계 — 어느 조건이 병목인지 숫자로(오너 요청: "기준 재점검") */}
                   {(() => {
-                    const stats = tallyMissReasons(screenRun.results);
+                    const stats = tallyMissReasons(screenRun.results, screenRun);
                     if (stats.length === 0) return null;
                     return (
                       <p className="hint miss-stats">
@@ -3737,7 +3749,7 @@ ${msg}
                   </p>
                   {/* [v0.29.0] 탈락 사유 통계 — 어느 조건이 병목인지 숫자로(오너 요청: "기준 재점검") */}
                   {(() => {
-                    const stats = tallyMissReasons(run.results);
+                    const stats = tallyMissReasons(run.results, run);
                     if (stats.length === 0) return null;
                     return (
                       <p className="hint miss-stats">
