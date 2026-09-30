@@ -12,14 +12,15 @@
 import "./env-shim"; // ← 가장 먼저(설정 저장소 준비)
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { installKyleTool } from "./kyletool-adapter";
+import { installKyleTool, handleOAuthRedirect } from "./kyletool-adapter";
 import UpdateBanner from "./UpdateBanner";
 import "./app.css"; //      웹 전용 보정(아이폰 안전영역 등)
 import "../src/App.css"; // 데스크톱 화면 스타일 그대로
 
 // ① 다리 먼저 놓기(엔진 생성). 실패해도 원인을 화면에 보여 준다.
+let engine: ReturnType<typeof installKyleTool>;
 try {
-  installKyleTool();
+  engine = installKyleTool();
 } catch (e) {
   document.body.innerHTML =
     `<div style="padding:24px;font-family:system-ui;color:#e2e8f0;background:#0f172a">` +
@@ -27,15 +28,17 @@ try {
   throw e;
 }
 
-// ② 데스크톱 화면을 그대로 띄운다.
+// ② 소셜 로그인(구글·카카오)에서 막 돌아온 것이면 화면이 뜨기 전에 먼저 세션을 적용한다
+//   (v0.59.0) — 그래야 App 첫 렌더부터 로그인 상태가 정확하다. 그 다음 데스크톱과
+//   똑같은 화면(src/App)을 그대로 띄운다.
 //   [왜 동적 import 인가?] 다리(kyletool)를 놓은 **뒤에** 화면 코드를 불러오기 위해서다.
-//   [왜 await 가 아니라 then 인가?] 파일 맨 위에서 await 를 쓰면(top-level await) 옛 아이폰
-//   사파리에서 화면이 아예 안 뜰 수 있다. then 으로 쓰면 그런 걱정이 없다.
-void import("../src/App").then(({ default: App }) => {
-  createRoot(document.getElementById("root")!).render(
-    <StrictMode>
-      <UpdateBanner />
-      <App />
-    </StrictMode>,
-  );
+void handleOAuthRedirect(engine).finally(() => {
+  void import("../src/App").then(({ default: App }) => {
+    createRoot(document.getElementById("root")!).render(
+      <StrictMode>
+        <UpdateBanner />
+        <App />
+      </StrictMode>,
+    );
+  });
 });

@@ -1118,6 +1118,9 @@ export class ToolEngine extends EventEmitter {
   //   없어진다(로그인 비밀번호 = 잠금 비밀번호). 앱을 다시 켜면(재로그인 전까지) null이라
   //   자동 동기화가 잠시 쉬는데, 그동안도 로컬에 저장된 값으로는 그대로 동작한다.
   private authPassword: string | null = null;
+  // [v0.59.0] capri_accounts.status 캐시(60초) — 승인 대기 화면이 반복 폴링해도
+  //   매번 Supabase를 다시 부르지 않게 한다. 로그아웃/로그인하면 자연히 비워진다.
+  private accountStatusCache: { status: "pending" | "approved" | "rejected"; atMs: number } | null = null;
 
   private mock: ReturnType<typeof createMockTossServer> | null = null;
   private mockPort = 0;
@@ -1141,6 +1144,13 @@ export class ToolEngine extends EventEmitter {
    *  절대 안 돈다(startGroupSyncLoop 참고). */
   private groupSyncTimer: ReturnType<typeof setInterval> | null = null;
   private static readonly GROUP_SYNC_INTERVAL_MS = 3 * 60_000; // 3분마다
+  /** [v0.59.0] 폰 원격 조종 — PC(데스크톱)에서만 돌아야 한다. electron/main.ts가 로그인 직후
+   *  이 인스턴스에서만 명시적으로 시작한다(IPC로 노출 안 함 — 화면 코드가 실수로도 못 켠다).
+   *  웹(폰) 쪽 ToolEngine 인스턴스는 이 타이머를 절대 돌리지 않는다(kyletool-adapter.ts가
+   *  이 메서드를 부르지 않음) — 그래서 폰 브라우저 탭이 실수로 명령을 "실행"하는 일은
+   *  구조적으로 없다(폰은 sendCommand로 "넣기"만 한다). */
+  private remoteControlTimer: ReturnType<typeof setInterval> | null = null;
+  private static readonly REMOTE_CONTROL_INTERVAL_MS = 8_000; // 8초마다(Realtime 대신 폴링)
   /** [v0.35.0] "스크리닝은 확정인데 왜 안 사졌지?"를 화면에서 바로 보이게 — 사이클마다 다시 채움
    *  (지난 사이클 이유가 이번 사이클에도 그대로 남아 헷갈리는 일이 없도록 매번 초기화). */
   private autoTradeSkipReasons: Record<string, string> = {};
@@ -1924,23 +1934,57 @@ export class ToolEngine extends EventEmitter {
   /** 로그아웃 — 세션 지우고 저장에서도 제거(토스 키/설정은 그대로 남는다). */
   authSignOut(): { ok: boolean } {
     this.stopGroupSyncLoop(); // [v0.56.0] 로그아웃하면 그룹 자동 동기화도 즉시 멈춘다.
+    this.stopRemoteControlLoop(); // [v0.59.0] 로그아웃하면 원격 명령 폴링도 즉시 멈춘다.
     this.authAccessToken = null;
     this.authRefreshToken = null;
     this.authEmail = null;
     this.authUserId = null;
     this.authExpiresAtMs = 0;
     this.authPassword = null; // [v0.24.0] 메모리에서만 들고 있던 비밀번호도 지운다
+    this.accountStatusCache = null; // [v0.59.0] 다음 로그인 계정과 섞이지 않게 비운다
     this.persistEnv();
     return { ok: true };
   }
 
-  /** 로그인 상태(화면 표시용). isOwner면 화면이 "가입 승인" 패널을 보여준다. */
-  authStatus(): { email: string | null; loggedIn: boolean; isOwner: boolean } {
-    return {
+  /**
+   * 로그인 상태(화면 표시용). isOwner면 화면이 "가입 승인" 패널을 보여준다.
+   * [v0.59.0] accountStatus 추가 — 화면이 "로그인 화면 / 승인 대기 화면 / 본 화면" 중
+   *   무엇을 보여줄지 이 값 하나로 정한다. 다만 이건 화면단 UX일 뿐이고, 진짜 차단은
+   *   서버 RLS(마이그레이션 20260930120000)가 한다 — 그래서 조회가 실패해도(오프라인 등)
+   *   "unknown"으로 두고 화면을 막지 않는다(이미 로그인된 사람을 네트워크 문제로 잠그면
+   *   안 됨 — 실계좌 앱이라 더 신중해야 한다). 진짜 미승인/거절이 **확인된 경우만** 막는다.
+   */
+  async authStatus(): Promise<{
+    email: string | null;
+    loggedIn: boolean;
+    isOwner: boolean;
+    accountStatus: "pending" | "approved" | "rejected" | "unknown";
+  }> {
+    const base = {
       email: this.authEmail,
       loggedIn: !!(this.authAccessToken || this.authRefreshToken),
       isOwner: this.authEmail === ToolEngine.OWNER_EMAIL,
     };
+    if (!base.loggedIn) return { ...base, accountStatus: "unknown" as const };
+    if (base.isOwner) return { ...base, accountStatus: "approved" as const }; // 오너는 게이트 대상 아님
+    if (this.accountStatusCache && Date.now() - this.accountStatusCache.atMs < 60_000) {
+      return { ...base, accountStatus: this.accountStatusCache.status };
+    }
+    try {
+      const token = await this.ensureAccessToken();
+      if (!token) return { ...base, accountStatus: "unknown" as const };
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_accounts?select=status&user_id=eq.${this.authUserId}`, {
+        headers: this.authRestHeaders(token),
+      });
+      if (!res.ok) return { ...base, accountStatus: "unknown" as const };
+      const rows = (await res.json()) as Array<{ status: "pending" | "approved" | "rejected" }>;
+      const status = rows[0]?.status;
+      if (!status) return { ...base, accountStatus: "unknown" as const };
+      this.accountStatusCache = { status, atMs: Date.now() };
+      return { ...base, accountStatus: status };
+    } catch {
+      return { ...base, accountStatus: "unknown" as const };
+    }
   }
 
   /** 토큰 응답을 세션 상태로 반영. */
@@ -1950,6 +1994,9 @@ export class ToolEngine extends EventEmitter {
     const expiresIn = Number(data.expires_in ?? 3600);
     this.authExpiresAtMs = Date.now() + expiresIn * 1000;
     const user = data.user as Record<string, unknown> | undefined;
+    // [v0.59.0] 계정이 바뀌면(다른 사람으로 로그인) 이전 계정의 승인 상태 캐시를 들고
+    //   있으면 안 된다 — 잠깐이라도 남의 승인 상태로 화면이 잘못 뜰 수 있다.
+    if (user?.id && String(user.id) !== this.authUserId) this.accountStatusCache = null;
     if (user?.id) this.authUserId = String(user.id);
     if (user?.email) this.authEmail = String(user.email);
   }
@@ -2068,6 +2115,140 @@ export class ToolEngine extends EventEmitter {
       return { ok: true, message: `${e} 요청을 거절했습니다.` };
     } catch (err) {
       return { ok: false, message: String(err).replace(/^Error:\s*/, "") };
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // [v0.59.0] 로그인 게이트 — capri_accounts 기반 승인 대기 목록(진짜 게이트).
+  //   위 capri_access_requests(가입 자체가 막히던 예전 모델)와는 별개 표다. 지금은
+  //   가입이 항상 성공하고, 승인 전엔 이 표의 status='pending'으로만 남는다
+  //   (마이그레이션 20260930120000 참고). 오너 전용 — RLS가 서버에서 한 번 더 막는다.
+  // --------------------------------------------------------------------------
+
+  /** [운영자 전용] 승인 대기 중인 계정 목록. */
+  async listPendingAccounts(): Promise<Array<{ userId: string; email: string; requestedAt: string }>> {
+    const token = await this.ensureAccessToken();
+    if (!token) return [];
+    try {
+      const res = await fetch(
+        `${ToolEngine.SUPABASE_URL}/rest/v1/capri_accounts?status=eq.pending&select=user_id,email,requested_at&order=requested_at.asc`,
+        { headers: this.authRestHeaders(token) },
+      );
+      if (!res.ok) return [];
+      const rows = (await res.json()) as Array<{ user_id: string; email: string; requested_at: string }>;
+      return rows.map((r) => ({ userId: r.user_id, email: r.email, requestedAt: r.requested_at }));
+    } catch {
+      return [];
+    }
+  }
+
+  /** [운영자 전용] 대기 계정을 승인/거절한다 — capri_allowed_emails 동기화는 DB 트리거가 자동으로 한다. */
+  async decideAccount(userId: string, decision: "approved" | "rejected"): Promise<{ ok: boolean; message: string }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요." };
+    try {
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_accounts?user_id=eq.${userId}`, {
+        method: "PATCH",
+        headers: { ...this.authRestHeaders(token), Prefer: "return=minimal" },
+        body: JSON.stringify({ status: decision, decided_at: new Date().toISOString(), decided_by: this.authEmail }),
+      });
+      if (!res.ok) return { ok: false, message: `처리 실패(HTTP ${res.status}). 운영자 계정으로 로그인했는지 확인하세요.` };
+      this.addJournal({ kind: "info", symbol: "-", summary: `${decision === "approved" ? "✅ 계정 승인" : "🚫 계정 거절"}: ${userId}` });
+      return { ok: true, message: decision === "approved" ? "승인했습니다. 이제 바로 쓸 수 있습니다." : "거절했습니다." };
+    } catch (err) {
+      return { ok: false, message: String(err).replace(/^Error:\s*/, "") };
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // [v0.59.0] 알림 설정(디스코드 웹훅) — 오너 전용. 값은 capri_notify_settings에
+  //   저장되고, 새 가입 대기가 생기면 DB 트리거가 직접 그 주소로 쏜다(앱이 꺼져
+  //   있어도 알림이 온다 — "언제 어디서든" 오너 요청 반영).
+  // --------------------------------------------------------------------------
+
+  /** [운영자 전용] 저장된 디스코드 웹훅 주소(있으면). */
+  async getNotifySettings(): Promise<{ discordWebhookUrl: string | null }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { discordWebhookUrl: null };
+    try {
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_notify_settings?select=discord_webhook_url&id=eq.true`, {
+        headers: this.authRestHeaders(token),
+      });
+      if (!res.ok) return { discordWebhookUrl: null };
+      const rows = (await res.json()) as Array<{ discord_webhook_url: string | null }>;
+      return { discordWebhookUrl: rows[0]?.discord_webhook_url ?? null };
+    } catch {
+      return { discordWebhookUrl: null };
+    }
+  }
+
+  /** [운영자 전용] 디스코드 웹훅 주소 저장(빈 문자열이면 알림을 끈다). */
+  async saveNotifySettings(discordWebhookUrl: string): Promise<{ ok: boolean; message: string }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요." };
+    try {
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_notify_settings?id=eq.true`, {
+        method: "PATCH",
+        headers: { ...this.authRestHeaders(token), Prefer: "return=minimal" },
+        body: JSON.stringify({ discord_webhook_url: discordWebhookUrl.trim() || null, updated_at: new Date().toISOString() }),
+      });
+      if (!res.ok) return { ok: false, message: `저장 실패(HTTP ${res.status}). 운영자 계정으로 로그인했는지 확인하세요.` };
+      return { ok: true, message: discordWebhookUrl.trim() ? "저장했습니다. 다음 신규 가입부터 디스코드로 알림이 갑니다." : "웹훅 주소를 비웠습니다(알림 꺼짐)." };
+    } catch (err) {
+      return { ok: false, message: String(err).replace(/^Error:\s*/, "") };
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // [v0.59.0] 소셜 로그인(구글·카카오) — Supabase Auth의 OAuth 흐름을 그대로 쓴다.
+  //   ⚠️ Supabase 대시보드에서 해당 provider를 켜고 Client ID/Secret을 등록해야만
+  //   실제로 동작한다(오너가 구글 클라우드/카카오 디벨로퍼스에서 발급받아야 하는
+  //   값 — 이 앱 코드로는 대신할 수 없다). 그 전까지는 버튼을 눌러도 provider가
+  //   비활성 상태라는 오류가 뜬다.
+  //   [플랫폼별 흐름] 웹(폰)은 전체 페이지 이동(리다이렉트) 방식, 데스크톱은 별도
+  //   팝업 창을 띄워 리다이렉트 주소만 가로채는 방식 — 각각 electron/main.ts와
+  //   web/kyletool-adapter.ts에서 platform-specific으로 이 URL/콜백을 쓴다.
+  // --------------------------------------------------------------------------
+
+  /** provider(google|kakao) 로그인 시작 주소. redirectTo는 로그인 뒤 돌아올 주소(플랫폼이 정한다). */
+  authOAuthUrl(provider: "google" | "kakao", redirectTo: string): string {
+    return `${ToolEngine.SUPABASE_URL}/auth/v1/authorize?provider=${provider}&redirect_to=${encodeURIComponent(redirectTo)}`;
+  }
+
+  /**
+   * OAuth 콜백 주소의 조각(fragment, "#" 뒤 부분 또는 그 안의 access_token=…&refresh_token=…
+   * 형태 쿼리 문자열)을 받아 세션으로 적용한다. authSignIn과 동일하게 로그인 직후
+   * 자동 동기화(키·매매 이력·자동매매 기록)까지 함께 한다.
+   */
+  async applyOAuthCallback(fragment: string): Promise<{ ok: boolean; message: string }> {
+    try {
+      const params = new URLSearchParams(fragment.replace(/^#/, ""));
+      const accessToken = params.get("access_token");
+      const errorDesc = params.get("error_description") || params.get("error");
+      if (!accessToken) {
+        return { ok: false, message: errorDesc ? `로그인 실패: ${errorDesc}` : "로그인 정보를 받지 못했습니다." };
+      }
+      // /auth/v1/user 로 이 토큰의 계정 정보(이메일 등)를 확인한다.
+      const meRes = await fetch(`${ToolEngine.SUPABASE_URL}/auth/v1/user`, {
+        headers: { apikey: ToolEngine.SUPABASE_ANON, Authorization: `Bearer ${accessToken}` },
+      });
+      const me = (await meRes.json()) as Record<string, unknown>;
+      if (!meRes.ok || !me.id) return { ok: false, message: "로그인 정보를 확인하지 못했습니다." };
+
+      this.applySession({
+        access_token: accessToken,
+        refresh_token: params.get("refresh_token"),
+        expires_in: params.get("expires_in"),
+        user: me,
+      });
+      // [v0.24.0] 이메일/비밀번호 로그인과 달리 소셜 로그인은 authPassword가 없다 →
+      //   토스 키·매매 이력 자동 동기화(비밀번호로 복호화)는 이 세션에서는 못 한다.
+      //   대신 세션(로그인 상태)은 정상 저장되고, 설정 탭에서 이 기기에 직접 키를
+      //   입력하면 그때부터는 정상적으로 클라우드에도 올라간다.
+      this.persistEnv();
+      return { ok: true, message: `로그인되었습니다(${this.authEmail}).` };
+    } catch (e) {
+      return { ok: false, message: String(e).replace(/^Error:\s*/, "") };
     }
   }
 
@@ -4062,6 +4243,183 @@ export class ToolEngine extends EventEmitter {
       if (pulled.ok) this.emit("groupSync", pulled.members);
     } catch {
       // 한 사이클 실패는 조용히 넘어간다 — 다음 3분에 다시 시도(자가 복구, 자동매매 사이클과 동일 원칙).
+    }
+  }
+
+  // ==========================================================================
+  // [v0.59.0] 폰 원격 조종 — "PC가 켜져 있는 동안은 폰에서 전부 조작 가능해야 한다"(오너 지시).
+  //   마이그레이션 20260930130000 참고. 흐름:
+  //     폰/PC 아무 기기 → sendCommand(type,payload) → capri_commands에 pending 한 줄 →
+  //     PC(이 루프)가 8초마다 폴링해 집어서(acked) 실행 → 결과(done/failed+result) 기록.
+  //   Realtime을 못 쓰는 이유·멱등성 설계는 마이그레이션 파일 주석 참고.
+  // ==========================================================================
+
+  /** [PC 전용 — main.ts만 호출] 로그인 직후 시작. 이미 돌고 있으면 무시(안전한 재호출). */
+  startRemoteControlLoop(): void {
+    if (this.remoteControlTimer) return;
+    if (!this.authAccessToken && !this.authRefreshToken) return;
+    void this.remoteControlTick();
+    this.remoteControlTimer = setInterval(() => void this.remoteControlTick(), ToolEngine.REMOTE_CONTROL_INTERVAL_MS);
+  }
+
+  stopRemoteControlLoop(): void {
+    if (this.remoteControlTimer) {
+      clearInterval(this.remoteControlTimer);
+      this.remoteControlTimer = null;
+    }
+  }
+
+  /** 한 주기: ①생존 신호 갱신 ②내 pending 명령을 폴링해 실행. 실패해도 다음 주기에 재시도. */
+  private async remoteControlTick(): Promise<void> {
+    const token = await this.ensureAccessToken();
+    if (!token || !this.authUserId) return;
+    try {
+      await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_desktop_heartbeat?on_conflict=user_id`, {
+        method: "POST",
+        headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({ user_id: this.authUserId, last_seen: new Date().toISOString() }),
+      });
+    } catch {
+      /* 생존 신호 실패는 조용히 무시(다음 8초 주기에 재시도) */
+    }
+    try {
+      const res = await fetch(
+        `${ToolEngine.SUPABASE_URL}/rest/v1/capri_commands?status=eq.pending&select=id,type,payload&order=created_at.asc&limit=5`,
+        { headers: this.authRestHeaders(token) },
+      );
+      if (!res.ok) return;
+      const rows = (await res.json()) as Array<{ id: string; type: string; payload: Record<string, unknown> }>;
+      for (const row of rows) await this.claimAndExecuteCommand(token, row);
+    } catch {
+      /* 폴링 실패는 조용히 무시(다음 8초 주기에 재시도) */
+    }
+  }
+
+  /**
+   * [멱등성 핵심] status='pending'인 행만 골라 'acked'로 **조건부** UPDATE한다. 같은 행을
+   *   두 폴링 주기(또는 이론상 두 PC)가 동시에 집으려 해도, WHERE status='pending' 조건에
+   *   걸려 둘 중 하나만 실제로 행을 바꾼다(PostgREST의 Prefer: return=representation로
+   *   "내가 바꾼 행"을 돌려받아 확인 — 빈 배열이면 이미 누가 선점한 것이므로 건너뛴다).
+   *   선점에 성공한 행만 실행하고, 끝나면 즉시 done/failed로 확정한다(재시도 없음 — 실주문
+   *   명령을 여러 번 내는 것보다 한 번 실패하고 사람이 다시 보내는 쪽이 훨씬 안전하다).
+   */
+  private async claimAndExecuteCommand(token: string, row: { id: string; type: string; payload: Record<string, unknown> }): Promise<void> {
+    let claimed: unknown[] = [];
+    try {
+      const claim = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_commands?id=eq.${row.id}&status=eq.pending`, {
+        method: "PATCH",
+        headers: { ...this.authRestHeaders(token), Prefer: "return=representation" },
+        body: JSON.stringify({ status: "acked" }),
+      });
+      if (!claim.ok) return;
+      claimed = (await claim.json()) as unknown[];
+    } catch {
+      return;
+    }
+    if (claimed.length === 0) return; // 이미 다른 폴링 주기가 선점함 — 건너뛴다(중복 실행 방지)
+
+    let result: { ok: boolean; message?: string; [k: string]: unknown };
+    try {
+      result = await this.dispatchCommand(row.type, row.payload);
+    } catch (e) {
+      result = { ok: false, message: e instanceof Error ? e.message : String(e) };
+    }
+    this.addJournal({
+      kind: "info",
+      symbol: "-",
+      summary: `📱 원격 명령 실행: ${row.type} → ${result.ok ? "성공" : "실패"}`,
+      category: "자동매매",
+    });
+    try {
+      await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_commands?id=eq.${row.id}`, {
+        method: "PATCH",
+        headers: { ...this.authRestHeaders(token), Prefer: "return=minimal" },
+        body: JSON.stringify({ status: result.ok ? "done" : "failed", result, executed_at: new Date().toISOString() }),
+      });
+    } catch {
+      /* 결과 기록 실패는 조용히 무시 — 명령 자체는 이미 실행됐다(재실행 안 함) */
+    }
+  }
+
+  /**
+   * [화이트리스트 디스패처] 여기 나열된 타입만 실행된다(마이그레이션의 check 제약과 이중으로
+   *   맞춰 둠). 전부 기존에 로컬 버튼(IPC)이 이미 부르던 **바로 그 함수**를 그대로 호출한다
+   *   — DRY_RUN·킬스위치·가격보호 같은 안전장치는 그 함수들 안에 이미 있으므로, 원격이라고
+   *   다르게 취급되지 않는다(우회 경로 없음).
+   */
+  private async dispatchCommand(type: string, payload: Record<string, unknown>): Promise<{ ok: boolean; message?: string; [k: string]: unknown }> {
+    switch (type) {
+      case "autoTradeStart":
+        return { ok: true, status: this.startAutoTrade() };
+      case "autoTradeStop":
+        return { ok: true, status: this.stopAutoTrade() };
+      case "saveAutoTradeSettings":
+        return { ok: true, settings: await this.saveAutoTradeSettings(payload as Parameters<ToolEngine["saveAutoTradeSettings"]>[0]) };
+      case "setKillSwitch":
+        await this.setKillSwitch(!!payload.on);
+        return { ok: true };
+      case "placeEntry":
+        return { ok: true, journal: await this.placeEntry(payload as Parameters<ToolEngine["placeEntry"]>[0]) };
+      case "placeSell":
+        return { ok: true, journal: await this.placeSell(payload as Parameters<ToolEngine["placeSell"]>[0]) };
+      case "cancelAutoPosition":
+        return await this.cancelAutoPosition(String(payload.symbol), Number(payload.entry), Number(payload.enteredAtMs));
+      case "autoScanNow":
+        return { ok: true, status: await this.autoScanNow() };
+      default:
+        return { ok: false, message: `알 수 없는 명령: ${type}` };
+    }
+  }
+
+  /** [폰/PC 공용] 명령을 큐에 넣는다. 실행은 로그인된 PC가 한다(이 함수는 "넣기"만). */
+  async sendCommand(type: string, payload: Record<string, unknown> = {}): Promise<{ ok: boolean; message: string; commandId?: string }> {
+    const token = await this.ensureAccessToken();
+    if (!token || !this.authUserId) return { ok: false, message: "먼저 로그인하세요." };
+    try {
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_commands`, {
+        method: "POST",
+        headers: { ...this.authRestHeaders(token), Prefer: "return=representation" },
+        body: JSON.stringify({ user_id: this.authUserId, type, payload }),
+      });
+      if (!res.ok) return { ok: false, message: `명령 접수 실패(HTTP ${res.status}). PC가 켜져 있고 승인된 계정인지 확인하세요.` };
+      const rows = (await res.json()) as Array<{ id: string }>;
+      return { ok: true, message: "명령을 보냈습니다. PC가 몇 초 안에 실행합니다.", commandId: rows[0]?.id };
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /** [폰/PC 공용] 최근에 보낸 명령들의 처리 상태(참고용 — "지금 몇 개 보냈고, 처리됐는지"). */
+  async listMyCommands(limit = 10): Promise<Array<{ id: string; type: string; status: string; result: unknown; createdAt: string }>> {
+    const token = await this.ensureAccessToken();
+    if (!token) return [];
+    try {
+      const res = await fetch(
+        `${ToolEngine.SUPABASE_URL}/rest/v1/capri_commands?select=id,type,status,result,created_at&order=created_at.desc&limit=${limit}`,
+        { headers: this.authRestHeaders(token) },
+      );
+      if (!res.ok) return [];
+      const rows = (await res.json()) as Array<{ id: string; type: string; status: string; result: unknown; created_at: string }>;
+      return rows.map((r) => ({ id: r.id, type: r.type, status: r.status, result: r.result, createdAt: r.created_at }));
+    } catch {
+      return [];
+    }
+  }
+
+  /** [폰/PC 공용] "PC가 지금 켜져 있나?" — 최근 생존 신호 시각(없으면 null). 화면이 임계값(예: 90초)과 비교해 판단한다. */
+  async getDesktopHeartbeat(): Promise<{ lastSeenMs: number | null }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { lastSeenMs: null };
+    try {
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_desktop_heartbeat?select=last_seen`, {
+        headers: this.authRestHeaders(token),
+      });
+      if (!res.ok) return { lastSeenMs: null };
+      const rows = (await res.json()) as Array<{ last_seen: string }>;
+      if (!rows[0]) return { lastSeenMs: null };
+      return { lastSeenMs: new Date(rows[0].last_seen).getTime() };
+    } catch {
+      return { lastSeenMs: null };
     }
   }
 

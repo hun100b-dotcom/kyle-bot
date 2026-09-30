@@ -651,6 +651,10 @@ function App() {
   const [screenRun, setScreenRun] = useState<ScreenRun | null>(null);
   // [v0.44.0] 시스템 휴무 시간대(05:00~17:00 KST) — 켜져 있으면 배너로 항상 보여준다(탭 무관).
   const [systemPause, setSystemPause] = useState<{ paused: boolean; reason: string | null; resumesAtMs: number | null } | null>(null);
+  // [v0.59.0] 폰 원격 조종 — PC 생존 신호(마지막으로 본 시각) + 최근 보낸 명령 목록.
+  const [pcLastSeenMs, setPcLastSeenMs] = useState<number | null>(null);
+  const [remoteCmds, setRemoteCmds] = useState<Array<{ id: string; type: string; status: string; result: unknown; createdAt: string }>>([]);
+  const [remoteBusy, setRemoteBusy] = useState<string | null>(null); // 처리 중인 명령 타입(버튼 개별 비활성용)
   const [screenBusy, setScreenBusy] = useState(false);
   const [screenProg, setScreenProg] = useState<ScreenProgress | null>(null);
   // [v0.43.0] 스크리닝 취소 버튼 — 요청을 보냈으면 협조적 취소가 실제로 멈출 때까지(screenBusy가
@@ -770,7 +774,18 @@ function App() {
   // [v0.8.1] 로그인(멀티유저). 이메일/비번은 화면에서만, 서버 인증 후 세션은 엔진이 보관.
   const [authEmail, setAuthEmail] = useState("");
   const [authPw, setAuthPw] = useState("");
-  const [authState, setAuthState] = useState<{ email: string | null; loggedIn: boolean; isOwner: boolean }>({ email: null, loggedIn: false, isOwner: false });
+  const [authState, setAuthState] = useState<{
+    email: string | null;
+    loggedIn: boolean;
+    isOwner: boolean;
+    accountStatus: "pending" | "approved" | "rejected" | "unknown";
+  }>({ email: null, loggedIn: false, isOwner: false, accountStatus: "unknown" });
+  // [v0.59.0] 앱을 켜자마자 로그인 상태부터 확인하는 동안(첫 refreshAuth 완료 전) 보여줄 화면을
+  //   가르는 값 — 이게 false인 동안은 로그인 화면도, 본 화면도 아닌 "확인 중" 화면만 보여줘서
+  //   "이미 로그인된 사람에게 로그인 화면이 잠깐 번쩍였다 사라지는" 깜빡임을 막는다.
+  const [authChecked, setAuthChecked] = useState(false);
+  // [v0.59.0] 소셜 로그인(구글/카카오) 처리 중 표시.
+  const [oauthBusy, setOauthBusy] = useState<"google" | "kakao" | null>(null);
   const [authMsg, setAuthMsg] = useState("");
   // [v0.24.0] 가입이 아직 승인 안 된 사람용 — "승인 요청 남기기" 버튼 노출 여부 + 처리 상태.
   const [canRequestAccess, setCanRequestAccess] = useState(false);
@@ -787,6 +802,14 @@ function App() {
   const [directAddEmail, setDirectAddEmail] = useState("");
   const [directAddBusy, setDirectAddBusy] = useState(false);
   const [directAddMsg, setDirectAddMsg] = useState("");
+  // [v0.59.0][운영자 전용] 진짜 게이트(capri_accounts) 대기 계정 목록 — 가입은 항상 성공하고
+  //   승인 전엔 여기 쌓인다(옛 capri_access_requests 대기 목록과는 별개).
+  const [pendingAccounts, setPendingAccounts] = useState<Array<{ userId: string; email: string; requestedAt: string }>>([]);
+  const [pendingActionBusy, setPendingActionBusy] = useState<string | null>(null); // 처리 중인 userId
+  // [v0.59.0][운영자 전용] 디스코드 웹훅 알림 설정.
+  const [discordWebhook, setDiscordWebhook] = useState("");
+  const [discordSaveBusy, setDiscordSaveBusy] = useState(false);
+  const [discordMsg, setDiscordMsg] = useState("");
   // [v0.3.0] 세션별 시드 비율 설정 입력칸(설정 탭). 문자열 보관(입력 중 뭉개짐 방지).
   // [v0.8.3] 기본 손익비 설정 입력칸(설정 탭). 공장값 2/10, 저장하면 계산기 초기값이 됨.
   const [defForm, setDefForm] = useState<{ tp: string; sl: string }>({ tp: "2", sl: "10" });
@@ -1146,6 +1169,7 @@ function App() {
     else if (t === "report") void loadReport();
     // [v0.27.0] 자동매매 현황/스크리닝 결과 탭을 열 때 최신 상태를 바로 받아온다(20초 폴링을 기다리지 않게).
     else if (t === "autoControl" || t === "autoScan") void window.kyletool.autoTradeStatus().then(setAutoStatus);
+    if (t === "autoControl") void loadRemoteCommands(); // [v0.59.0] 원격 조종 탭을 열 때 최근 명령 상태를 바로 보여준다.
     // [v0.30.0] 자동매매기록 탭을 열 때 최신 기록을 불러온다.
     // [v0.33.0] 매매연구 탭도 같은 기록(autoHistory)을 재료로 통계를 내므로 똑같이 불러온다.
     else if (t === "autoHistory" || t === "research") void loadAutoHistory();
@@ -1170,6 +1194,20 @@ function App() {
   //   렌더 블록은 paneTab로 옮겼지만, 명령형 가드(자동계산·주문 후 새로고침·킬스위치)가 stale tab을 봐서
   //   2컬럼에서 계산기·주문현황이 갱신 안 되던 치명 버그를 이 헬퍼로 바로잡는다.
   const isTabVisible = (t: TabId) => (showTwoCol ? tabL === t || tabR === t : tab === t);
+
+  // [v0.59.0] 디스코드 알림의 "지금 승인하기" 링크(#/approve)로 들어온 경우 — 오너 로그인이
+  //   확인되는 즉시 [그룹원 관리] 탭으로 바로 이동한다. 아직 로그인 전이면(막 앱을 열어
+  //   authChecked가 안 끝났거나, 로그인 화면에 있는 중) 대기하다가 authState가 오너로
+  //   바뀌는 순간 실행된다. 데스크톱은 이 링크를 열 방법이 없어(알림은 웹/폰 전용) 사실상
+  //   웹앱에서만 동작하지만, 조건이 같으니 굳이 플랫폼을 분기하지 않는다.
+  useEffect(() => {
+    if (typeof location === "undefined" || location.hash !== "#/approve") return;
+    if (!authState.loggedIn || !authState.isOwner) return;
+    goToTab("groupManage");
+    activateTab("groupManage");
+    history.replaceState(null, "", location.pathname + location.search);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authState.loggedIn, authState.isOwner]);
 
   // [v0.2.10] 30초 자동 갱신. 기본은 꺼짐(자율 동작 최소화 원칙) — 오너가 켤 때만 돈다.
   //   주문 현황이 '보이는 동안'만 돈다. [v0.15.0] 2컬럼이면 좌/우 어느 패널에 있어도 인정.
@@ -1232,6 +1270,40 @@ function App() {
     const id = setInterval(poll, 30_000);
     return () => clearInterval(id);
   }, []);
+
+  // [v0.59.0] PC 생존 신호 — 로그인 화면을 통과한 뒤부터 20초마다 확인(승인 대기/로그인 전엔
+  //   당연히 의미 없으므로 이 지점 — 게이트 통과 이후 — 에 둔다). "PC 연결됨/꺼져 있음" 배지가
+  //   이 값을 쓴다 — PC 꺼진 줄 모르고 원격 버튼을 눌러놓고 됐다고 착각하는 사고를 막는 핵심 표시.
+  useEffect(() => {
+    const poll = () => void window.kyletool.getDesktopHeartbeat().then((r) => setPcLastSeenMs(r.lastSeenMs)).catch(() => {});
+    poll();
+    const id = setInterval(poll, 20_000);
+    return () => clearInterval(id);
+  }, []);
+  // PC 생존 신호 임계값: 데스크톱 루프 주기(8초)의 여유를 넉넉히 둬 90초로 잡는다(한 주기 놓쳐도 오탐 안 하게).
+  const pcConnected = pcLastSeenMs != null && Date.now() - pcLastSeenMs < 90_000;
+
+  /** [v0.59.0] 원격 명령 목록을 다시 불러온다(최근 처리 상태 확인용). */
+  async function loadRemoteCommands() {
+    try {
+      setRemoteCmds(await window.kyletool.listMyCommands(10));
+    } catch {
+      /* 무시 */
+    }
+  }
+  /** [v0.59.0] 원격 명령을 보내고, 잠시 뒤 목록을 새로고침해 처리 상태를 보여준다. */
+  async function doSendCommand(type: string, payload?: Record<string, unknown>) {
+    setRemoteBusy(type);
+    try {
+      const r = await window.kyletool.sendCommand(type, payload);
+      setSyncMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      await loadRemoteCommands();
+      // PC가 8초 주기로 집어가므로, 잠시 후 한 번 더 새로고침해 처리 결과까지 보여준다.
+      setTimeout(() => void loadRemoteCommands(), 10_000);
+    } finally {
+      setRemoteBusy(null);
+    }
+  }
 
   // [v0.30.0] 로테이션 전환 — 포지션이 2개 이상일 때만 3.5초마다 다음 종목으로 넘긴다.
   useEffect(() => {
@@ -2376,9 +2448,15 @@ ${msg}
     try {
       const s = await window.kyletool.authStatus();
       setAuthState(s);
-      if (s.isOwner) void loadAccessRequests();
+      if (s.isOwner) {
+        void loadAccessRequests();
+        void loadPendingAccounts(); // [v0.59.0] 진짜 게이트(capri_accounts) 대기 목록
+        void loadNotifySettings();
+      }
     } catch {
-      /* 무시 */
+      /* 무시 — 아래 finally가 authChecked는 반드시 true로 만든다(무한 로딩 방지) */
+    } finally {
+      setAuthChecked(true);
     }
   }
   /** [v0.24.0][운영자 전용] 대기 중인 가입 승인 요청 목록을 다시 불러온다. */
@@ -2456,6 +2534,63 @@ ${msg}
     } finally { setDirectAddBusy(false); }
   }
 
+  // --------------------------------------------------------------------------
+  // [v0.59.0] 로그인 게이트(capri_accounts) — 진짜 승인 대기 목록. 가입은 항상 성공하고,
+  //   승인 전엔 여기 쌓인다. 승인/거절하면 DB 트리거가 capri_allowed_emails도 자동으로
+  //   맞춰 주므로(그룹 채팅·근황 공유 계속 정상 동작), 화면은 이 두 함수만 부르면 된다.
+  // --------------------------------------------------------------------------
+  /** [운영자 전용] 대기 계정 목록을 다시 불러온다. */
+  async function loadPendingAccounts() {
+    try {
+      setPendingAccounts(await window.kyletool.listPendingAccounts());
+    } catch {
+      /* 무시 */
+    }
+  }
+  async function doDecideAccount(userId: string, decision: "approved" | "rejected") {
+    setPendingActionBusy(userId);
+    try {
+      const r = await window.kyletool.decideAccount(userId, decision);
+      setSyncMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      if (r.ok) await loadPendingAccounts();
+    } finally { setPendingActionBusy(null); }
+  }
+
+  // --------------------------------------------------------------------------
+  // [v0.59.0] 디스코드 알림 설정(운영자 전용) — 새 가입 대기가 생기면 이 주소로 DB가 직접 쏜다.
+  // --------------------------------------------------------------------------
+  async function loadNotifySettings() {
+    try {
+      const s = await window.kyletool.getNotifySettings();
+      setDiscordWebhook(s.discordWebhookUrl ?? "");
+    } catch {
+      /* 무시 */
+    }
+  }
+  async function doSaveDiscordWebhook() {
+    setDiscordSaveBusy(true); setDiscordMsg("저장 중…");
+    try {
+      const r = await window.kyletool.saveNotifySettings(discordWebhook);
+      setDiscordMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+    } finally { setDiscordSaveBusy(false); }
+  }
+
+  // --------------------------------------------------------------------------
+  // [v0.59.0] 소셜 로그인(구글·카카오). Supabase에 provider가 아직 안 켜져 있으면 오류
+  //   메시지가 그대로 뜬다(설정은 오너가 Supabase 대시보드에서 해야 한다 — README 참고).
+  // --------------------------------------------------------------------------
+  async function doOAuth(provider: "google" | "kakao") {
+    setOauthBusy(provider);
+    setAuthMsg(provider === "google" ? "구글 로그인 창을 여는 중…" : "카카오 로그인 창을 여는 중…");
+    try {
+      const r = await window.kyletool.authOAuth(provider);
+      setAuthMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      if (r.ok) await refreshAuth();
+    } finally {
+      setOauthBusy(null);
+    }
+  }
+
   /**
    * [v0.24.0] 로그인 비밀번호로 클라우드에서 토스 키·매매 이력을 다시 받아온다.
    *   로그인하는 순간 이미 자동으로 한 번 실행되므로, 평소엔 이 버튼을 쓸 일이 없다.
@@ -2500,6 +2635,106 @@ ${msg}
     .slice()
     .reverse();
 
+  // ===========================================================================
+  // [v0.59.0] 로그인 게이트 — "카프리를 켜면 로그인 화면이 먼저 나온다" (오너 요청)
+  // ---------------------------------------------------------------------------
+  // 예전엔 로그인이 [설정] 탭 안에 묻힌 선택 사항이었다(안 해도 계산기 등 본 화면이
+  // 그냥 떴다). 이제 로그인 여부·승인 상태를 앱을 켜자마자 확인해서, 그 결과에 따라
+  // "확인 중" → "로그인/가입" → "승인 대기" → "본 화면" 순서로만 넘어간다.
+  //
+  // [화면 차단은 UX일 뿐 — 진짜 차단은 서버가 한다] accountStatus가 "unknown"이면
+  // (오프라인 등으로 조회 실패) 절대 막지 않는다 — 이미 로그인된 사람을 네트워크
+  // 문제로 잠그면 안 된다(실계좌 앱). 대신 마이그레이션(20260930120000)의 RLS가
+  // 실제 데이터 접근을 서버에서 막으므로, 화면이 잘못 판단해도 안전은 그대로 유지된다.
+  // ===========================================================================
+  if (!authChecked) {
+    return (
+      <div className="app" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
+        <p className="hint">확인 중…</p>
+      </div>
+    );
+  }
+
+  if (!authState.loggedIn) {
+    return (
+      <div className="app" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", padding: 16 }}>
+        <section className="card" style={{ maxWidth: 420, width: "100%" }}>
+          <h2>🧮 Capri 로그인</h2>
+          <p className="hint">
+            로그인하면 바로 시작됩니다 — 토스 키·매매 이력은 로그인 즉시 자동으로 이 기기와 동기화돼요.
+            처음이면 아래에서 가입하세요(운영자 승인 후 쓸 수 있습니다).
+          </p>
+          <div className="form-col">
+            <label>이메일
+              <input type="email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="you@example.com" />
+            </label>
+            <label>비밀번호(6자+)
+              <input
+                type="password"
+                value={authPw}
+                onChange={(e) => setAuthPw(e.target.value)}
+                placeholder="계정 비밀번호"
+                onKeyDown={(e) => { if (e.key === "Enter") void doSignIn(); }}
+              />
+            </label>
+          </div>
+          <div className="form-row">
+            <button className="btn btn-start" disabled={syncBusy} onClick={doSignIn}>로그인</button>
+            <button className="btn" disabled={syncBusy} onClick={doSignUp}>가입(처음이면)</button>
+          </div>
+          <div className="form-row" style={{ marginTop: 8 }}>
+            <button className="btn" disabled={oauthBusy !== null} onClick={() => void doOAuth("google")}>
+              {oauthBusy === "google" ? "여는 중…" : "G 구글로 로그인"}
+            </button>
+            <button className="btn" disabled={oauthBusy !== null} onClick={() => void doOAuth("kakao")}>
+              {oauthBusy === "kakao" ? "여는 중…" : "K 카카오로 로그인"}
+            </button>
+          </div>
+          {canRequestAccess && (
+            <div className="form-row" style={{ marginTop: 8 }}>
+              <button className="btn" disabled={reqBusy} onClick={doRequestAccess}>📮 승인 요청 남기기</button>
+            </div>
+          )}
+          {authMsg && <p className={authMsg.startsWith("✅") ? "ok" : "hint"} style={{ whiteSpace: "pre-wrap" }}>{authMsg}</p>}
+          {reqMsg && <p className={reqMsg.startsWith("✅") ? "ok" : "hint"} style={{ whiteSpace: "pre-wrap" }}>{reqMsg}</p>}
+          <p className="hint small">
+            💡 가입하면 즉시 사용할 수 있는 건 아니에요 — 운영자 승인 후 바로 쓸 수 있게 됩니다.
+          </p>
+        </section>
+      </div>
+    );
+  }
+
+  if (!authState.isOwner && authState.accountStatus === "pending") {
+    return (
+      <div className="app" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", padding: 16 }}>
+        <section className="card" style={{ maxWidth: 420, width: "100%", textAlign: "center" }}>
+          <h2>⏳ 승인 대기 중</h2>
+          <p className="hint">
+            <b>{authState.email}</b> 계정으로 가입됐습니다. 운영자 승인 후 바로 쓸 수 있어요
+            — 운영자에게는 이미 알림이 갔습니다.
+          </p>
+          <div className="form-row" style={{ justifyContent: "center" }}>
+            <button className="btn" onClick={() => void refreshAuth()}>🔄 지금 확인</button>
+            <button className="btn" onClick={doSignOut}>로그아웃</button>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  if (!authState.isOwner && authState.accountStatus === "rejected") {
+    return (
+      <div className="app" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", padding: 16 }}>
+        <section className="card" style={{ maxWidth: 420, width: "100%", textAlign: "center" }}>
+          <h2>🚫 사용이 거절되었습니다</h2>
+          <p className="hint"><b>{authState.email}</b> 계정은 운영자가 사용을 거절했습니다.</p>
+          <button className="btn" onClick={doSignOut}>로그아웃</button>
+        </section>
+      </div>
+    );
+  }
+
   return (
     <div className="app">
       {/* ===== 상단바 ===== */}
@@ -2542,6 +2777,14 @@ ${msg}
               ⚠ 마감 1분 전<span className="wide-only">: 지금은 주문 정정·취소가 안 돼요</span>
             </span>
           )}
+          {/* [v0.59.0] PC 생존 신호 — "항상 표시"(오너 지시). PC 꺼진 줄 모르고 원격 버튼을
+              눌러놓고 됐다고 착각하는 사고를 막는 게 목적이라, 눈에 띄는 색으로 항상 띄운다. */}
+          <span
+            className={`badge ${pcConnected ? "badge-live" : "badge-dry"}`}
+            title={pcConnected ? "PC(데스크톱 앱)가 켜져 있어 원격 명령이 실행됩니다." : "PC가 꺼져 있거나 로그인 전이라 원격 명령이 실행되지 않습니다."}
+          >
+            {pcConnected ? "🟢 PC 연결됨" : "🔴 PC 꺼져 있음"}
+          </span>
         </div>
 
         <div className="controls">
@@ -3688,6 +3931,57 @@ ${msg}
                 </>
               )}
             </div>
+          </section>
+
+          {/* [v0.59.0] 폰 원격 조종 — "PC가 켜져 있는 동안은 폰에서 전부 조작 가능해야 한다"
+              (오너 지시). 위 버튼들은 이 기기가 곧 PC일 때(또는 QR 페어링 상태일 때)만 바로
+              듣는다 — 이 카드는 그것과 무관하게, 로그인만 돼 있으면 어디서든(외부망 포함)
+              명령을 큐에 넣고 로그인된 PC가 몇 초 안에 집어 실행하는 별도 경로다. */}
+          <section className="card wide">
+            <h2>📱 원격 조종 {pcConnected ? <span className="ok">(PC 연결됨)</span> : <span className="hint">(PC 꺼져 있음 — 명령이 쌓이기만 하고 실행 안 됨)</span>}</h2>
+            <p className="hint">
+              여기 버튼은 어디서든(외부망 포함) 로그인만 돼 있으면 눌러집니다 — 다만 <b>PC(데스크톱 앱)가
+              켜져 있어야</b> 실제로 실행됩니다(위 상단바 배지 참고). PC가 꺼져 있으면 명령은 큐에 쌓여
+              있다가 PC를 켜면 그때 실행됩니다 — "눌렀는데 반영 안 됐다"고 PC가 켜진 줄 착각하지 마세요.
+            </p>
+            <div className="form-row">
+              <button className="btn btn-start" disabled={remoteBusy !== null || !pcConnected} onClick={() => void doSendCommand("autoTradeStart")}>
+                {remoteBusy === "autoTradeStart" ? "보내는 중…" : "▶ 자동매매 시작(원격)"}
+              </button>
+              <button className="btn btn-kill" disabled={remoteBusy !== null || !pcConnected} onClick={() => void doSendCommand("autoTradeStop")}>
+                {remoteBusy === "autoTradeStop" ? "보내는 중…" : "🔴 자동매매 중지(원격)"}
+              </button>
+              <button className="btn btn-kill" disabled={remoteBusy !== null || !pcConnected} onClick={() => void doSendCommand("setKillSwitch", { on: true })}>
+                🛑 비상 정지 켜기(원격)
+              </button>
+              <button className="btn" disabled={remoteBusy !== null || !pcConnected} onClick={() => void doSendCommand("setKillSwitch", { on: false })}>
+                비상 정지 끄기(원격)
+              </button>
+              <button className="btn" disabled={remoteBusy !== null || !pcConnected} onClick={() => void doSendCommand("autoScanNow")}>
+                🔄 지금 스캔(원격)
+              </button>
+            </div>
+            <p className="hint small">
+              💡 포지션 개별 취소는 위 "지금 감시 중인 자동매매 포지션" 표의 [✕ 취소]가 이미 이 기기가
+              PC일 때 바로 동작합니다. 신규 진입·수동 매도 명령도 서버 큐에는 이미 지원돼 있지만
+              (electron/tool-engine.ts의 dispatchCommand), 이 화면에는 아직 입력 폼을 만들지
+              않았습니다 — 다음에 필요하면 추가하겠습니다.
+            </p>
+            <button className="mini" onClick={() => void loadRemoteCommands()}>🔄 최근 명령 새로고침</button>
+            {remoteCmds.length > 0 && (
+              <table className="result-table">
+                <thead><tr><th>명령</th><th>상태</th><th>보낸 시각</th></tr></thead>
+                <tbody>
+                  {remoteCmds.map((c) => (
+                    <tr key={c.id}>
+                      <td>{c.type}</td>
+                      <td>{c.status === "pending" ? "⏳ 대기" : c.status === "acked" ? "⏳ 처리 중" : c.status === "done" ? "✅ 완료" : "⚠️ 실패"}</td>
+                      <td>{DateTime.fromISO(c.createdAt).setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </section>
         </main>
       )}
@@ -5026,65 +5320,25 @@ ${msg}
             </div>
           </section>
 
-          {/* ── ③ 계정 (로그인 하나로 끝) ──
-              [v0.24.0] 예전엔 비밀번호가 3개(로그인·키 잠금·매매이력 동기화)라 너무 복잡했다.
-              → 로그인 비밀번호 하나로 통일. 로그인하면 토스 키·매매 이력이 전부 자동으로
-              이 계정 안에서 동기화된다(따로 버튼을 누를 일이 거의 없다). */}
+          {/* ── ③ 계정 ──
+              [v0.59.0] 로그인은 이제 앱을 켜자마자 뜨는 첫 화면에서 끝난다(이 탭에 오는
+              순간 이미 로그인·승인된 상태다) — 그래서 로그인 폼은 없애고 상태·동기화
+              버튼만 남긴다. 로그인 화면 자체는 App() 맨 앞의 "로그인 게이트" 참고. */}
           <section className="card wide">
-            <h2>☁️ 계정 (로그인하면 자동으로 동기화)</h2>
+            <h2>☁️ 계정</h2>
             <p className="hint">
-              누구나 <b>자기 계정</b>으로 로그인해 <b>자기 토스 키</b>를 연결하면 바로 쓸 수 있습니다.
-              다른 사람의 키·매매 이력은 서로 <b>절대 볼 수 없어요</b>. 가입은 <b>운영자가 승인한
-              이메일만</b> 됩니다(사용 인원은 운영자가 정합니다) — 아직 승인 전이면 운영자에게
-              사용 신청을 해주세요.
+              토스 키와 매매 이력은 로그인 즉시 이 계정 안에서 자동으로 동기화됩니다.
+              다른 사람의 키·매매 이력은 서로 <b>절대 볼 수 없어요</b>.
             </p>
-            <p className="hint">
-              로그인하면 <b>토스 키</b>와 <b>매매 이력</b>이 자동으로 이 기기와 동기화됩니다.
-              외울 비밀번호는 <b>로그인 비밀번호 하나</b>뿐입니다(따로 "동기화 비밀번호"가 없습니다).
-            </p>
-
-            {authState.loggedIn ? (
-              <div className="form-row">
-                <span className="ok">✅ 로그인됨: <b>{authState.email}</b></span>
-                <button className="mini" disabled={syncBusy} onClick={doSignOut}>로그아웃</button>
-                <button className="btn" disabled={syncBusy} onClick={doSyncNow}>지금 다시 동기화</button>
-              </div>
-            ) : (
-              <>
-                <div className="form-row">
-                  <label style={{ flex: 1 }}>이메일
-                    <input type="email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} placeholder="you@example.com" />
-                  </label>
-                  <label style={{ flex: 1 }}>비밀번호(6자+)
-                    <input type="password" value={authPw} onChange={(e) => setAuthPw(e.target.value)} placeholder="계정 비밀번호" />
-                  </label>
-                </div>
-                <div className="form-row">
-                  <button className="btn btn-start" disabled={syncBusy} onClick={doSignIn}>로그인</button>
-                  <button className="btn" disabled={syncBusy} onClick={doSignUp}>가입(처음이면)</button>
-                  <span className="hint small">가입하면 바로 로그인됩니다(확인 메일 클릭 불필요).</span>
-                </div>
-                {/* [v0.24.0] 아직 승인 안 된 이메일로 가입을 시도했을 때만 나타난다 */}
-                {canRequestAccess && (
-                  <div className="form-row">
-                    <button className="btn" disabled={reqBusy} onClick={doRequestAccess}>📮 승인 요청 남기기</button>
-                    <span className="hint small">운영자가 앱에서 승인하면 바로 가입할 수 있어요.</span>
-                  </div>
-                )}
-                {reqMsg && <p className={reqMsg.startsWith("✅") ? "ok" : "hint"} style={{ whiteSpace: "pre-wrap" }}>{reqMsg}</p>}
-              </>
-            )}
+            <div className="form-row">
+              <span className="ok">✅ 로그인됨: <b>{authState.email}</b></span>
+              <button className="mini" disabled={syncBusy} onClick={doSignOut}>로그아웃</button>
+              <button className="btn" disabled={syncBusy} onClick={doSyncNow}>지금 다시 동기화</button>
+            </div>
             {authMsg && <p className={authMsg.startsWith("✅") ? "ok" : "hint"} style={{ whiteSpace: "pre-wrap" }}>{authMsg}</p>}
             {syncMsg && <p className="hint" style={{ whiteSpace: "pre-wrap" }}>{syncMsg}</p>}
-            <p className="hint small">
-              💡 [설정]에 키를 입력·저장하면 로그인 상태에서 자동으로 클라우드에도 올라갑니다.
-              다른 기기에서는 같은 계정으로 <b>로그인만</b> 하면 키와 매매 이력을 자동으로 받습니다.
-              로그인을 안 쓰면 기존처럼 이 기기 안에만 저장됩니다.
-            </p>
-            {/* [v0.56.0] 가입 승인·이메일 직접 등록은 [현황 → 👥 그룹원 관리] 탭으로 옮겼다
-                (오너 요청 — 예전엔 여기 설정 안에 묻혀 있었음). */}
             {authState.isOwner && (
-              <p className="hint small">📋 가입 승인 대기 관리는 [현황 → 👥 그룹원 관리] 탭에서 할 수 있어요.</p>
+              <p className="hint small">📋 가입 승인·디스코드 알림 설정은 [현황 → 👥 그룹원 관리] 탭에서 할 수 있어요.</p>
             )}
           </section>
 
@@ -5295,25 +5549,70 @@ ${msg}
         <main className="pane">
           {authState.isOwner && (
             <section className="card wide">
-              <h2>📋 가입 승인 대기 ({accessRequests.length}건)</h2>
+              <h2>📋 가입 승인 대기 ({pendingAccounts.length}건)</h2>
               <p className="hint">
-                사용 신청이 들어오면 여기 쌓입니다. PC가 꺼져 있어도, 폰으로 로그인만 하면 이 화면에서 바로 처리할 수 있어요.
+                가입하면 바로 여기 쌓입니다(계정은 이미 만들어졌고 승인 전엔 아무 데이터도 못 봅니다).
+                PC가 꺼져 있어도, 폰으로 로그인만 하면 이 화면에서 바로 처리할 수 있어요. 디스코드
+                웹훅을 아래에 설정해 두면 새 신청이 올 때마다 알림도 옵니다.
+              </p>
+              <button className="mini" onClick={() => void loadPendingAccounts()}>🔄 새로고침</button>
+              {pendingAccounts.length === 0 ? (
+                <p className="hint">대기 중인 계정이 없습니다.</p>
+              ) : (
+                pendingAccounts.map((a) => (
+                  <div key={a.userId} className="form-row">
+                    <span>{a.email} <span className="hint small">({DateTime.fromISO(a.requestedAt).setZone("Asia/Seoul").toFormat("MM-dd HH:mm")})</span></span>
+                    <button className="btn btn-start" disabled={pendingActionBusy === a.userId} onClick={() => void doDecideAccount(a.userId, "approved")}>✅ 승인</button>
+                    <button className="mini" disabled={pendingActionBusy === a.userId} onClick={() => void doDecideAccount(a.userId, "rejected")}>거절</button>
+                  </div>
+                ))
+              )}
+            </section>
+          )}
+
+          {authState.isOwner && (
+            <section className="card wide">
+              <h2>🔔 디스코드 알림</h2>
+              <p className="hint">
+                새 가입 신청이 오면 이 주소로 디스코드 알림이 갑니다(앱이 꺼져 있어도 — 서버(DB)가
+                직접 보냅니다). 디스코드 채널 설정 → 연동 → 웹후크 만들기에서 주소를 복사해 붙여넣으세요.
+              </p>
+              <div className="form-row">
+                <input
+                  type="text"
+                  style={{ flex: 1 }}
+                  placeholder="https://discord.com/api/webhooks/…"
+                  value={discordWebhook}
+                  disabled={discordSaveBusy}
+                  onChange={(e) => setDiscordWebhook(e.target.value)}
+                />
+                <button className="btn btn-start" disabled={discordSaveBusy} onClick={() => void doSaveDiscordWebhook()}>
+                  {discordSaveBusy ? "저장 중…" : "저장"}
+                </button>
+              </div>
+              {discordMsg && <p className={discordMsg.startsWith("✅") ? "ok" : "hint"}>{discordMsg}</p>}
+            </section>
+          )}
+
+          {/* [v0.59.0] 예전 승인 요청함(capri_access_requests) — 가입 자체가 막히던 옛 모델의
+              흔적. 지금은 가입이 항상 성공해 위 "가입 승인 대기"가 진짜 목록이지만, 이메일을
+              미리 등록해 두고 싶을 때(아직 가입 전인 사람) 쓰는 보조 경로로 그대로 남겨 둔다. */}
+          {authState.isOwner && (
+            <section className="card wide">
+              <h2>📮 이메일 미리 등록 ({accessRequests.length}건 대기)</h2>
+              <p className="hint small">
+                아직 가입 전인 사람의 이메일을 미리 허용 목록에 넣어 두고 싶을 때 씁니다(선택 사항 —
+                위 목록만으로도 충분합니다. 가입하면 자동으로 대기 목록에 올라갑니다).
               </p>
               <button className="mini" onClick={loadAccessRequests}>🔄 새로고침</button>
-              {accessRequests.length === 0 ? (
-                <p className="hint">대기 중인 요청이 없습니다.</p>
-              ) : (
+              {accessRequests.length > 0 &&
                 accessRequests.map((r) => (
                   <div key={r.email} className="form-row">
                     <span>{r.email}</span>
                     <button className="btn btn-start" disabled={reqActionBusy === r.email} onClick={() => doApproveRequest(r.email)}>✅ 승인</button>
                     <button className="mini" disabled={reqActionBusy === r.email} onClick={() => doRejectRequest(r.email)}>거절</button>
                   </div>
-                ))
-              )}
-              <p className="hint small" style={{ marginTop: 12 }}>
-                또는 요청 목록에 없어도 이메일을 직접 입력해 바로 등록할 수 있어요:
-              </p>
+                ))}
               <div className="form-row">
                 <input
                   type="email"

@@ -37,3 +37,6 @@ dist-electron
 
 # 웹앱(PWA) 빌드 결과 — 소스가 아니라 산출물이므로 추적하지 않는다
 dist-web/
+
+# Supabase CLI 로컬 캐시(버전 정보 등, 기기마다 다름 — 코드 아님)
+supabase/.temp/

@@ -160,8 +160,26 @@ export function installKyleTool(): ToolEngine {
     listAccessRequests: () => e.listAccessRequests(),
     approveAccessRequest: (email: string) => e.approveAccessRequest(email),
     rejectAccessRequest: (email: string) => e.rejectAccessRequest(email),
+    // [v0.59.0] 로그인 게이트(capri_accounts) — 진짜 승인 대기 목록
+    listPendingAccounts: () => e.listPendingAccounts(),
+    decideAccount: (userId: string, decision: "approved" | "rejected") => e.decideAccount(userId, decision),
+    getNotifySettings: () => e.getNotifySettings(),
+    saveNotifySettings: (url: string) => e.saveNotifySettings(url),
+    // [v0.59.0] 소셜 로그인 — 웹은 전체 페이지 이동(리다이렉트) 방식. 돌아온 뒤 처리는
+    //   이 파일 아래 installOAuthCallbackHandler()가 페이지 로드 시 자동으로 한다.
+    authOAuth: (provider: "google" | "kakao") => {
+      const redirectTo = `${location.origin}${location.pathname}`;
+      location.href = e.authOAuthUrl(provider, redirectTo);
+      return new Promise<{ ok: boolean; message: string }>(() => {}); // 페이지가 이동하므로 이 값은 쓰이지 않는다
+    },
     syncPushKeys: () => e.syncPushKeys(),
     syncPullKeys: () => e.syncPullKeys(),
+    // [v0.59.0] 폰 원격 조종 — 폰은 "넣기"·"조회"만 한다("실행"은 PC의 startRemoteControlLoop
+    //   전용이라 이 어댑터는 아예 그 메서드를 부르지 않는다 — 웹 빌드에서 명령 실행 루프가
+    //   도는 일은 구조적으로 없다).
+    sendCommand: (type: string, payload?: Record<string, unknown>) => e.sendCommand(type, payload),
+    listMyCommands: (limit?: number) => e.listMyCommands(limit),
+    getDesktopHeartbeat: () => e.getDesktopHeartbeat(),
 
     // ── 안전장치 토글 ──────────────────────────────────────────
     setKillSwitch: (on: boolean) => e.setKillSwitch(!!on),
@@ -290,6 +308,23 @@ export function installKyleTool(): ToolEngine {
 
   (window as unknown as { kyletool: typeof api }).kyletool = api;
   return e;
+}
+
+/**
+ * [v0.59.0] 소셜 로그인(구글·카카오)에서 돌아온 직후 처리.
+ *   Supabase가 로그인 뒤 이 페이지 주소로 돌려보내며 #access_token=…&refresh_token=…
+ *   형태로 토큰을 URL 조각(fragment)에 실어 준다. 화면(App)이 뜨기 전에 이걸 먼저
+ *   처리해야 authStatus()가 첫 렌더부터 로그인 상태를 정확히 보여준다. 처리 후에는
+ *   주소창에서 토큰 조각을 지운다(새로고침 시 재처리·주소창 노출 방지).
+ */
+export async function handleOAuthRedirect(engine: ToolEngine): Promise<void> {
+  const hash = location.hash;
+  if (!hash || !hash.includes("access_token")) return;
+  try {
+    await engine.applyOAuthCallback(hash);
+  } finally {
+    history.replaceState(null, "", location.pathname + location.search);
+  }
 }
 
 /** 이미 만들어진 엔진(진단용) */

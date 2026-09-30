@@ -27,10 +27,25 @@ Capri매매기법 **계산기 + 토스 조건주문(OCO/OTO) 제출 도구**. �
    → 앱 아이콘을 **우클릭(또는 Control+클릭) → "열기"** → 다시 나오는 창에서 **"열기"** 를 누릅니다.
    (한 번만 이렇게 하면 다음부터는 그냥 더블클릭으로 열립니다.)
 
-### 처음 켠 뒤 — API 키 입력
-앱에는 **키가 들어있지 않습니다**(보안). 처음 실행 후 **설정 탭**에서 본인의
-토스 Open API **Client ID / Client Secret / 계좌번호(accountSeq)** 를 입력하고 저장하세요.
-키는 이 컴퓨터의 앱 데이터 폴더에만 저장되고 화면에 다시 표시되지 않습니다.
+### 처음 켠 뒤 — 로그인 하나로 끝 (v0.59.0부터)
+앱을 켜면 **로그인 화면이 먼저** 뜹니다. 계정이 없으면 그 화면에서 바로 가입하세요
+(이메일/비밀번호, 또는 구글 로그인 — 카카오는 준비 중). **가입은 운영자 승인이 필요합니다**
+— 승인 전에는 "승인 대기 중" 화면만 보이고, 운영자가 폰이든 PC든 로그인만 하면 언제든
+승인할 수 있습니다.
+
+이미 다른 기기에서 토스 키를 등록해 둔 계정으로 로그인하면 **키·매매 이력이 자동으로
+이 기기에도 동기화**됩니다(별도 입력 불필요). 이 기기가 처음이면 로그인 뒤 [설정] 탭에서
+본인의 토스 Open API **Client ID / Client Secret / 계좌번호(accountSeq)** 를 한 번만
+입력·저장하세요 — 키는 이 컴퓨터에만 저장되고 화면에 다시 표시되지 않습니다.
+
+### 📱 폰에서 쓰기 (v0.59.0부터 — 로그인만 하면 어디서든)
+같은 계정으로 폰 웹앱(`https://hun100b-dotcom.github.io/capri-web/`)에 로그인하면
+QR 페어링 없이도 승인·매매기록·자동매매 원격 조종을 바로 쓸 수 있습니다. 다만 **실시간
+시세 조회·수동 주문 실행처럼 토스 서버를 직접 불러야 하는 기능은 여전히 PC(홈 PC)가
+켜져 있어야** 합니다(토스 API 키에 걸린 IP 허용목록 때문 — 로그인으로도 우회할 수 없는
+제약입니다). 화면 상단의 "🟢 PC 연결됨 / 🔴 PC 꺼져 있음" 배지로 지금 원격 조종이 실제로
+실행될지 확인하세요. 옛 QR 페어링([설정] → 📱 폰에서 쓰기)은 폰에서 실시간 시세·직접
+조회가 필요할 때를 위해 그대로 남아 있습니다.
 
 ---
 
@@ -115,6 +130,51 @@ npm run release:mac      # dmg + zip 빌드 → 릴리스 업로드까지 한 �
   애플 실리콘 맥에서 앱 부팅 자체가 SIGTRAP 크래시했습니다. 실행파일은 영문 `Capri`,
   화면 표시명만 `CFBundleDisplayName` 으로 지정합니다.
 - 릴리스에 dmg가 올라가면 README 설치 안내(위 macOS 절)가 그대로 유효해집니다.
+
+---
+
+## 👤 계정·로그인 체계 (v0.59.0)
+
+Supabase Auth 기반. 가입은 **항상 성공**하고(예전처럼 허용목록에 없으면 가입 자체가
+막히던 방식이 아님), 승인 전엔 `capri_accounts.status`가 `pending`으로 남아 **RLS가
+서버에서** 매매 데이터(`capri_secrets`·`capri_trades`·`capri_auto_state`) 접근을 막습니다
+— 화면의 "승인 대기 중" 표시는 UX일 뿐, 진짜 차단은 DB가 합니다. 스키마·트리거는
+`supabase/migrations/20260930120000_capri_login_gate.sql`(로그인 게이트) +
+`20260930130000_capri_remote_control.sql`(폰 원격 조종, 아래 참고).
+
+**적용 방법**: 이 저장소를 새로 클론한 기기에서 직접 Supabase 대시보드로 DB 스키마를
+바꿀 일은 없습니다(이미 실제 프로젝트에 적용 완료). 스키마를 더 바꿔야 하면
+[Supabase SQL Editor](https://supabase.com/dashboard/project/fauieykjxdfkngwvfoky/sql/new)에
+새 마이그레이션 파일 내용을 그대로 붙여넣어 실행하고, 같은 내용을
+`supabase/migrations/`에도 파일로 남겨 두세요(레포와 실제 DB가 항상 같은 상태를 유지하기 위함).
+
+### 소셜 로그인(구글·카카오)
+- **구글**: 설정 완료·동작 중(Google Cloud 프로젝트 "Capri", OAuth 동의 화면은 테스트
+  모드 — 테스트 사용자로 등록된 이메일만 로그인 가능, 100명까지 무료로 추가 가능).
+  테스트 사용자 추가: [Google Cloud 콘솔 → 대상](https://console.cloud.google.com/auth/audience) →
+  프로젝트 "Capri" 선택 → 테스트 사용자에 이메일 추가.
+- **카카오**: 아직 미설정. [Kakao Developers](https://developers.kakao.com)에서 앱 생성 →
+  카카오 로그인 활성화 → Redirect URI에 `https://fauieykjxdfkngwvfoky.supabase.co/auth/v1/callback`
+  등록 → REST API 키 + Client Secret 발급 → [Supabase Auth Providers](https://supabase.com/dashboard/project/fauieykjxdfkngwvfoky/auth/providers)의
+  Kakao 항목에 입력·저장. 오너의 카카오 계정 로그인이 필요해 이 저장소 작업만으로는
+  대신할 수 없습니다.
+
+### 디스코드 알림
+새 가입 대기가 생기면 DB 트리거(`capri_notify_new_pending_account`, pg_net 사용)가
+`capri_notify_settings.discord_webhook_url`로 직접 알림을 보냅니다(앱이 꺼져 있어도 옴).
+디스코드 서버 → 채널 설정 → 연동 → 웹후크 만들기로 주소를 받아, 앱의
+[👥 그룹원 관리] 탭(오너 로그인 시)에서 그 주소를 붙여넣고 저장하면 됩니다 — SQL 불필요.
+
+### 폰 원격 조종
+`capri_commands`(명령 큐, PC가 8초마다 폴링해 실행) + `capri_desktop_heartbeat`(PC 생존
+신호, 폰 화면 상단 배지가 참조) 두 표로 동작합니다. Supabase Realtime은 이 프로젝트에서
+`relation "realtime.subscription" does not exist` 오류로 못 쓰는 상태라 폴링 방식을 씁니다.
+지원 명령(전부 `electron/tool-engine.ts`의 `dispatchCommand` 화이트리스트에 있는 기존
+IPC 메서드 그대로 호출 — 안전장치 우회 경로 없음): `autoTradeStart`·`autoTradeStop`·
+`saveAutoTradeSettings`·`setKillSwitch`·`placeEntry`·`placeSell`·`cancelAutoPosition`·
+`autoScanNow`. 화면(자동매매 컨트롤 탭)에는 이 중 자주 쓰는 몇 개만 버튼으로 연결돼 있고,
+`placeEntry`/`placeSell`은 서버·엔진 쪽은 이미 준비돼 있지만 아직 폰 화면에 입력 폼을
+만들지 않았습니다.
 
 ---
 

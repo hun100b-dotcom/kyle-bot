@@ -423,6 +423,58 @@ async function stopPhoneAccess(): Promise<typeof phoneState> {
 }
 
 /** 화면 요청(window.kyletool.*) ↔ 엔진 연결 */
+// =============================================================================
+// [v0.59.0] 소셜 로그인(구글·카카오) 팝업 — 데스크톱 전용
+// -----------------------------------------------------------------------------
+// [왜 팝업인가] Supabase OAuth는 "브라우저를 그 provider(구글/카카오) 로그인 페이지로
+//   보냈다가, 로그인이 끝나면 우리가 정한 주소(redirect_to)로 돌려보내며 그 주소의
+//   #뒤에 access_token을 실어 준다"는 방식이다. 웹(폰)은 이걸 페이지 전체 이동으로
+//   처리하면 되지만, 데스크톱 앱은 메인 화면 자체를 구글 로그인 페이지로 이동시킬 수
+//   없다(원격 화면 로딩과 충돌하고, 로그인 끝나고 돌아올 곳도 마땅찮다) — 그래서 별도
+//   창을 하나 띄워 그 창 안에서만 로그인을 진행하고, 우리 주소로 돌아오려는 순간(아직
+//   실제로 로드되기 전에) 그 주소의 #뒤 조각만 가로채 창을 닫는다. 사용자 눈에는
+//   "로그인 창이 잠깐 떴다가 자동으로 닫히고 로그인된다"로 보인다.
+// [redirect_to를 왜 실제 서비스 주소(capri-web)로 하나] Supabase가 등록되지 않은
+//   임의의 주소로는 리다이렉트를 허용하지 않기 때문에(Auth 설정의 허용 리다이렉트
+//   목록), 이미 허용돼 있을 가능성이 매우 높은 이 프로젝트의 실제 웹앱 주소를 그대로
+//   쓴다 — 실제로 그 페이지가 로드되기 전에 가로채 닫으므로 문제없다.
+// =============================================================================
+const OAUTH_REDIRECT_TO = "https://hun100b-dotcom.github.io/capri-web/";
+
+function startOAuthPopup(engine: ToolEngine, provider: "google" | "kakao"): Promise<{ ok: boolean; message: string }> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result: { ok: boolean; message: string }) => {
+      if (settled) return;
+      settled = true;
+      if (!popup.isDestroyed()) popup.destroy();
+      resolve(result);
+    };
+
+    const popup = new BrowserWindow({
+      width: 480,
+      height: 640,
+      parent: win ?? undefined,
+      modal: false,
+      title: provider === "google" ? "구글로 로그인" : "카카오로 로그인",
+      webPreferences: { contextIsolation: true, nodeIntegration: false },
+    });
+
+    const tryCapture = (url: string) => {
+      if (!url.startsWith(OAUTH_REDIRECT_TO)) return;
+      const hashIdx = url.indexOf("#");
+      const fragment = hashIdx >= 0 ? url.slice(hashIdx + 1) : "";
+      void engine.applyOAuthCallback(fragment).then(finish);
+    };
+
+    popup.webContents.on("will-redirect", (_ev, url) => tryCapture(url));
+    popup.webContents.on("will-navigate", (_ev, url) => tryCapture(url));
+    popup.on("closed", () => finish({ ok: false, message: "로그인이 취소되었습니다." }));
+
+    popup.loadURL(engine.authOAuthUrl(provider, OAUTH_REDIRECT_TO));
+  });
+}
+
 function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:status", () => e.getStatus());
   ipcMain.handle("tool:journal", () => e.getJournal());
@@ -441,6 +493,17 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:auth:listRequests", () => e.listAccessRequests());
   ipcMain.handle("tool:auth:approve", (_ev, email: string) => e.approveAccessRequest(email));
   ipcMain.handle("tool:auth:reject", (_ev, email: string) => e.rejectAccessRequest(email));
+  // [v0.59.0] 로그인 게이트(capri_accounts) — 승인 대기 목록/결정 + 알림 설정 + 소셜 로그인
+  ipcMain.handle("tool:auth:pendingAccounts", () => e.listPendingAccounts());
+  ipcMain.handle("tool:auth:decideAccount", (_ev, userId: string, decision: "approved" | "rejected") => e.decideAccount(userId, decision));
+  ipcMain.handle("tool:notify:get", () => e.getNotifySettings());
+  ipcMain.handle("tool:notify:save", (_ev, url: string) => e.saveNotifySettings(url));
+  ipcMain.handle("tool:auth:oauth", (_ev, provider: "google" | "kakao") => startOAuthPopup(e, provider));
+  // [v0.59.0] 폰 원격 조종 — 명령 보내기/조회 + PC 생존신호 조회. 명령 "실행"(폴링 루프)은
+  //   IPC로 노출하지 않는다(engine.startRemoteControlLoop()는 main.ts가 직접 부른다 — 아래 참고).
+  ipcMain.handle("tool:remote:send", (_ev, type: string, payload?: Record<string, unknown>) => e.sendCommand(type, payload));
+  ipcMain.handle("tool:remote:list", (_ev, limit?: number) => e.listMyCommands(limit));
+  ipcMain.handle("tool:remote:heartbeat", () => e.getDesktopHeartbeat());
   ipcMain.handle("tool:killSwitch", (_ev, on: boolean) => e.setKillSwitch(!!on));
   ipcMain.handle("tool:liveOrders", (_ev, on: boolean) => e.setLiveOrders(!!on));
   ipcMain.handle("tool:priceGuard", (_ev, on: boolean, pct?: number) => e.setPriceGuard(!!on, pct));
@@ -658,6 +721,14 @@ app.whenReady().then(async () => {
   engine = new ToolEngine(app.getPath("userData"), { forceMock: process.env.KYLEBOT_E2E === "1" });
   registerIpc(engine);
   createWindow();
+
+  // [v0.59.0] 폰 원격 조종 루프 — 이 인스턴스(데스크톱 main 프로세스)에서만 시작한다
+  //   (웹/폰 쪽 ToolEngine 인스턴스는 이 메서드를 아예 안 부른다 — 그래서 폰이 명령을
+  //   "실행"할 방법은 구조적으로 없다, 오직 "넣기"만 한다). startRemoteControlLoop()는
+  //   로그인 전에는 조용히 아무 일도 안 하므로(engine 내부 가드), 15초마다 재시도해
+  //   로그인되는 순간(세션 복원이든 화면에서 방금 로그인했든) 자동으로 붙는다.
+  engine.startRemoteControlLoop();
+  setInterval(() => engine?.startRemoteControlLoop(), 15_000);
 
   // 자동 업데이트는 실제 설치본에서만(개발/검증 실행 제외). 실패해도 앱은 정상.
   if (app.isPackaged && !process.env.KYLEBOT_SHOT) {

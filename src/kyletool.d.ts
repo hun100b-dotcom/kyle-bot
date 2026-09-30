@@ -625,12 +625,26 @@ interface KyletoolBridge {
   authSignUp(email: string, password: string): Promise<{ ok: boolean; needsConfirm: boolean; message: string; canRequestAccess?: boolean }>;
   authSignIn(email: string, password: string): Promise<{ ok: boolean; message: string }>;
   authSignOut(): Promise<{ ok: boolean }>;
-  authStatus(): Promise<{ email: string | null; loggedIn: boolean; isOwner: boolean }>;
-  /** [v0.24.0] 가입 승인 요청함 — 누구나 신청(로그인 불필요), 운영자만 조회·승인·거절 */
+  /** [v0.59.0] accountStatus 추가 — "unknown"이면 조회 실패일 뿐 차단 신호가 아니다(화면은 막지 않는다). */
+  authStatus(): Promise<{ email: string | null; loggedIn: boolean; isOwner: boolean; accountStatus: "pending" | "approved" | "rejected" | "unknown" }>;
+  /** [v0.24.0] 가입 승인 요청함(옛 모델 — 가입 자체가 막혔을 때의 보조 경로). 누구나 신청(로그인 불필요), 운영자만 조회·승인·거절 */
   requestAccess(email: string, note?: string): Promise<{ ok: boolean; message: string }>;
   listAccessRequests(): Promise<Array<{ email: string; note: string | null; requestedAt: string }>>;
   approveAccessRequest(email: string): Promise<{ ok: boolean; message: string }>;
   rejectAccessRequest(email: string): Promise<{ ok: boolean; message: string }>;
+  /** [v0.59.0] 로그인 게이트(capri_accounts) — 진짜 승인 대기 목록(가입은 항상 성공, 이게 진짜 게이트). */
+  listPendingAccounts(): Promise<Array<{ userId: string; email: string; requestedAt: string }>>;
+  decideAccount(userId: string, decision: "approved" | "rejected"): Promise<{ ok: boolean; message: string }>;
+  /** [v0.59.0] 디스코드 웹훅 알림 설정(운영자 전용). */
+  getNotifySettings(): Promise<{ discordWebhookUrl: string | null }>;
+  saveNotifySettings(url: string): Promise<{ ok: boolean; message: string }>;
+  /** [v0.59.0] 소셜 로그인(구글·카카오) — Supabase에 provider가 설정돼 있어야 실제로 동작한다. */
+  authOAuth(provider: "google" | "kakao"): Promise<{ ok: boolean; message: string }>;
+  /** [v0.59.0] 폰 원격 조종 — 명령을 큐에 "넣기"만 한다. 실행은 로그인된 PC가 자동으로 한다. */
+  sendCommand(type: string, payload?: Record<string, unknown>): Promise<{ ok: boolean; message: string; commandId?: string }>;
+  listMyCommands(limit?: number): Promise<Array<{ id: string; type: string; status: string; result: unknown; createdAt: string }>>;
+  /** [v0.59.0] PC가 지금 켜져 있는지(최근 생존 신호). null이면 한 번도 신호가 없었던 것. */
+  getDesktopHeartbeat(): Promise<{ lastSeenMs: number | null }>;
   setKillSwitch(on: boolean): Promise<void>;
   setLiveOrders(on: boolean): Promise<void>;
   setPriceGuard(on: boolean, pct?: number): Promise<void>;

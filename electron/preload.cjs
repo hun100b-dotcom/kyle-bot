@@ -28,6 +28,16 @@ contextBridge.exposeInMainWorld("kyletool", {
   listAccessRequests: () => ipcRenderer.invoke("tool:auth:listRequests"),
   approveAccessRequest: (email) => ipcRenderer.invoke("tool:auth:approve", email),
   rejectAccessRequest: (email) => ipcRenderer.invoke("tool:auth:reject", email),
+  // [v0.59.0] 로그인 게이트(capri_accounts) — 승인 대기 목록/결정 + 알림 설정 + 소셜 로그인
+  pendingAccounts: () => ipcRenderer.invoke("tool:auth:pendingAccounts"),
+  decideAccount: (userId, decision) => ipcRenderer.invoke("tool:auth:decideAccount", userId, decision),
+  getNotifySettings: () => ipcRenderer.invoke("tool:notify:get"),
+  saveNotifySettings: (url) => ipcRenderer.invoke("tool:notify:save", url),
+  authOAuth: (provider) => ipcRenderer.invoke("tool:auth:oauth", provider),
+  // [v0.59.0] 폰 원격 조종 — 명령 보내기/조회 + PC 생존신호 조회(실행은 항상 PC가 자동으로 한다)
+  sendCommand: (type, payload) => ipcRenderer.invoke("tool:remote:send", type, payload),
+  listMyCommands: (limit) => ipcRenderer.invoke("tool:remote:list", limit),
+  getDesktopHeartbeat: () => ipcRenderer.invoke("tool:remote:heartbeat"),
   setKillSwitch: (on) => ipcRenderer.invoke("tool:killSwitch", on),
   setLiveOrders: (on) => ipcRenderer.invoke("tool:liveOrders", on),
   setPriceGuard: (on, pct) => ipcRenderer.invoke("tool:priceGuard", on, pct),
