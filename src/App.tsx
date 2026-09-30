@@ -785,7 +785,7 @@ function App() {
   //   "이미 로그인된 사람에게 로그인 화면이 잠깐 번쩍였다 사라지는" 깜빡임을 막는다.
   const [authChecked, setAuthChecked] = useState(false);
   // [v0.59.0] 소셜 로그인(구글/카카오) 처리 중 표시.
-  const [oauthBusy, setOauthBusy] = useState<"google" | "kakao" | null>(null);
+  const [oauthBusy, setOauthBusy] = useState<"google" | null>(null); // [v0.60.0] 카카오 로그인 제거(오너 요청 — "카카오 로그인은 하지 않는다")
   const [authMsg, setAuthMsg] = useState("");
   // [v0.24.0] 가입이 아직 승인 안 된 사람용 — "승인 요청 남기기" 버튼 노출 여부 + 처리 상태.
   const [canRequestAccess, setCanRequestAccess] = useState(false);
@@ -888,15 +888,26 @@ function App() {
   const [autoHistoryBusy, setAutoHistoryBusy] = useState(false);
   // [v0.41.0 — 오너 요청] "지금 감시 중" 포지션을 직접 취소하는 버튼의 진행 상태(포지션 키 단위).
   const [autoCancelBusyKey, setAutoCancelBusyKey] = useState<string | null>(null);
+  // [v0.60.0 긴급 수정 — 오너 실사용 보고: "취소 버튼을 눌러도 반응이 없다"] 원인 규명: 이
+  //   버튼은 실제로는 항상 반응했다 — 다만 그 결과 메시지를 저 멀리 [설정] 탭 안의 syncMsg에만
+  //   써서, 오너가 지금 보고 있는 이 탭(자동매매 컨트롤)에는 성공이든 실패든 아무 것도 안
+  //   보였을 뿐이다("조용히 아무 일도 안 하는 것처럼 보인다"의 실제 정체). 이 버튼 바로 아래에
+  //   뜨는 전용 메시지로 분리한다 — 실패하면 실패 사유가 바로 여기 보인다.
+  const [autoCancelMsg, setAutoCancelMsg] = useState("");
   const [reconcileBusy, setReconcileBusy] = useState(false); // [v0.45.0] "🔄 지금 확인" 버튼 눌림 상태
   async function doCancelAutoPosition(p: AutoPosition) {
     const key = `${p.symbol}@${p.entry}@${p.enteredAtMs}`;
     if (!confirm(`${p.symbol} 자동매매 포지션을 취소할까요?\n(매수 체결 대기 중이면 매수 주문을, 이미 체결됐으면 익절/손절 조건주문을 취소합니다.)`)) return;
     setAutoCancelBusyKey(key);
+    setAutoCancelMsg("");
     try {
       const r = await window.kyletool.cancelAutoPosition(p.symbol, p.entry, p.enteredAtMs);
-      setSyncMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      setAutoCancelMsg(`${p.symbol}: ${r.ok ? "✅ " : "⚠️ "}${r.message}`);
       if (r.ok) setAutoStatus(await window.kyletool.autoTradeStatus());
+    } catch (e) {
+      // [v0.60.0] IPC 호출 자체가 예외를 던지는 경우(네트워크 끊김 등)까지 반드시 화면에 남긴다
+      //   — 실패를 조용히 삼키는 경로를 하나도 남기지 않는다(오너 지시).
+      setAutoCancelMsg(`${p.symbol}: ⚠️ 취소 요청 자체가 실패했습니다(${e instanceof Error ? e.message : String(e)}).`);
     } finally {
       setAutoCancelBusyKey(null);
     }
@@ -1291,15 +1302,21 @@ function App() {
       /* 무시 */
     }
   }
+  /** [v0.60.0 긴급 수정 — "취소 버튼 무반응" 계열 버그를 이 카드에도 같은 원리로 남기지 않으려고
+   *   syncMsg(저 멀리 [설정] 탭에만 보임) 대신 이 카드 전용 메시지로 분리했다. */
+  const [remoteCmdMsg, setRemoteCmdMsg] = useState("");
   /** [v0.59.0] 원격 명령을 보내고, 잠시 뒤 목록을 새로고침해 처리 상태를 보여준다. */
   async function doSendCommand(type: string, payload?: Record<string, unknown>) {
     setRemoteBusy(type);
+    setRemoteCmdMsg("");
     try {
       const r = await window.kyletool.sendCommand(type, payload);
-      setSyncMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      setRemoteCmdMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
       await loadRemoteCommands();
       // PC가 8초 주기로 집어가므로, 잠시 후 한 번 더 새로고침해 처리 결과까지 보여준다.
       setTimeout(() => void loadRemoteCommands(), 10_000);
+    } catch (e) {
+      setRemoteCmdMsg(`⚠️ 명령 전송 자체가 실패했습니다(${e instanceof Error ? e.message : String(e)}).`);
     } finally {
       setRemoteBusy(null);
     }
@@ -2501,22 +2518,30 @@ ${msg}
       if (r.ok) setCanRequestAccess(false); // 접수됐으면 버튼은 다시 안 보여도 됨
     } finally { setReqBusy(false); }
   }
-  /** [v0.24.0][운영자 전용] 요청을 승인 — 허용목록에 추가되고 그 사람은 바로 가입할 수 있게 된다. */
+  /** [v0.24.0][운영자 전용] 요청을 승인 — 허용목록에 추가되고 그 사람은 바로 가입할 수 있게 된다.
+   *  [v0.60.0] 결과 메시지는 이 카드에 이미 있는 directAddMsg를 그대로 재사용한다(저 멀리
+   *  [설정] 탭에만 보이던 syncMsg 대신 — "무반응처럼 보인다" 계열 버그 일괄 수정). */
   async function doApproveRequest(email: string) {
     setReqActionBusy(email);
+    setDirectAddMsg("");
     try {
       const r = await window.kyletool.approveAccessRequest(email);
-      setSyncMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      setDirectAddMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
       if (r.ok) await loadAccessRequests();
+    } catch (e) {
+      setDirectAddMsg(`⚠️ 요청 자체가 실패했습니다(${e instanceof Error ? e.message : String(e)}).`);
     } finally { setReqActionBusy(null); }
   }
   /** [v0.24.0][운영자 전용] 요청 거절(허용목록에는 추가 안 함). */
   async function doRejectRequest(email: string) {
     setReqActionBusy(email);
+    setDirectAddMsg("");
     try {
       const r = await window.kyletool.rejectAccessRequest(email);
-      setSyncMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      setDirectAddMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
       if (r.ok) await loadAccessRequests();
+    } catch (e) {
+      setDirectAddMsg(`⚠️ 요청 자체가 실패했습니다(${e instanceof Error ? e.message : String(e)}).`);
     } finally { setReqActionBusy(null); }
   }
   /** [v0.53.0][운영자 전용] 대기 목록에 없어도(요청이 아예 안 남았거나, 미리 등록해 두고
@@ -2547,12 +2572,17 @@ ${msg}
       /* 무시 */
     }
   }
+  // [v0.60.0] 이 카드 전용 메시지(저 멀리 [설정] 탭에만 보이던 syncMsg 대신).
+  const [pendingDecideMsg, setPendingDecideMsg] = useState("");
   async function doDecideAccount(userId: string, decision: "approved" | "rejected") {
     setPendingActionBusy(userId);
+    setPendingDecideMsg("");
     try {
       const r = await window.kyletool.decideAccount(userId, decision);
-      setSyncMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      setPendingDecideMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
       if (r.ok) await loadPendingAccounts();
+    } catch (e) {
+      setPendingDecideMsg(`⚠️ 요청 자체가 실패했습니다(${e instanceof Error ? e.message : String(e)}).`);
     } finally { setPendingActionBusy(null); }
   }
 
@@ -2576,12 +2606,13 @@ ${msg}
   }
 
   // --------------------------------------------------------------------------
-  // [v0.59.0] 소셜 로그인(구글·카카오). Supabase에 provider가 아직 안 켜져 있으면 오류
-  //   메시지가 그대로 뜬다(설정은 오너가 Supabase 대시보드에서 해야 한다 — README 참고).
+  // [v0.59.0→v0.60.0] 소셜 로그인(구글만 — 카카오는 오너 요청으로 제거). Supabase에
+  //   provider가 아직 안 켜져 있으면 오류 메시지가 그대로 뜬다(설정은 오너가 Supabase
+  //   대시보드에서 해야 한다 — README 참고).
   // --------------------------------------------------------------------------
-  async function doOAuth(provider: "google" | "kakao") {
+  async function doOAuth(provider: "google") {
     setOauthBusy(provider);
-    setAuthMsg(provider === "google" ? "구글 로그인 창을 여는 중…" : "카카오 로그인 창을 여는 중…");
+    setAuthMsg("구글 로그인 창을 여는 중…");
     try {
       const r = await window.kyletool.authOAuth(provider);
       setAuthMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
@@ -2685,9 +2716,6 @@ ${msg}
           <div className="form-row" style={{ marginTop: 8 }}>
             <button className="btn" disabled={oauthBusy !== null} onClick={() => void doOAuth("google")}>
               {oauthBusy === "google" ? "여는 중…" : "G 구글로 로그인"}
-            </button>
-            <button className="btn" disabled={oauthBusy !== null} onClick={() => void doOAuth("kakao")}>
-              {oauthBusy === "kakao" ? "여는 중…" : "K 카카오로 로그인"}
             </button>
           </div>
           {canRequestAccess && (
@@ -3912,7 +3940,15 @@ ${msg}
                           <td>${p.tp}</td>
                           <td>${p.sl}</td>
                           <td>{p.quantity}</td>
-                          <td>{p.status === "active" ? "익절/손절 등록됨" : "매수 체결 대기중"}</td>
+                          <td>
+                            {p.status === "active" ? "익절/손절 등록됨" : "매수 체결 대기중"}
+                            {/* [v0.60.0] 상태 확인이 반복 실패하면(원인은 대부분 이미 종료된 주문을
+                                계속 조회하려는 것) 여기 바로 보이게 한다 — "왜 안 없어지지?"에
+                                대한 답을 화면 자체가 준다. */}
+                            {p.syncWarning && (
+                              <div className="hint small danger" style={{ marginTop: 4 }}>⚠️ {p.syncWarning}</div>
+                            )}
+                          </td>
                           <td>
                             <button
                               className="mini"
@@ -3928,6 +3964,11 @@ ${msg}
                       })}
                     </tbody>
                   </table>
+                  {autoCancelMsg && (
+                    <p className={autoCancelMsg.includes("⚠️") ? "hint small danger" : "hint small ok"} style={{ whiteSpace: "pre-wrap" }}>
+                      {autoCancelMsg}
+                    </p>
+                  )}
                 </>
               )}
             </div>
@@ -3967,6 +4008,11 @@ ${msg}
               (electron/tool-engine.ts의 dispatchCommand), 이 화면에는 아직 입력 폼을 만들지
               않았습니다 — 다음에 필요하면 추가하겠습니다.
             </p>
+            {remoteCmdMsg && (
+              <p className={remoteCmdMsg.includes("⚠️") ? "hint small danger" : "hint small ok"} style={{ whiteSpace: "pre-wrap" }}>
+                {remoteCmdMsg}
+              </p>
+            )}
             <button className="mini" onClick={() => void loadRemoteCommands()}>🔄 최근 명령 새로고침</button>
             {remoteCmds.length > 0 && (
               <table className="result-table">
@@ -5566,6 +5612,11 @@ ${msg}
                     <button className="mini" disabled={pendingActionBusy === a.userId} onClick={() => void doDecideAccount(a.userId, "rejected")}>거절</button>
                   </div>
                 ))
+              )}
+              {pendingDecideMsg && (
+                <p className={pendingDecideMsg.includes("⚠️") ? "hint small danger" : "hint small ok"} style={{ whiteSpace: "pre-wrap" }}>
+                  {pendingDecideMsg}
+                </p>
               )}
             </section>
           )}

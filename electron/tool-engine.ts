@@ -828,6 +828,13 @@ export interface AutoPosition {
    *  2026-09-26: "껐다 키거나 업데이트하면 자동매매 기록이 사라짐 — 실제 토스엔 주문이 남아있는데").
    *  이 필드가 생기기 전(v0.30.0 이전) 기록엔 없을 수 있어 optional로 둔다. */
   buyOrderId?: string | null;
+  /** [v0.60.0 긴급 수정 — 오너 실사용 보고: "체결 완료된 종목이 목록에 계속 남고 취소도
+   *  무반응"] reconcileAutoPositions가 이 포지션의 조건주문 상태를 반복해서 확인 못 하면
+   *  (네트워크 오류가 아니라 같은 원인으로 여러 사이클 연속 실패) 여기에 이유를 남긴다 —
+   *  예전엔 실패를 조용히 삼키고 다음 사이클에 재시도만 해서, 그 원인이 매 사이클 똑같이
+   *  반복되는(예: 이미 존재하지 않는 조건주문 ID) 경우 화면엔 "익절/손절 등록됨"만 영원히
+   *  보이고 왜 안 지워지는지 알 방법이 없었다. 성공하면 즉시 지운다(null). */
+  syncWarning?: string | null;
 }
 
 /** 자동매매 화면 현황판에 보여줄 요약. */
@@ -1069,6 +1076,9 @@ export class ToolEngine extends EventEmitter {
   private autoTradeTickPromise: Promise<void> | null = null;
   private autoTradeRealizedPnlUsd = 0; // 이번 자동매매 실행 동안 누적 실현손익(달러, 손실이면 음수)
   private autoTradePositions: AutoPosition[] = []; // 지금 자동매매로 감시·보유 중인 포지션(파일로 영속)
+  /** [v0.60.0] reconcileAutoPositions가 포지션별 조건주문 조회 연속 실패 횟수를 세는 곳
+   *  (메모리만 — 재시작하면 0부터 다시 센다, 굳이 파일로 남길 값은 아니다). */
+  private reconcileFailCounts: Map<string, number> = new Map();
   private autoTradeUsedKeys = new Set<string>(); // `${symbol}@${entry}` — 같은 종목 같은 타점 재진입 방지(파일로 영속)
   private autoPositionsPath = ""; // [v0.30.1] autoTradePositions/autoTradeUsedKeys 저장 파일
   /** [v0.30.1] 지금 이 프로세스 안에서 watchAndBracket이 실시간(1초~5초 간격)으로 직접 감시
@@ -1580,7 +1590,7 @@ export class ToolEngine extends EventEmitter {
         this.addJournal({ kind: "info", symbol: "-", summary: "🤖 자동매매: 마침 사이클이 진행 중이라 끝나는 대로 최신 결과를 보여드립니다." });
         if (this.autoTradeTickPromise) await this.autoTradeTickPromise;
       } else {
-        await this.autoTradeTick(); // 스캔+진입 시도+skipReasons까지 실제 사이클과 완전히 동일
+        await this.autoTradeTick(true); // 스캔+진입 시도+skipReasons까지 실제 사이클과 완전히 동일(수동 새로고침 — forceScan)
         if (this.autoTradeTimer) {
           // 5분 주기 자체는 유지하되, 기준 시각을 이 수동 새로고침이 끝난 지금으로 다시 맞춘다.
           clearInterval(this.autoTradeTimer);
@@ -3452,6 +3462,22 @@ export class ToolEngine extends EventEmitter {
         return { ok: false, message: "취소할 주문 번호를 찾을 수 없습니다 — [현황 → 주문 현황] 탭에서 직접 확인해 주세요." };
       }
     } catch (e) {
+      // [v0.60.0 긴급 수정 — 오너 실사용 보고: "체결 완료된 종목이 목록에 남고 취소도 무반응"]
+      //   취소가 실패하는 흔한 이유 중 하나: 이 조건주문이 그 사이 이미 발동(COMPLETED)돼서
+      //   "취소할 살아있는 주문"이 더는 없는 경우 — Toss가 이걸 오류로 돌려주면 예전엔 그냥
+      //   "취소 실패"만 보여주고 목록엔 계속 남았다(오너가 본 그 증상). 포기하기 전에 실제
+      //   상태를 한 번 더 물어봐서, 이미 끝나 있으면 "취소"가 아니라 "정리"로 처리한다.
+      if (pos.status === "active" && pos.conditionalOrderId) {
+        try {
+          const resp = await getConditionalOrder(pos.conditionalOrderId);
+          if (resp.status === "COMPLETED") {
+            this.resolveCompletedConditional(pos, resp);
+            return { ok: true, message: `${symbol}은 이미 종료된 주문이라 취소 대신 목록에서 정리했습니다(익절/손절/수동취소 중 하나로 이미 끝나 있었음).` };
+          }
+        } catch {
+          /* 재확인도 실패하면 원래 오류 메시지를 그대로 보여준다(아래) */
+        }
+      }
       return { ok: false, message: `취소 실패: ${String(e).replace(/^Error:\s*/, "")}` };
     }
     this.autoTradeActiveWatches.delete(`${symbol}@${entry}@${enteredAtMs}`);
@@ -5451,6 +5477,58 @@ export class ToolEngine extends EventEmitter {
   }
 
   /**
+   * [v0.60.0] COMPLETED로 확인된 조건주문 하나를 실제로 정리한다(자리 비움 + 손익 반영 +
+   *   기록·저널). reconcileAutoPositions(5분 주기 자동 확인)와 cancelAutoPosition(오너가
+   *   직접 취소 버튼을 눌렀는데 이미 끝나 있던 경우)이 이 로직을 그대로 공유한다 — 오너
+   *   실사용 보고("체결 완료된 종목이 목록에 남고 취소도 무반응")의 두 번째 원인이 바로
+   *   이것: 취소 버튼은 cancelConditional(살아있는 조건주문을 취소)만 시도했지, "이미
+   *   끝나 있어서 취소할 게 없는" 경우는 전혀 처리하지 않아 매번 실패만 하고 있었다.
+   */
+  private resolveCompletedConditional(pos: AutoPosition, resp: ConditionalOrderResponse): void {
+    const secondTriggered = resp.second?.triggeredOrderId != null;
+    const firstTriggered = resp.first?.triggeredOrderId != null;
+    if (firstTriggered || secondTriggered) {
+      // 익절(first)/손절(second) 중 어느 쪽이 발동됐는지에 따라 우리가 등록해 둔 그 가격을 그대로 쓴다
+      // (실제 체결가 조회 없이도 정확 — 조건주문 지정가로 나가므로).
+      const exitPrice = secondTriggered ? pos.sl : pos.tp;
+      const pnlUsd = (exitPrice - pos.entry) * pos.quantity;
+      const pnlPct = ((exitPrice - pos.entry) / pos.entry) * 100;
+      this.autoTradeRealizedPnlUsd += pnlUsd;
+      this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
+      this.saveAutoPositions(); // [v0.30.1] 자리 비움을 즉시 파일에도 반영(재시작해도 정확)
+      const kindKo = secondTriggered ? "손절" : "익절";
+      this.addJournal({
+        kind: "info",
+        symbol: pos.symbol,
+        summary:
+          `🤖 자동매매 ${kindKo} 완료 ${pos.symbol}: 진입 $${pos.entry} → 청산 $${exitPrice} × ${pos.quantity}주 ` +
+          `(이번 실행 누적손익 $${this.autoTradeRealizedPnlUsd.toFixed(2)}) — 빈자리는 다음 확인 때 채웁니다.`,
+        notify: true,
+        notifyTitle: `${kindKo === "손절" ? "🛑" : "✅"} ${kindKo} 완료: ${pos.symbol}`,
+      });
+      this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
+        status: secondTriggered ? "closed_loss" : "closed_win",
+        exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
+        exitPrice,
+        pnlUsd: Math.round(pnlUsd * 100) / 100,
+        pnlPct: Math.round(pnlPct * 100) / 100,
+        note: `${kindKo} 발동으로 자동 청산`,
+      });
+    } else {
+      // 어느 다리도 발동 안 했는데 그룹이 COMPLETED = 사람이 [주문현황]에서 직접 취소한 경우
+      // — 손익 반영 없이 자리만 비운다.
+      this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
+      this.saveAutoPositions();
+      this.addJournal({ kind: "info", symbol: pos.symbol, summary: `자동매매 포지션의 조건주문이 취소돼 있어 감시를 멈춥니다: ${pos.symbol}` });
+      this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
+        status: "closed_manual",
+        exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
+        note: "사람이 [주문현황]에서 조건주문을 직접 취소함(손익 미확정)",
+      });
+    }
+  }
+
+  /**
    * 기존 자동매매 포지션을 다시 확인한다("빈자리 채우기"가 늦지 않으려면 스캔보다 먼저 끝나야 함).
    *   - active(OCO 등록 완료) 상태는 조건주문이 "발동"됐는지 조회해, 발동됐으면 실현손익에 반영하고
    *     자리를 비운다.
@@ -5465,11 +5543,43 @@ export class ToolEngine extends EventEmitter {
   private async reconcileAutoPositions(): Promise<void> {
     const active = this.autoTradePositions.filter((p) => p.status === "active" && p.conditionalOrderId);
     for (const pos of active) {
+      const posKey = `${pos.symbol}@${pos.entry}@${pos.enteredAtMs}`;
       let resp: ConditionalOrderResponse;
       try {
         resp = await getConditionalOrder(pos.conditionalOrderId as string);
-      } catch {
-        continue; // 조회 실패는 다음 사이클에 재시도(포지션을 잃어버리지 않음)
+      } catch (e) {
+        // [v0.60.0 긴급 수정 — 오너 실사용 보고: "체결 완료된 종목이 목록에 계속 남는다"]
+        //   예전엔 조회 실패를 조용히 삼키고 continue만 했다 — 원인이 네트워크 순단처럼
+        //   "한 번 실패하고 다음엔 되는" 종류면 문제없지만, 같은 원인(예: 조건주문 ID가
+        //   더는 조회되지 않음)이 매 사이클 똑같이 반복되면 이 포지션은 상태가 영원히
+        //   안 바뀐 채(=취소 버튼을 눌러도 cancelAutoPosition이 같은 cancelConditional
+        //   호출로 또 실패) 화면에 "익절/손절 등록됨"만 계속 보이는데, 왜 그런지 알
+        //   방법이 전혀 없었다. 3회 연속(약 15분) 실패하면 포지션에 경고를 남겨 화면에
+        //   보이게 하고, 저널에도 한 번 남긴다(반복 알림 방지 — 정확히 3회째에만).
+        const failCount = (this.reconcileFailCounts.get(posKey) ?? 0) + 1;
+        this.reconcileFailCounts.set(posKey, failCount);
+        if (failCount >= 3) {
+          const warning = `조건주문 상태 확인 ${failCount}회 연속 실패(${String(e).replace(/^Error:\s*/, "")}) — [주문현황]에서 실제 상태를 직접 확인해 주세요.`;
+          const idx = this.autoTradePositions.findIndex((p) => p === pos);
+          if (idx !== -1 && this.autoTradePositions[idx].syncWarning !== warning) {
+            this.autoTradePositions[idx] = { ...this.autoTradePositions[idx], syncWarning: warning };
+            this.saveAutoPositions();
+          }
+          if (failCount === 3) {
+            this.addJournal({
+              kind: "info", symbol: pos.symbol,
+              summary: `⚠️ ${pos.symbol} 자동매매 포지션의 조건주문 상태 확인이 계속 실패합니다 — [주문현황]에서 직접 확인해 주세요.`,
+              notify: true, notifyTitle: `⚠️ 상태 확인 실패: ${pos.symbol}`,
+            });
+          }
+        }
+        continue; // 다음 사이클에 재시도(포지션을 잃어버리지 않음)
+      }
+      // 조회 성공 — 실패 카운트·경고를 지운다(있었다면).
+      this.reconcileFailCounts.delete(posKey);
+      if (pos.syncWarning) {
+        const idx = this.autoTradePositions.findIndex((p) => p === pos);
+        if (idx !== -1) this.autoTradePositions[idx] = { ...this.autoTradePositions[idx], syncWarning: null };
       }
       // [v0.51.0 긴급 수정] 예전엔 실제로 존재하지 않는 값(status "TRIGGERED"/"CANCELED",
       //   triggeredLeg 필드)을 확인하고 있었다 — 실스펙은 그룹 status가 "WATCHING"(감시 중)
@@ -5478,47 +5588,7 @@ export class ToolEngine extends EventEmitter {
       //   이 불일치 때문에 실계좌에서는 이 분기가 절대 안 걸려, 이미 끝난 포지션이 영원히
       //   "감시 중"으로 남아있었다 — 오너가 반복 보고한 정합성 버그의 진짜 원인.
       if (resp.status === "COMPLETED") {
-        const secondTriggered = resp.second?.triggeredOrderId != null;
-        const firstTriggered = resp.first?.triggeredOrderId != null;
-        if (firstTriggered || secondTriggered) {
-          // 익절(first)/손절(second) 중 어느 쪽이 발동됐는지에 따라 우리가 등록해 둔 그 가격을 그대로 쓴다
-          // (실제 체결가 조회 없이도 정확 — 조건주문 지정가로 나가므로).
-          const exitPrice = secondTriggered ? pos.sl : pos.tp;
-          const pnlUsd = (exitPrice - pos.entry) * pos.quantity;
-          const pnlPct = ((exitPrice - pos.entry) / pos.entry) * 100;
-          this.autoTradeRealizedPnlUsd += pnlUsd;
-          this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
-          this.saveAutoPositions(); // [v0.30.1] 자리 비움을 즉시 파일에도 반영(재시작해도 정확)
-          const kindKo = secondTriggered ? "손절" : "익절";
-          this.addJournal({
-            kind: "info",
-            symbol: pos.symbol,
-            summary:
-              `🤖 자동매매 ${kindKo} 완료 ${pos.symbol}: 진입 $${pos.entry} → 청산 $${exitPrice} × ${pos.quantity}주 ` +
-              `(이번 실행 누적손익 $${this.autoTradeRealizedPnlUsd.toFixed(2)}) — 빈자리는 다음 확인 때 채웁니다.`,
-            notify: true,
-            notifyTitle: `${kindKo === "손절" ? "🛑" : "✅"} ${kindKo} 완료: ${pos.symbol}`,
-          });
-          this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
-            status: secondTriggered ? "closed_loss" : "closed_win",
-            exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
-            exitPrice,
-            pnlUsd: Math.round(pnlUsd * 100) / 100,
-            pnlPct: Math.round(pnlPct * 100) / 100,
-            note: `${kindKo} 발동으로 자동 청산`,
-          });
-        } else {
-          // 어느 다리도 발동 안 했는데 그룹이 COMPLETED = 사람이 [주문현황]에서 직접 취소한 경우
-          // — 손익 반영 없이 자리만 비운다.
-          this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
-          this.saveAutoPositions();
-          this.addJournal({ kind: "info", symbol: pos.symbol, summary: `자동매매 포지션의 조건주문이 취소돼 있어 감시를 멈춥니다: ${pos.symbol}` });
-          this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
-            status: "closed_manual",
-            exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
-            note: "사람이 [주문현황]에서 조건주문을 직접 취소함(손익 미확정)",
-          });
-        }
+        this.resolveCompletedConditional(pos, resp);
       }
       // WATCHING(그대로 감시 중)이면 할 일 없음.
     }
@@ -5755,8 +5825,11 @@ export class ToolEngine extends EventEmitter {
   /**
    * 자동매매 한 사이클(시작 즉시 1회 + 이후 5분마다).
    *   [재진입 방지] 한 사이클이 오래 걸려도(스캔에 수십 초) 다음 타이머 틱과 겹치지 않게 막는다.
+   *   [v0.60.0] forceScan=true는 오너가 [🔄 지금 새로고침]을 직접 눌렀을 때만 쓴다 — 자리가
+   *   꽉 차 있어도 스캔 생략을 건너뛰고 실제로 다시 훑어 화면을 최신 상태로 갈아 끼운다(아래
+   *   freeSlots 분기 주석 참고). 5분 정기 사이클은 항상 기본값(false)이라 기존 동작 그대로다.
    */
-  private async autoTradeTick(): Promise<void> {
+  private async autoTradeTick(forceScan = false): Promise<void> {
     if (!this.autoTradeEnabled || this.autoTradeTickBusy) return;
     this.autoTradeTickBusy = true;
     this.autoTradeLastCycleAt = DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss");
@@ -5842,7 +5915,18 @@ export class ToolEngine extends EventEmitter {
       }
 
       const freeSlots = this.autoTradeMaxPositions - this.effectiveActivePositionCount();
-      if (freeSlots <= 0) {
+      // [v0.60.0 긴급수정 — 오너 실사용 보고: "스크리너에 종료·탈락 종목(SDEV, BIYA 등)이
+      //   계속 남는다, 새로고침해도 실제 상태로 안 바뀐다"] freeSlots<=0이면 5분 정기
+      //   사이클은 (아래처럼) 스캔 자체를 건너뛰는 게 맞다 — 어차피 못 들어가니 API 호출을
+      //   아끼는 최적화다. 그런데 오너가 직접 [🔄 지금 새로고침]을 눌렀을 때(forceScan)도
+      //   똑같이 건너뛰면, 화면엔 몇 사이클 전(심지어 몇 시간 전) 스캔의 "확정" 목록이 그대로
+      //   박제된 채 남는다 — 그 사이 실제로는 추세가 무너져 탈락했거나(BIYA) 이미 종료된
+      //   종목(SDEV, bug#3과 동일 원인 — 자리가 안 비어 freeSlots가 계속 0으로 막혀 있었음)도
+      //   "확정"으로 계속 보였다. "새로고침"은 오너가 지금 당장 실제 상태를 보려고 누르는
+      //   버튼이므로, 이때만은 꽉 차 있어도 실제로 다시 스캔해 lastScan을 통째로 새로 갈아
+      //   끼운다(신규 진입 자체는 아래 루프의 canAutoEnter가 activePositionCount로 별도로
+      //   다시 막으므로, 여기서 건너뛰지 않아도 최대 종목 수를 넘는 진입은 여전히 안 난다).
+      if (freeSlots <= 0 && !forceScan) {
         // [v0.38.0 버그 수정] 꽉 차서 이번 사이클은 스캔 자체를 건너뛰면, 화면엔 "지난 스캔에서
         //   확정됐던 종목"이 그대로 남아 있는데 사유는 하나도 안 채워져 "확정인데 왜 안 들어가지?"
         //   처럼 보였다 — 최대 종목 수 도달이 이유임을 여기서도 채워 둔다(스캔을 새로 안 해도).
@@ -5948,6 +6032,30 @@ export class ToolEngine extends EventEmitter {
           continue; // [오너 지시] 동일종목 동일타점 재진입 방지
         }
 
+        // [v0.60.0 긴급 수정 — 오너 실사용 보고: "1차 타점 3944 익절 후, 하락하다 일시 반등할 때
+        //   2차 타점을 더 높은 3966으로 잡아 오발주"] 원인: level1은 그 사이클(run.results)의
+        //   prevClose/ema200 스냅샷으로 계산될 뿐, 이전에 같은 종목에 넣었던 타점과는 전혀 비교
+        //   하지 않는다 — 5분마다 새 스캔이 돌 때마다 그 순간의 캔들만 보고 독립적으로 타점을
+        //   다시 계산하므로, 하락 추세 중 일시 반등이 오면 prevClose가 올라가 새 타점(entry1)이
+        //   직전 타점보다 **더 높게** 나올 수 있다(삼분할 기법은 "얕게 눌렸을 때 사는" 전략이라,
+        //   같은 종목에 또 들어갈 땐 직전보다 같거나 낮은 가격이어야 논리적으로 맞다 — 하락
+        //   추세에서 더 비싸게 사는 재진입은 그 자체로 모순). 최근 24시간 안에 이 종목에 넣었던
+        //   가장 최근 타점(드라이런 제외 — 실제로 시도됐던 진입만 기준)보다 새 타점이 높으면
+        //   "방향 정합성 위반"으로 보고 진입을 취소한다.
+        const RECENT_ENTRY_WINDOW_MS = 24 * 60 * 60_000; // 24시간 — "같은 하락 국면 안의 재진입"으로 볼 범위
+        const priorEntries = this.autoTradeHistory.filter((h) => {
+          if (h.symbol !== cand.symbol || h.status === "dryrun") return false;
+          const enteredAtMs = Number(h.id.split("@").pop());
+          return Number.isFinite(enteredAtMs) && Date.now() - enteredAtMs < RECENT_ENTRY_WINDOW_MS;
+        });
+        const lastEntry = priorEntries.length > 0 ? priorEntries[priorEntries.length - 1] : null;
+        if (lastEntry && level1.entry > lastEntry.entry) {
+          this.autoTradeSkipReasons[cand.symbol] =
+            `직전 타점($${lastEntry.entry})보다 높은 가격($${level1.entry})으로 재진입하려 해 취소했습니다 ` +
+            `(하락 추세 중 상향 재진입은 방향 정합성 위반 — 최근 24시간 내 기록 기준).`;
+          continue;
+        }
+
         const qty = computeSeedQty(seedUsd, perSlotPct, level1.entry, commissionRate) ?? 0;
         const gate = canAutoEnter({
           limits: {
@@ -5967,6 +6075,34 @@ export class ToolEngine extends EventEmitter {
           // 종목 수·손실 한도처럼 "이 사이클 전체"에 적용되는 사유면 더 시도할 필요가 없다.
           if (gate.reason?.includes("종목 수") || gate.reason?.includes("손실")) break;
           continue; // 그 외(예: 예산으로 1주도 못 사는 경우)는 이 종목만 건너뛰고 다음 후보 시도
+        }
+
+        // [v0.60.0 긴급 수정 — 오너 실사용 보고: "200 EMA 아래로 꺾인 하락 추세인데 진입이
+        //   났다"] 원인 규명: level1(위 calcSplit3)은 이 스캔(run.results)이 만들어진 시점의
+        //   스냅샷(cand.prevClose/cand.ema200)으로만 계산된다. candidates 루프는 이 스캔
+        //   전체(최대 autoScanCount 종목, 종목마다 캔들 조회 필요)가 끝난 뒤에 도는 데다,
+        //   후보가 여러 개면 앞 후보의 주문 접수(await placeBracketCore, 네트워크 왕복)를
+        //   기다리는 동안 뒤 후보는 더 늦게 도달한다 — 스캔 당시엔 "EMA200 위(상승)"였어도
+        //   실제 주문이 나가는 순간엔 그새 가격이 EMA200 아래로 꺾여 있을 수 있다(스크리너
+        //   탈락 사유 통계에 "EMA200 아래"가 찍히는 건 그 *다음* 스캔이 그때는 정직하게
+        //   걸러냈다는 뜻일 뿐, 이미 나간 주문을 막지는 못한다). 그래서 실제 매수 주문을
+        //   내기 **바로 직전**에 현재가를 다시 조회해 EMA200 위인지 마지막으로 재확인한다
+        //   — 스캔 때 통과했어도 이 순간 깨졌으면 진입하지 않는다(오너 지시 그대로).
+        //   EMA200 자체는 5분봉 200개 평균이라 몇 분 사이 크게 안 움직이므로 스캔 시점 값을
+        //   그대로 기준선으로 쓰고, 빠르게 변하는 현재가만 다시 확인하면 충분하다.
+        let livePriceAtEntry: number;
+        try {
+          livePriceAtEntry = (await getPrice(cand.symbol)).price;
+        } catch (e) {
+          this.autoTradeSkipReasons[cand.symbol] =
+            `주문 직전 현재가 재확인에 실패해(${String(e).replace(/^Error:\s*/, "")}) 안전하게 이번 사이클은 건너뜁니다.`;
+          continue;
+        }
+        if (!(livePriceAtEntry > cand.ema200)) {
+          this.autoTradeSkipReasons[cand.symbol] =
+            `스캔 때는 EMA200 위였지만 주문 직전 재확인 결과 현재가($${livePriceAtEntry})가 EMA200($${cand.ema200}) ` +
+            `아래로 떨어져 진입을 취소했습니다(추세가 그 사이 무너짐 — 실계좌 보호를 위한 마지막 재확인).`;
+          continue;
         }
 
         // [v0.35.0 버그 수정] 예전엔 여기서(시도 직전에) usedKeys에 등록했다 — 그러면 진입이

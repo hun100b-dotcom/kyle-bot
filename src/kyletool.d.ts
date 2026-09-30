@@ -159,6 +159,8 @@ interface AutoPosition {
   enteredAtMs: number;
   status: "watching" | "active";
   conditionalOrderId: string | null;
+  /** [v0.60.0] 조건주문 상태 확인이 반복 실패했을 때의 경고(화면에 그대로 표시). */
+  syncWarning?: string | null;
 }
 
 /** [v0.26.0] 자동매매 현황판. */

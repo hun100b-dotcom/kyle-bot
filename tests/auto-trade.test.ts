@@ -25,7 +25,7 @@ import { join } from "node:path";
 import { Settings, DateTime } from "luxon";
 import {
   ToolEngine, computeSeedQty, newlyConfirmedSymbols, applyScreenGates,
-  type AutoPosition, type JournalEntry, type NotifyEvent, type ScreenResult,
+  type AutoPosition, type JournalEntry, type NotifyEvent, type ScreenResult, type AutoTradeHistoryEntry,
 } from "../electron/tool-engine";
 
 /** [v0.30.1] OCO 등록 저널이 뜰 때까지 기다린다(bracket.test.ts의 waitForJournal과 동일 패턴). */
@@ -738,6 +738,213 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // ===========================================================================
+  // [v0.60.0 긴급수정 — 오너 실사용 보고: "스크리너에 종료·탈락 종목(SDEV, BIYA 등)이 계속
+  //   남는다 — 새로고침해도 실제 상태로 안 바뀐다"] 원인: freeSlots<=0(자리가 꽉 참)이면
+  //   autoTradeTick이 스캔 자체를 생략하고 화면엔 몇 사이클 전 lastScan이 그대로 남는다.
+  //   이 최적화 자체는 5분 정기 사이클에선 맞지만, 오너가 [🔄 지금 새로고침]을 직접 눌렀을
+  //   때(autoScanNow → forceScan)까지 똑같이 생략하면 "새로고침해도 안 바뀜"으로 보인다.
+  //   이제 forceScan이면 자리가 꽉 차 있어도 실제로 다시 스캔해 lastScan을 통째로 새로 채운다
+  //   (신규 진입 자체는 canAutoEnter가 activePositionCount로 별도로 계속 막으므로 안전).
+  // ===========================================================================
+  it("[v0.60.0] 자동매매 자리가 꽉 차 있어도, 수동 새로고침(autoScanNow)은 스캔을 생략하지 않고 lastScan을 최신으로 갈아 끼운다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.saveAutoTradeSettings({ maxPositions: 1 }); // 자리 1개뿐
+      const engAny = eng as unknown as EngineInternals & {
+        autoTradeLastScan: unknown;
+        autoTradeEnabled: boolean;
+        scanScreener: (opts?: unknown) => Promise<unknown>;
+      };
+      // 자리를 꽉 채운다(freeSlots = 1 - 1 = 0).
+      engAny.autoTradePositions.push({
+        symbol: "TSLA", entry: 5, tp: 5.5, sl: 4.5, quantity: 1, enteredAtMs: Date.now(),
+        status: "watching", conditionalOrderId: null,
+      });
+      // 몇 사이클 전에 박제된 "확정" 스캔(오너가 본 SDEV/BIYA 같은 오래된 잔상)을 흉내낸다.
+      engAny.autoTradeLastScan = {
+        scannedAt: "09-28 09:00:00", total: 1, priceMin: 1, priceMax: 9, excludedEtf: 0,
+        results: [{
+          rank: 1, symbol: "STALEX", price: 3, ema200: 2, prevClose: 2.5, cloudTop: 1.9,
+          priceInBand: true, aboveEma: true, aboveCloud: true, status: "confirmed",
+          sessionHigh: 3.1, proximityPct: -3, n1m: 300, n5m: 60, evidence: null,
+        }],
+      };
+      // 새로고침을 누르면 실제로 다시 훑을 것이므로, 그 결과를 빠르고 결정적으로 가짜 응답한다.
+      engAny.scanScreener = async () => ({
+        scannedAt: "09-30 21:50:00", total: 1, priceMin: 1, priceMax: 9, excludedEtf: 0,
+        results: [{
+          rank: 1, symbol: "FRESH1", price: 4, ema200: 3, prevClose: 3.5, cloudTop: 2.9,
+          priceInBand: true, aboveEma: true, aboveCloud: true, status: "confirmed",
+          sessionHigh: 4.1, proximityPct: -3, n1m: 300, n5m: 60, evidence: null,
+        }],
+      });
+      engAny.autoTradeEnabled = true;
+
+      const s = await eng.autoScanNow();
+      expect(s.lastScan?.scannedAt).toBe("09-30 21:50:00"); // 스캔을 생략하지 않고 실제로 다시 돌았어야 함
+      expect(s.lastScan?.results.some((r) => r.symbol === "STALEX")).toBe(false); // 옛 잔상이 사라져야 함
+      expect(s.lastScan?.results.some((r) => r.symbol === "FRESH1")).toBe(true);
+      // 자리는 여전히 꽉 차 있으므로(canAutoEnter가 별도로 막음) FRESH1으로 실제 진입은 안 났어야 한다.
+      expect(s.positions.find((p) => p.symbol === "FRESH1")).toBeUndefined();
+      expect(s.skipReasons.FRESH1).toBeDefined(); // 왜 못 들어갔는지 사유가 남아야 함(자리 없음 계열)
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // [v0.60.0 긴급 수정 — 오너 실사용 보고: "200 EMA 아래로 꺾인 하락 추세인데 진입이 났다"]
+  //   원인: level1 진입가는 스캔(run.results) 시점의 스냅샷(prevClose/ema200)으로만 계산되고,
+  //   실제 매수 주문(placeBracketCore)은 스캔 전체가 끝난 뒤 한참 지나서 나갈 수 있는데, 그
+  //   사이 현재가가 EMA200 아래로 떨어져도 재확인 없이 그대로 주문이 나갔다. 이제 주문 직전에
+  //   현재가를 다시 조회해 EMA200 위인지 확인하고, 깨져 있으면 진입을 취소한다.
+  it("[v0.60.0] 스캔 때는 EMA200 위였지만 주문 직전 재확인 때 현재가가 EMA200 아래로 떨어졌으면 진입하지 않는다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.saveAutoTradeSettings({ maxPositions: 3 });
+      const engAny = eng as unknown as EngineInternals & {
+        scanScreener: (opts?: unknown) => Promise<unknown>;
+      };
+      // 스캔 시점 스냅샷: TSLA가 confirmed, ema200=200 · prevClose=210(EMA200 위 — 정상 진입 조건).
+      engAny.scanScreener = async () => ({
+        scannedAt: "09-30 12:00:00", total: 1, priceMin: 1, priceMax: 9999, excludedEtf: 0,
+        results: [{
+          rank: 1, symbol: "TSLA", price: 210, ema200: 200, prevClose: 210, cloudTop: 190,
+          priceInBand: true, aboveEma: true, aboveCloud: true, status: "confirmed",
+          sessionHigh: 212, proximityPct: -1, n1m: 300, n5m: 60, evidence: null,
+        }],
+      });
+      // 스캔이 끝난 뒤(=주문 직전 재확인 시점) 현재가가 EMA200(200) 아래로 떨어졌다고 가정
+      // (스캔~집행 사이 시차 동안 추세가 무너진 실제 상황을 재현).
+      await eng.mockSetPrice("TSLA", 190);
+
+      engAny.autoTradeEnabled = true;
+      await engAny.autoTradeTick();
+
+      const s = eng.getAutoTradeStatus();
+      expect(s.positions.find((p) => p.symbol === "TSLA")).toBeUndefined(); // 진입하지 않아야 한다(핵심)
+      expect(s.skipReasons.TSLA).toBeDefined();
+      expect(s.skipReasons.TSLA).toContain("재확인");
+      expect(s.skipReasons.TSLA).toContain("EMA200");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("[v0.60.0] 반대로 주문 직전 재확인 때도 여전히 EMA200 위면(정상 케이스) 평소대로 진입한다(회귀 없음 확인)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.saveAutoTradeSettings({ maxPositions: 3 });
+      const engAny = eng as unknown as EngineInternals & {
+        scanScreener: (opts?: unknown) => Promise<unknown>;
+      };
+      engAny.scanScreener = async () => ({
+        scannedAt: "09-30 12:00:00", total: 1, priceMin: 1, priceMax: 9999, excludedEtf: 0,
+        results: [{
+          rank: 1, symbol: "TSLA", price: 210, ema200: 200, prevClose: 210, cloudTop: 190,
+          priceInBand: true, aboveEma: true, aboveCloud: true, status: "confirmed",
+          sessionHigh: 212, proximityPct: -1, n1m: 300, n5m: 60, evidence: null,
+        }],
+      });
+      // 주문 직전에도 여전히 EMA200(200) 위(205) — 재확인 통과해야 정상 진입.
+      await eng.mockSetPrice("TSLA", 205);
+
+      engAny.autoTradeEnabled = true;
+      await engAny.autoTradeTick();
+
+      const s = eng.getAutoTradeStatus();
+      expect(s.positions.find((p) => p.symbol === "TSLA")).toBeDefined(); // 정상 진입돼야 한다
+      expect(s.skipReasons.TSLA).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // [v0.60.0 긴급 수정 — 오너 실사용 보고: "1차 타점 3944 익절 후, 하락하다 일시 반등할 때 2차
+  //   타점을 더 높은 3966으로 잡아 오발주(취소 처리함)"] 하락 추세에서 직전 타점보다 더 높은
+  //   가격으로 재진입하는 건 삼분할 기법("얕게 눌렸을 때 사는" 전략)의 논리에 정면으로 어긋난다.
+  it("[v0.60.0] 24시간 안에 같은 종목에 더 낮은 가격으로 넣었던 기록이 있는데, 새 타점이 그보다 높으면 재진입을 취소한다(방향 정합성)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.saveAutoTradeSettings({ maxPositions: 3 });
+      const engAny = eng as unknown as EngineInternals & {
+        scanScreener: (opts?: unknown) => Promise<unknown>;
+        autoTradeHistory: AutoTradeHistoryEntry[];
+      };
+      // 1차 타점(3944)이 이미 익절로 종료된 기록으로 남아 있다(오너 사례 그대로).
+      engAny.autoTradeHistory.push({
+        id: `TSLA@3944@${Date.now() - 60_000}`,
+        symbol: "TSLA", entry: 3944, tp: 4023, sl: 3549, quantity: 1,
+        enteredAt: "09-30 12:00:00", status: "closed_win",
+        exitedAt: "09-30 12:30:00", exitPrice: 4023, pnlUsd: 79, pnlPct: 2,
+        note: "익절", conditionalOrderId: null, buyOrderId: null,
+      });
+      // 반등으로 prevClose가 올라가, 새 스캔의 1분할 타점이 1차(3944)보다 높게(약 3967) 나온다.
+      engAny.scanScreener = async () => ({
+        scannedAt: "09-30 13:00:00", total: 1, priceMin: 1, priceMax: 9999, excludedEtf: 0,
+        results: [{
+          rank: 1, symbol: "TSLA", price: 4000, ema200: 3900, prevClose: 4000, cloudTop: 3800,
+          priceInBand: true, aboveEma: true, aboveCloud: true, status: "confirmed",
+          sessionHigh: 4010, proximityPct: -1, n1m: 300, n5m: 60, evidence: null,
+        }],
+      });
+      await eng.mockSetPrice("TSLA", 4000); // EMA200 재확인은 통과하게(이 테스트의 관심사가 아님)
+
+      engAny.autoTradeEnabled = true;
+      await engAny.autoTradeTick();
+
+      const s = eng.getAutoTradeStatus();
+      expect(s.positions.find((p) => p.symbol === "TSLA")).toBeUndefined(); // 재진입하지 않아야 한다(핵심)
+      expect(s.skipReasons.TSLA).toBeDefined();
+      expect(s.skipReasons.TSLA).toContain("직전 타점");
+      expect(s.skipReasons.TSLA).toContain("3944");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("[v0.60.0] 반대로 새 타점이 직전 타점과 같거나 더 낮으면(정상적인 하락 재진입) 평소대로 진입한다(회귀 없음 확인)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.saveAutoTradeSettings({ maxPositions: 3 });
+      const engAny = eng as unknown as EngineInternals & {
+        scanScreener: (opts?: unknown) => Promise<unknown>;
+        autoTradeHistory: AutoTradeHistoryEntry[];
+      };
+      // 1차 타점(4000)이 손절로 종료된 기록 — 그 뒤 더 하락해서 2차 타점이 더 낮게(3400대) 나온다.
+      engAny.autoTradeHistory.push({
+        id: `TSLA@4000@${Date.now() - 60_000}`,
+        symbol: "TSLA", entry: 4000, tp: 4080, sl: 3600, quantity: 1,
+        enteredAt: "09-30 12:00:00", status: "closed_loss",
+        exitedAt: "09-30 12:20:00", exitPrice: 3600, pnlUsd: -400, pnlPct: -10,
+        note: "손절", conditionalOrderId: null, buyOrderId: null,
+      });
+      engAny.scanScreener = async () => ({
+        scannedAt: "09-30 13:00:00", total: 1, priceMin: 1, priceMax: 9999, excludedEtf: 0,
+        results: [{
+          rank: 1, symbol: "TSLA", price: 3500, ema200: 3400, prevClose: 3500, cloudTop: 3300,
+          priceInBand: true, aboveEma: true, aboveCloud: true, status: "confirmed",
+          sessionHigh: 3520, proximityPct: -1, n1m: 300, n5m: 60, evidence: null,
+        }],
+      });
+      await eng.mockSetPrice("TSLA", 3500);
+
+      engAny.autoTradeEnabled = true;
+      await engAny.autoTradeTick();
+
+      const s = eng.getAutoTradeStatus();
+      expect(s.positions.find((p) => p.symbol === "TSLA")).toBeDefined(); // 정상 진입돼야 한다(더 낮은 재진입은 정상)
+      expect(s.skipReasons.TSLA).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("[v0.32.0] 알림 — 스크리닝 관찰 확정 + 주문 이벤트", () => {
@@ -1067,6 +1274,59 @@ describe("[v0.41.0] cancelAutoPosition — 지금 감시 중인 포지션을 사
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // ===========================================================================
+  // [v0.60.0 긴급수정 — 오너 실사용 보고: "체결 완료된 종목(SLND·VNDA·SDEV)이 목록에
+  //   남고 취소 버튼도 무반응"] active 포지션의 조건주문이 이미 익절/손절로 끝나 있는데
+  //   (=Toss 쪽엔 더는 "취소할 살아있는 주문"이 없는데) 취소 버튼을 누르면, 예전엔
+  //   cancelConditional 실패만 보고 끝이었다. 이제는 실패 직후 getConditionalOrder로
+  //   실제 상태를 한 번 더 물어 COMPLETED면 "취소"가 아니라 "정리"로 처리해야 한다.
+  // ===========================================================================
+  it("[v0.60.0] 취소 시도 중 조건주문이 이미 COMPLETED(익절/손절로 종료)인 걸 확인하면, 실패 대신 '정리'로 처리해 목록에서 뺀다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      // 1) 실제 매수 체결 → OCO(조건주문) 등록까지 실제 흐름 그대로 태워 진짜 conditionalOrderId를 얻는다.
+      const entry = await eng.placeEntry({ symbol: "AAPL", price: 2.1, quantity: 3 });
+      const buyOrderId = (entry.detail as { tossOrderId: string }).tossOrderId;
+      const enteredAtMs = Date.now();
+      const engAny = eng as unknown as {
+        autoTradePositions: AutoPosition[];
+        reconcileAutoPositions: () => Promise<void>;
+        cancelConditional: (id: string) => Promise<unknown>;
+        addAutoTradeHistory: (pos: AutoPosition) => void;
+      };
+      const watchingPos: AutoPosition = {
+        symbol: "AAPL", entry: 2.1, tp: 2.5, sl: 1.8, quantity: 3,
+        enteredAtMs, status: "watching", conditionalOrderId: null, buyOrderId,
+      };
+      engAny.autoTradePositions.push(watchingPos);
+      engAny.addAutoTradeHistory(watchingPos); // 실제 흐름(autoTradeTick)처럼 기록도 함께 남겨 둔다
+      const ocoPromise = waitForOcoJournal(eng);
+      await engAny.reconcileAutoPositions(); // watching → active + 실제 OCO 등록
+      await ocoPromise;
+
+      // 2) 목 서버 현재가를 익절가(2.5) 위로 올려 조건주문을 실제로 COMPLETED시킨다(reevaluateOco).
+      await eng.mockSetPrice("AAPL", 2.6);
+
+      // 3) "취소 버튼을 눌렀는데 cancelConditional 자체가 실패하는" 상황만 강제로 재현한다
+      //    (예: 취소 요청이 서버에 닿기 전 네트워크 오류 등) — 이미 끝난 주문이라 실패하는
+      //    실제 사례는 목 서버가 DELETE를 항상 성공시켜 그대로 재현할 수 없어, 이 한 지점만
+      //    오버라이드한다. 그 뒤의 재확인(getConditionalOrder)은 실제 네트워크·실제 목 서버
+      //    상태(COMPLETED) 그대로 탄다.
+      engAny.cancelConditional = async () => { throw new Error("네트워크 오류(모의)"); };
+
+      const res = await eng.cancelAutoPosition("AAPL", 2.1, enteredAtMs);
+      expect(res.ok).toBe(true);
+      expect(res.message).toContain("이미 종료된 주문");
+      expect(eng.getAutoTradeStatus().positions.find((p) => p.symbol === "AAPL")).toBeUndefined();
+
+      const rec = eng.getAutoTradeHistory().find((h) => h.id === `AAPL@2.1@${enteredAtMs}`);
+      expect(rec?.status).toBe("closed_win"); // 익절가(2.5) 돌파로 발동됐으므로
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
 });
 
 // =============================================================================
