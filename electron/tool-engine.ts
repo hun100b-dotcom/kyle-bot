@@ -4221,20 +4221,50 @@ export class ToolEngine extends EventEmitter {
     }
   }
 
-  /** syncPullGroupHistory — 그룹(가입 허용목록) 전원의 자동매매기록을 실명(이메일)째로 받아온다. */
+  /**
+   * syncPullGroupHistory — 그룹(가입 허용목록) 전원의 자동매매기록을 실명(이메일)째로 받아온다.
+   *
+   * [v0.60.0 긴급 수정 — 오너 실사용 보고: "매매연구 탭이 그룹원 데이터를 못 불러옴", "그룹원
+   *   관리 탭에 실제 그룹원(카일)이 안 보임"] 예전엔 capri_group_trades에 실제로 행이 있는
+   *   사람만 나열했다 — 로그인만 하고 자동매매 기록을 한 번도 안 올린 그룹원(가입만 하고 아직
+   *   안 써 본 경우 등)은 통째로 목록에서 빠졌다("아직 기록 없음"으로 보여야 한다는 화면 쪽
+   *   의도와 다르게, 아예 안 보임). capri_allowed_emails(가입 허용목록 = 그룹 명단)에서
+   *   먼저 "그룹원이 누구누구인지" 전체 명단을 받아온 뒤, capri_group_trades의 실제 기록을
+   *   그 위에 덧씌운다 — 기록이 없는 그룹원은 빈 배열로 명단에 남아, 화면이 원래 의도대로
+   *   "아직 기록 없음"을 보여줄 수 있게 됐다. (capri_allowed_emails를 일반 그룹원도 조회할
+   *   수 있어야 이게 가능한데, 예전엔 오너 전용이었다 — 새 마이그레이션
+   *   20260930140000_capri_group_roster_rls.sql로 "승인된 그룹원이면 명단을 볼 수 있다"
+   *   정책을 추가했다.)
+   */
   async syncPullGroupHistory(): Promise<{ ok: boolean; message: string; members: { email: string; history: AutoTradeHistoryEntry[] }[] }> {
     const token = await this.ensureAccessToken();
     if (!token) return { ok: false, message: "먼저 로그인하세요.", members: [] };
 
     try {
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_trades?select=member_email,history`, {
-        headers: this.authRestHeaders(token),
-      });
-      if (!res.ok) return { ok: false, message: `그룹 기록 조회 실패(HTTP ${res.status}).`, members: [] };
-      const rows = (await res.json()) as Array<{ member_email: string; history: unknown }>;
-      const members = rows
-        .filter((r) => Array.isArray(r.history))
-        .map((r) => ({ email: r.member_email, history: r.history as AutoTradeHistoryEntry[] }));
+      const [rosterRes, tradesRes] = await Promise.all([
+        fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_allowed_emails?select=email&order=email.asc`, {
+          headers: this.authRestHeaders(token),
+        }),
+        fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_trades?select=member_email,history`, {
+          headers: this.authRestHeaders(token),
+        }),
+      ]);
+      if (!tradesRes.ok) return { ok: false, message: `그룹 기록 조회 실패(HTTP ${tradesRes.status}).`, members: [] };
+      const tradeRows = (await tradesRes.json()) as Array<{ member_email: string; history: unknown }>;
+      const historyByEmail = new Map<string, AutoTradeHistoryEntry[]>();
+      for (const r of tradeRows) {
+        if (Array.isArray(r.history)) historyByEmail.set(r.member_email, r.history as AutoTradeHistoryEntry[]);
+      }
+      // 명단(roster) 조회는 실패해도 전체를 실패로 만들지 않는다 — 예전 동작(기록이 있는
+      // 사람만 나열)으로 조용히 대체된다(마이그레이션 미적용 등 과도기 대비 안전망).
+      let rosterEmails: string[] = [...historyByEmail.keys()];
+      if (rosterRes.ok) {
+        const rosterRows = (await rosterRes.json()) as Array<{ email: string }>;
+        const merged = new Set<string>(rosterRows.map((r) => r.email));
+        for (const e of historyByEmail.keys()) merged.add(e); // 명단에 없어도 기록이 있으면 보여준다
+        rosterEmails = [...merged].sort();
+      }
+      const members = rosterEmails.map((email) => ({ email, history: historyByEmail.get(email) ?? [] }));
       return { ok: true, message: `그룹 회원 ${members.length}명의 자동매매기록을 받았습니다.`, members };
     } catch (e) {
       return { ok: false, message: `받기 실패: ${e instanceof Error ? e.message : String(e)}`, members: [] };
