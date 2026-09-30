@@ -3468,14 +3468,36 @@ export class ToolEngine extends EventEmitter {
       //   "취소 실패"만 보여주고 목록엔 계속 남았다(오너가 본 그 증상). 포기하기 전에 실제
       //   상태를 한 번 더 물어봐서, 이미 끝나 있으면 "취소"가 아니라 "정리"로 처리한다.
       if (pos.status === "active" && pos.conditionalOrderId) {
+        // [v0.60.1 긴급 — SDEV 실사용 사고: 취소(DELETE) 자체가 이미 404
+        // conditional-order-not-found였다] 이 경우 재확인(GET)도 십중팔구 같은 404를
+        // 준다 — 먼저 취소 오류 자체가 이미 "존재하지 않는 설정"이면 재확인을 시도할
+        // 것도 없이 바로 정리한다(예전엔 이 경우 재확인 GET도 404로 실패하고 그
+        // 실패를 조용히 삼켜 원래의 "취소 실패"만 보여줬다 — 오너가 본 그 증상).
+        if (this.isConditionalOrderGoneError(e)) {
+          this.clearAutoPositionWithoutPnl(
+            pos,
+            `🤖 자동매매 포지션 정리: ${symbol}(토스에 조건주문이 더 이상 존재하지 않음)`,
+            "취소 시도 시 토스에 조건주문이 이미 없었음(직접 취소했거나 만료된 것으로 보임 — 손익 미확정)",
+          );
+          return { ok: true, message: `${symbol}은 토스에 조건주문이 이미 없어(존재하지 않는 설정) 취소 대신 목록에서 정리했습니다.` };
+        }
         try {
           const resp = await getConditionalOrder(pos.conditionalOrderId);
           if (resp.status === "COMPLETED") {
             this.resolveCompletedConditional(pos, resp);
             return { ok: true, message: `${symbol}은 이미 종료된 주문이라 취소 대신 목록에서 정리했습니다(익절/손절/수동취소 중 하나로 이미 끝나 있었음).` };
           }
-        } catch {
-          /* 재확인도 실패하면 원래 오류 메시지를 그대로 보여준다(아래) */
+        } catch (e2) {
+          // [v0.60.1] 재확인(GET) 자체가 404 conditional-order-not-found면 이것도 정리 대상.
+          if (this.isConditionalOrderGoneError(e2)) {
+            this.clearAutoPositionWithoutPnl(
+              pos,
+              `🤖 자동매매 포지션 정리: ${symbol}(토스에 조건주문이 더 이상 존재하지 않음)`,
+              "취소 재확인 시 토스에 조건주문이 이미 없었음(직접 취소했거나 만료된 것으로 보임 — 손익 미확정)",
+            );
+            return { ok: true, message: `${symbol}은 토스에 조건주문이 이미 없어(존재하지 않는 설정) 취소 대신 목록에서 정리했습니다.` };
+          }
+          /* 그 외 재확인 실패는 원래 오류 메시지를 그대로 보여준다(아래) */
         }
       }
       return { ok: false, message: `취소 실패: ${String(e).replace(/^Error:\s*/, "")}` };
@@ -5547,15 +5569,44 @@ export class ToolEngine extends EventEmitter {
     } else {
       // 어느 다리도 발동 안 했는데 그룹이 COMPLETED = 사람이 [주문현황]에서 직접 취소한 경우
       // — 손익 반영 없이 자리만 비운다.
-      this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
-      this.saveAutoPositions();
-      this.addJournal({ kind: "info", symbol: pos.symbol, summary: `자동매매 포지션의 조건주문이 취소돼 있어 감시를 멈춥니다: ${pos.symbol}` });
-      this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
-        status: "closed_manual",
-        exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
-        note: "사람이 [주문현황]에서 조건주문을 직접 취소함(손익 미확정)",
-      });
+      this.clearAutoPositionWithoutPnl(
+        pos,
+        `자동매매 포지션의 조건주문이 취소돼 있어 감시를 멈춥니다: ${pos.symbol}`,
+        "사람이 [주문현황]에서 조건주문을 직접 취소함(손익 미확정)",
+      );
     }
+  }
+
+  /**
+   * [v0.60.1] 손익을 확정할 근거가 없는 상태로 자동매매 포지션 자리만 비운다(자리 비움
+   *   + 저널 + 기록 갱신, 손익 반영 없음) — resolveCompletedConditional의 "발동 안 함"
+   *   분기와 아래 reconcileAutoPositions의 "조건주문 자체가 더 이상 존재하지 않음(404)"
+   *   분기가 이 메서드를 공유한다.
+   */
+  private clearAutoPositionWithoutPnl(pos: AutoPosition, journalSummary: string, historyNote: string): void {
+    this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
+    this.saveAutoPositions();
+    this.addJournal({ kind: "info", symbol: pos.symbol, summary: journalSummary });
+    this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
+      status: "closed_manual",
+      exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
+      note: historyNote,
+    });
+  }
+
+  /**
+   * [v0.60.1 긴급 — 오너 실사용 보고: SLND·VNDA·SDEV가 "조건주문 상태 확인 21회 연속
+   *   실패(HTTP 404 conditional-order-not-found)"로 계속 남아 있음] v0.60.0에서 고친
+   *   "재확인 실패"는 네트워크 순단처럼 재시도하면 나아질 수 있는 **모호한** 실패를
+   *   염두에 뒀다(그래서 3회 연속까지는 조용히 기다렸다가 경고만 표시). 그런데 토스가
+   *   404 conditional-order-not-found로 답하는 건 모호하지 않다 — "이 조건주문 ID는
+   *   토스 쪽에 아예 없다"는 확정적인 신호라, 아무리 재시도해도 저절로 좋아지지 않는다
+   *   (오너 실사용에서 21회, 약 7분을 반복 실패하고도 그대로였던 이유). 이 신호는 실패로
+   *   세지 말고 그 자리에서 바로 자리를 비운다.
+   */
+  private isConditionalOrderGoneError(e: unknown): boolean {
+    const s = String(e);
+    return s.includes("HTTP 404") && s.includes("conditional-order-not-found");
   }
 
   /**
@@ -5578,6 +5629,19 @@ export class ToolEngine extends EventEmitter {
       try {
         resp = await getConditionalOrder(pos.conditionalOrderId as string);
       } catch (e) {
+        // [v0.60.1 긴급 — SLND·VNDA·SDEV 실사용 사고] 404 conditional-order-not-found는
+        // "재시도하면 나아질 수도 있는 모호한 실패"가 아니라 "토스에 이 ID 자체가 없다"는
+        // 확정적 신호다 — 아래 재시도 카운트(3회부터 경고만)를 태우지 않고 바로 정리한다.
+        if (this.isConditionalOrderGoneError(e)) {
+          this.reconcileFailCounts.delete(posKey);
+          this.clearAutoPositionWithoutPnl(
+            pos,
+            `🤖 ${pos.symbol}의 조건주문을 토스에서 더 이상 찾을 수 없어(존재하지 않는 설정) 자동으로 정리했습니다 — ` +
+              `실제 체결·손익 여부는 [주문현황]이나 토스 앱에서 직접 확인해 주세요.`,
+            "토스에 조건주문이 더 이상 존재하지 않아 자동 정리(직접 취소했거나 만료된 것으로 보임 — 손익 미확정)",
+          );
+          continue;
+        }
         // [v0.60.0 긴급 수정 — 오너 실사용 보고: "체결 완료된 종목이 목록에 계속 남는다"]
         //   예전엔 조회 실패를 조용히 삼키고 continue만 했다 — 원인이 네트워크 순단처럼
         //   "한 번 실패하고 다음엔 되는" 종류면 문제없지만, 같은 원인(예: 조건주문 ID가

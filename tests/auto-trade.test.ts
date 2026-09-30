@@ -1327,6 +1327,96 @@ describe("[v0.41.0] cancelAutoPosition — 지금 감시 중인 포지션을 사
       rmSync(dir, { recursive: true, force: true });
     }
   }, 10_000);
+
+  // ===========================================================================
+  // [v0.60.1 긴급 — 오너 실사용 사고: SLND·VNDA·SDEV가 "조건주문 상태 확인 21회 연속
+  //   실패(HTTP 404 conditional-order-not-found)"로 [자동매매 현황]에 계속 남고, 취소
+  //   버튼도 같은 404로 실패만 반복했다] v0.60.0의 COMPLETED 재확인 로직은 "조건주문이
+  //   살아있지만 이미 끝난(COMPLETED)" 경우만 다뤘다 — 이번엔 조건주문 ID 자체가 토스에
+  //   더는 존재하지 않는(404) 경우로, 재시도해도 절대 좋아지지 않는다. 목서버의
+  //   404 응답을 실서버와 같은 모양(error.code="conditional-order-not-found")으로
+  //   고쳐서, 그 상황을 실제로 재현해 검증한다.
+  // ===========================================================================
+  it("[v0.60.1] 취소 시도 중 조건주문 자체가 토스에 없음(404 conditional-order-not-found)을 확인하면, 재확인 없이 바로 '정리'로 처리한다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const entry = await eng.placeEntry({ symbol: "AAPL", price: 2.1, quantity: 3 });
+      const buyOrderId = (entry.detail as { tossOrderId: string }).tossOrderId;
+      const enteredAtMs = Date.now();
+      const engAny = eng as unknown as {
+        autoTradePositions: AutoPosition[];
+        reconcileAutoPositions: () => Promise<void>;
+        addAutoTradeHistory: (pos: AutoPosition) => void;
+        mock: { state: { conditionals: Map<string, unknown> } } | null;
+      };
+      const watchingPos: AutoPosition = {
+        symbol: "AAPL", entry: 2.1, tp: 2.5, sl: 1.8, quantity: 3,
+        enteredAtMs, status: "watching", conditionalOrderId: null, buyOrderId,
+      };
+      engAny.autoTradePositions.push(watchingPos);
+      engAny.addAutoTradeHistory(watchingPos);
+      const ocoPromise = waitForOcoJournal(eng);
+      await engAny.reconcileAutoPositions(); // watching → active + 실제 OCO 등록(진짜 conditionalOrderId 발급)
+      await ocoPromise;
+
+      const activePos = engAny.autoTradePositions.find((p) => p.symbol === "AAPL");
+      const condId = activePos?.conditionalOrderId as string;
+      expect(condId).toBeTruthy();
+      // 토스 쪽에서 이 조건주문이 통째로 사라진 상황을 그대로 재현한다(목서버 저장소에서 직접 삭제).
+      engAny.mock?.state.conditionals.delete(condId);
+
+      const res = await eng.cancelAutoPosition("AAPL", 2.1, enteredAtMs);
+      expect(res.ok).toBe(true);
+      expect(res.message).toContain("존재하지 않는");
+      expect(eng.getAutoTradeStatus().positions.find((p) => p.symbol === "AAPL")).toBeUndefined();
+
+      const rec = eng.getAutoTradeHistory().find((h) => h.id === `AAPL@2.1@${enteredAtMs}`);
+      expect(rec?.status).toBe("closed_manual");
+      expect(rec?.note).toContain("이미 없었음");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it("[v0.60.1] reconcileAutoPositions 정기 재확인 때도 조건주문 404(not-found)를 만나면, 3회를 기다리지 않고 즉시 자리를 비운다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const entry = await eng.placeEntry({ symbol: "AAPL", price: 2.1, quantity: 3 });
+      const buyOrderId = (entry.detail as { tossOrderId: string }).tossOrderId;
+      const enteredAtMs = Date.now();
+      const engAny = eng as unknown as {
+        autoTradePositions: AutoPosition[];
+        reconcileAutoPositions: () => Promise<void>;
+        addAutoTradeHistory: (pos: AutoPosition) => void;
+        mock: { state: { conditionals: Map<string, unknown> } } | null;
+      };
+      const watchingPos: AutoPosition = {
+        symbol: "AAPL", entry: 2.1, tp: 2.5, sl: 1.8, quantity: 3,
+        enteredAtMs, status: "watching", conditionalOrderId: null, buyOrderId,
+      };
+      engAny.autoTradePositions.push(watchingPos);
+      engAny.addAutoTradeHistory(watchingPos);
+      const ocoPromise = waitForOcoJournal(eng);
+      await engAny.reconcileAutoPositions();
+      await ocoPromise;
+
+      const condId = engAny.autoTradePositions.find((p) => p.symbol === "AAPL")?.conditionalOrderId as string;
+      engAny.mock?.state.conditionals.delete(condId);
+
+      // 정기 재확인을 딱 한 번만 돌려도(3회를 기다리지 않고) 바로 정리돼야 한다 — v0.60.0의
+      // "3회 연속 실패해야 경고" 로직은 모호한 실패용이라, 확정적인 404는 그 카운트를 안 태운다.
+      await engAny.reconcileAutoPositions();
+
+      expect(engAny.autoTradePositions.find((p) => p.symbol === "AAPL")).toBeUndefined();
+      const rec = eng.getAutoTradeHistory().find((h) => h.id === `AAPL@2.1@${enteredAtMs}`);
+      expect(rec?.status).toBe("closed_manual");
+      expect(rec?.note).toContain("존재하지 않아");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
 });
 
 // =============================================================================

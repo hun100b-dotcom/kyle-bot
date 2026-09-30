@@ -516,7 +516,15 @@ export function createMockTossServer() {
     if (cm) {
       if (!req.headers["x-tossinvest-account"]) return sendJson(res, 400, { error: "missing_account" });
       const cond = state.conditionals.get(decodeURIComponent(cm[1]));
-      if (!cond) return sendJson(res, 404, { error: "not_found" });
+      // [v0.60.1] 실서버와 동일한 오류 모양으로 — 오너 실사용 사고(SLND·VNDA·SDEV가
+      //   "HTTP 404 conditional-order-not-found"로 계속 남던 문제)를 목서버로 그대로
+      //   재현해 회귀 테스트를 붙일 수 있게 한다(예전엔 { error: "not_found" }라는
+      //   단순한 모양이라 실서버 응답을 흉내 못 냈다).
+      if (!cond) {
+        return sendJson(res, 404, {
+          error: { requestId: `mock-req-${++state.seq}`, code: "conditional-order-not-found", message: "존재하지 않는 설정입니다." },
+        });
+      }
       if (method === "GET") {
         reevaluateOco(cond, state); // [v0.26.0] 단건 조회 시점에도 재판정
         return sendResult(res, 200, { ...cond, quantity: String(cond.quantity) });
