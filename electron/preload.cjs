@@ -175,24 +175,30 @@ contextBridge.exposeInMainWorld("kyletool", {
   installUpdate: () => ipcRenderer.invoke("update:install"),
   // [v0.58.0] macOS 차선책 — 받아 둔 dmg 폴더를 Finder로 열기
   openMacDmg: () => ipcRenderer.invoke("update:openMacDmg"),
-  // 업데이트 이벤트 구독(있음/진행률/완료/오류/맥 dmg 준비됨). 반환값은 구독 해제 함수.
+  // [v0.60.0] macOS 직접 교체 자동업데이트 — "지금 바로 재시작"(그냥 앱을 끄면 종료
+  //   훅이 알아서 교체한다).
+  installMacSwap: () => ipcRenderer.invoke("update:installMacSwap"),
+  // 업데이트 이벤트 구독(있음/진행률/완료/오류/맥 dmg 준비됨/맥 직접교체 준비됨). 반환값은 구독 해제 함수.
   onUpdate: (handlers) => {
     const onAvail = (_ev, info) => handlers.available?.(info);
     const onProg = (_ev, pct) => handlers.progress?.(pct);
     const onDone = () => handlers.downloaded?.();
     const onErr = (_ev, msg) => handlers.error?.(msg);
     const onMacDmg = (_ev, info) => handlers.macDmgReady?.(info);
+    const onMacSwap = (_ev, info) => handlers.macSwapReady?.(info);
     ipcRenderer.on("update:available", onAvail);
     ipcRenderer.on("update:progress", onProg);
     ipcRenderer.on("update:downloaded", onDone);
     ipcRenderer.on("update:error", onErr);
     ipcRenderer.on("update:macDmgReady", onMacDmg);
+    ipcRenderer.on("update:macSwapReady", onMacSwap);
     return () => {
       ipcRenderer.removeListener("update:available", onAvail);
       ipcRenderer.removeListener("update:progress", onProg);
       ipcRenderer.removeListener("update:downloaded", onDone);
       ipcRenderer.removeListener("update:error", onErr);
       ipcRenderer.removeListener("update:macDmgReady", onMacDmg);
+      ipcRenderer.removeListener("update:macSwapReady", onMacSwap);
     };
   },
 });

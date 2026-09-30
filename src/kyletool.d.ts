@@ -827,13 +827,17 @@ interface KyletoolBridge {
   installUpdate(): Promise<{ ok: boolean; error?: string }>;
   /** [v0.58.0] macOS 차선책 — 받아 둔 dmg가 있는 폴더를 Finder로 연다(선택 항목). */
   openMacDmg?(): Promise<{ ok: boolean }>;
+  /** [v0.60.0] macOS 직접 교체 자동업데이트 — "지금 바로 재시작"(그냥 앱을 끈다). */
+  installMacSwap?(): Promise<{ ok: boolean; error?: string }>;
   onUpdate(handlers: {
     available?: (info: { version: string; notes: string }) => void;
     progress?: (pct: number) => void;
     downloaded?: () => void;
     error?: (msg: string) => void;
-    /** [v0.58.0] macOS 차선책 — 새 dmg를 받아 뒀다는 알림(엔진 코드가 바뀐 드문 배포용). */
+    /** [v0.58.0] macOS 차선책 — 새 dmg를 받아 뒀다는 알림(직접 교체가 실패했을 때만 뜬다). */
     macDmgReady?: (info: { version: string; fileName: string }) => void;
+    /** [v0.60.0] macOS 직접 교체 자동업데이트 — 앱 종료 시 자동 적용될 준비가 끝났다는 알림. */
+    macSwapReady?: (info: { version: string }) => void;
   }): () => void;
 }
 

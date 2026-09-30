@@ -18,6 +18,7 @@ import { startRelay, type RelayHandle } from "./relay"; //   [폰 연동] 집 PC
 import { startTunnel, type TunnelHandle } from "./tunnel"; // [폰 연동] 인터넷 터널
 import QRCode from "qrcode"; //                              [폰 연동] 접속 주소 QR
 import electronUpdater from "electron-updater";
+import { prepareMacSelfUpdate, scheduleMacSelfUpdateSwap } from "./mac-self-update"; // [v0.60.0] 맥 직접교체 자동업데이트
 
 const { autoUpdater } = electronUpdater;
 
@@ -272,6 +273,31 @@ async function checkMacDmgFallback(): Promise<void> {
   } catch (err) {
     console.error("[capri][mac-dmg] 확인/다운로드 실패(조용히 무시, 다음 주기에 재시도):", err);
   }
+}
+
+// =============================================================================
+// [v0.60.0] macOS 직접 교체 자동업데이트 — "한 번에 최우선"으로 먼저 시도한다.
+// -----------------------------------------------------------------------------
+//   위 checkMacDmgFallback(dmg를 받아만 두고 사람이 직접 설치)은 이제 "직접 교체가
+//   어떤 이유로든 준비 못 했을 때"만 쓰이는 차선책으로 격하된다. 매 주기(시작 5초 후+
+//   30분마다) 먼저 electron/mac-self-update.ts의 prepareMacSelfUpdate를 시도해 완전
+//   자동 교체가 가능한지 보고, 준비되면 종료 훅을 걸고 화면에 알린다. 준비에 실패하면
+//   (네트워크 문제·unzip 없음·체크섬 불일치 등 무엇이든) 조용히 옛 dmg 차선책으로
+//   넘어간다 — 어떤 경우에도 사람이 새 버전을 받을 방법 자체가 없어지진 않는다.
+// =============================================================================
+async function runMacAutoUpdateCycle(): Promise<void> {
+  if (process.platform !== "darwin" || !app.isPackaged) return;
+  try {
+    const ready = await prepareMacSelfUpdate(app.getVersion());
+    if (ready) {
+      scheduleMacSelfUpdateSwap(ready);
+      win?.webContents.send("update:macSwapReady", { version: ready.version });
+      return; // 직접 교체가 준비됐으니 dmg 차선책은 필요 없다
+    }
+  } catch (err) {
+    console.error("[capri][mac-self-update] 자동 교체 준비 사이클 실패(차선책으로 대체):", err);
+  }
+  await checkMacDmgFallback();
 }
 
 function createWindow(): void {
@@ -624,11 +650,24 @@ function registerIpc(e: ToolEngine): void {
   });
   // 현재 앱 버전(화면 표시용)
   ipcMain.handle("app:version", () => app.getVersion());
-  // [v0.58.0] macOS 차선책 — 받아 둔 dmg가 있는 폴더를 Finder로 연다.
+  // [v0.58.0] macOS 차선책(직접 교체 자동업데이트가 어떤 이유로든 준비 못 했을 때만
+  //   쓰인다) — 받아 둔 dmg가 있는 폴더를 Finder로 연다.
   ipcMain.handle("update:openMacDmg", () => {
     if (!lastMacDmgPath) return { ok: false };
     shell.showItemInFolder(lastMacDmgPath);
     return { ok: true };
+  });
+  // [v0.60.0] macOS 직접 교체 자동업데이트 — "지금 바로 재시작"을 누르면 그냥 앱을
+  //   끈다. 종료 훅(scheduleMacSelfUpdateSwap이 이미 걸어 둔 before-quit)이 알아서
+  //   교체 스크립트를 띄운다 — Windows의 quitAndInstall과 달리 Squirrel을 전혀 안 타므로
+  //   여기서 autoUpdater를 부를 필요가 없다(오히려 부르면 서명 불일치로 실패한다).
+  ipcMain.handle("update:installMacSwap", () => {
+    try {
+      setImmediate(() => app.quit());
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    }
   });
 
   e.on("journal", (entry) => win?.webContents.send("tool:journalEvent", entry));
@@ -733,10 +772,12 @@ app.whenReady().then(async () => {
   // 자동 업데이트는 실제 설치본에서만(개발/검증 실행 제외). 실패해도 앱은 정상.
   if (app.isPackaged && !process.env.KYLEBOT_SHOT) {
     setupAutoUpdater();
-    // [v0.58.0] macOS 차선책(엔진 코드가 바뀐 드문 배포용) — 시작 시 1회 + 30분마다 재확인.
+    // [v0.60.0] macOS 자동업데이트(직접 교체 우선, 실패 시 dmg 차선책) — 시작 시 1회 +
+    //   30분마다 재확인. (엔진 코드가 바뀐 드문 배포에서만 의미 있음 — 대부분의 배포는
+    //   화면(UI) 원격 로딩만으로 재시작 없이 반영된다.)
     if (process.platform === "darwin") {
-      setTimeout(() => void checkMacDmgFallback(), 5000);
-      setInterval(() => void checkMacDmgFallback(), 30 * 60_000);
+      setTimeout(() => void runMacAutoUpdateCycle(), 5000);
+      setInterval(() => void runMacAutoUpdateCycle(), 30 * 60_000);
     }
   }
 

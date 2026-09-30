@@ -1027,8 +1027,11 @@ function App() {
   //   화면 타이머로 직접 감지해 안내한다.
   const [updateInstalling, setUpdateInstalling] = useState(false);
   const [updateInstallStuck, setUpdateInstallStuck] = useState(false);
-  // [v0.58.0] macOS 차선책 — 엔진 코드가 바뀐 드문 배포에서만 뜨는 "새 dmg 받아 놨어요" 안내.
+  // [v0.58.0] macOS 차선책 — 직접 교체가 실패했을 때만 뜨는 "새 dmg 받아 놨어요" 안내.
   const [macDmg, setMacDmg] = useState<{ version: string; fileName: string } | null>(null);
+  // [v0.60.0] macOS 직접 교체 자동업데이트 — 종료 시 자동 적용될 준비가 끝났다는 안내.
+  const [macSwap, setMacSwap] = useState<{ version: string } | null>(null);
+  const [macSwapBusy, setMacSwapBusy] = useState(false);
 
   useEffect(() => {
     refreshStatus();
@@ -1137,8 +1140,10 @@ function App() {
         setUpdateProgress(100);
       },
       error: (msg) => setUpdateErr(String(msg)),
-      // [v0.58.0] macOS 차선책 알림 — 새 dmg를 미리 받아 뒀다는 신호.
+      // [v0.58.0] macOS 차선책 알림 — 새 dmg를 미리 받아 뒀다는 신호(직접 교체 실패 시만).
       macDmgReady: (info) => setMacDmg(info),
+      // [v0.60.0] macOS 직접 교체 자동업데이트 — 종료 시 자동 적용될 준비가 끝났다는 신호.
+      macSwapReady: (info) => setMacSwap(info),
     });
     return () => {
       off();
@@ -1385,6 +1390,19 @@ function App() {
       );
     }
     // r.ok===true 인 경우: 위 watchdog이 판단을 대신한다(정상 성공이면 곧 앱이 꺼진다).
+  }
+
+  /** [v0.60.0] macOS 직접 교체 자동업데이트 — "지금 바로 재시작". 그냥 앱을 끄는 것뿐이고
+   *  (Squirrel을 안 타므로 워치독이 따로 필요 없다), 종료 훅이 자동으로 번들을 교체하고
+   *  다시 연다. 정상이면 곧 이 창 자체가 사라진다. */
+  async function doInstallMacSwap() {
+    setMacSwapBusy(true);
+    const r = await window.kyletool.installMacSwap?.();
+    if (!r?.ok) {
+      setMacSwapBusy(false);
+      alert(`재시작에 실패했습니다: ${r?.error ?? "알 수 없는 오류"}. 앱은 계속 사용 가능합니다 — 직접 종료 후 다시 켜도 적용됩니다.`);
+    }
+    // r.ok===true면 곧 앱이 꺼지므로 별도 처리 불필요.
   }
 
   async function refreshStatus() {
@@ -5898,14 +5916,31 @@ ${msg}
             <p className="hint small danger">
               ⚠️ 자동 재시작이 정상적으로 이어지지 않았습니다 — macOS는(유료 애플 개발자 인증서가
               없는 간이 서명 상태라) 이 방식의 자동 적용이 구조적으로 실패할 수 있습니다(앱 자체엔
-              문제 없음). 아래 "맥용 새 버전이 준비됐어요" 안내가 뜨면 그걸로 받아 직접 설치해 주세요.
+              문제 없음). 아래 "맥용 새 버전이 준비됐어요"(자동 적용) 또는 "dmg를 받아 놨어요"
+              (직접 설치) 안내 중 뜨는 쪽으로 받아 주세요.
             </p>
           )}
         </div>
       )}
 
-      {/* ===== [v0.58.0] macOS 차선책 배너 — 화면(UI) 원격 갱신으로 못 덮는, 엔진 코드가 바뀐
-          드문 배포에서만 뜬다(대부분의 배포는 화면만 원격에서 새로 받아 재시작 없이 반영됨). */}
+      {/* ===== [v0.60.0] macOS 직접 교체 자동업데이트 준비 완료 배너 — "지금 바로 재시작"을
+          누르면 앱이 꺼지고, 종료 훅이 번들을 교체한 뒤 알아서 다시 연다. 안 눌러도 다음에
+          어차피 앱을 껐다 켤 때 자동으로 적용된다(자동매매 중이어도 안전 — 이건 화면(UI)
+          교체가 아니라 앱 자체 재시작이 필요한 드문 경우라 자동 재시작은 하지 않는다). */}
+      {macSwap && (
+        <div className="update-banner" style={update ? { top: 64 } : undefined}>
+          <span>🍎 새 버전(v{macSwap.version})이 준비됐어요 — 앱을 껐다 켜면 자동으로 적용돼요.</span>
+          <button className="btn" onClick={doInstallMacSwap} disabled={macSwapBusy}>
+            {macSwapBusy ? "적용 중…" : "↻ 지금 바로 재시작"}
+          </button>
+          <button className="btn" onClick={() => setMacSwap(null)}>
+            닫기
+          </button>
+        </div>
+      )}
+
+      {/* ===== [v0.58.0] macOS 차선책 배너 — 직접 교체(위 배너)가 어떤 이유로든 준비되지
+          못했을 때만 뜬다(대부분은 위 macSwap 배너로 충분해 이 배너는 안 뜬다). */}
       {macDmg && (
         <div className="update-banner" style={update ? { top: 64 } : undefined}>
           <span>🍎 맥용 새 버전(v{macDmg.version}) dmg를 받아 놨어요 — {macDmg.fileName}</span>
