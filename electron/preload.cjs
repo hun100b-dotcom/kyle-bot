@@ -163,21 +163,26 @@ contextBridge.exposeInMainWorld("kyletool", {
   appVersion: () => ipcRenderer.invoke("app:version"),
   downloadUpdate: () => ipcRenderer.invoke("update:download"),
   installUpdate: () => ipcRenderer.invoke("update:install"),
-  // 업데이트 이벤트 구독(있음/진행률/완료/오류). 반환값은 구독 해제 함수.
+  // [v0.58.0] macOS 차선책 — 받아 둔 dmg 폴더를 Finder로 열기
+  openMacDmg: () => ipcRenderer.invoke("update:openMacDmg"),
+  // 업데이트 이벤트 구독(있음/진행률/완료/오류/맥 dmg 준비됨). 반환값은 구독 해제 함수.
   onUpdate: (handlers) => {
     const onAvail = (_ev, info) => handlers.available?.(info);
     const onProg = (_ev, pct) => handlers.progress?.(pct);
     const onDone = () => handlers.downloaded?.();
     const onErr = (_ev, msg) => handlers.error?.(msg);
+    const onMacDmg = (_ev, info) => handlers.macDmgReady?.(info);
     ipcRenderer.on("update:available", onAvail);
     ipcRenderer.on("update:progress", onProg);
     ipcRenderer.on("update:downloaded", onDone);
     ipcRenderer.on("update:error", onErr);
+    ipcRenderer.on("update:macDmgReady", onMacDmg);
     return () => {
       ipcRenderer.removeListener("update:available", onAvail);
       ipcRenderer.removeListener("update:progress", onProg);
       ipcRenderer.removeListener("update:downloaded", onDone);
       ipcRenderer.removeListener("update:error", onErr);
+      ipcRenderer.removeListener("update:macDmgReady", onMacDmg);
     };
   },
 });

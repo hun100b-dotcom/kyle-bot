@@ -993,6 +993,8 @@ function App() {
   //   화면 타이머로 직접 감지해 안내한다.
   const [updateInstalling, setUpdateInstalling] = useState(false);
   const [updateInstallStuck, setUpdateInstallStuck] = useState(false);
+  // [v0.58.0] macOS 차선책 — 엔진 코드가 바뀐 드문 배포에서만 뜨는 "새 dmg 받아 놨어요" 안내.
+  const [macDmg, setMacDmg] = useState<{ version: string; fileName: string } | null>(null);
 
   useEffect(() => {
     refreshStatus();
@@ -1101,6 +1103,8 @@ function App() {
         setUpdateProgress(100);
       },
       error: (msg) => setUpdateErr(String(msg)),
+      // [v0.58.0] macOS 차선책 알림 — 새 dmg를 미리 받아 뒀다는 신호.
+      macDmgReady: (info) => setMacDmg(info),
     });
     return () => {
       off();
@@ -1247,6 +1251,9 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tech, baseClose, ema200, wallPrice, barOpen, manualEntry, tpPct, slPct, candleYang, committedSymbol, showTwoCol, tabL, tabR, tab]);
 
+  /** [v0.58.0] 다운로드는 이제 새 버전이 감지되면 메인 프로세스가 알아서 자동으로 시작한다
+   *  (autoDownload:true) — 이 함수는 그게 실패했을 때(updateErr) 배너의 "지금 다시 받기"
+   *  버튼으로만 쓰인다. */
   async function startDownloadUpdate() {
     setUpdateProgress(0);
     const r = await window.kyletool.downloadUpdate();
@@ -5494,76 +5501,77 @@ ${msg}
         </div>
       )}
 
-      {/* ===== 자동 업데이트 팝업 ===== */}
+      {/* ===== [v0.58.0] 자동 업데이트 안내 — 작은 배너(화면을 막지 않음, 누르지 않아도 된다) =====
+          [바뀐 점] 예전엔 이 자리가 전체 화면을 가리는 팝업이었고, "지금 업데이트"→"재시작하고
+          적용"을 사람이 직접 두 번 눌러야만 새 버전이 반영됐다. 이제 다운로드는 새 버전이
+          보이는 즉시 메인 프로세스가 알아서 시작하고(electron/main.ts의 autoDownload), 다
+          받으면 "자동매매가 꺼져 있고 사람이 10분 이상 자리를 비운" 순간에 스스로 조용히
+          재시작해 적용한다. 이 배너는 그 진행 상황을 참고로만 보여주는 것이라, 안 누르고
+          그냥 둬도 알아서 끝난다 — "지금 바로 재시작"은 급할 때만 쓰는 선택 버튼이다. */}
       {update && (
-        <div className="modal-back">
-          <div className="modal">
-            <h2>🎉 새 버전이 있습니다 — v{update.version}</h2>
-            {appVer && <p className="hint">현재 설치된 버전: v{appVer}</p>}
-            {update.notes ? (
-              <div className="update-notes">
-                <b>변경 사항</b>
-                <pre>{update.notes}</pre>
-              </div>
-            ) : (
-              <p className="hint">이번 버전의 개선 사항이 적용됩니다.</p>
-            )}
-
-            {updateProgress != null && !updateReady && (
-              <div className="progress-wrap">
-                <div className="progress-bar" style={{ width: `${updateProgress}%` }} />
-                <span className="progress-txt">다운로드 중… {updateProgress}%</span>
-              </div>
-            )}
-
-            {updateErr && (
-              <p className="hint small danger">
-                ⚠️ 자동 업데이트 중 오류가 있었습니다(자세히: {updateErr}). 특히 아주 오래된 버전에서
-                업데이트할 때는 자동 적용이 안 될 수 있습니다 — 그럴 땐{" "}
-                <a href="https://github.com/hun100b-dotcom/kyle-bot-releases/releases" target="_blank" rel="noreferrer">
-                  릴리스 페이지
-                </a>
-                에서 설치 파일을 새로 받아 직접 설치해 주세요(기존 설정·기록은 그대로 남습니다).
-              </p>
-            )}
-
-            {updateInstallStuck && (
-              <p className="hint small danger">
-                ⚠️ "재시작하고 적용"이 정상적으로 이어지지 않았습니다 — macOS에서는 이 앱이
-                (유료 애플 개발자 인증서가 아닌) 간이 서명 상태라, 자동 재설치 엔진이 옛 버전과
-                새 버전의 서명이 안 맞으면 오류 표시 없이 그냥 멈추는 경우가 있습니다(앱 자체엔
-                문제 없음 — [주문현황] 등 기존 기능은 정상 동작합니다). 지금은{" "}
-                <a href="https://github.com/hun100b-dotcom/kyle-bot-releases/releases" target="_blank" rel="noreferrer">
-                  릴리스 페이지
-                </a>
-                에서 새 dmg 파일을 받아 직접 설치해 주세요(기존 설정·매매 기록은 그대로 남습니다).
-              </p>
-            )}
-
-            <div className="form-row">
-              {updateReady ? (
-                <button className="btn btn-start" onClick={startInstallUpdate} disabled={updateInstalling}>
-                  {updateInstalling ? "적용 확인 중…" : "↻ 재시작하고 적용"}
-                </button>
-              ) : updateProgress != null ? (
-                <button className="btn" disabled>
-                  다운로드 중…
-                </button>
-              ) : (
-                <button className="btn btn-start" onClick={startDownloadUpdate}>
-                  지금 업데이트
-                </button>
-              )}
-              {!updateReady && (
-                <button className="btn" onClick={() => setUpdate(null)}>
-                  나중에
-                </button>
-              )}
-            </div>
-            <p className="hint">
-              💡 업데이트는 언제 해도 됩니다. "나중에"를 눌러도 앱은 그대로 사용할 수 있고, 다음에 켤 때 다시 안내합니다.
+        <div className="update-banner">
+          <span>
+            🎉 v{update.version} {updateReady ? "— 받기 완료(유휴 시 자동 적용)" : updateProgress != null ? `— 받는 중 ${updateProgress}%` : "감지됨"}
+          </span>
+          {updateReady && (
+            <button className="btn" onClick={startInstallUpdate} disabled={updateInstalling}>
+              {updateInstalling ? "적용 확인 중…" : "↻ 지금 바로 재시작"}
+            </button>
+          )}
+          <button className="btn" onClick={() => setUpdate(null)}>
+            닫기
+          </button>
+          {updateErr && (
+            <p className="hint small danger">
+              ⚠️ 자동 업데이트 중 오류(자세히: {updateErr}) —{" "}
+              <button className="btn" onClick={startDownloadUpdate}>
+                지금 다시 받기
+              </button>
+              . 계속 안 되면{" "}
+              <a href="https://github.com/hun100b-dotcom/kyle-bot-releases/releases" target="_blank" rel="noreferrer">
+                릴리스 페이지
+              </a>
+              에서 설치 파일을 새로 받아 직접 설치해 주세요(기존 설정·기록은 그대로 남습니다).
             </p>
-          </div>
+          )}
+          {updateInstallStuck && (
+            <p className="hint small danger">
+              ⚠️ 자동 재시작이 정상적으로 이어지지 않았습니다 — macOS는(유료 애플 개발자 인증서가
+              없는 간이 서명 상태라) 이 방식의 자동 적용이 구조적으로 실패할 수 있습니다(앱 자체엔
+              문제 없음). 아래 "맥용 새 버전이 준비됐어요" 안내가 뜨면 그걸로 받아 직접 설치해 주세요.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* ===== [v0.58.0] macOS 차선책 배너 — 화면(UI) 원격 갱신으로 못 덮는, 엔진 코드가 바뀐
+          드문 배포에서만 뜬다(대부분의 배포는 화면만 원격에서 새로 받아 재시작 없이 반영됨). */}
+      {macDmg && (
+        <div className="update-banner" style={update ? { top: 64 } : undefined}>
+          <span>🍎 맥용 새 버전(v{macDmg.version}) dmg를 받아 놨어요 — {macDmg.fileName}</span>
+          <button className="btn" onClick={() => void window.kyletool.openMacDmg?.()}>
+            폴더 열기
+          </button>
+          <button className="btn" onClick={() => setMacDmg(null)}>
+            닫기
+          </button>
+        </div>
+      )}
+
+      {/* [v0.58.0] 지금 실행 중인 앱 버전 — 항상 작게 표시(디버깅·원격 화면 갱신 확인용). */}
+      {appVer && (
+        <div
+          style={{
+            position: "fixed",
+            right: 8,
+            bottom: 4,
+            fontSize: 11,
+            opacity: 0.35,
+            pointerEvents: "none",
+            zIndex: 1,
+          }}
+        >
+          v{appVer}
         </div>
       )}
 

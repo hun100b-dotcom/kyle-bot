@@ -809,11 +809,15 @@ interface KyletoolBridge {
   appVersion(): Promise<string>;
   downloadUpdate(): Promise<{ ok: boolean; error?: string }>;
   installUpdate(): Promise<{ ok: boolean; error?: string }>;
+  /** [v0.58.0] macOS 차선책 — 받아 둔 dmg가 있는 폴더를 Finder로 연다(선택 항목). */
+  openMacDmg?(): Promise<{ ok: boolean }>;
   onUpdate(handlers: {
     available?: (info: { version: string; notes: string }) => void;
     progress?: (pct: number) => void;
     downloaded?: () => void;
     error?: (msg: string) => void;
+    /** [v0.58.0] macOS 차선책 — 새 dmg를 받아 뒀다는 알림(엔진 코드가 바뀐 드문 배포용). */
+    macDmgReady?: (info: { version: string; fileName: string }) => void;
   }): () => void;
 }
 

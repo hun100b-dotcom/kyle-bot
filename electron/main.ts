@@ -10,8 +10,9 @@
 //   화면은 preload.cjs가 허용한 창구(window.kyletool.*)로만 엔진과 대화한다.
 // =============================================================================
 
-import { app, BrowserWindow, ipcMain, Menu } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, powerMonitor, shell } from "electron";
 import { join } from "node:path";
+import { existsSync, writeFileSync } from "node:fs";
 import { ToolEngine } from "./tool-engine";
 import { startRelay, type RelayHandle } from "./relay"; //   [폰 연동] 집 PC 릴레이
 import { startTunnel, type TunnelHandle } from "./tunnel"; // [폰 연동] 인터넷 터널
@@ -45,20 +46,99 @@ let engine: ToolEngine | null = null;
 let win: BrowserWindow | null = null;
 
 // =============================================================================
-// 자동 업데이트 (electron-updater)
+// [v0.58.0] 화면(UI) 원격 우선 로딩 — "설치파일 없이도 화면은 항상 최신"
 // -----------------------------------------------------------------------------
-// [흐름] 앱 시작 → 조용히 새 버전 확인 → 있으면 화면에 팝업 신호(update:available)
-//   → 사용자가 "지금 업데이트" 누르면 다운로드(진행률 update:progress)
-//   → 완료(update:downloaded) → "재시작하고 적용" 누르면 quitAndInstall.
+// [왜 만들었나] 오너 불만: "수정·배포할 때마다 윈도우·맥에서 업데이트 누르고 재시작
+//   적용 누르는 게 번거롭다. 맥은 그 버튼조차 실행이 안 된다." 조사 결과 이 앱의 화면
+//   (React, src/App.tsx)은 electron/tool-engine.ts(매매 엔진)를 window.kyletool 다리로만
+//   부르고, 화면 코드 자체는 fetch/XHR 등 브라우저 네트워크 API를 전혀 쓰지 않는다
+//   (엔진 호출은 전부 이 파일의 preload.cjs↔ipcMain 다리를 거친다 — 페이지가 어느 주소에서
+//   불려왔든 이 다리는 그대로 살아있다). 즉 화면(껍데기)과 엔진(매매 로직)이 이미 분리돼
+//   있다는 뜻이라, **화면만 인터넷에서 즉시 불러오면 대부분의 배포(v0.47~v0.57 이력의
+//   거의 전부 — 새 탭 신설, 표시 개선, 버그 수정 등)는 설치파일을 다시 받을 필요가 아예
+//   없어진다.** 앱을 껐다 켜기만 하면 그새 배포된 최신 화면이 바로 뜬다.
+//
+//   [이미 검증된 패턴] 이 방식은 새로 지어낸 게 아니라, 이 프로젝트가 폰(웹앱, capri-web)
+//   에서 이미 실사용 중인 방식과 완전히 같다(web/kyletool-adapter.ts) — 폰은 이미 매매
+//   엔진 전체가 딸린 화면을 GitHub Pages에서 통째로 불러와 쓰고 있다. PC는 그보다도 안전한
+//   조합이다: 원격에서 불러오는 건 순수 화면(UI) 뿐이고, 실제 매매 엔진(계정 키·주문·
+//   자동매매 루프)은 이 메인 프로세스(로컬 Node)에 그대로 남아 있어 원격 화면 쪽 코드가
+//   직접 건드릴 수 없다.
+//
+// [오프라인/장애 대비] 원격 화면을 못 불러오면(인터넷 없음·GitHub Pages 장애 등) 5초 안에
+//   포기하고 **설치파일 안에 들어있는 내장(로컬) 화면**으로 조용히 대체한다 — 이 폴백
+//   덕분에 원격이 무엇이든 앱이 아예 안 뜨는 사고는 구조적으로 생기지 않는다. 원격 화면은
+//   "있으면 최신, 없으면 예전 버전(설치 당시 화면)"일 뿐 필수 경로가 아니다.
+//
+// [preload.cjs의 window.kyletool 다리는?] contextBridge.exposeInMainWorld는 이 창의
+//   webPreferences.preload로 지정되며, 이 창에 어떤 주소가 로드되든(로컬 파일이든 원격
+//   https든) 항상 그대로 걸린다 — 화면 코드는 자신이 어디서 왔는지 신경 쓸 필요가 없다.
+// =============================================================================
+const REMOTE_UI_BASE = "https://hun100b-dotcom.github.io/capri-web/app/";
+
+/** 원격 화면을 먼저 시도하고, 실패/시간초과(5초)면 내장(로컬) 화면으로 대체한다. */
+async function loadRenderer(target: BrowserWindow): Promise<void> {
+  const localIndex = join(app.getAppPath(), "dist", "index.html");
+  const devUrl = process.env.ELECTRON_START_URL;
+  if (devUrl) {
+    target.loadURL(devUrl);
+    return;
+  }
+  // 개발 실행(npm run app)·자동 검증(KYLEBOT_SHOT/E2E)은 항상 로컬만 쓴다 — 아직 배포되지
+  // 않은 로컬 수정사항을 그대로 봐야 하고, 검증 캡처는 결과가 매번 똑같아야 하기 때문.
+  if (!app.isPackaged || process.env.KYLEBOT_SHOT || process.env.KYLEBOT_E2E === "1") {
+    target.loadFile(localIndex);
+    return;
+  }
+
+  // 캐시된 옛 화면을 계속 받는 사고를 막기 위해 매번 새 주소(캐시 무력화)로 요청한다.
+  const remoteUrl = `${REMOTE_UI_BASE}index.html?t=${Date.now()}`;
+  const loadedRemote = await new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(ok);
+    };
+    target.webContents.once("did-finish-load", () => finish(true));
+    target.webContents.once("did-fail-load", () => finish(false));
+    target.loadURL(remoteUrl).catch(() => finish(false));
+    setTimeout(() => finish(false), 5000);
+  });
+
+  if (loadedRemote) {
+    console.log("[capri][ui] 원격 최신 화면을 불러왔습니다:", remoteUrl);
+  } else {
+    console.log("[capri][ui] 원격 화면을 못 불러와 내장(로컬) 화면으로 대체합니다.");
+    target.loadFile(localIndex);
+  }
+}
+
+// =============================================================================
+// 자동 업데이트 (electron-updater) — [v0.58.0] "사람 개입 0회" 전면 자동화
+// -----------------------------------------------------------------------------
+// [예전 흐름] 앱 시작 → 조용히 새 버전 확인 → 있으면 화면에 팝업 → 사용자가
+//   "지금 업데이트"를 눌러야 다운로드 → "재시작하고 적용"을 또 눌러야 설치.
+// [바뀐 흐름] 앱 시작(+30분마다) → 새 버전을 찾으면 **묻지 않고 바로 다운로드** →
+//   다 받으면, "자동매매가 꺼져 있고 + 사람이 10분 이상 손을 안 댄(유휴)" 순간을 5분마다
+//   확인해 그때 **조용히 재시작·적용**한다(quitAndInstall(true, true) — 확인창 없음).
+//   자동매매가 켜져 있으면 무슨 일이 있어도 재시작하지 않는다(실계좌 매매 도중 앱이
+//   꺼지는 사고를 막기 위한 최우선 안전장치) — 그런 경우엔 다음 자연 종료(앱을 직접
+//   끌 때, autoInstallOnAppQuit) 때 적용된다.
+//
+// [화면 표시] 버튼을 눌러야만 진행되던 팝업은 없앴다. 대신 작게 접히는 배너로 "새 버전을
+//   자동으로 받고 있어요/적용 대기 중이에요"만 알리고, "지금 바로 재시작" 버튼은 급한
+//   경우를 위해 선택적으로만 남겨 둔다(누르지 않아도 알아서 적용됨).
 //
 // [★ 안전 원칙] 업데이트 확인/다운로드가 실패해도(오프라인·서버오류 등) 앱은
-//   절대 죽지 않는다. 모든 호출을 try/catch로 감싸고, 자동 다운로드는 끈다
-//   (사용자가 팝업에서 승낙할 때만 받는다).
+//   절대 죽지 않는다 — 모든 호출을 try/catch로 감싼다.
 // =============================================================================
+let updateReadyToInstall = false;
+
 function setupAutoUpdater(): void {
-  // 사용자 승낙 전에는 자동으로 받지도, 자동으로 설치하지도 않는다.
-  autoUpdater.autoDownload = false;
-  autoUpdater.autoInstallOnAppQuit = false;
+  // [v0.58.0] 묻지 않고 자동으로 받고, 앱을 끌 때는 자동으로 적용한다.
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
   // [v0.27.1] "업데이트 다운로드에 실패했습니다" 오류 대응 — electron-updater는 기본적으로
   //   "차등 업데이트"(설치돼 있는 옛 버전과 새 버전을 비교해 달라진 부분만 내려받음)를 먼저
   //   시도한다. 이 방식은 옛 버전의 blockmap이 없거나(첫 업데이트 등) 조건이 안 맞으면 중간에
@@ -66,7 +146,8 @@ function setupAutoUpdater(): void {
   //   용량을 좀 더 받더라도(설치파일 전체, 약 100MB) 항상 되는 전체 다운로드만 쓰도록 끈다.
   autoUpdater.disableDifferentialDownload = true;
 
-  // 새 버전이 있을 때: 화면에 버전·변경사항을 보내 팝업을 띄운다.
+  // 새 버전이 있을 때: 화면에 버전·변경사항을 보내 배너를 띄운다(참고용 — 다운로드는
+  // 이미 자동으로 시작됐다).
   autoUpdater.on("update-available", (info) => {
     // [v0.32.3] GitHub 릴리스 노트는 electron-updater가 마크다운→HTML로 변환해 주는데,
     //   화면은 이걸 그냥 <pre>로 그대로 찍어서 "<p>...</p>" 태그가 글자 그대로 보였다
@@ -85,8 +166,9 @@ function setupAutoUpdater(): void {
     win?.webContents.send("update:progress", Math.round(p.percent));
   });
 
-  // 다운로드 완료: 이제 "재시작하고 적용"을 누를 수 있다.
+  // 다운로드 완료: 재시작 대기 상태로 기록하고, 아래 유휴 감시 타이머가 조용히 적용한다.
   autoUpdater.on("update-downloaded", () => {
+    updateReadyToInstall = true;
     win?.webContents.send("update:downloaded");
   });
 
@@ -102,14 +184,8 @@ function setupAutoUpdater(): void {
     /* 개발 실행 등에서 실패해도 앱은 정상 */
   }
 
-  // [v0.51.0 긴급 수정] 예전엔 "시작 시 1회"뿐이라, 오너가 실계좌 자동매매를 켜 둔 채 몇 시간씩
-  //   앱을 계속 켜 두면(=흔한 실사용 패턴) 그 사이 새 배포가 여러 번 나가도 전혀 알 길이 없었다.
-  //   이번 세션에서만도 v0.45.0~v0.50.0이 약 1시간 안에 연달아 배포됐는데, 오너가 그때마다
-  //   "고쳤다더니 그대로다"라고 반복 보고한 것과 시점이 정확히 겹친다 — 앱을 껐다 켜거나 업데이트
-  //   팝업을 직접 확인하지 않는 한 새 버전이 실행 중인 화면에 반영될 방법이 구조적으로 없었다.
-  //   이제 30분마다도 조용히 한 번씩 재확인해, 오래 켜 둔 세션도 새 배포를 놓치지 않게 한다
-  //   (실패해도 조용히 무시 — 위 안전 원칙과 동일. 자동 다운로드/설치는 여전히 안 함 — 오너가
-  //   팝업에서 직접 승낙할 때만).
+  // [v0.51.0] "시작 시 1회"뿐이면, 오너가 실계좌 자동매매를 켜 둔 채 몇 시간씩 앱을 계속
+  //   켜 두는 흔한 실사용 패턴에서 그 사이 나온 새 배포를 놓친다. 30분마다 조용히 재확인.
   setInterval(() => {
     try {
       void autoUpdater.checkForUpdates().catch(() => {});
@@ -117,6 +193,85 @@ function setupAutoUpdater(): void {
       /* 무시 — 다음 주기에 다시 시도 */
     }
   }, 30 * 60_000);
+
+  // [v0.58.0] 유휴 무음 재시작 — 5분마다, 아래 두 조건을 모두 만족할 때만 조용히 적용한다:
+  //   ① 자동매매가 지금 켜져 있지 않음(실계좌 매매 도중 앱이 꺼지는 사고 방지 — 최우선 안전장치)
+  //   ② 사람이 10분 이상 마우스/키보드를 건드리지 않음(powerMonitor — OS 전체 기준 유휴시간)
+  //   실패해도(quitAndInstall이 예외를 던져도) 조용히 무시하고 다음 주기에 다시 시도한다.
+  setInterval(() => {
+    if (!updateReadyToInstall) return;
+    if (engine?.getAutoTradeStatus().enabled) return; // ① 자동매매 중엔 절대 재시작 안 함
+    try {
+      if (powerMonitor.getSystemIdleTime() < 600) return; // ② 10분(600초) 미만이면 대기
+      autoUpdater.quitAndInstall(true, true); // 확인창 없이(silent) 재시작까지(force run after)
+    } catch {
+      /* 조용히 무시 — 다음 5분 주기에 다시 시도 */
+    }
+  }, 5 * 60_000);
+}
+
+// =============================================================================
+// [v0.58.0] macOS 차선책 — "새 dmg 자동 다운로드 후 안내"
+// -----------------------------------------------------------------------------
+// [왜 필요한가] 위 electron-updater(Squirrel.Mac) 자동 적용은 유료 애플 개발자 인증서
+//   (Developer ID + 공증)가 있어야만 동작한다(electron-builder.yml 참고 — 이 앱은 애드혹
+//   서명이라 조건 미충족). 원격 화면(위 loadRenderer)이 대부분의 배포(화면 변경)는 이미
+//   해결하지만, **메인 프로세스 코드(이 파일·preload.cjs·tool-engine.ts 등 엔진 자체)가
+//   바뀐 배포는 화면만 새로 받아서는 반영되지 않는다** — 그런 드문 경우를 위한 차선책이다.
+//   GitHub 릴리스 API로 최신 버전을 조용히 확인해, 새 버전이 있으면 맞는 아키텍처(Apple
+//   Silicon/Intel)의 dmg를 다운로드 폴더에 미리 받아 두고, 화면에 "받아 놨어요, 눌러서
+//   폴더 열기"만 알린다. Gatekeeper 우클릭→열기 한 번은 공증 없이는 여전히 피할 수
+//   없다(README에 이미 안내돼 있음) — 그래도 "릴리스 페이지를 찾아가 맞는 파일을 고르는"
+//   수고는 없앤다.
+// =============================================================================
+const RELEASES_LATEST_API = "https://api.github.com/repos/hun100b-dotcom/kyle-bot-releases/releases/latest";
+let lastMacDmgPath: string | null = null;
+
+/** "1.2.3" 형태의 두 버전을 비교해 a가 b보다 최신이면 true. */
+function isNewerVersion(a: string, b: string): boolean {
+  const pa = a.split(".").map((n) => Number.parseInt(n, 10) || 0);
+  const pb = b.split(".").map((n) => Number.parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] ?? 0;
+    const y = pb[i] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return false;
+}
+
+async function checkMacDmgFallback(): Promise<void> {
+  if (process.platform !== "darwin" || !app.isPackaged) return;
+  try {
+    const current = app.getVersion();
+    const res = await fetch(RELEASES_LATEST_API);
+    if (!res.ok) return;
+    const rel = (await res.json()) as { tag_name?: string; assets?: { name: string; browser_download_url: string }[] };
+    const latest = String(rel.tag_name ?? "").replace(/^v/, "");
+    if (!latest || !isNewerVersion(latest, current)) return;
+
+    const wantArm = process.arch === "arm64";
+    const asset = (rel.assets ?? []).find(
+      (a) => a.name.endsWith(".dmg") && (wantArm ? a.name.includes("-arm64") : !a.name.includes("-arm64")),
+    );
+    if (!asset) return;
+
+    const dest = join(app.getPath("downloads"), asset.name);
+    if (existsSync(dest)) {
+      lastMacDmgPath = dest;
+      win?.webContents.send("update:macDmgReady", { version: latest, fileName: asset.name });
+      return;
+    }
+
+    const dl = await fetch(asset.browser_download_url);
+    if (!dl.ok || !dl.body) return;
+    const buf = Buffer.from(await dl.arrayBuffer());
+    writeFileSync(dest, buf);
+    lastMacDmgPath = dest;
+    console.log(`[capri][mac-dmg] 새 버전(${latest}) dmg를 받아 뒀습니다: ${dest}`);
+    win?.webContents.send("update:macDmgReady", { version: latest, fileName: asset.name });
+  } catch (err) {
+    console.error("[capri][mac-dmg] 확인/다운로드 실패(조용히 무시, 다음 주기에 재시도):", err);
+  }
 }
 
 function createWindow(): void {
@@ -134,9 +289,7 @@ function createWindow(): void {
     },
   });
 
-  const devUrl = process.env.ELECTRON_START_URL;
-  if (devUrl) win.loadURL(devUrl);
-  else win.loadFile(join(app.getAppPath(), "dist", "index.html"));
+  void loadRenderer(win);
 
   win.on("closed", () => {
     win = null;
@@ -408,6 +561,12 @@ function registerIpc(e: ToolEngine): void {
   });
   // 현재 앱 버전(화면 표시용)
   ipcMain.handle("app:version", () => app.getVersion());
+  // [v0.58.0] macOS 차선책 — 받아 둔 dmg가 있는 폴더를 Finder로 연다.
+  ipcMain.handle("update:openMacDmg", () => {
+    if (!lastMacDmgPath) return { ok: false };
+    shell.showItemInFolder(lastMacDmgPath);
+    return { ok: true };
+  });
 
   e.on("journal", (entry) => win?.webContents.send("tool:journalEvent", entry));
   // [v0.32.0] 자동매매 관찰 확정·주문 알림 — 화면(App.tsx)이 이 이벤트를 받아 브라우저/OS
@@ -503,6 +662,11 @@ app.whenReady().then(async () => {
   // 자동 업데이트는 실제 설치본에서만(개발/검증 실행 제외). 실패해도 앱은 정상.
   if (app.isPackaged && !process.env.KYLEBOT_SHOT) {
     setupAutoUpdater();
+    // [v0.58.0] macOS 차선책(엔진 코드가 바뀐 드문 배포용) — 시작 시 1회 + 30분마다 재확인.
+    if (process.platform === "darwin") {
+      setTimeout(() => void checkMacDmgFallback(), 5000);
+      setInterval(() => void checkMacDmgFallback(), 30 * 60_000);
+    }
   }
 
   app.on("activate", () => {

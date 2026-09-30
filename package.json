@@ -1,7 +1,7 @@
 {
   "name": "kyle-bot",
   "private": true,
-  "version": "0.57.0",
+  "version": "0.58.0",
   "description": "Capri 매매도구 — Capri매매기법 계산기 + 토스 조건주문 (v0.2: 주문 잠금/드라이런)",
   "author": "hun100b",
   "type": "module",
@@ -23,12 +23,12 @@
     "web:dev": "vite --config vite.web.config.ts",
     "web:check": "tsc -p tsconfig.web.json --noEmit",
     "web:build": "npm run web:check && vite build --config vite.web.config.ts && node scripts/stamp-sw.mjs",
-    "web:deploy": "npm run web:build && node scripts/deploy-web.mjs",
+    "web:deploy": "npm run build && npm run web:build && node scripts/deploy-web.mjs",
     "dist:win": "npm run build && npm run app:compile && electron-builder --win nsis --publish never",
     "dist:mac": "npm run build && npm run app:compile && electron-builder --mac --publish never",
     "publish:release": "node scripts/publish-release.mjs",
-    "release:win": "npm run dist:win && node scripts/publish-release.mjs",
-    "release:mac": "npm run dist:mac && node scripts/publish-release.mjs"
+    "release:win": "npm run web:deploy && npm run dist:win && node scripts/publish-release.mjs",
+    "release:mac": "npm run web:deploy && npm run dist:mac && node scripts/publish-release.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.6",
