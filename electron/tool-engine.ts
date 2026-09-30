@@ -3089,6 +3089,26 @@ export class ToolEngine extends EventEmitter {
   }
 
   /**
+   * [v0.60.3] createOrder가 모호하게(네트워크 순단·타임아웃 등) 실패했을 때, 실제로는
+   *   토스에 접수됐을 가능성을 clientOrderId(멱등키)로 직접 확인한다 — OPEN(미체결)을
+   *   먼저 보고, 없으면 CLOSED(체결/취소 등 종료)까지 본다(순간 체결됐을 수도 있어서).
+   *   조회 자체가 실패해도(같은 순단이 계속될 수 있음) 예외를 던지지 않고 그냥 "못
+   *   찾음"으로 취급한다 — 호출부가 원래 오류로 안전하게 폴백한다.
+   */
+  private async findOrderByClientOrderId(clientOrderId: string, symbol: string): Promise<OrderResponse | null> {
+    for (const status of ["OPEN", "CLOSED"] as const) {
+      try {
+        const r = await listOrders({ status, symbol });
+        const found = r.orders.find((o) => o.clientOrderId === clientOrderId);
+        if (found) return found;
+      } catch {
+        /* 이 상태 조회 자체가 실패해도 다음 상태로 계속 확인 */
+      }
+    }
+    return null;
+  }
+
+  /**
    * placeBracket의 실제 로직(공용 코어). placeBracket(수동 버튼)과 자동매매 경로가 함께 쓴다.
    *   [v0.26.0] 자동매매는 watchPromise를 끝까지 기다려 "OCO가 실제로 등록됐는지, 등록됐다면
    *   그 조건주문 번호가 뭔지"를 알아야 포지션을 추적할 수 있어 이렇게 분리했다.
@@ -3119,7 +3139,30 @@ export class ToolEngine extends EventEmitter {
       return { entryJournal, watchPromise: null };
     }
 
-    const o = await createOrder({ symbol, side: "BUY", orderType: "LIMIT", price: spec.price, quantity: spec.quantity, clientOrderId });
+    let o: OrderResponse;
+    try {
+      o = await createOrder({ symbol, side: "BUY", orderType: "LIMIT", price: spec.price, quantity: spec.quantity, clientOrderId });
+    } catch (e) {
+      // [v0.60.3 긴급 — 오너 실사용 보고: "매수 주문이 토스에 실제로 접수됐는데 카프리가
+      //   추적을 포기해버림(주문은 그대로 남는데 카프리 혼자 사라짐)"] createOrder 요청
+      //   자체가 실패해도, 그게 "토스가 진짜로 거부했다"인지 "요청은 갔는데 응답만 못
+      //   받았다(네트워크 순단·타임아웃)"인지는 이 예외만으로 구별할 수 없다. 후자라면
+      //   실제로는 주문이 접수됐는데 카프리만 모르는, 가장 위험한 상태(익절/손절 보호
+      //   없이 방치)가 된다. 포기하기 전에 clientOrderId(멱등키 — 요청에 실려 보냈으므로
+      //   실제로 접수됐다면 토스 쪽 주문에도 그대로 남아있다)로 실제 주문 목록을 뒤져
+      //   확인한다 — 있으면 그 주문을 그대로 이어받아 정상 흐름을 계속하고, 정말 없으면
+      //   그제서야 실패로 처리한다(호출부 catch가 다음 사이클에 자동 재시도한다).
+      const found = await this.findOrderByClientOrderId(clientOrderId, symbol).catch(() => null);
+      if (!found) throw e;
+      o = found;
+      this.addJournal({
+        kind: "info",
+        symbol,
+        summary:
+          `⚠️ 매수 주문 응답을 못 받았지만(${String(e).replace(/^Error:\s*/, "")}) 실제로는 토스에 이미 접수돼 있어 ` +
+          `정상 진행합니다(주문번호 ${o.tossOrderId}).`,
+      });
+    }
     this.saveRationale(spec.rationale, { clientOrderId, kind: "entry", symbol, quantity: spec.quantity, priceAtOrder: cur, dryRun: false, tossOrderId: o.tossOrderId });
     void this.recordEntry(symbol, spec.price, this.currentMode(), spec.quantity);
     const entryJournal = this.addJournal({

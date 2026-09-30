@@ -598,3 +598,65 @@ describe("[v0.54.0 긴급 수정] onAutoBracketResolved — '장시간 미체결
     }
   });
 });
+
+// =============================================================================
+// [v0.60.3 긴급 — 오너 실사용 보고: "자동 스크리닝 확정 종목의 매수 주문이 토스로
+//   전송됐는데, 다음 스크리닝에서 그 종목이 카프리 추적 목록에서 갑자기 사라짐 — 토스
+//   주문은 여전히 살아있는데 카프리 혼자 추적을 포기함"]
+//
+//   [원인] placeBracketCore가 createOrder(매수 요청) 뒤에도 saveRationale·addJournal·
+//   watchAndBracket 호출까지 같은 try 블록 안에 있었다. 이 중 무엇 하나라도(특히
+//   네트워크 순단으로 응답을 못 받는 경우) 예외를 던지면, autoTradeTick의 catch가
+//   "주문 접수 자체가 실패"로 단정하고 posDraft(추적 기록)를 지워버렸다 — 그런데
+//   createOrder 자체가 "요청은 갔는데 응답만 못 받은" 경우라면 실제로는 토스에 주문이
+//   이미 접수돼 있을 수 있다. 이럴 때 카프리가 조용히 추적을 포기하면 그 주문은 익절/
+//   손절 보호 없이 방치된다 — 가장 위험한 상태.
+//
+//   [수정] createOrder가 실패하면 clientOrderId(멱등키 — 실제로 접수됐다면 토스 쪽
+//   주문에도 그대로 남아있다)로 실제 주문 목록을 직접 뒤져(findOrderByClientOrderId)
+//   확인한다. 있으면 그 주문을 그대로 이어받아 정상 흐름을 계속하고, 정말 없으면
+//   그제서야 실패로 처리한다.
+//
+//   [이 테스트가 검증하는 범위] createOrder 자체가 "요청은 갔지만 응답을 못 받는"
+//   네트워크 상황을 목서버로 완벽히 재현하기는 어렵다(동기적 요청/응답 목서버라
+//   "서버는 처리했지만 클라이언트가 응답을 못 받는" 상태를 만들 방법이 없음 — 이
+//   프로젝트에 모듈 목(vi.mock) 관례도 없어 새로 들이지 않았다). 대신 새로 추가된
+//   findOrderByClientOrderId 자체(이번 수정의 핵심 새 로직)가 실제 목서버에 대고
+//   정확히 동작하는지 — 진짜 존재하는 주문은 찾고, 없는 주문은 null을 주는지 —
+//   직접 검증한다.
+// =============================================================================
+describe("[v0.60.3] findOrderByClientOrderId — createOrder 응답을 못 받았을 때의 안전망", () => {
+  type EngineInternals = {
+    findOrderByClientOrderId: (clientOrderId: string, symbol: string) => Promise<{ tossOrderId: string; clientOrderId?: string } | null>;
+  };
+
+  it("실제로 접수된 주문은 clientOrderId로 정확히 찾아낸다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-findorder-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const entry = await eng.placeEntry({ symbol: "AAPL", price: 2.1, quantity: 3 });
+      const detail = entry.detail as { tossOrderId: string; clientOrderId?: string };
+      expect(detail.clientOrderId).toBeTruthy();
+
+      const engAny = eng as unknown as EngineInternals;
+      const found = await engAny.findOrderByClientOrderId(detail.clientOrderId as string, "AAPL");
+      expect(found?.tossOrderId).toBe(detail.tossOrderId);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("존재하지 않는 clientOrderId는 null(예외를 던지지 않음)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-findorder-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      // 목서버에 접속만 해 두고(실제 주문은 하나도 안 낸 상태) 조회를 시도한다.
+      await eng.placeEntry({ symbol: "AAPL", price: 2.1, quantity: 1 }); // prepareBackend를 태우기 위한 최소 접속
+      const engAny = eng as unknown as EngineInternals;
+      const found = await engAny.findOrderByClientOrderId("never-existed-client-order-id", "AAPL");
+      expect(found).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

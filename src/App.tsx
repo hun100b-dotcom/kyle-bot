@@ -2064,17 +2064,34 @@ ${msg}
   }
 
   /**
-   * [v0.11.0] 후보에 못 든 '아쉽게 탈락' 종목의 실패 사유를 사람 말로.
+   * [v0.11.0→v0.60.3] 후보에 못 든 '아쉽게 탈락' 종목의 실패 사유를 사람 말로.
    *   하드 게이트(가격대·EMA·구름) 중 무엇을 놓쳤는지, 다 넘었으면 패턴(도지/다음봉) 중 무엇인지.
    *   반환: { passed: 넘은 하드게이트 수(0~3), reasons: 실패 사유 문자열 배열 }
+   *
+   *   [v0.60.3 긴급 수정 — 오너 실사용 보고: "구름 필터를 꺼 뒀는데 탈락 사유에 '구름 밑'이라고
+   *   나온다 — 설정이 실제로 반영되는지 의심스럽다"] 전수조사 결과, 집계용 tallyMissReasons는
+   *   이미 v0.51.0에서 "꺼진 조건은 사유로 안 셈"으로 고쳐져 있었지만, 이 함수(종목별 개별
+   *   사유 — 스크리너 탭의 "근접 탈락" 목록, 자동 스크리너 탭의 "전체 종목 보기" 사유 칸 둘
+   *   다에서 쓰인다)는 그 수정에서 빠져 있었다. r.aboveEma/r.aboveCloud는 electron/tool-engine.ts가
+   *   "그 조건을 꺼도 지표상 실제로 어떤지는 정직하게 보여준다"는 원칙으로 넣어 둔 원본
+   *   비교값이라(게이트로 쓸지는 별도 결정), 필터가 꺼져 있어도 그 종목이 실제로 EMA/구름
+   *   아래면 이 값은 여전히 false다 — 이 함수가 그 원본값만 보고 무조건 "탈락 사유"로
+   *   적었던 것이 실제 원인이다(그 필터는 꺼져 있어 탈락에 전혀 영향을 안 줬는데도).
+   *   이제 그 스캔(run)에서 실제로 켜져 있던 조건만 사유에 넣는다 — tallyMissReasons와
+   *   완전히 같은 원칙.
    */
-  function missReasons(r: ScreenResult): { passed: number; reasons: string[] } {
+  function missReasons(
+    r: ScreenResult,
+    run: { emaTrendEnabled: boolean; cloudEnabled: boolean; nextCandleConfirmEnabled: boolean },
+  ): { passed: number; reasons: string[] } {
     const reasons: string[] = [];
-    // ① 하드 게이트(가격대·EMA·구름) 중 놓친 것
+    // ① 하드 게이트(가격대·EMA·구름) 중 놓친 것 — 꺼진 조건은 애초에 탈락 원인이 될 수 없다.
     if (!r.priceInBand) reasons.push(`가격대 벗어남 (현재가 ${r.price != null ? `$${r.price.toFixed(2)}` : "—"})`);
-    if (!r.aboveEma) reasons.push("EMA200 아래");
-    if (!r.aboveCloud) reasons.push("이치모쿠 구름 아래/속");
-    const passed = (r.priceInBand ? 1 : 0) + (r.aboveEma ? 1 : 0) + (r.aboveCloud ? 1 : 0);
+    if (run.emaTrendEnabled && !r.aboveEma) reasons.push("EMA200 아래");
+    if (run.cloudEnabled && !r.aboveCloud) reasons.push("이치모쿠 구름 아래/속");
+    // "넘은 하드게이트 수"도 꺼진 조건은 항상 통과로 친다(어차피 안 막으므로) — 정렬(근접순)에 쓰임.
+    const passed =
+      (r.priceInBand ? 1 : 0) + (!run.emaTrendEnabled || r.aboveEma ? 1 : 0) + (!run.cloudEnabled || r.aboveCloud ? 1 : 0);
     // ② 패턴(도지/다음봉)도 '항상' 함께 본다. [B 리뷰 반영]
     //   예전엔 하드게이트를 다 넘었을 때만 패턴을 봤는데, 그러면 "구름만 넘으면 될 것"처럼 오해를 준다.
     //   실제로는 패턴이 없으면 구름을 넘어도 후보가 안 되므로, 빠진 사유를 빠짐없이 보여 준다.
@@ -2085,7 +2102,7 @@ ${msg}
       if (!f.firstDoji) reasons.push("최고점 이후 음봉 도지 없음");
       else if (!f.bothWicks) reasons.push("도지에 꼬리가 한쪽만(망치형·유성형)");
       else if (!f.recentDoji) reasons.push("도지 발생이 너무 오래전(20분 초과 — 신뢰 불가)");
-      else if (!f.nextBearish) reasons.push("도지 다음 봉이 음봉 아님(패턴 미완성)");
+      else if (run.nextCandleConfirmEnabled && !f.nextBearish) reasons.push("도지 다음 봉이 음봉 아님(패턴 미완성)");
     }
     return { passed, reasons };
   }
@@ -3338,7 +3355,7 @@ ${msg}
               // [v0.11.0] '아쉽게 탈락(근접)' = none 중 하드게이트를 2개 이상 넘긴 종목(많이 넘긴 순).
               const near = screenRun.results
                 .filter((r) => r.status === "none")
-                .map((r) => ({ r, ...missReasons(r) }))
+                .map((r) => ({ r, ...missReasons(r, screenRun) }))
                 .filter((x) => x.passed >= 2)
                 .sort((a, b) => b.passed - a.passed || a.r.rank - b.r.rank)
                 .slice(0, 15);
@@ -4330,7 +4347,7 @@ ${msg}
                               const reason =
                                 r.status === "confirmed" || r.status === "watch" ? "조건 전부 통과"
                                 : r.status === "insufficient" ? (r.note ?? "데이터 부족")
-                                : (missReasons(r).reasons.join(" · ") || "패턴 미완성");
+                                : (missReasons(r, run).reasons.join(" · ") || "패턴 미완성");
                               return (
                                 <tr key={r.symbol} className="screen-row" onClick={() => pickScreenSymbol(r)} title="클릭하면 계산기로 이동 + 이 종목의 전봉종가·EMA200이 자동 입력됩니다(수정 가능)">
                                   <td>{r.rank}</td>

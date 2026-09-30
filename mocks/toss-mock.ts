@@ -610,7 +610,12 @@ export function createMockTossServer() {
       const status = url.searchParams.get("status");
       if (!status) return sendJson(res, 400, { error: "missing_status" });
       let list = [...state.orders.values()];
+      // [v0.60.3 수정] CLOSED를 literal "CLOSED" 문자열과 대조하고 있었다 — 이 목서버의
+      //   실제 주문 status 값은 PENDING/PARTIAL_FILLED/FILLED/CANCELED뿐이라 "CLOSED"와
+      //   글자 그대로 일치하는 주문은 존재할 수 없다(항상 빈 목록). 실스펙의 OPEN/CLOSED는
+      //   "미체결이냐 종료됐냐"를 뜻하므로, OPEN(대기중)이 아닌 전부를 CLOSED로 본다.
       if (status === "OPEN") list = list.filter((o) => o.status === "PENDING" || o.status === "PARTIAL_FILLED");
+      else if (status === "CLOSED") list = list.filter((o) => o.status !== "PENDING" && o.status !== "PARTIAL_FILLED");
       else if (status !== "ALL") list = list.filter((o) => o.status === status);
       const symbol = url.searchParams.get("symbol");
       if (symbol) list = list.filter((o) => o.symbol === symbol);
