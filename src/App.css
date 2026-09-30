@@ -284,6 +284,20 @@ input {
 .form-col input { width: 100%; }
 input:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px rgba(76,130,251,0.18); }
 .radio { flex-direction: row; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; color: var(--text); }
+.radio input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--blue); cursor: pointer; }
+
+/* [v0.60.0 — 오너 요청 "서버로그 체크박스 UI 가독성 개선(크기·간격·대비)"] 카테고리 토글을
+   맨 체크박스가 아니라 또렷한 "칩"으로 — 클릭 영역도 넓어지고, 켜진 상태가 배경색으로
+   한눈에 보인다. */
+.cat-chip {
+  flex-direction: row; align-items: center; gap: 8px;
+  padding: 8px 14px; border-radius: var(--r-pill);
+  background: var(--panel2); border: 1px solid var(--border);
+  font-size: 14px; color: var(--text); cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.cat-chip:has(input:checked) { background: rgba(76,130,251,0.22); border-color: var(--blue); }
+.cat-chip input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--blue); cursor: pointer; }
 .quote { color: var(--blue); font-weight: 700; padding-bottom: 8px; }
 .mock-box { border-top: 1px dashed var(--border); padding-top: 10px; }
 .settings-block { margin-bottom: 8px; }

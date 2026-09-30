@@ -5222,6 +5222,16 @@ ${msg}
               === '동기화'는 예전엔 두 곳(매매이력·토스키)에 흩어져 '동기화'라는 말이
                   두 번 나와 헷갈렸다 → ③ 한 카드 안에 ①매매이력 ②토스키 로 나눠 통합. ═══ */}
 
+          {/* [v0.60.0 — 오너 요청 "배포 버전을 앱에서 확인 가능하게"] 화면 오른쪽 아래 구석에
+              아주 작고 흐리게(opacity 0.35) 떠 있는 버전 표시가 있긴 했지만, 눈에 띄지 않아
+              오너가 못 찾았다 — [설정] 탭 맨 위에 크고 분명하게 하나 더 둔다. */}
+          {appVer && (
+            <section className="card wide">
+              <h2>ℹ️ 버전 정보</h2>
+              <p>지금 실행 중인 버전: <b style={{ fontSize: 18 }}>v{appVer}</b></p>
+            </section>
+          )}
+
           {/* ── ① 폰에서 쓰기 (데스크톱 앱에서만 보임 — 웹앱엔 이 기능 없음) ── */}
           {window.kyletool.phoneStart && (
             <section className="card wide">
@@ -5554,9 +5564,9 @@ ${msg}
               카프리가 실제로 한 일(주문·인증·동기화·자동매매·오류 등)을 시간순으로 전부 남깁니다.
               아래 카테고리 토글로 원하는 것만 골라 볼 수 있어요(전부 꺼짐 = 전체 표시).
             </p>
-            <div className="form-row" style={{ flexWrap: "wrap", gap: 8 }}>
+            <div className="form-row" style={{ flexWrap: "wrap", gap: 10 }}>
               {JOURNAL_CATEGORIES.map((c) => (
-                <label key={c} className="radio" style={{ cursor: "pointer" }}>
+                <label key={c} className="cat-chip">
                   <input
                     type="checkbox"
                     checked={journalCategoryFilter.has(c)}
