@@ -1341,28 +1341,27 @@ describe("[v0.41.0] cancelAutoPosition — 지금 감시 중인 포지션을 사
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
       const eng = new ToolEngine(dir, { forceMock: true });
-      const entry = await eng.placeEntry({ symbol: "AAPL", price: 2.1, quantity: 3 });
-      const buyOrderId = (entry.detail as { tossOrderId: string }).tossOrderId;
+      // [단순화] watching→active 부트스트랩(reconcile의 "재시작 후 복구" 경로, registerOcoForFilled
+      // 재시도 로직까지 거침)을 타지 않고, placeOco로 직접 진짜 conditionalOrderId를 발급받아
+      // "active" 포지션을 곧바로 구성한다 — 이 테스트가 실제로 검증하려는 건 reconcile/cancel의
+      // "active" 분기(404 처리)뿐이라, 무관한 경로를 거칠수록 다른 원인의 흔들림(flakiness)만 늘어난다.
+      const ocoEntry = await eng.placeOco({
+        symbol: "AAPL", quantity: 3, tpTrigger: 2.5, tpPrice: 2.5, slTrigger: 1.8, slPrice: 1.79, expireDate: "2026-12-30",
+      });
+      const condId = (ocoEntry.detail as { conditionalOrderId: string }).conditionalOrderId;
+      expect(condId).toBeTruthy();
       const enteredAtMs = Date.now();
       const engAny = eng as unknown as {
         autoTradePositions: AutoPosition[];
-        reconcileAutoPositions: () => Promise<void>;
         addAutoTradeHistory: (pos: AutoPosition) => void;
         mock: { state: { conditionals: Map<string, unknown> } } | null;
       };
-      const watchingPos: AutoPosition = {
+      const activePos: AutoPosition = {
         symbol: "AAPL", entry: 2.1, tp: 2.5, sl: 1.8, quantity: 3,
-        enteredAtMs, status: "watching", conditionalOrderId: null, buyOrderId,
+        enteredAtMs, status: "active", conditionalOrderId: condId, buyOrderId: null,
       };
-      engAny.autoTradePositions.push(watchingPos);
-      engAny.addAutoTradeHistory(watchingPos);
-      const ocoPromise = waitForOcoJournal(eng);
-      await engAny.reconcileAutoPositions(); // watching → active + 실제 OCO 등록(진짜 conditionalOrderId 발급)
-      await ocoPromise;
-
-      const activePos = engAny.autoTradePositions.find((p) => p.symbol === "AAPL");
-      const condId = activePos?.conditionalOrderId as string;
-      expect(condId).toBeTruthy();
+      engAny.autoTradePositions.push(activePos);
+      engAny.addAutoTradeHistory(activePos);
       // 토스 쪽에서 이 조건주문이 통째로 사라진 상황을 그대로 재현한다(목서버 저장소에서 직접 삭제).
       engAny.mock?.state.conditionals.delete(condId);
 
@@ -1383,8 +1382,10 @@ describe("[v0.41.0] cancelAutoPosition — 지금 감시 중인 포지션을 사
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
       const eng = new ToolEngine(dir, { forceMock: true });
-      const entry = await eng.placeEntry({ symbol: "AAPL", price: 2.1, quantity: 3 });
-      const buyOrderId = (entry.detail as { tossOrderId: string }).tossOrderId;
+      const ocoEntry = await eng.placeOco({
+        symbol: "AAPL", quantity: 3, tpTrigger: 2.5, tpPrice: 2.5, slTrigger: 1.8, slPrice: 1.79, expireDate: "2026-12-30",
+      });
+      const condId = (ocoEntry.detail as { conditionalOrderId: string }).conditionalOrderId;
       const enteredAtMs = Date.now();
       const engAny = eng as unknown as {
         autoTradePositions: AutoPosition[];
@@ -1392,17 +1393,12 @@ describe("[v0.41.0] cancelAutoPosition — 지금 감시 중인 포지션을 사
         addAutoTradeHistory: (pos: AutoPosition) => void;
         mock: { state: { conditionals: Map<string, unknown> } } | null;
       };
-      const watchingPos: AutoPosition = {
+      const activePos: AutoPosition = {
         symbol: "AAPL", entry: 2.1, tp: 2.5, sl: 1.8, quantity: 3,
-        enteredAtMs, status: "watching", conditionalOrderId: null, buyOrderId,
+        enteredAtMs, status: "active", conditionalOrderId: condId, buyOrderId: null,
       };
-      engAny.autoTradePositions.push(watchingPos);
-      engAny.addAutoTradeHistory(watchingPos);
-      const ocoPromise = waitForOcoJournal(eng);
-      await engAny.reconcileAutoPositions();
-      await ocoPromise;
-
-      const condId = engAny.autoTradePositions.find((p) => p.symbol === "AAPL")?.conditionalOrderId as string;
+      engAny.autoTradePositions.push(activePos);
+      engAny.addAutoTradeHistory(activePos);
       engAny.mock?.state.conditionals.delete(condId);
 
       // 정기 재확인을 딱 한 번만 돌려도(3회를 기다리지 않고) 바로 정리돼야 한다 — v0.60.0의
