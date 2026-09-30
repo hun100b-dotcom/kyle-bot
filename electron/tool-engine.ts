@@ -292,6 +292,13 @@ export interface JournalEntry {
  *   우선순위: ①오류(문구에 실패·오류 표시) → ②주문(kind 기준, 가장 명확) → ③문구 키워드로
  *   인증/동기화/자동매매 순서로 추정 → ④나머지는 시스템.
  */
+/** [v0.57.0] OCO 규칙: 반드시 "익절 감시가 > 현재가 > 손절 감시가"여야 한다(토스 스펙). 사전
+ *  경고(placeOco)와 체결 후 재시도 중 즉시 보호매도 판단(registerOcoForFilled)이 정확히 같은
+ *  기준을 써야 하므로 한 곳에 모아 둔다 — 따로 두면 나중에 한쪽만 고쳐질 위험이 있다. */
+export function isWithinOcoBand(cur: number, tpTrigger: number, slTrigger: number): boolean {
+  return tpTrigger > cur && cur > slTrigger;
+}
+
 export function classifyJournalEntry(e: Pick<JournalEntry, "kind" | "summary">): JournalCategory {
   const s = e.summary;
   if (/⚠️|실패|오류/.test(s)) return "오류";
@@ -788,7 +795,14 @@ export type WatchAndBracketResult =
    *  "끝났다"고 믿고 감시를 놓아버리면 실제 주문은 토스에 그대로 남는데 우리 쪽 감시
    *  목록에서만 사라지는 사고가 난다(ALDX 실사례). 이 상태는 절대 포지션을 지우지
    *  않고, 다음 reconcileAutoPositions 사이클이 다시 확인하게 넘긴다. */
-  | { status: "still_pending" };
+  | { status: "still_pending" }
+  /** [v0.57.0 긴급 수정 — 오너 실사례: BGIN/SMJF 체결 후 보호주문(OCO) 등록 실패]
+   *  registerOcoForFilled가 재시도하는 도중, 현재가가 이미 익절/손절 감시가를 결정적으로
+   *  넘어서 있음을 발견하면(가격이 그 사이에 있어야 하는 OCO 규칙상 더 이상 등록 자체가
+   *  불가능한 상황) OCO 재시도 대신 즉시 시장가로 매도해 포지션을 보호한다. 이 경우는
+   *  "실패"가 아니라 실제로 포지션이 정상적으로 청산된 것이므로, 손익을 계산해 기록할 수
+   *  있게 exitPrice를 함께 돌려준다. */
+  | { status: "protected_by_market_sell"; exitPrice: number; quantity: number };
 
 // -----------------------------------------------------------------------------
 // [v0.26.0] 자동매매 타입
@@ -2689,7 +2703,7 @@ export class ToolEngine extends EventEmitter {
     const symbol = spec.symbol.toUpperCase();
     const cur = await this.orderGate(symbol); // 익절/손절 감시가는 ±검사 대신 아래 OCO 규칙으로 검증
     // 스펙 규칙 사전 검증(서버 400 전에 친절한 한국어로)
-    if (!(spec.tpTrigger > cur && cur > spec.slTrigger)) {
+    if (!isWithinOcoBand(cur, spec.tpTrigger, spec.slTrigger)) {
       // [v0.2.8 — 막지 않는다] 토스 스펙상 OCO는 "익절>현재가>손절"을 요구하지만 그 판단은 토스가 한다.
       //   우리가 미리 막으면 시세가 움직이는 순간 오너가 기회를 놓친다. 경고만 남기고 그대로 전송.
       this.addJournal({
@@ -2945,39 +2959,117 @@ export class ToolEngine extends EventEmitter {
   private static readonly BRACKET_FAST_WINDOW_MS = 60_000; // "진입 직후"로 볼 구간(1분)
   private static readonly BRACKET_SLOW_POLL_MS = 5000; // 그 이후엔 5초 간격(API 부담 완화)
 
-  /** filled 수량만큼 OCO(익절+손절)를 걸고 결과를 WatchAndBracketResult로 돌려주는 공용 내부 로직
-   *  (정상 체결 경로·타임아웃 시 부분체결 보호 경로가 함께 쓴다 — 로직 중복 방지). */
+  /** [테스트 전용] registerOcoForFilled의 재시도 대기 시간. 실사용 기본값은 3초/5초/8초 —
+   *  체결 직후 토스 내부 보유수량 원장이 아직 안 따라잡은 경우(insufficient-sellable-quantity
+   *  실사례)가 몇 초 안에 스스로 풀리는지 지켜볼 여유를 준다. */
+  private ocoRetryDelaysMs: number[] = [3000, 5000, 8000];
+
+  /**
+   * filled 수량만큼 OCO(익절+손절)를 걸고 결과를 WatchAndBracketResult로 돌려주는 공용 내부 로직
+   *  (정상 체결 경로·타임아웃 시 부분체결 보호 경로가 함께 쓴다 — 로직 중복 방지).
+   *
+   * [v0.57.0 긴급 수정 — 오너 실사례(BGIN·SMJF) "체결 후 보호주문 등록 실패"]
+   *   실제 토스 응답 두 종류를 직접 확인했다:
+   *   ① HTTP 422 insufficient-sellable-quantity("보유 수량이 없습니다") — 매수 체결 직후
+   *      토스 내부의 "매도 가능 수량" 원장이 아직 반영 전이라 생기는 일시적 경합으로 보인다.
+   *   ② HTTP 400 invalid-request("OCO 조건주문은 현재가가 두 감시가 사이에 있어야 합니다") —
+   *      체결 시점에 계산해 둔 익절/손절 감시가 사이에 지금 가격이 더 이상 없다는 뜻. 변동성
+   *      큰 저가주에서 체결~OCO등록 사이 몇 초 동안 가격이 이미 감시가를 넘어가 버린 것이다.
+   *   예전엔 두 경우 다 그냥 "실패, 직접 확인 필요"로 저널만 남기고 끝났다 — 그 사이 포지션은
+   *   토스에 보호장치 없이 그대로 남는다(가장 위험한 상태). 이제:
+   *   - 몇 초 뒤 다시 시도한다(①류의 일시적 경합은 대개 이 안에 스스로 풀린다).
+   *   - 재시도 전 현재가를 다시 확인해서, 가격이 이미 감시가를 "결정적으로" 넘어섰으면(②가
+   *     스스로 풀릴 문제가 아님 — 가격이 되돌아오길 기다리는 건 방치와 같다) OCO 재시도 대신
+   *     즉시 시장가로 매도해 포지션을 보호한다(protectByMarketSell).
+   *   - 그래도 전부 실패하면 예전처럼 저널+알림으로 오너에게 직접 확인을 요청한다.
+   */
   private async registerOcoForFilled(
     symbol: string,
     quantity: number,
     spec: { tpTrigger: number; tpPrice: number; slTrigger: number; slPrice: number; expireDate: string; rationale?: RationaleInput },
   ): Promise<WatchAndBracketResult> {
+    const maxAttempts = this.ocoRetryDelaysMs.length + 1;
+    let lastError = "";
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (attempt > 1) {
+        await new Promise((resolve) => setTimeout(resolve, this.ocoRetryDelaysMs[attempt - 2]));
+        try {
+          const { price: cur } = await getPrice(symbol);
+          if (Number.isFinite(cur) && cur > 0 && !isWithinOcoBand(cur, spec.tpTrigger, spec.slTrigger)) {
+            return await this.protectByMarketSell(symbol, quantity, cur, spec);
+          }
+        } catch {
+          // 현재가 재확인 실패 — 판단할 근거가 없으니 아래에서 OCO 재등록을 그대로 다시 시도한다.
+        }
+      }
+      try {
+        const ocoJournal = await this.placeOco({
+          symbol,
+          quantity,
+          tpTrigger: spec.tpTrigger,
+          tpPrice: spec.tpPrice,
+          slTrigger: spec.slTrigger,
+          slPrice: spec.slPrice,
+          expireDate: spec.expireDate,
+          rationale: spec.rationale,
+        });
+        // [v0.26.0] 자동매매가 이 OCO를 추적할 수 있게 조건주문 번호를 결과로 돌려준다.
+        const conditionalOrderId = (ocoJournal.detail as { conditionalOrderId?: string } | undefined)?.conditionalOrderId;
+        if (conditionalOrderId) return { status: "oco_registered", conditionalOrderId };
+        // 드라이런처럼 conditionalOrderId가 없는 경우(이론상 이 분기는 isDryRun()이 이미
+        // placeBracketCore에서 걸러내 도달하지 않지만, 안전하게 실패로 취급한다).
+        lastError = "조건주문 번호를 확인할 수 없습니다.";
+      } catch (e) {
+        lastError = String(e).replace(/^Error:\s*/, "");
+      }
+    }
+    this.addJournal({
+      kind: "info",
+      symbol,
+      summary: `⚠️ 체결을 확인했지만 조건주문(익절+손절) 자동 등록에 ${maxAttempts}번 시도해도 실패했습니다 — 직접 걸어 주세요: ${lastError}`,
+      // [v0.32.0] 보호주문 없이 포지션만 남은 상태라 매매 방식(수동/자동)과 무관하게 중요한 알림.
+      notify: true,
+      notifyTitle: `⚠️ 보호주문 등록 실패: ${symbol}`,
+    });
+    return { status: "oco_failed", error: lastError };
+  }
+
+  /**
+   * [v0.57.0] 체결 후 가격이 이미 익절/손절 감시가를 넘어서 OCO 자체를 등록할 수 없을 때의
+   *   마지막 방어선 — 조건주문을 기다리는 대신 즉시 시장가로 팔아 포지션을 정리한다. "가격이
+   *   되돌아와 OCO가 등록되길" 기다리는 것보다, 지금 확정할 수 있는 손익으로 끝내는 쪽이
+   *   훨씬 안전하다(무보호 상태로 방치하지 않음).
+   */
+  private async protectByMarketSell(
+    symbol: string,
+    quantity: number,
+    cur: number,
+    spec: { tpTrigger: number; slTrigger: number },
+  ): Promise<WatchAndBracketResult> {
+    const reason = cur >= spec.tpTrigger ? `익절 감시가($${spec.tpTrigger}) 이상으로 이미 올라` : `손절 감시가($${spec.slTrigger}) 이하로 이미 내려가`;
     try {
-      const ocoJournal = await this.placeOco({
+      // [2차 검토 — 실제 체결가 vs 추정가] 시장가 주문 응답은 즉시 체결가를 안 주므로(토스
+      //   스펙상 주문 생성 응답은 orderId뿐 — 실제 체결가는 별도 조회가 필요), 방금 조회한
+      //   현재가(cur)를 손익 계산의 기준으로 쓴다. 변동성 큰 저가주 특성상 실제 체결가와
+      //   몇 센트 차이가 날 수 있다는 점을 기록에 정직하게 남긴다(아래 note 참고) — "정확한
+      //   체결가"가 아니라 "판단 시점의 추정 기준가"임을 숨기지 않는다.
+      await this.placeSell({ symbol, quantity, orderType: "MARKET" });
+      this.addJournal({
+        kind: "info",
         symbol,
-        quantity,
-        tpTrigger: spec.tpTrigger,
-        tpPrice: spec.tpPrice,
-        slTrigger: spec.slTrigger,
-        slPrice: spec.slPrice,
-        expireDate: spec.expireDate,
-        rationale: spec.rationale,
+        summary: `⚠️ 체결 후 보호주문(OCO)을 걸려 했지만, 그 사이 현재가($${cur})가 ${reason} 있어 OCO 등록이 불가능했습니다(토스 규칙상 감시가 사이에 있어야 함) — 대기 대신 즉시 시장가로 매도해 포지션을 정리했습니다(기록된 가격은 매도 직전 조회한 추정가 — 실제 체결가와 약간 다를 수 있습니다).`,
+        notify: true,
+        notifyTitle: `⚠️ 즉시 보호매도: ${symbol}`,
       });
-      // [v0.26.0] 자동매매가 이 OCO를 추적할 수 있게 조건주문 번호를 결과로 돌려준다.
-      const conditionalOrderId = (ocoJournal.detail as { conditionalOrderId?: string } | undefined)?.conditionalOrderId;
-      if (conditionalOrderId) return { status: "oco_registered", conditionalOrderId };
-      // 드라이런처럼 conditionalOrderId가 없는 경우(이론상 이 분기는 isDryRun()이 이미
-      // placeBracketCore에서 걸러내 도달하지 않지만, 안전하게 실패로 취급한다).
-      return { status: "oco_failed", error: "조건주문 번호를 확인할 수 없습니다." };
+      return { status: "protected_by_market_sell", exitPrice: cur, quantity };
     } catch (e) {
       const error = String(e).replace(/^Error:\s*/, "");
       this.addJournal({
         kind: "info",
         symbol,
-        summary: `⚠️ 체결을 확인했지만 조건주문(익절+손절) 자동 등록에 실패했습니다 — 직접 걸어 주세요: ${error}`,
-        // [v0.32.0] 보호주문 없이 포지션만 남은 상태라 매매 방식(수동/자동)과 무관하게 중요한 알림.
+        summary: `⚠️ 가격이 감시가를 넘어서 즉시 시장가 매도를 시도했지만 그마저 실패했습니다 — 직접 확인 필요: ${error}`,
         notify: true,
-        notifyTitle: `⚠️ 보호주문 등록 실패: ${symbol}`,
+        notifyTitle: `⚠️ 긴급: 보호매도 실패: ${symbol}`,
       });
       return { status: "oco_failed", error };
     }
@@ -5115,6 +5207,23 @@ export class ToolEngine extends EventEmitter {
             status: "active", note: "재시작 후 재확인 — 매수 체결을 뒤늦게 확인해 보호주문 등록",
             conditionalOrderId: result.conditionalOrderId,
           });
+        } else if (result.status === "protected_by_market_sell") {
+          // [v0.57.0] 여기도 위 onAutoBracketResolved와 같은 원칙 — 실패가 아니라 실제 청산이다.
+          // [2차 검토 수정] 부분체결이었을 수 있어(qty = filled_qty ?? pos.quantity, 위 참고)
+          // 손익은 pos.quantity가 아니라 실제로 보호매도한 수량(result.quantity)으로 계산해야 한다.
+          if (idx !== -1) this.autoTradePositions.splice(idx, 1);
+          this.saveAutoPositions();
+          const pnlUsd = (result.exitPrice - pos.entry) * result.quantity;
+          const pnlPct = ((result.exitPrice - pos.entry) / pos.entry) * 100;
+          this.autoTradeRealizedPnlUsd += pnlUsd;
+          this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
+            status: pnlUsd >= 0 ? "closed_win" : "closed_loss",
+            exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
+            exitPrice: result.exitPrice,
+            pnlUsd: Math.round(pnlUsd * 100) / 100,
+            pnlPct: Math.round(pnlPct * 100) / 100,
+            note: "재시작 후 재확인 — 가격이 감시가를 이미 넘어서 OCO 등록이 불가능해, 즉시 시장가로 매도해 정리함",
+          });
         } else {
           // OCO 등록 자체가 실패 — registerOcoForFilled가 이미 상세 사유를 저널에 남겼다.
           this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
@@ -5188,6 +5297,23 @@ export class ToolEngine extends EventEmitter {
         this.updateAutoTradeHistory(symbol, entry, enteredAtMs, {
           status: "cancelled", exitedAt: closedAt,
           note: "설정한 감시시간이 되기 전에 이미 취소된 것을 확인했습니다(킬스위치 또는 [주문현황]에서 직접 취소했을 수 있음 — 장시간 미체결 자동취소가 아닙니다)",
+        });
+      } else if (res.status === "protected_by_market_sell") {
+        // [v0.57.0] OCO 등록 자체가 불가능할 만큼 가격이 감시가를 넘어서 즉시 시장가로 정리한
+        // 경우 — "실패"가 아니라 실제로 포지션이 청산된 것이므로 손익을 계산해 정확히 기록한다.
+        // [2차 검토 수정] 부분체결이었을 수 있어 포지션의 원래 계획 수량이 아니라 실제로
+        // 보호매도한 수량(res.quantity — watchAndBracket이 체결분만큼만 registerOcoForFilled에
+        // 넘긴 값)으로 계산해야 한다.
+        const pnlUsd = (res.exitPrice - entry) * res.quantity;
+        const pnlPct = ((res.exitPrice - entry) / entry) * 100;
+        this.autoTradeRealizedPnlUsd += pnlUsd;
+        this.updateAutoTradeHistory(symbol, entry, enteredAtMs, {
+          status: pnlUsd >= 0 ? "closed_win" : "closed_loss",
+          exitedAt: closedAt,
+          exitPrice: res.exitPrice,
+          pnlUsd: Math.round(pnlUsd * 100) / 100,
+          pnlPct: Math.round(pnlPct * 100) / 100,
+          note: "체결 직후 가격이 익절/손절 감시가를 이미 넘어서 OCO 등록이 불가능해, 즉시 시장가로 매도해 정리함",
         });
       } else if (res.status === "oco_failed") {
         this.updateAutoTradeHistory(symbol, entry, enteredAtMs, {

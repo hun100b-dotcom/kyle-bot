@@ -97,6 +97,12 @@ export interface MockState {
    *  등)를 재현한다(watchAndBracket의 cancelOnTimeout 안전망 검증용). 값이 있으면 그 값을 쓰고
    *  한 번 쓰면 다시 null로 돌아간다(한 번만 재현). 기본은 null(예전처럼 항상 CANCELED — 회귀 없음).*/
   cancelReturnsStatus: MockOrder["status"] | null;
+  /** [v0.57.0] 조건주문 등록(POST /api/v1/conditional-orders) 응답을 강제로 실패시키는
+   *  일회성 스위치 — 체결 직후 "보호주문 등록 실패" 실사례(BGIN insufficient-sellable-quantity,
+   *  SMJF "현재가가 두 감시가 사이에 있어야 함")를 재현해 registerOcoForFilled의 재시도·즉시
+   *  보호매도 안전망을 검증하는 용도. 값이 있으면 그 status/code/message로 실패시키고 한 번
+   *  쓰면 다시 null로 돌아간다(기본은 null — 정상 동작, 기존 테스트 전부 그대로 통과). */
+  conditionalOrderRejectOnce: { httpStatus: number; code: string; message: string } | null;
 }
 
 const INITIAL_PRICES: Record<string, number> = { AAPL: 2.05, PARTIAL: 2.05, REJECT: 2.05, SLOW: 2.05 };
@@ -196,6 +202,7 @@ export function createMockTossServer() {
     rankingsRejectType: null,
     lastRankingsType: null,
     cancelReturnsStatus: null,
+    conditionalOrderRejectOnce: null,
   };
 
   const server = http.createServer(async (req, res) => {
@@ -430,6 +437,12 @@ export function createMockTossServer() {
     // ---------- 3.6) 조건주문 (실스펙: SINGLE/OCO/OTO) ----------
     if (path === "/api/v1/conditional-orders" && method === "POST") {
       if (!req.headers["x-tossinvest-account"]) return sendJson(res, 400, { error: "missing_account" });
+      // [v0.57.0] 오너 실사례(BGIN/SMJF) 재현용 강제 실패 — 한 번 쓰면 원상복귀.
+      if (state.conditionalOrderRejectOnce) {
+        const { httpStatus, code, message } = state.conditionalOrderRejectOnce;
+        state.conditionalOrderRejectOnce = null;
+        return sendJson(res, httpStatus, { error: { requestId: "mock-req-id", code, message } });
+      }
       const body = await readJsonBody(req);
       const type = String(body.type ?? "SINGLE") as MockConditional["type"];
       const first = body.first as MockConditional["first"] | undefined;
@@ -437,16 +450,19 @@ export function createMockTossServer() {
 
       // 실스펙 검증 흉내: 필수 필드
       if (!body.symbol || !first || !body.expireDate || !body.quantity) {
-        return sendJson(res, 400, { error: "invalid_request", message: "필수 필드 누락" });
+        return sendJson(res, 400, { error: { code: "invalid-request", message: "필수 필드 누락" } });
       }
       // OCO 규칙: 둘 다 SELL + 익절 감시가 > 현재가 > 손절 감시가
       if (type === "OCO") {
         const cur = priceOf(state.prices, String(body.symbol));
-        if (!second) return sendJson(res, 400, { error: "invalid_request", message: "OCO는 second 필수" });
+        if (!second) return sendJson(res, 400, { error: { code: "invalid-request", message: "OCO는 second 필수" } });
         if (first.orderSide !== "SELL" || second.orderSide !== "SELL")
-          return sendJson(res, 400, { error: "invalid_request", message: "OCO는 두 다리 모두 SELL" });
+          return sendJson(res, 400, { error: { code: "invalid-request", message: "OCO는 두 다리 모두 SELL" } });
+        // [v0.57.0 실스펙 정합] 실제 토스 에러 메시지 그대로("현재가가 두 감시가 사이에 있어야
+        //   합니다") — registerOcoForFilled가 이 문구를 실제로 감지해 재시도/보호매도로 넘어가는지
+        //   테스트가 검증하므로, 목도 실제 문구와 같아야 그 검증이 의미가 있다.
         if (!(Number(first.triggerPrice) > cur && cur > Number(second.triggerPrice)))
-          return sendJson(res, 400, { error: "invalid_request", message: "OCO는 first감시가>현재가>second감시가" });
+          return sendJson(res, 400, { error: { code: "invalid-request", message: "OCO 조건주문은 현재가가 두 감시가 사이에 있어야 합니다." } });
       }
 
       state.seq += 1;

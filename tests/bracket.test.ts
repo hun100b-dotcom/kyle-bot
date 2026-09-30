@@ -266,6 +266,116 @@ describe("매수+익절+손절 동시 주문(브라켓) — v0.25.0", () => {
   }, 10_000);
 });
 
+describe("[v0.57.0 긴급 수정] registerOcoForFilled — 체결 후 보호주문 등록 실패 시 재시도 + 즉시 보호매도(BGIN/SMJF 실사례 회귀)", () => {
+  // [배경] 오너가 실제 토스 응답 캡처 3장을 보고했다:
+  //   ① BGIN $2.1×8주 — HTTP 422 insufficient-sellable-quantity "보유 수량이 없습니다"
+  //   ② SMJF $2.61×10주 — HTTP 400 invalid-request "OCO 조건주문은 현재가가 두 감시가
+  //      사이에 있어야 합니다"
+  //   둘 다 "체결됐지만 보호주문 등록 실패"로 끝나 포지션이 무보호 상태로 남았다. 예전엔
+  //   registerOcoForFilled가 한 번 실패하면 그대로 포기하고 저널 경고만 남겼다 — 이 테스트는
+  //   ①류(일시적 경합)는 재시도로 스스로 회복되고, ②류(가격이 감시가를 결정적으로 넘어섬)는
+  //   재시도 대신 즉시 시장가 매도로 포지션을 보호하는지 확인한다.
+  type EngineInternals = { ocoRetryDelaysMs: number[] };
+
+  it("①류: insufficient-sellable-quantity처럼 일시적인 실패는 잠깐 뒤 재시도해서 정상 등록된다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-oco-retry-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      await eng.quote("AAPL"); // 목 서버 인스턴스를 먼저 깨워야 아래 state 조작이 먹는다.
+      (eng as unknown as EngineInternals).ocoRetryDelaysMs = [20, 20, 20]; // 테스트 전용 — 실제는 3초/5초/8초
+      (eng as unknown as { mock: { state: { conditionalOrderRejectOnce: { httpStatus: number; code: string; message: string } | null } } }).mock.state.conditionalOrderRejectOnce = {
+        httpStatus: 422,
+        code: "insufficient-sellable-quantity",
+        message: "보유 수량이 없습니다.",
+      };
+
+      const ocoPromise = waitForJournal(eng, (e) => e.kind === "oco");
+      await eng.placeBracket({
+        symbol: "AAPL",
+        price: 2.1, // 현재가(2.05)보다 위 → 즉시 체결
+        quantity: 1,
+        tpTrigger: 2.5,
+        tpPrice: 2.5,
+        slTrigger: 1.8,
+        slPrice: 1.79,
+        expireDate: "2026-12-30",
+        watchMinutes: 1,
+        pollMs: 20,
+      });
+      const ocoEntry = await ocoPromise;
+      expect(ocoEntry.summary).toContain("OCO 등록 완료"); // 재시도 끝에 결국 성공
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it("②류: 체결 직후 가격이 이미 익절 감시가 이상으로 올라가 있으면 OCO 대신 즉시 시장가로 매도해 보호한다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-oco-protect-tp-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      await eng.quote("AAPL");
+      (eng as unknown as EngineInternals).ocoRetryDelaysMs = [20, 20, 20];
+      // 현재가를 미리 익절 감시가(2.5)보다 높은 2.6으로 올려 둔다 — 매수 진입가(2.65)는
+      // 그보다 더 위라 즉시 체결되지만, 체결된 순간부터 이미 "감시가 사이" 조건이 깨져 있다.
+      await eng.mockSetPrice("AAPL", 2.6);
+
+      const protectedPromise = waitForJournal(eng, (e) => e.kind === "info" && e.summary.includes("즉시 시장가로 매도해 포지션을 정리했습니다"));
+      await eng.placeBracket({
+        symbol: "AAPL",
+        price: 2.65,
+        quantity: 1,
+        tpTrigger: 2.5,
+        tpPrice: 2.5,
+        slTrigger: 1.8,
+        slPrice: 1.79,
+        expireDate: "2026-12-30",
+        watchMinutes: 1,
+        pollMs: 20,
+      });
+      const info = await protectedPromise;
+      expect(info.summary).toContain("익절 감시가($2.5) 이상으로 이미 올라");
+
+      // OCO는 등록되지 않았어야 한다(등록 자체가 불가능한 상황이었으므로).
+      const journal = eng.getJournal();
+      expect(journal.some((j) => j.kind === "oco")).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it("②류: 체결 직후 가격이 이미 손절 감시가 이하로 내려가 있어도 즉시 시장가로 매도해 보호한다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-oco-protect-sl-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      await eng.quote("AAPL");
+      (eng as unknown as EngineInternals).ocoRetryDelaysMs = [20, 20, 20];
+      // 현재가를 손절 감시가(1.8)보다 낮은 1.5로 내려 둔다.
+      await eng.mockSetPrice("AAPL", 1.5);
+
+      const protectedPromise = waitForJournal(eng, (e) => e.kind === "info" && e.summary.includes("즉시 시장가로 매도해 포지션을 정리했습니다"));
+      await eng.placeBracket({
+        symbol: "AAPL",
+        price: 1.6, // 현재가(1.5)보다 위 → 즉시 체결
+        quantity: 1,
+        tpTrigger: 2.5,
+        tpPrice: 2.5,
+        slTrigger: 1.8,
+        slPrice: 1.79,
+        expireDate: "2026-12-30",
+        watchMinutes: 1,
+        pollMs: 20,
+      });
+      const info = await protectedPromise;
+      expect(info.summary).toContain("손절 감시가($1.8) 이하로 이미 내려가");
+
+      const journal = eng.getJournal();
+      expect(journal.some((j) => j.kind === "oco")).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
+});
+
 describe("[v0.54.0 긴급 수정] placeOto — '오입력 방지' 가격가드가 예약 매수+익절 경로도 실제로 검사한다(프로퓨사 실사례 회귀)", () => {
   // AAPL 목 서버 기본 현재가는 2.05 — 이 값 대비 터무니없이 먼 진입가/익절가를 넣어
   // 재현한다(오너 보고: 프로퓨사가 현재가와 동떨어진 가격에 조건주문이 걸림).
@@ -368,12 +478,13 @@ describe("[v0.54.0 긴급 수정] onAutoBracketResolved — '장시간 미체결
     autoTradePositions: AutoPosition[];
     addAutoTradeHistory: (pos: AutoPosition) => void;
     onAutoBracketResolved: (symbol: string, entry: number, res: WatchAndBracketResult) => void;
+    autoTradeRealizedPnlUsd: number;
   };
 
-  function pushWatchingPosition(eng: ToolEngine, symbol: string, entry: number, enteredAtMs: number): void {
+  function pushWatchingPosition(eng: ToolEngine, symbol: string, entry: number, enteredAtMs: number, quantity = 1): void {
     const engAny = eng as unknown as EngineInternals;
     const pos: AutoPosition = {
-      symbol, entry, tp: entry * 1.2, sl: entry * 0.9, quantity: 1, enteredAtMs,
+      symbol, entry, tp: entry * 1.2, sl: entry * 0.9, quantity, enteredAtMs,
       status: "watching", conditionalOrderId: null,
     };
     engAny.autoTradePositions.push(pos);
@@ -415,6 +526,73 @@ describe("[v0.54.0 긴급 수정] onAutoBracketResolved — '장시간 미체결
       expect(h?.note).not.toContain("장시간 미체결로 자동 취소");
       expect(h?.note).toContain("설정한 감시시간이 되기 전");
       expect(engAny.autoTradePositions.find((p) => p.symbol === "EARLYX")).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("[v0.57.0 긴급 수정] protected_by_market_sell이면 '실패'가 아니라 실제 청산으로 손익을 계산해 기록한다(BGIN/SMJF 회귀)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-resolve-protect-win-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const engAny = eng as unknown as EngineInternals;
+      const enteredAtMs = Date.now();
+      // entry=$10, quantity=1(위 pushWatchingPosition 기본값) — exitPrice $12로 보호매도됐다고 가정(이익).
+      pushWatchingPosition(eng, "PROTECTX", 10, enteredAtMs);
+      engAny.autoTradeRealizedPnlUsd = 0;
+
+      engAny.onAutoBracketResolved("PROTECTX", 10, { status: "protected_by_market_sell", exitPrice: 12, quantity: 1 });
+
+      const h = eng.getAutoTradeHistory().find((e) => e.symbol === "PROTECTX");
+      expect(h?.status).toBe("closed_win"); // "oco_failed"(실패)가 아니라 실제 청산 결과로 기록됨
+      expect(h?.exitPrice).toBe(12);
+      expect(h?.pnlUsd).toBe(2); // (12-10)*1주
+      expect(h?.note).toContain("즉시 시장가로 매도해 정리함");
+      expect(engAny.autoTradeRealizedPnlUsd).toBe(2); // 이번 실행 누적손익에도 반영됨
+      expect(engAny.autoTradePositions.find((p) => p.symbol === "PROTECTX")).toBeUndefined(); // 자리도 비워짐
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("[v0.57.0] protected_by_market_sell로 손실 확정된 경우엔 closed_loss로 기록한다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-resolve-protect-loss-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const engAny = eng as unknown as EngineInternals;
+      const enteredAtMs = Date.now();
+      pushWatchingPosition(eng, "PROTECTY", 10, enteredAtMs); // entry $10, exitPrice $8 → 손실
+      engAny.autoTradeRealizedPnlUsd = 0;
+
+      engAny.onAutoBracketResolved("PROTECTY", 10, { status: "protected_by_market_sell", exitPrice: 8, quantity: 1 });
+
+      const h = eng.getAutoTradeHistory().find((e) => e.symbol === "PROTECTY");
+      expect(h?.status).toBe("closed_loss");
+      expect(h?.pnlUsd).toBe(-2);
+      expect(engAny.autoTradeRealizedPnlUsd).toBe(-2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("[2차 검토에서 발견 — 긴급 수정] 부분체결로 실제 보호매도 수량이 원래 계획 수량과 다르면, 손익은 반드시 실제 매도 수량으로 계산한다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-resolve-protect-partial-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const engAny = eng as unknown as EngineInternals;
+      const enteredAtMs = Date.now();
+      // 원래 계획은 3주였지만(포지션 기록), 실제로는 2주만 체결돼 그 2주만 보호매도됐다고 가정
+      // — registerOcoForFilled는 항상 "실제 체결된 수량"을 받아 처리하므로 res.quantity=2가 진실이다.
+      pushWatchingPosition(eng, "PARTIALZ", 10, enteredAtMs, 3);
+      engAny.autoTradeRealizedPnlUsd = 0;
+
+      engAny.onAutoBracketResolved("PARTIALZ", 10, { status: "protected_by_market_sell", exitPrice: 12, quantity: 2 });
+
+      const h = eng.getAutoTradeHistory().find((e) => e.symbol === "PARTIALZ");
+      // [핵심] pos.quantity(3)이 아니라 res.quantity(2)로 계산해야 한다 — (12-10)*2=4.
+      // 옛 코드(pos.quantity 사용)였다면 (12-10)*3=6으로 50% 과다 계상됐을 것이다.
+      expect(h?.pnlUsd).toBe(4);
+      expect(engAny.autoTradeRealizedPnlUsd).toBe(4);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
