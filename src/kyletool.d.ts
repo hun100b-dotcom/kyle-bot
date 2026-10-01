@@ -124,6 +124,9 @@ interface ToolSettings {
   /** [v0.42.0] 장기간 미체결 자동취소 기준(분) — 전부터 있던 값이지만 하드코딩이라 화면에 안 보이고
    *  조절도 안 됐던 것을 오너 요청으로 노출/조절 가능하게 했다. */
   autoTradeWatchMinutes: number;
+  /** [v0.61.8] 삼분할 매매기법의 몇 분할 타점을 자동매매 매수가로 쓸지(1~2). 공장값 1(가장
+   *  얕은 눌림). 2를 고르면 더 깊이 눌렸을 때만 사는 보수적 진입(체결 자체는 덜 될 수 있음). */
+  autoTradeEntryLevel: 1 | 2;
   autoTradeEnabled: boolean;
   /** [v0.44.0] 시스템 휴무 시간대(매일 05:00~17:00 KST — 스크리닝·주문·자동매매 전부 정지) 기능
    *  켜짐 여부. 다른 자동매매 토글과 달리 이건 재시작해도 유지된다(안전장치). */
@@ -724,7 +727,14 @@ interface KyletoolBridge {
   autoTradeStatus(): Promise<AutoTradeStatus>;
   /** [v0.45.0] 감시 중인 포지션을 지금 바로 재확인(체결·익절/손절 발동 여부)하고 최신 상태를 돌려준다. */
   reconcileAutoPositionsNow(): Promise<AutoTradeStatus>;
-  saveAutoTradeSettings(input: { maxPositions?: number; maxLossPct?: number; maxInvestPct?: number; watchMinutes?: number }): Promise<ToolSettings>;
+  saveAutoTradeSettings(input: {
+    maxPositions?: number;
+    maxLossPct?: number;
+    maxInvestPct?: number;
+    watchMinutes?: number;
+    /** [v0.61.8] 진입 타점 분할(1~2). */
+    entryLevel?: 1 | 2;
+  }): Promise<ToolSettings>;
   /** [v0.44.0] 지금 "시스템 휴무 시간대(또는 휴장)"인지 + 왜 + 언제 재개되는지. */
   getSystemPauseStatus(): Promise<{ paused: boolean; reason: string | null; resumesAtMs: number | null }>;
   /** [v0.44.0] 시스템 휴무 시간대(05:00~17:00 KST) 기능을 켜고 끈다. */

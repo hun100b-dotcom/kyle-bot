@@ -365,6 +365,34 @@ export function computeSeedQty(seedUsd: number | null, pct: number, price: numbe
 }
 
 /**
+ * [v0.60.0→v0.61.8] "방향 정합성" 재진입 체크 — 같은 종목에 직전보다 더 비싼 타점으로
+ *   재진입하려는 시도를 막기 위해 비교할 "직전 기록"을 찾는다. 순수 함수로 빼서(autoTradeTick
+ *   안에 묻혀 있던 로직) 실제 스캔 없이도 검증할 수 있게 했다 — 오너 지적("과거 매매이력을
+ *   기준으로 하면 진입할 종목도 막히는 경우가 있음")을 코드로 증명하는 자리.
+ *
+ *   비교 대상: ①아직 안 끝난(watching/active) 포지션은 진입 시각과 무관하게 항상 포함(그
+ *   포지션이 살아있는 한 더 비싸게 또 사는 건 전략 모순이므로). ②완전히 청산된 매매는
+ *   "recentWindowMs 이내에 진입했던" 것만(기본값은 자동매매 한 사이클, 5분 — v0.60.0 원래
+ *   사고인 "같은 사이클 직후 재평가에서 노이즈로 역전"은 여전히 잡되, 몇 시간~하루 전에 이미
+ *   끝난 매매가 전혀 다른 시점의 정당한 새 기회까지 막는 일은 없앤다).
+ *   드라이런 기록은 애초에 비교 대상에서 제외(실제로 시도됐던 진입만 기준).
+ */
+export function findDirectionConflict(
+  history: AutoTradeHistoryEntry[],
+  symbol: string,
+  nowMs: number,
+  recentWindowMs: number,
+): AutoTradeHistoryEntry | null {
+  const candidates = history.filter((h) => {
+    if (h.symbol !== symbol || h.status === "dryrun") return false;
+    if (h.status === "watching" || h.status === "active") return true;
+    const enteredAtMs = Number(h.id.split("@").pop());
+    return Number.isFinite(enteredAtMs) && nowMs - enteredAtMs < recentWindowMs;
+  });
+  return candidates.length > 0 ? candidates[candidates.length - 1] : null;
+}
+
+/**
  * [v0.32.0] 스캔 결과 중 "이번에 새로 확정(confirmed)된" 종목만 골라낸다 — 직전 스캔에서
  *   이미 확정 상태였던 종목은 제외해 "관찰 확정" 알림이 5분마다 중복으로 뜨지 않게 한다.
  *   순수 함수라 실제 스크리너 판정 로직과 분리해 테스트할 수 있다.
@@ -933,6 +961,10 @@ export interface AutoTradeHistoryEntry {
     maxLossPct: number;
     maxInvestPct: number;
     watchMinutes: number;
+    /** [v0.61.8] 진입 당시 선택돼 있던 타점 분할(1~2) — 연구탭에서 "몇 분할로 들어갔을 때
+     *  성적이 어땠는지" 비교할 수 있게. 이 필드가 생기기 전 기록은 undefined(=당시엔 늘
+     *  1분할 고정이었으므로 해석 시 1로 간주해도 된다). */
+    entryLevel?: 1 | 2;
   };
 }
 
@@ -1025,6 +1057,14 @@ export class ToolEngine extends EventEmitter {
   private autoTradeMaxPositions = 3; //  동시 보유 최대 종목 수(오너 기본값)
   private autoTradeMaxLossPct = 5; //    최대손실 한도(시드 대비 %) — 넘으면 자동매매 자동 중단
   private autoTradeMaxInvestPct = 30; // 종목 1개당 배정하는 시드 대비 투입 비율(%) — 종목 수로 나누지 않음
+  /** [v0.61.8 — 오너 지시] 삼분할 매매기법의 몇 분할 타점을 자동매매 매수가로 쓸지(1~2).
+   *  1분할(얕은 눌림, EMA200과 전봉종가 간격의 1/3 지점)이 공장값. 2분할(gap의 2/3 지점,
+   *  더 깊이 눌렸을 때)을 고르면 더 보수적인(더 싸게 사려는) 진입이 된다 — 그만큼 체결
+   *  자체가 덜 될 수 있다(깊은 눌림이 덜 자주 오므로). 3분할(EMA200 자체)은 선택지에서
+   *  뺐다 — 삼분할 매매기법상 3분할은 "마지막 보루" 성격이라 자동 매수 대상으로 쓰기엔
+   *  더 신중한 사람 판단이 필요하다는 게 오너 기존 설계 의도(자동매매는 1분할만 쓴다는
+   *  원래 결정)와 결이 맞다. */
+  private autoTradeEntryLevel: 1 | 2 = 1;
   // [v0.44.0] 오너 결정 — 매일 05:00~17:00 KST(데이마켓+애프터 구간, 토스 합성시세)는 스크리닝·
   //   수동 주문·자동매매를 전부 멈춘다. 재개는 정확히 17:00(프리마켓 시작)이다. "켜짐" 여부는
   //   다른 자동매매 토글과 달리 껐다 켜도 유지한다(안전장치라 기본 켜짐을 지키는 게 맞음).
@@ -1296,6 +1336,9 @@ export class ToolEngine extends EventEmitter {
     // [v0.42.0] 저장된 미체결 자동취소 기준(분) 복원.
     const awm = Number(process.env.AUTO_WATCH_MINUTES);
     if (Number.isFinite(awm) && awm > 0) this.autoTradeWatchMinutes = Math.round(awm);
+    // [v0.61.8] 저장된 진입 타점 분할(1~2) 복원.
+    const ael = Number(process.env.AUTO_ENTRY_LEVEL);
+    if (ael === 1 || ael === 2) this.autoTradeEntryLevel = ael;
     // [v0.44.0] 저장된 시스템 휴무 시간대 기능 켜짐 여부 복원(기본 켜짐 — 명시적으로 껐을 때만 꺼짐).
     if (process.env.SYSTEM_PAUSE_ENABLED === "false") this.systemPauseEnabled = false;
     // [v0.28.0] 저장된 자동매매 스크리너 조건 복원(4개 전부 오너가 수정 가능).
@@ -1363,6 +1406,7 @@ export class ToolEngine extends EventEmitter {
       autoTradeMaxLossPct: this.autoTradeMaxLossPct,
       autoTradeMaxInvestPct: this.autoTradeMaxInvestPct,
       autoTradeWatchMinutes: this.autoTradeWatchMinutes, // [v0.42.0] 장기간 미체결 자동취소 기준(분)
+      autoTradeEntryLevel: this.autoTradeEntryLevel, // [v0.61.8] 진입 타점 분할(1~2)
       autoTradeEnabled: this.autoTradeEnabled,
       systemPauseEnabled: this.systemPauseEnabled, // [v0.44.0] 시스템 휴무 시간대(05:00~17:00 KST) 기능
       // [v0.28.0] 자동매매 스크리너 조건(4개)
@@ -1408,6 +1452,7 @@ export class ToolEngine extends EventEmitter {
     maxLossPct?: number;
     maxInvestPct?: number;
     watchMinutes?: number; // [v0.42.0] 장기간 미체결 자동취소 기준(분) — 여기서 함께 저장
+    entryLevel?: 1 | 2; // [v0.61.8] 진입 타점 분할(1~2) — 여기서 함께 저장
   }) {
     if (typeof input.maxPositions === "number" && Number.isFinite(input.maxPositions) && input.maxPositions > 0) {
       this.autoTradeMaxPositions = Math.round(input.maxPositions);
@@ -1423,13 +1468,17 @@ export class ToolEngine extends EventEmitter {
       // "자동 취소 안 함"과 다를 바 없어 의미가 퇴색된다).
       this.autoTradeWatchMinutes = Math.round(Math.min(60, Math.max(1, input.watchMinutes)));
     }
+    if (input.entryLevel === 1 || input.entryLevel === 2) {
+      this.autoTradeEntryLevel = input.entryLevel;
+    }
     this.persistEnv();
     this.addJournal({
       kind: "info",
       symbol: "-",
       summary:
         `자동매매 한도 저장 — 최대 ${this.autoTradeMaxPositions}종목 · 최대손실 시드대비 ${this.autoTradeMaxLossPct}% · ` +
-        `총 투입한도 시드대비 ${this.autoTradeMaxInvestPct}% · 미체결 자동취소 ${this.autoTradeWatchMinutes}분`,
+        `총 투입한도 시드대비 ${this.autoTradeMaxInvestPct}% · 미체결 자동취소 ${this.autoTradeWatchMinutes}분 · ` +
+        `진입 타점 ${this.autoTradeEntryLevel}분할`,
     });
     return this.getSettings();
   }
@@ -1698,6 +1747,7 @@ export class ToolEngine extends EventEmitter {
       `AUTO_MAX_LOSS_PCT=${this.autoTradeMaxLossPct}`,
       `AUTO_MAX_INVEST_PCT=${this.autoTradeMaxInvestPct}`,
       `AUTO_WATCH_MINUTES=${this.autoTradeWatchMinutes}`, // [v0.42.0] 장기간 미체결 자동취소 기준(분)
+      `AUTO_ENTRY_LEVEL=${this.autoTradeEntryLevel}`, // [v0.61.8] 진입 타점 분할(1~2)
       `SYSTEM_PAUSE_ENABLED=${this.systemPauseEnabled ? "true" : "false"}`, // [v0.44.0] 시스템 휴무 시간대 기능
       // --- [v0.28.0] 자동매매 스크리너 조건(4개) ---
       `AUTO_SCAN_COUNT=${this.autoScanCount}`,
@@ -3564,7 +3614,7 @@ export class ToolEngine extends EventEmitter {
         // 것도 없이 바로 정리한다(예전엔 이 경우 재확인 GET도 404로 실패하고 그
         // 실패를 조용히 삼켜 원래의 "취소 실패"만 보여줬다 — 오너가 본 그 증상).
         if (this.isConditionalOrderGoneError(e)) {
-          this.clearAutoPositionWithoutPnl(
+          await this.clearAutoPositionWithoutPnl(
             pos,
             `🤖 자동매매 포지션 정리: ${symbol}(토스에 조건주문이 더 이상 존재하지 않음)`,
             "취소 시도 시 토스에 조건주문이 이미 없었음(직접 취소했거나 만료된 것으로 보임 — 손익 미확정)",
@@ -3574,13 +3624,13 @@ export class ToolEngine extends EventEmitter {
         try {
           const resp = await getConditionalOrder(pos.conditionalOrderId);
           if (resp.status === "COMPLETED") {
-            this.resolveCompletedConditional(pos, resp);
+            await this.resolveCompletedConditional(pos, resp);
             return { ok: true, message: `${symbol}은 이미 종료된 주문이라 취소 대신 목록에서 정리했습니다(익절/손절/수동취소 중 하나로 이미 끝나 있었음).` };
           }
         } catch (e2) {
           // [v0.60.1] 재확인(GET) 자체가 404 conditional-order-not-found면 이것도 정리 대상.
           if (this.isConditionalOrderGoneError(e2)) {
-            this.clearAutoPositionWithoutPnl(
+            await this.clearAutoPositionWithoutPnl(
               pos,
               `🤖 자동매매 포지션 정리: ${symbol}(토스에 조건주문이 더 이상 존재하지 않음)`,
               "취소 재확인 시 토스에 조건주문이 이미 없었음(직접 취소했거나 만료된 것으로 보임 — 손익 미확정)",
@@ -5733,7 +5783,8 @@ export class ToolEngine extends EventEmitter {
   //   대신 아래 안전장치로 "무엇을 얼마나 자동으로 할지"는 여전히 오너가 정한다:
   //     ① 마스터 스위치(이 자체는 절대 저장 안 함 — 앱 켤 때마다 다시 켜야 함)
   //     ② 최대 종목 수·최대손실 한도·최대 투입 비율(전부 설정 탭에서 언제든 수정 가능)
-  //     ③ 오직 삼분할 매매기법의 "1분할" 타점만 쓴다(가장 얕게 눌렸을 때만 — 오너 지시)
+  //     ③ 삼분할 매매기법의 1~2분할 중 오너가 고른 한 타점만 쓴다(공장값 1분할 — 가장
+  //        얕게 눌렸을 때만, [v0.61.8] 설정 탭 "진입 타점"에서 선택 가능 — 오너 지시)
   //     ④ 신규 진입은 반드시 lib/auto-risk.ts의 canAutoEnter 게이트를 통과해야 나간다(우회 금지 —
   //        이 원칙은 CLAUDE.md의 옛 lib/risk.ts canPlaceOrder 규칙을 v2 방식으로 재구현한 것.
   //        조사해보니 실제 lib/risk.ts 파일은 이미 삭제되어 있었다 — 오너에게 보고함).
@@ -5777,7 +5828,7 @@ export class ToolEngine extends EventEmitter {
         `🤖 자동매매 시작 — 최대 ${this.autoTradeMaxPositions}종목 · 최대손실 한도 시드대비 ${this.autoTradeMaxLossPct}% · ` +
         `종목당 투입 시드대비 ${this.autoTradeMaxInvestPct}%(최대 동시 투입 합계 최대 ${(this.autoTradeMaxInvestPct * this.autoTradeMaxPositions).toFixed(0)}%) · ` +
         `미체결 자동취소 ${this.autoTradeWatchMinutes}분 · ` +
-        `5분마다 탐색(삼분할 1분할 타점만, 이 프로그램이 켜져 있는 동안만 작동)` +
+        `5분마다 탐색(삼분할 ${this.autoTradeEntryLevel}분할 타점만, 이 프로그램이 켜져 있는 동안만 작동)` +
         (carried > 0 ? ` · ⏪ 이전에 감시하던 ${carried}종목을 그대로 이어받아 감시합니다(재시작·업데이트에도 유지됨)` : ""),
     });
     this.runAutoTradeTick(); // 시작하자마자 한 번 즉시 돌리고(이어받은 포지션도 곧바로 재확인됨)
@@ -5925,7 +5976,7 @@ export class ToolEngine extends EventEmitter {
    *   이것: 취소 버튼은 cancelConditional(살아있는 조건주문을 취소)만 시도했지, "이미
    *   끝나 있어서 취소할 게 없는" 경우는 전혀 처리하지 않아 매번 실패만 하고 있었다.
    */
-  private resolveCompletedConditional(pos: AutoPosition, resp: ConditionalOrderResponse): void {
+  private async resolveCompletedConditional(pos: AutoPosition, resp: ConditionalOrderResponse): Promise<void> {
     const secondTriggered = resp.second?.triggeredOrderId != null;
     const firstTriggered = resp.first?.triggeredOrderId != null;
     if (firstTriggered || secondTriggered) {
@@ -5958,7 +6009,7 @@ export class ToolEngine extends EventEmitter {
     } else {
       // 어느 다리도 발동 안 했는데 그룹이 COMPLETED = 사람이 [주문현황]에서 직접 취소한 경우
       // — 손익 반영 없이 자리만 비운다.
-      this.clearAutoPositionWithoutPnl(
+      await this.clearAutoPositionWithoutPnl(
         pos,
         `자동매매 포지션의 조건주문이 취소돼 있어 감시를 멈춥니다: ${pos.symbol}`,
         "사람이 [주문현황]에서 조건주문을 직접 취소함(손익 미확정)",
@@ -5972,14 +6023,46 @@ export class ToolEngine extends EventEmitter {
    *   분기와 아래 reconcileAutoPositions의 "조건주문 자체가 더 이상 존재하지 않음(404)"
    *   분기가 이 메서드를 공유한다.
    */
-  private clearAutoPositionWithoutPnl(pos: AutoPosition, journalSummary: string, historyNote: string): void {
+  /**
+   * [v0.61.8 긴급 보강 — 오너 지시 "왜 이런 종목들이 발생하지 않을 수 있을지 검토"]
+   *   오너 실사용 사고(2026-10-01, CNTB): 손절 직전 조건주문을 직접 취소했는데("손절
+   *   방지" 의도), 이 함수가 "조건주문이 사라짐 = 거래 종료"로만 처리해 자동매매 추적
+   *   에서 빠지고 끝이었다 — 그런데 **주식 자체는 계좌에 그대로 남아 있을 수 있다**
+   *   (조건주문 취소는 "보호장치 해제"일 뿐 "매도"가 아니므로). 보호장치 없이 방치된
+   *   보유 종목을 오너가 모른 채 지나칠 수 있는 게 진짜 위험 — 이제 정리하기 전에
+   *   실계좌를 다시 확인해, 아직 보유 중이면 훨씬 강하게(알림 포함) 경고한다.
+   *   [한계] 이래도 "최대 종목 수" 계산(effectiveActivePositionCount)에는 이 종목이 다시
+   *   안 잡힌다 — 그 부분까지 고치려면 "기보유 종목은 한도에 안 잡히게" 한 v0.39.0
+   *   설계와 충돌해 범위가 커진다(docs/audit-2026-10-01.md 후속 논의 필요, 이번엔 보류).
+   */
+  private async clearAutoPositionWithoutPnl(pos: AutoPosition, journalSummary: string, historyNote: string): Promise<void> {
     this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
     this.saveAutoPositions();
-    this.addJournal({ kind: "info", symbol: pos.symbol, summary: journalSummary });
+    const heldSymbols = await this.fetchRealHeldSymbols();
+    const stillHeld = heldSymbols?.has(pos.symbol.toUpperCase()) ?? null;
+    let finalSummary = journalSummary;
+    let finalNote = historyNote;
+    if (stillHeld) {
+      finalSummary =
+        `🚨 ${pos.symbol} — 조건주문(익절/손절 보호장치)은 사라졌는데 실계좌엔 아직 ${pos.quantity}주가 남아 있습니다! ` +
+        `보호장치 없이 방치되고 있다는 뜻이니 [주문현황]이나 토스 앱에서 직접 익절/손절을 다시 걸어 주세요. (${journalSummary})`;
+      finalNote = `⚠️ 조건주문만 사라지고 실계좌엔 ${pos.quantity}주가 그대로 남아있음(보호장치 없이 방치 — 직접 재확인 필요). ${historyNote}`;
+    } else if (stillHeld === false) {
+      finalNote = `실계좌 재확인 결과 보유 수량 0(실제로 매도된 것으로 보임, 손익 미확정). ${historyNote}`;
+    }
+    // stillHeld===null(실계좌 재확인 자체가 실패)이면 "확인 못 함"을 "괜찮음"으로 착각하지
+    // 않게 원래 메시지 그대로 둔다(섣부른 안심 금지).
+    this.addJournal({
+      kind: "info",
+      symbol: pos.symbol,
+      summary: finalSummary,
+      notify: !!stillHeld, // 아직 실제로 보유 중일 때만 강한 알림(Discord 포함) — 단순 정리면 기존처럼 조용히
+      notifyTitle: stillHeld ? `🚨 보호장치 없이 보유 중: ${pos.symbol}` : undefined,
+    });
     this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
       status: "closed_manual",
       exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
-      note: historyNote,
+      note: finalNote,
     });
   }
 
@@ -6023,7 +6106,7 @@ export class ToolEngine extends EventEmitter {
         // 확정적 신호다 — 아래 재시도 카운트(3회부터 경고만)를 태우지 않고 바로 정리한다.
         if (this.isConditionalOrderGoneError(e)) {
           this.reconcileFailCounts.delete(posKey);
-          this.clearAutoPositionWithoutPnl(
+          await this.clearAutoPositionWithoutPnl(
             pos,
             `🤖 ${pos.symbol}의 조건주문을 토스에서 더 이상 찾을 수 없어(존재하지 않는 설정) 자동으로 정리했습니다 — ` +
               `실제 체결·손익 여부는 [주문현황]이나 토스 앱에서 직접 확인해 주세요.`,
@@ -6071,7 +6154,7 @@ export class ToolEngine extends EventEmitter {
       //   이 불일치 때문에 실계좌에서는 이 분기가 절대 안 걸려, 이미 끝난 포지션이 영원히
       //   "감시 중"으로 남아있었다 — 오너가 반복 보고한 정합성 버그의 진짜 원인.
       if (resp.status === "COMPLETED") {
-        this.resolveCompletedConditional(pos, resp);
+        await this.resolveCompletedConditional(pos, resp);
       }
       // WATCHING(그대로 감시 중)이면 할 일 없음.
     }
@@ -6502,10 +6585,14 @@ export class ToolEngine extends EventEmitter {
 
         let level1: SplitOrder;
         try {
-          // [오너 지시] 삼분할 매매기법의 "1분할" 타점만 쓴다 — 가장 얕게 눌렸을 때만 자동 진입.
-          level1 = calcSplit3(cand.prevClose, cand.ema200, this.defaultTpPct, this.defaultSlPct).splits[0];
+          // [오너 지시 → v0.61.8 설정으로 노출] 삼분할 매매기법의 1~2분할 중 오너가 고른 한
+          //   타점만 쓴다(설정 탭 "진입 타점" — 공장값 1분할, 가장 얕게 눌렸을 때). 변수명은
+          //   과거 "항상 1분할"이던 시절 이름을 그대로 쓰지만, 실제로는 autoTradeEntryLevel이
+          //   가리키는 분할이다(아래 전부 이 변수를 통해서만 타점가를 쓴다).
+          level1 = calcSplit3(cand.prevClose, cand.ema200, this.defaultTpPct, this.defaultSlPct).splits[this.autoTradeEntryLevel - 1];
         } catch {
-          this.autoTradeSkipReasons[cand.symbol] = "1분할 진입 조건 불성립(전봉종가가 EMA200 이하) — 삼분할 매매기법상 지금은 진입 대상이 아닙니다.";
+          this.autoTradeSkipReasons[cand.symbol] =
+            `${this.autoTradeEntryLevel}분할 진입 조건 불성립(전봉종가가 EMA200 이하) — 삼분할 매매기법상 지금은 진입 대상이 아닙니다.`;
           continue; // 진입 필터 불성립(전봉종가<=EMA200) — 이 종목은 건너뜀
         }
 
@@ -6515,27 +6602,40 @@ export class ToolEngine extends EventEmitter {
           continue; // [오너 지시] 동일종목 동일타점 재진입 방지
         }
 
-        // [v0.60.0 긴급 수정 — 오너 실사용 보고: "1차 타점 3944 익절 후, 하락하다 일시 반등할 때
+        // [v0.60.0 — 오너 실사용 보고: "1차 타점 3944 익절 후, 하락하다 일시 반등할 때
         //   2차 타점을 더 높은 3966으로 잡아 오발주"] 원인: level1은 그 사이클(run.results)의
         //   prevClose/ema200 스냅샷으로 계산될 뿐, 이전에 같은 종목에 넣었던 타점과는 전혀 비교
         //   하지 않는다 — 5분마다 새 스캔이 돌 때마다 그 순간의 캔들만 보고 독립적으로 타점을
-        //   다시 계산하므로, 하락 추세 중 일시 반등이 오면 prevClose가 올라가 새 타점(entry1)이
-        //   직전 타점보다 **더 높게** 나올 수 있다(삼분할 기법은 "얕게 눌렸을 때 사는" 전략이라,
-        //   같은 종목에 또 들어갈 땐 직전보다 같거나 낮은 가격이어야 논리적으로 맞다 — 하락
-        //   추세에서 더 비싸게 사는 재진입은 그 자체로 모순). 최근 24시간 안에 이 종목에 넣었던
-        //   가장 최근 타점(드라이런 제외 — 실제로 시도됐던 진입만 기준)보다 새 타점이 높으면
-        //   "방향 정합성 위반"으로 보고 진입을 취소한다.
-        const RECENT_ENTRY_WINDOW_MS = 24 * 60 * 60_000; // 24시간 — "같은 하락 국면 안의 재진입"으로 볼 범위
-        const priorEntries = this.autoTradeHistory.filter((h) => {
-          if (h.symbol !== cand.symbol || h.status === "dryrun") return false;
-          const enteredAtMs = Number(h.id.split("@").pop());
-          return Number.isFinite(enteredAtMs) && Date.now() - enteredAtMs < RECENT_ENTRY_WINDOW_MS;
-        });
-        const lastEntry = priorEntries.length > 0 ? priorEntries[priorEntries.length - 1] : null;
+        //   다시 계산하므로, 하락 추세 중 일시 반등이 오면 prevClose가 올라가 새 타점이 직전
+        //   타점보다 **더 높게** 나올 수 있다(삼분할 기법은 "얕게 눌렸을 때 사는" 전략이라,
+        //   같은 종목에 또 들어갈 땐 직전보다 같거나 낮은 가격이어야 논리적으로 맞다).
+        //
+        // [v0.61.8 긴급 수정 — 오너 지적, 2026-10-01: "타점 가격을 기준으로 생각해야지 과거
+        //   매매이력을 기준으로 하면 진입할 종목도 막히게 되는 경우가 있음, 로직상 오류"]
+        //   v0.60.0은 비교 대상을 "최근 24시간 안의 모든 기록(드라이런 제외)"으로 잡았는데,
+        //   여기엔 **이미 완전히 청산된(익절·손절) 매매**까지 포함됐다. 문제: 오전에 어떤
+        //   종목을 익절하고, 오후에 그 종목이 완전히 새로운(독립적인) 눌림목을 만들어 새
+        //   타점이 형성돼도 — 그게 오전 진입가보다 조금이라도 비싸면 "방향 정합성 위반"으로
+        //   막혔다. 하지만 이미 끝난 매매 사이클은 끝난 것이고, 새 스캔이 "지금 이 순간의
+        //   캔들"로 계산한 새 타점은 그 자체로 독립적인 정당한 기회다 — 과거 이력이 아니라
+        //   "지금 비교해야 할 대상이 있는가"(=아직 안 끝난 포지션)로 판단해야 한다는 지적이
+        //   맞다. 이제 비교 대상을 좁힌다:
+        //     ① 아직 안 끝난(watching/active) 포지션 — 언제 넣었든 항상 비교(그 포지션이
+        //        살아있는 한 더 비싸게 또 사는 건 여전히 전략 모순이므로).
+        //     ② 완전히 청산된 매매는 "방금(한 자동매매 사이클, 기본 5분) 진입했던" 것만 —
+        //        v0.60.0 원래 사고(같은 사이클 직후 재평가에서 노이즈로 역전)는 여전히 막되,
+        //        몇 시간~하루 전에 이미 끝난 매매가 전혀 다른 시점의 정당한 새 기회까지
+        //        막는 일은 없앴다.
+        const lastEntry = findDirectionConflict(this.autoTradeHistory, cand.symbol, Date.now(), ToolEngine.AUTO_TRADE_INTERVAL_MS);
         if (lastEntry && level1.entry > lastEntry.entry) {
-          this.autoTradeSkipReasons[cand.symbol] =
+          const reason =
             `직전 타점($${lastEntry.entry})보다 높은 가격($${level1.entry})으로 재진입하려 해 취소했습니다 ` +
-            `(하락 추세 중 상향 재진입은 방향 정합성 위반 — 최근 24시간 내 기록 기준).`;
+            `(하락 추세 중 상향 재진입은 방향 정합성 위반 — 아직 살아있는 포지션이거나 방금 끝난 매매 기준).`;
+          this.autoTradeSkipReasons[cand.symbol] = reason;
+          // [v0.61.8] 예전엔 skipReasons에만 남아 다음 사이클에 덮어써졌다 — 실제로 몇 번이나
+          //   발동했는지 사후에 확인할 방법이 없었다(오너 지적 검토 중 발견). 저널(최근 로그)에도
+          //   남겨 history로 확인 가능하게 한다.
+          this.addJournal({ kind: "info", symbol: cand.symbol, summary: `🤖 자동매매: ${cand.symbol} ${reason}` });
           continue;
         }
 
@@ -6623,6 +6723,7 @@ export class ToolEngine extends EventEmitter {
           maxLossPct: this.autoTradeMaxLossPct,
           maxInvestPct: this.autoTradeMaxInvestPct,
           watchMinutes: this.autoTradeWatchMinutes,
+          entryLevel: this.autoTradeEntryLevel,
         }); // [v0.30.0] 자동매매기록 — 접수 즉시 한 줄 남김
 
         try {
@@ -6658,7 +6759,7 @@ export class ToolEngine extends EventEmitter {
           this.addJournal({
             kind: "info",
             symbol: cand.symbol,
-            summary: `🤖 자동매매 진입 ${cand.symbol} $${level1.entry} × ${qty}주(삼분할 1분할) — 체결되면 자동으로 익절 $${level1.tp} / 손절 $${level1.sl}을 등록합니다.`,
+            summary: `🤖 자동매매 진입 ${cand.symbol} $${level1.entry} × ${qty}주(삼분할 ${this.autoTradeEntryLevel}분할) — 체결되면 자동으로 익절 $${level1.tp} / 손절 $${level1.sl}을 등록합니다.`,
             notify: true,
             notifyTitle: `🤖 진입 접수: ${cand.symbol}`,
           });

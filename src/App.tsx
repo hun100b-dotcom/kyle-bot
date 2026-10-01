@@ -868,6 +868,10 @@ function App() {
     maxInvestPct: "30",
     watchMinutes: "10", // [v0.42.0] 장기간 미체결 자동취소 기준(분) — 기존 하드코딩값과 동일한 기본값
   });
+  // [v0.61.8 — 오너 지시 "1타점으로 잡을지 2타점으로 잡을지 설정할 수 있도록"] 자동매매 진입
+  //   타점 분할(1~2). 위 autoForm과 별도 상태로 둔 이유: 저게 전부 "숫자 입력칸(문자열)"인
+  //   반면 이건 "둘 중 하나 고르는" 선택지라 모양이 달라 섞으면 폼 렌더 로직이 지저분해진다.
+  const [autoEntryLevel, setAutoEntryLevel] = useState<1 | 2>(1);
   const [autoStatus, setAutoStatus] = useState<AutoTradeStatus | null>(null);
   const [autoBusy, setAutoBusy] = useState(false);
   // [v0.61.0] 상태 미러(capri_live_state) — PC가 마지막으로 올린 시각(ms). canReconcileLive가
@@ -1154,6 +1158,7 @@ function App() {
         maxInvestPct: String(s.autoTradeMaxInvestPct ?? 30),
         watchMinutes: String(s.autoTradeWatchMinutes ?? 10),
       });
+      setAutoEntryLevel(s.autoTradeEntryLevel === 2 ? 2 : 1); // [v0.61.8]
       // [v0.28.0] 저장된 자동매매 스크리너 조건을 입력칸 초기값으로.
       setAutoScanForm({
         scanCount: String(s.autoScanCount ?? 60),
@@ -2509,16 +2514,16 @@ ${msg}
       return;
     }
     if (isWebApp) {
-      const r = await window.kyletool.sendCommand("saveAutoTradeSettings", { maxPositions, maxLossPct, maxInvestPct, watchMinutes });
+      const r = await window.kyletool.sendCommand("saveAutoTradeSettings", { maxPositions, maxLossPct, maxInvestPct, watchMinutes, entryLevel: autoEntryLevel });
       setSavedMsg(r.ok ? "✅ PC로 자동매매 한도 저장 명령을 보냈습니다(PC가 몇 초 안에 반영)." : `⚠️ ${r.message}`);
       setTimeout(() => setSavedMsg(""), 4000);
       return;
     }
-    const s = await window.kyletool.saveAutoTradeSettings({ maxPositions, maxLossPct, maxInvestPct, watchMinutes });
+    const s = await window.kyletool.saveAutoTradeSettings({ maxPositions, maxLossPct, maxInvestPct, watchMinutes, entryLevel: autoEntryLevel });
     setSettings(s);
     setSavedMsg(
       `자동매매 한도 저장됨 — 최대 ${s.autoTradeMaxPositions}종목 · 손실한도 ${s.autoTradeMaxLossPct}% · ` +
-      `투입한도 ${s.autoTradeMaxInvestPct}% · 미체결 자동취소 ${s.autoTradeWatchMinutes}분`,
+      `투입한도 ${s.autoTradeMaxInvestPct}% · 미체결 자동취소 ${s.autoTradeWatchMinutes}분 · 진입 타점 ${s.autoTradeEntryLevel}분할`,
     );
     setTimeout(() => setSavedMsg(""), 4000);
   }
@@ -4152,6 +4157,13 @@ ${msg}
                 </label>
                 <label>장기간 미체결 자동취소 기준 (분)
                   <input type="text" inputMode="numeric" value={autoForm.watchMinutes} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, watchMinutes: e.target.value })} placeholder="10" />
+                </label>
+                {/* [v0.61.8 — 오너 지시 "1타점으로 잡을지 2타점으로 잡을지 설정"] */}
+                <label>진입 타점 (삼분할 몇 분할 가격에 자동 매수할지)
+                  <select value={autoEntryLevel} onChange={(e) => setAutoEntryLevel(Number(e.target.value) === 2 ? 2 : 1)}>
+                    <option value={1}>1분할(얕은 눌림 — 공장값)</option>
+                    <option value={2}>2분할(더 깊이 눌렸을 때만 — 보수적)</option>
+                  </select>
                 </label>
                 <button className="btn btn-start" onClick={saveAutoSettings}>한도 저장</button>
                 {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}

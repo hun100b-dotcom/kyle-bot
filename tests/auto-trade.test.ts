@@ -24,7 +24,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Settings, DateTime } from "luxon";
 import {
-  ToolEngine, computeSeedQty, newlyConfirmedSymbols, applyScreenGates,
+  ToolEngine, computeSeedQty, newlyConfirmedSymbols, applyScreenGates, findDirectionConflict,
   type AutoPosition, type JournalEntry, type NotifyEvent, type ScreenResult, type AutoTradeHistoryEntry,
 } from "../electron/tool-engine";
 
@@ -1532,6 +1532,54 @@ describe("[v0.41.0] cancelAutoPosition — 지금 감시 중인 포지션을 사
       rmSync(dir, { recursive: true, force: true });
     }
   }, 10_000);
+
+  // ===========================================================================
+  // [v0.61.8 긴급 보강 — 오너 실사용 사고 분석, 2026-10-01: CNTB] 손절 직전 조건주문을
+  //   직접 취소했는데(의도는 "손절 방지"), 예전엔 이 경우 "조건주문이 사라짐 = 거래
+  //   종료"로만 처리해 끝이었다 — 실제로는 주식이 계좌에 그대로 남아 보호장치 없이
+  //   방치될 수 있는데 그 사실을 오너가 알 길이 없었다. 이제 정리 전에 실계좌를 다시
+  //   확인해, 아직 보유 중이면 강하게 경고한다(목 서버는 AAPL을 항상 100주 보유 중으로
+  //   응답하므로, 이 테스트의 기본 설정 자체가 "아직 보유 중" 시나리오를 재현한다).
+  // ===========================================================================
+  it("[v0.61.8] 조건주문이 사라졌는데 실계좌엔 여전히 보유 중이면 강한 경고(알림 포함)를 남긴다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const ocoEntry = await eng.placeOco({
+        symbol: "AAPL", quantity: 3, tpTrigger: 2.5, tpPrice: 2.5, slTrigger: 1.8, slPrice: 1.79, expireDate: "2026-12-30",
+      });
+      const condId = (ocoEntry.detail as { conditionalOrderId: string }).conditionalOrderId;
+      const enteredAtMs = Date.now();
+      const engAny = eng as unknown as {
+        autoTradePositions: AutoPosition[];
+        reconcileAutoPositions: () => Promise<void>;
+        addAutoTradeHistory: (pos: AutoPosition) => void;
+        mock: { state: { conditionals: Map<string, unknown> } } | null;
+      };
+      const activePos: AutoPosition = {
+        symbol: "AAPL", entry: 2.1, tp: 2.5, sl: 1.8, quantity: 3,
+        enteredAtMs, status: "active", conditionalOrderId: condId, buyOrderId: null,
+      };
+      engAny.autoTradePositions.push(activePos);
+      engAny.addAutoTradeHistory(activePos);
+      engAny.mock?.state.conditionals.delete(condId); // 사람이 조건주문만 직접 취소한 상황 재현
+
+      const notifyPromise = new Promise<NotifyEvent>((resolve) => eng.once("notify", resolve));
+      await engAny.reconcileAutoPositions();
+
+      expect(engAny.autoTradePositions.find((p) => p.symbol === "AAPL")).toBeUndefined();
+      const rec = eng.getAutoTradeHistory().find((h) => h.id === `AAPL@2.1@${enteredAtMs}`);
+      expect(rec?.note).toContain("보호장치 없이 방치");
+      expect(rec?.note).toContain("직접 재확인 필요");
+
+      // [핵심] "확인 못 함"과 구분되는 강한 알림이 실제로 떴는지(Discord 알림 경로와 동일하게 탄다).
+      const notified = await notifyPromise;
+      expect(notified.title).toContain("보호장치 없이 보유 중");
+      expect(notified.symbol).toBe("AAPL");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
 });
 
 // =============================================================================
@@ -1586,4 +1634,109 @@ describe("[v0.45.0] AutoTradeHistoryEntry.criteriaSnapshot — 진입 시점 설
   //   나오지 않아 그런 테스트는 비결정적이다. 대신 electron/tool-engine.ts의 autoTradeTick 호출부가
   //   이 함수에 정확히 무엇을 넘기는지는 타입 체크(AutoTradeHistoryEntry["criteriaSnapshot"])가
   //   보장하고, addAutoTradeHistory 자체의 동작(넘긴 값을 그대로 저장하는지)은 위에서 직접 검증했다.
+});
+
+// =============================================================================
+// [v0.61.8] 진입 타점 분할(1~2) 설정 — 오너 지시 "1타점으로 잡을지 2타점으로 잡을지 설정"
+// =============================================================================
+describe("[v0.61.8] 진입 타점 분할 설정(autoTradeEntryLevel)", () => {
+  it("공장값은 1분할이고, saveAutoTradeSettings로 2분할을 저장하면 재시작해도 유지된다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      expect(eng.getSettings().autoTradeEntryLevel).toBe(1);
+
+      const saved = eng.saveAutoTradeSettings({ entryLevel: 2 });
+      expect(saved.autoTradeEntryLevel).toBe(2);
+
+      const eng2 = new ToolEngine(dir, { forceMock: true });
+      expect(eng2.getSettings().autoTradeEntryLevel).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("entryLevel을 안 주거나 1/2가 아닌 값을 주면 이전 값을 그대로 유지한다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.saveAutoTradeSettings({ entryLevel: 2 });
+      // @ts-expect-error — 런타임 방어(원격 명령 등 외부 입력이 잘못된 값을 보낼 수 있음) 검증
+      const after = eng.saveAutoTradeSettings({ entryLevel: 3, maxPositions: 5 });
+      expect(after.autoTradeEntryLevel).toBe(2); // 잘못된 값은 무시되고 이전 값(2) 유지
+      expect(after.autoTradeMaxPositions).toBe(5); // 다른 필드는 정상 저장
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// =============================================================================
+// [v0.61.8 긴급 수정 — 오너 지적, 2026-10-01] "방향 정합성" 재진입 체크(findDirectionConflict)
+// -----------------------------------------------------------------------------
+// 오너 보고 원문: "한번이라도 거래한 종목에 대하여 더 높은 타점에서 재진입 하지 못하도록
+//   시스템상에서 막고있는데... 타점 가격을 기준으로 생각해야지 과거 매매이력을 기준으로
+//   하면 진입할 종목도 막히게 되는 경우가 있음." — 코드를 읽어보니 v0.60.0이 "최근 24시간
+//   내 모든 기록(완전히 청산된 것 포함)"을 비교 대상으로 삼고 있어 오너 지적이 맞았다.
+//   이제 ①아직 안 끝난 포지션은 항상 ②완료된 매매는 "최근(한 사이클)" 것만 비교한다.
+// =============================================================================
+describe("[v0.61.8] findDirectionConflict — 방향 정합성 재진입 체크", () => {
+  function histEntry(over: Partial<AutoTradeHistoryEntry> = {}): AutoTradeHistoryEntry {
+    return {
+      id: "AAPL@2.1@1000",
+      symbol: "AAPL",
+      entry: 2.1,
+      tp: 2.5,
+      sl: 1.8,
+      quantity: 10,
+      enteredAt: "09-26 10:00:00",
+      status: "watching",
+      exitedAt: null,
+      exitPrice: null,
+      pnlUsd: null,
+      pnlPct: null,
+      note: "",
+      ...over,
+    };
+  }
+
+  it("몇 시간 전에 이미 완전히 청산된(closed_win) 매매는 비교 대상에서 제외된다(오너 지적 핵심)", () => {
+    const now = 1_700_000_000_000;
+    const history = [
+      histEntry({ id: `AAPL@2.1@${now - 6 * 3600_000}`, status: "closed_win", entry: 2.1 }), // 6시간 전 익절, 완전히 끝남
+    ];
+    // 새 타점(2.3)이 6시간 전 진입가(2.1)보다 높아도, 이미 끝난 지 오래된 매매라 막히면 안 된다.
+    const conflict = findDirectionConflict(history, "AAPL", now, 5 * 60_000);
+    expect(conflict).toBeNull();
+  });
+
+  it("아직 안 끝난(watching) 포지션은 진입 시각과 무관하게 항상 비교 대상이다", () => {
+    const now = 1_700_000_000_000;
+    const history = [
+      histEntry({ id: `AAPL@2.1@${now - 6 * 3600_000}`, status: "watching", entry: 2.1 }), // 6시간 전 진입, 아직 살아있음
+    ];
+    const conflict = findDirectionConflict(history, "AAPL", now, 5 * 60_000);
+    expect(conflict?.entry).toBe(2.1); // 여전히 비교 대상 — 더 비싼 재진입은 막혀야 함
+  });
+
+  it("방금(한 사이클 이내) 청산된 매매는 여전히 비교 대상이다(v0.60.0 원래 사고 재현 방지)", () => {
+    const now = 1_700_000_000_000;
+    const history = [
+      histEntry({ id: `AAPL@2.1@${now - 2 * 60_000}`, status: "closed_win", entry: 2.1 }), // 2분 전 익절
+    ];
+    const conflict = findDirectionConflict(history, "AAPL", now, 5 * 60_000); // 5분 윈도우
+    expect(conflict?.entry).toBe(2.1);
+  });
+
+  it("드라이런 기록은 비교 대상에서 제외된다", () => {
+    const now = 1_700_000_000_000;
+    const history = [histEntry({ id: `AAPL@2.1@${now - 60_000}`, status: "dryrun", entry: 2.1 })];
+    expect(findDirectionConflict(history, "AAPL", now, 5 * 60_000)).toBeNull();
+  });
+
+  it("다른 종목의 기록은 비교 대상에서 제외된다", () => {
+    const now = 1_700_000_000_000;
+    const history = [histEntry({ id: `TSLA@2.1@${now - 60_000}`, symbol: "TSLA", status: "watching", entry: 2.1 })];
+    expect(findDirectionConflict(history, "AAPL", now, 5 * 60_000)).toBeNull();
+  });
 });
