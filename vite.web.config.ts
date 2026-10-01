@@ -11,11 +11,18 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { resolve } from "node:path";
-import { writeFileSync } from "node:fs";
+import { writeFileSync, readFileSync } from "node:fs";
 
 // 빌드마다 바뀌는 식별자. 서비스 워커의 캐시 이름에 들어가고,
 // 이 값이 바뀌면 폰이 "새 버전이 있다"고 알아챈다.
 const BUILD_ID = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
+
+// [v0.60.8 — 오너 실사용 보고 "버전 정보에 vweb-202610010438만 떠서 뭔 버전인지 모르겠다"]
+//   빌드 타임스탬프(BUILD_ID)만으로는 package.json의 버전(데스크톱 화면·릴리스 태그와
+//   같은 "0.60.7" 같은 숫자)과 대응이 안 돼, 오너가 지금 PC·릴리스 노트와 같은 버전인지
+//   알아볼 방법이 없었다. package.json을 직접 읽어 데스크톱과 완전히 같은 버전 문자열을
+//   심는다 — 화면엔 이제 "0.60.8"처럼 보인다(빌드 타임스탬프는 보조 정보로 괄호에 남김).
+const APP_VERSION = JSON.parse(readFileSync(resolve(__dirname, "package.json"), "utf8")).version as string;
 
 /**
  * 빌드 식별자를 파일로 남긴다(dist-web/.build-id).
@@ -67,6 +74,7 @@ export default defineConfig({
   plugins: [react(), writeBuildId()],
   define: {
     __BUILD_ID__: JSON.stringify(BUILD_ID),
+    __APP_VERSION__: JSON.stringify(APP_VERSION),
     // [중요] 번들러 기본 동작은 `process.env` 를 빈 객체로 바꿔 버린다(설정이 저장 안 되는 버그).
     //   우리가 만든 진짜 객체로 연결해 읽기·쓰기가 모두 살아 있게 한다. (web/env-shim.ts)
     "process.env": "globalThis.__capriEnv",

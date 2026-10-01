@@ -306,7 +306,11 @@ export function installKyleTool(): ToolEngine {
     hasTossRelay: () => Promise.resolve(Boolean(apiBase)),
 
     // ── 앱 업데이트: 웹은 서비스 워커가 담당하므로 여기선 무해한 값만 ──
-    appVersion: () => Promise.resolve(`web-${__BUILD_ID__}`),
+    // [v0.60.8 긴급 수정 — 오너 실사용 보고 "버전 정보에 vweb-202610010438만 떠서 뭔
+    //   버전인지 모르겠다"] 빌드 타임스탬프만 보여줬던 걸 package.json 버전(데스크톱
+    //   화면·릴리스 태그와 완전히 같은 값, 예: "0.60.8")으로 바꾸고, 빌드 시각은 괄호
+    //   보조 정보로만 남긴다 — 오너가 지금 버전이 PC·릴리스 노트와 같은지 바로 비교 가능.
+    appVersion: () => Promise.resolve(`${__APP_VERSION__} (web ${__BUILD_ID__})`),
     downloadUpdate: () => Promise.resolve({ ok: true }),
     installUpdate: () => Promise.resolve({ ok: true }),
     onUpdate: (_cb: (v: unknown) => void) => () => {},
@@ -339,3 +343,4 @@ export function getEngine(): ToolEngine | null {
 }
 
 declare const __BUILD_ID__: string;
+declare const __APP_VERSION__: string;
