@@ -2446,7 +2446,13 @@ ${msg}
     setTimeout(() => setSavedMsg(""), 4000);
   }
 
-  /** [v0.26.0→v0.42.0] 자동매매 한도 4개(최대 종목 수·최대손실 한도·최대 투입 비율·미체결 자동취소 기준) 저장. */
+  /** [v0.26.0→v0.42.0→v0.61.1] 자동매매 한도 4개(최대 종목 수·최대손실 한도·최대 투입
+   *  비율·미체결 자동취소 기준) 저장.
+   *  [v0.61.1 — ③ 전수조사에서 발견한 치명 버그 수정] 예전엔 웹(폰)에서도 이 버튼이
+   *  `window.kyletool.saveAutoTradeSettings`를 **직접** 불렀다 — 폰의 로컬 엔진은
+   *  PC와 완전히 별개 인스턴스라, 폰에서 "최대손실 한도를 더 엄격하게 줄였다"고 믿어도
+   *  PC는 전혀 몰랐고 옛(더 느슨한) 한도로 계속 돌고 있었다. 실계좌 위험 한도라
+   *  "저장됨"이라고 뜨는데 실제로 적용이 안 되는 건 치명적 — 원격 명령 큐로 보낸다. */
   async function saveAutoSettings() {
     const maxPositions = toNum(autoForm.maxPositions);
     const maxLossPct = toNum(autoForm.maxLossPct);
@@ -2459,6 +2465,12 @@ ${msg}
       watchMinutes === null || watchMinutes <= 0
     ) {
       setSavedMsg("⚠️ 자동매매 한도 4개 모두 0보다 큰 숫자로 입력하세요.");
+      setTimeout(() => setSavedMsg(""), 4000);
+      return;
+    }
+    if (isWebApp) {
+      const r = await window.kyletool.sendCommand("saveAutoTradeSettings", { maxPositions, maxLossPct, maxInvestPct, watchMinutes });
+      setSavedMsg(r.ok ? "✅ PC로 자동매매 한도 저장 명령을 보냈습니다(PC가 몇 초 안에 반영)." : `⚠️ ${r.message}`);
       setTimeout(() => setSavedMsg(""), 4000);
       return;
     }
@@ -2496,7 +2508,7 @@ ${msg}
       setTimeout(() => setSavedMsg(""), 4000);
       return;
     }
-    const s = await window.kyletool.saveAutoScanSettings({
+    const criteria = {
       count: scanCount,
       priceMin: pMin,
       priceMax: pMax,
@@ -2513,7 +2525,20 @@ ${msg}
       preEnabled: screenCritForm.preEnabled,
       regularEnabled: screenCritForm.regularEnabled,
       afterEnabled: screenCritForm.afterEnabled,
-    });
+    };
+    // [v0.61.1 — ③ 전수조사에서 발견한 치명 버그 수정] 예전엔 웹(폰)에서도 이 버튼이
+    //   `window.kyletool.saveAutoScanSettings`를 직접 불렀다 — 폰의 로컬 엔진에만 저장되고
+    //   PC는 전혀 몰랐다(원격 명령 화이트리스트에 애초에 없었음 — 마이그레이션
+    //   20261001110000으로 추가). "저장됨" 화면만 보고 실제 스캔 조건이 안 바뀐 걸
+    //   믿게 만드는 상태 불일치였다. 폰 응답은 즉시 오지 않으므로(PC가 몇 초 뒤 처리)
+    //   clamp된 값으로 입력칸을 되맞추는 건 PC 로컬에서만 한다.
+    if (isWebApp) {
+      const r = await window.kyletool.sendCommand("saveAutoScanSettings", criteria);
+      setSavedMsg(r.ok ? "✅ PC로 스크리닝 기준 저장 명령을 보냈습니다(PC가 몇 초 안에 반영)." : `⚠️ ${r.message}`);
+      setTimeout(() => setSavedMsg(""), 4000);
+      return;
+    }
+    const s = await window.kyletool.saveAutoScanSettings(criteria);
     setSettings(s);
     // 저장 직후 입력칸을 서버가 실제로 보정한 값(clamp 결과)으로 다시 맞춘다 — 예: 500분을
     // 넣었어도 서버가 180분으로 잘랐으면 화면도 180으로 보여야 헷갈리지 않는다.

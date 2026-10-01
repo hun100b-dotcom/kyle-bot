@@ -4576,6 +4576,12 @@ export class ToolEngine extends EventEmitter {
         return { ok: true, status: this.stopAutoTrade() };
       case "saveAutoTradeSettings":
         return { ok: true, settings: await this.saveAutoTradeSettings(payload as Parameters<ToolEngine["saveAutoTradeSettings"]>[0]) };
+      case "saveAutoScanSettings":
+        // [v0.61.1 — ③ 전수조사에서 발견한 치명 버그 수정] 폰이 "스크리닝 기준" 탭에서
+        //   저장해도 예전엔 이 명령 자체가 화이트리스트에 없어 폰의 로컬(의미 없는) 엔진에만
+        //   적용되고 PC는 전혀 몰랐다 — PC가 실제로 돌리는 스캔 조건이 안 바뀌는데도 화면은
+        //   "저장됨"이라고 떠 오너를 속이는 상태 불일치였다.
+        return { ok: true, settings: await this.saveAutoScanSettings(payload as Parameters<ToolEngine["saveAutoScanSettings"]>[0]) };
       case "setKillSwitch":
         await this.setKillSwitch(!!payload.on);
         return { ok: true };
