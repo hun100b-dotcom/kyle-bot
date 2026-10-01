@@ -11,7 +11,10 @@
 //      있는) 것만 포함해야 한다 — 번호 없이 "감시 중"이라고 거짓으로 보여주면 안 됨.
 // =============================================================================
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { encryptJson, decryptJson } from "../lib/keysync";
 import {
   toAutoStateSyncPayload,
@@ -20,7 +23,7 @@ import {
   derivePositionsFromHistory,
   type AutoStateSyncPayload,
 } from "../lib/auto-state-sync";
-import type { AutoTradeHistoryEntry, ScreenRun } from "../electron/tool-engine";
+import { ToolEngine, type AutoTradeHistoryEntry, type ScreenRun } from "../electron/tool-engine";
 
 const PASS = "capri-비밀번호-테스트";
 
@@ -164,5 +167,82 @@ describe("derivePositionsFromHistory — '지금 감시 중' 목록 재구성", 
     expect(positions[0].enteredAtMs).toBe(1758870000000);
     expect(positions[0].entry).toBe(2.1);
     expect(positions[0].status).toBe("watching");
+  });
+});
+
+// =============================================================================
+// [v0.60.6 긴급 — 오너 실사용 보고: "폰에서 자동매매 시작을 눌러도 자동 스크리너 탭에
+//   스캔 진행 상황이 전혀 안 뜬다, 새로고침을 눌러도 무반응"]
+// -----------------------------------------------------------------------------
+// 원인: syncPullAutoState()가 lastScan/skipReasons를 반영하기 **전에**
+//   persistAutoTradeHistory()를 먼저 불렀다. persistAutoTradeHistory()는 쓰로틀(15초)이
+//   맞으면 그 자리에서 곧바로 syncPushAutoState()로 재업로드하는데, 그 push는 "그 시점의"
+//   this.autoTradeLastScan을 그대로 담는다 — 아직 이번 pull로 못 받은 **옛 값(주로 null)**을
+//   그대로 되올려, 방금 받은 PC의 진짜 스캔 결과를 곧바로 덮어써 지워버렸다. 폰이 "받자마자
+//   스스로 지우는" 꼴이라 화면에 제대로 뜬 적이 없었던 것.
+//
+//   이 테스트는 ToolEngine.syncPullAutoState()를 실제로 호출해(fetch만 스텁) 이 순서
+//   버그가 고쳐졌는지 — pull 과정에서 저절로 일어나는 재업로드(push)가 방금 받은
+//   lastScan을 그대로 담아 보내는지(지우지 않는지) — 직접 검증한다.
+// =============================================================================
+describe("[v0.60.6] syncPullAutoState — pull 직후 자동 재업로드가 방금 받은 lastScan을 지우지 않는다", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("pull로 받은 lastScan이 뒤이은 자동 push에도 그대로 실려 나간다(옛 값으로 덮어쓰지 않음)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-autostate-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const engAny = eng as unknown as {
+        authAccessToken: string | null;
+        authExpiresAtMs: number;
+        authUserId: string | null;
+        authPassword: string | null;
+      };
+      engAny.authAccessToken = "test-access-token";
+      engAny.authExpiresAtMs = Date.now() + 3_600_000;
+      engAny.authUserId = "test-user-id";
+      engAny.authPassword = PASS;
+
+      // "클라우드(PC가 올려 둔 것)"로 꾸민 암호화 페이로드 — 이 기기(폰)는 아직 이 lastScan을 모른다.
+      const cloudPayload = toAutoStateSyncPayload([], Date.now(), { lastScan: fakeScreenRun({ total: 99 }) });
+      const cloudRec = await encryptJson(cloudPayload, PASS);
+
+      let capturedPushBody: string | null = null;
+      const fetchStub = vi.fn(async (url: string | URL, init?: RequestInit) => {
+        const u = String(url);
+        const method = init?.method ?? "GET";
+        if (u.includes("capri_auto_state") && method === "GET") {
+          return new Response(JSON.stringify([{ ciphertext: cloudRec.ciphertext, salt: cloudRec.salt, iv: cloudRec.iv }]), { status: 200 });
+        }
+        if (u.includes("capri_auto_state") && method === "POST") {
+          capturedPushBody = String(init?.body ?? "");
+          return new Response(null, { status: 200 });
+        }
+        return new Response(JSON.stringify({ error: "not_found" }), { status: 404 });
+      });
+      vi.stubGlobal("fetch", fetchStub);
+
+      const result = await eng.syncPullAutoState();
+      expect(result.ok).toBe(true);
+
+      // persistAutoTradeHistory()가 거는 재업로드는 void(fire-and-forget)라 syncPullAutoState의
+      // 반환과 완료 시점이 보장되지 않는다 — encryptJson이 PBKDF2 20만회(의도적으로 느림, 보안용)를
+      // 돌리는 동안은 아직 안 끝나 있을 수 있어, 짧게 한 번 기다리는 대신 끝날 때까지 폴링한다.
+      for (let i = 0; i < 100 && capturedPushBody === null; i++) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+
+      // persistAutoTradeHistory()의 쓰로틀(신규 엔진이라 항상 통과)이 자동으로 재push했어야 한다.
+      expect(capturedPushBody).not.toBeNull();
+      const pushedRaw = JSON.parse(capturedPushBody as unknown as string) as { ciphertext: string; salt: string; iv: string };
+      const decryptedPush = await decryptJson<AutoStateSyncPayload>(pushedRaw, PASS);
+      // [핵심] 방금 pull로 받은 lastScan(total:99)이 그대로 실려 나가야 한다 — null로
+      // 덮어써졌다면(순서 버그) 여기서 undefined/null이 돼 실패한다.
+      expect(decryptedPush.lastScan?.total).toBe(99);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

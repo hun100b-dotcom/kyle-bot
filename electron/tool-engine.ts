@@ -4218,19 +4218,21 @@ export class ToolEngine extends EventEmitter {
 
       const before = this.autoTradeHistory.length;
       this.autoTradeHistory = mergeAutoHistory(this.autoTradeHistory, payload.history);
+      // [v0.60.6 긴급 수정 — 순서 버그] 마지막 스캔 결과·탈락 사유를 persistAutoTradeHistory()
+      //   보다 **먼저** 반영해야 한다. persistAutoTradeHistory()는 조건(15초 쓰로틀)이 맞으면
+      //   그 자리에서 곧바로 syncPushAutoState()를 다시 호출하는데, 그 push는 "지금 이 순간의"
+      //   this.autoTradeLastScan을 그대로 담는다 — 아래 줄보다 먼저 persistAutoTradeHistory를
+      //   부르면 이 기기(특히 폰)가 아직 한 번도 못 받은 옛 값(대개 null)을 그대로 되올려,
+      //   방금 PC가 올려 둔 진짜 스캔 결과를 곧바로 덮어써 지워버린다 — 오너 실사용 보고
+      //   ("폰에서 시작을 눌러도 자동 스크리너에 스캔 진행 상황이 전혀 안 뜬다")의 실제 원인.
+      if (payload.lastScan !== undefined) this.autoTradeLastScan = payload.lastScan;
+      if (payload.skipReasons !== undefined) this.autoTradeSkipReasons = payload.skipReasons;
       this.persistAutoTradeHistory();
       // [핵심] "지금 감시 중" 목록도 병합된 기록에서 다시 만든다 — 이 기기가 한 번도 진입시킨
       //   적 없는 포지션이라도, 다른 기기가 올려 둔 기록에 conditionalOrderId/buyOrderId가
       //   있으면 이 기기도 그 번호로 실제 체결·발동 여부를 재확인할 수 있게 된다.
       this.autoTradePositions = derivePositionsFromHistory(this.autoTradeHistory);
       this.saveAutoPositions();
-      // [v0.60.5 — 오너 요청 "PC와 동일하게 스크리너 조회"] 마지막 스캔 결과·탈락 사유도
-      //   그대로 받아들인다 — 이 기기(특히 웹/폰)는 스스로 스캔할 수 없으므로, PC가 올려
-      //   둔 걸 그대로 보여주는 게 유일한 방법이다. 항상 pull 쪽 값을 채택한다(이 기기가
-      //   직접 돌린 스캔보다, "방금 로그인한 다른 기기가 PC의 최신 상태를 따라잡으려는"
-      //   이 호출의 목적상 PC 쪽이 항상 더 권위 있는 최신 값이라고 본다).
-      if (payload.lastScan !== undefined) this.autoTradeLastScan = payload.lastScan;
-      if (payload.skipReasons !== undefined) this.autoTradeSkipReasons = payload.skipReasons;
       const added = this.autoTradeHistory.length - before;
       return {
         ok: true,

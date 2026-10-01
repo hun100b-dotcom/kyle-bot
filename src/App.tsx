@@ -1264,14 +1264,19 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authState.loggedIn, authState.isOwner]);
 
-  // [v0.2.10] 30초 자동 갱신. 기본은 꺼짐(자율 동작 최소화 원칙) — 오너가 켤 때만 돈다.
+  // [v0.2.10→v0.60.6] 30초 자동 갱신. 기본은 꺼짐(자율 동작 최소화 원칙) — 오너가 켤 때만 돈다.
   //   주문 현황이 '보이는 동안'만 돈다. [v0.15.0] 2컬럼이면 좌/우 어느 패널에 있어도 인정.
+  //   [v0.60.6] 웹에서 토스 중계(QR)가 없으면 holdingsView/ordersView/condOrdersView는 전부
+  //   실제 토스 호출이라 항상 실패하고, 이 데이터는(스크리너·포지션과 달리) PC↔폰 동기화
+  //   채널 자체가 없어 대신 받아올 방법도 없다 — 그래서 자동 갱신 자체를 돌리지 않는다
+  //   (30초마다 실패 경고창이 뜨는 걸 막는다). 수동 버튼은 눌러서 바로 확인 가능하지만
+  //   역시 연결이 없으면 실패 — 이건 애초에 PC를 거쳐야만 조회되는 데이터라 구조적 한계다.
   useEffect(() => {
     const ordersVisible = showTwoCol ? (tabL === "orders" || tabR === "orders") : tab === "orders";
-    if (!autoRefresh || !ordersVisible) return;
+    if (!autoRefresh || !ordersVisible || !canReconcileLive) return;
     const id = setInterval(() => void refreshStatusTab(), 30_000);
     return () => clearInterval(id);
-  }, [autoRefresh, tab, showTwoCol, tabL, tabR]);
+  }, [autoRefresh, tab, showTwoCol, tabL, tabR, canReconcileLive]);
 
   // [v0.26.0→v0.45.0→v0.48.0] 현황(포지션·누적손익)을 20초마다 새로고침.
   //   [v0.48.0 긴급 수정 — 오너 보고 "익절/손절 완료된 종목이 계속 감시 중으로 남아있다,
@@ -2507,14 +2512,18 @@ ${msg}
   }
 
   /**
-   * [v0.28.0→v0.39.0→v0.60.5] 자동매매 스크리너 수동 새로고침 — 5분 사이클을 기다리지 않고
-   *   지금 바로 훑는다. 자동매매가 켜져 있으면 실제 진입 시도까지 그대로 도는 진짜
-   *   사이클이고(엔진의 autoScanNow 참고 — 5분 주기 자체는 유지, 기준 시각만 지금으로
-   *   당김), 꺼져 있으면 예전 그대로 미리보기(스캔만, 진입 없음)다.
-   *   [v0.60.5] 웹에서 토스 중계(QR)가 없으면 autoScanNow가 직접 스캔(실제 토스 호출)을
-   *   시도해 항상 실패한다 — 대신 PC에 "지금 스캔해" 원격 명령을 보내고, PC가 끝낸 뒤
-   *   올려 둔 결과를 몇 초 뒤 받아오는 쪽으로 돌린다(원격 조종 카드의 "지금 스캔"과 동일한
-   *   경로).
+   * [v0.28.0→v0.39.0→v0.60.5→v0.60.6] 자동매매 스크리너 수동 새로고침 — 5분 사이클을
+   *   기다리지 않고 지금 바로 훑는다. 자동매매가 켜져 있으면 실제 진입 시도까지 그대로
+   *   도는 진짜 사이클이고(엔진의 autoScanNow 참고 — 5분 주기 자체는 유지, 기준 시각만
+   *   지금으로 당김), 꺼져 있으면 예전 그대로 미리보기(스캔만, 진입 없음)다.
+   *   [v0.60.5→v0.60.6] 웹에서 토스 중계(QR)가 없으면 autoScanNow가 직접 스캔(실제 토스
+   *   호출)을 시도해 항상 실패한다 — 대신 PC에 "지금 스캔해" 원격 명령을 보내고, 결과가
+   *   올라올 때까지 기다린다. [v0.60.6 긴급 수정] v0.60.5는 5초·15초 뒤 딱 두 번만
+   *   확인하고 끝냈는데, 실제 스캔(기본 60종목)은 목서버 기준으로도 70초 넘게 걸린다 —
+   *   너무 일찍 포기해 "눌러도 무반응"으로 보였다(게다가 pull 직후 재전송 순서 버그까지
+   *   겹쳐 있었다 — syncPullAutoState 주석 참고, 둘 다 이번에 같이 고쳤다). 이제 "스캔
+   *   시작 전 마지막 스캔 시각"과 다른(=새로운) scannedAt이 나타날 때까지 10초 간격으로
+   *   최대 3분간 계속 확인하고, 그동안 화면에 "PC가 스캔 중…"을 계속 보여준다.
    */
   async function refreshAutoScanNow() {
     if (autoScanBusy) return;
@@ -2522,13 +2531,17 @@ ${msg}
     try {
       if (!canReconcileLive) {
         if (!pcConnected) { setAutoToggleMsg("⚠️ PC가 꺼져 있어 지금 스캔을 요청할 수 없습니다."); return; }
+        const priorScannedAt = autoStatus?.lastScan?.scannedAt ?? null;
         await window.kyletool.sendCommand("autoScanNow").catch(() => {});
-        // PC의 스캔은 몇 초~몇십 초 걸릴 수 있어(종목 수에 따라 다름), 넉넉히 두 번에 걸쳐 받아온다.
-        for (const delayMs of [5000, 15000]) {
-          setTimeout(() => {
-            void window.kyletool.autoStateSyncPull().catch(() => {}).then(() => window.kyletool.autoTradeStatus()).then(setAutoStatus);
-          }, delayMs);
+        const maxAttempts = 18; // 10초 × 18 = 최대 3분
+        for (let i = 0; i < maxAttempts; i++) {
+          await new Promise((r) => setTimeout(r, 10_000));
+          await window.kyletool.autoStateSyncPull().catch(() => {});
+          const s = await window.kyletool.autoTradeStatus();
+          setAutoStatus(s);
+          if (s.lastScan && s.lastScan.scannedAt !== priorScannedAt) return; // 새 스캔 결과 도착 — 완료
         }
+        setAutoToggleMsg("⚠️ 3분 안에 새 스캔 결과를 못 받았습니다 — PC가 아직 스캔 중이거나 연결이 느릴 수 있습니다. 잠시 후 다시 시도해 주세요.");
         return;
       }
       setAutoStatus(await window.kyletool.autoScanNow());
@@ -5173,11 +5186,16 @@ ${msg}
         <main className="statusmain">
           {/* --- 공통 도구줄: 새로고침 · 자동갱신 · 상태(미체결/체결) --- */}
           <div className="statusbar">
-            <button className="mini" disabled={posBusy} onClick={() => refreshStatusTab()}>↻ 새로고침</button>
-            <label className="inline-check">
-              <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} /> 30초마다 자동
+            <button className="mini" disabled={posBusy || !canReconcileLive} onClick={() => refreshStatusTab()}>↻ 새로고침</button>
+            <label className="inline-check" title={canReconcileLive ? undefined : "이 세션은 토스에 직접 연결돼 있지 않아(QR 중계 미연결) 이 탭의 실시간 조회를 쓸 수 없습니다."}>
+              <input type="checkbox" checked={autoRefresh} disabled={!canReconcileLive} onChange={(e) => setAutoRefresh(e.target.checked)} /> 30초마다 자동
             </label>
             {posAt && <span className="hint small">마지막 갱신 {posAt}</span>}
+            {!canReconcileLive && (
+              <span className="hint small danger">
+                ⚠️ 이 세션은 토스에 직접 연결돼 있지 않아(QR 중계 미연결) 여기는 조회할 수 없습니다 — PC에서 직접 확인하세요.
+              </span>
+            )}
             <span className="sb-sep" />
             <span className="sb-k">상태</span>
             <div className="seg">
