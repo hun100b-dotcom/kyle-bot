@@ -110,6 +110,15 @@ const JOURNAL_CATEGORY_ICON: Record<JournalCategory, string> = {
   주문: "🧾", 인증: "🔐", 동기화: "☁️", 자동매매: "🤖", 시스템: "⚙️", 오류: "⚠️",
 };
 
+/** [v0.60.4 — 오너 실사용 보고 "최근 명령 표에 영문 그대로 떠서 뭘 보낸 건지 헷갈린다"]
+ *  "📱 원격 조종" 카드의 최근 명령 표가 electron/tool-engine.ts의 dispatchCommand 타입
+ *  문자열(영문)을 그대로 찍고 있었다 — 사람이 읽을 라벨로 바꿔 보여준다. */
+const REMOTE_CMD_LABEL: Record<string, string> = {
+  autoTradeStart: "자동매매 시작", autoTradeStop: "자동매매 중지",
+  setKillSwitch: "비상 정지 설정", placeEntry: "진입 주문", placeSell: "매도 주문",
+  cancelAutoPosition: "포지션 취소", autoScanNow: "지금 스캔", saveAutoTradeSettings: "설정 저장",
+};
+
 /**
  * [v0.2.6 입력 버그 수정] 숫자 입력 공통 처리.
  *
@@ -653,6 +662,10 @@ function App() {
   const [systemPause, setSystemPause] = useState<{ paused: boolean; reason: string | null; resumesAtMs: number | null } | null>(null);
   // [v0.59.0] 폰 원격 조종 — PC 생존 신호(마지막으로 본 시각) + 최근 보낸 명령 목록.
   const [pcLastSeenMs, setPcLastSeenMs] = useState<number | null>(null);
+  // [v0.60.4] PC가 실제로 보낸 "지금 자동매매 켜져 있나" — 폰(web)에서는 이 값이 진실.
+  const [pcAutoTradeEnabled, setPcAutoTradeEnabled] = useState<boolean | null>(null);
+  // [v0.60.4] 웹(폰)에서 자동매매 시작/중지를 원격 명령으로 보냈을 때의 결과 메시지.
+  const [autoToggleMsg, setAutoToggleMsg] = useState("");
   const [remoteCmds, setRemoteCmds] = useState<Array<{ id: string; type: string; status: string; result: unknown; createdAt: string }>>([]);
   const [remoteBusy, setRemoteBusy] = useState<string | null>(null); // 처리 중인 명령 타입(버튼 개별 비활성용)
   const [screenBusy, setScreenBusy] = useState(false);
@@ -1291,13 +1304,21 @@ function App() {
   //   당연히 의미 없으므로 이 지점 — 게이트 통과 이후 — 에 둔다). "PC 연결됨/꺼져 있음" 배지가
   //   이 값을 쓴다 — PC 꺼진 줄 모르고 원격 버튼을 눌러놓고 됐다고 착각하는 사고를 막는 핵심 표시.
   useEffect(() => {
-    const poll = () => void window.kyletool.getDesktopHeartbeat().then((r) => setPcLastSeenMs(r.lastSeenMs)).catch(() => {});
+    const poll = () =>
+      void window.kyletool.getDesktopHeartbeat()
+        .then((r) => { setPcLastSeenMs(r.lastSeenMs); setPcAutoTradeEnabled(r.autoTradeEnabled); })
+        .catch(() => {});
     poll();
     const id = setInterval(poll, 20_000);
     return () => clearInterval(id);
   }, []);
   // PC 생존 신호 임계값: 데스크톱 루프 주기(8초)의 여유를 넉넉히 둬 90초로 잡는다(한 주기 놓쳐도 오탐 안 하게).
   const pcConnected = pcLastSeenMs != null && Date.now() - pcLastSeenMs < 90_000;
+  // [v0.60.4 — 오너 실사용 보고 "원격으로 시작을 눌러도 진행되고 있는지 모르겠다"] 웹(폰)
+  //   세션의 autoStatus.enabled는 이 브라우저 탭 자체의(의미 없는) 로컬 상태라, 웹에서는
+  //   PC가 실제로 보낸 값(pcAutoTradeEnabled)을 대신 쓴다 — 아직 못 받아왔으면(null) 기존
+  //   표시로 안전하게 대체.
+  const effectiveAutoEnabled = isWebApp && pcAutoTradeEnabled != null ? pcAutoTradeEnabled : (autoStatus?.enabled ?? false);
 
   /** [v0.59.0] 원격 명령 목록을 다시 불러온다(최근 처리 상태 확인용). */
   async function loadRemoteCommands() {
@@ -2461,11 +2482,49 @@ ${msg}
     }
   }
 
-  /** [v0.26.0] 자동매매 시작/중지 버튼. 시작은 확인 팝업으로 한 번 더 의사를 묻는다(실계좌라 신중하게). */
+  /**
+   * [v0.26.0→v0.60.4] 자동매매 시작/중지 버튼. 시작은 확인 팝업으로 한 번 더 의사를 묻는다
+   *   (실계좌라 신중하게).
+   *   [v0.60.4 — 오너 실사용 보고 "폰에서 일반 버튼으로 쓰고 싶다, 원격 버튼 말고"] 웹(폰)
+   *   세션에서는 이 버튼이 직접 토스를 호출하는 로컬 엔진(의미 없음 — 폰엔 토스 연결이
+   *   없다)이 아니라, PC가 집어가 실행하는 원격 명령 큐로 보낸다(원격 조종 카드와 완전히
+   *   같은 경로 — 예전엔 폰 전용 "원격" 카드를 따로 찾아 눌러야 했다). 결과는 즉시 알 수
+   *   없고(PC가 몇 초 안에 실행) PC가 보낸 생존 신호(heartbeat)의 auto_trade_enabled로
+   *   나중에 확인되므로, 보내고 나서 하트비트를 앞당겨 다시 확인한다.
+   */
   async function toggleAutoTrade() {
     if (autoBusy) return;
     setAutoBusy(true);
+    setAutoToggleMsg("");
     try {
+      if (isWebApp) {
+        const wantStop = effectiveAutoEnabled;
+        if (!wantStop) {
+          const ok = window.confirm(
+            [
+              "🤖 PC에 자동매매 시작 명령을 보냅니다.",
+              "",
+              `PC(데스크톱 앱)가 켜져 있는 동안, 5분마다 스스로 탐색해 합격 종목을 최대 ${autoForm.maxPositions}종목까지`,
+              "삼분할 매매기법의 '1분할' 타점으로 자동 매수하고, 체결되면 익절/손절까지 자동으로 겁니다.",
+              `최대손실 한도(시드 대비 ${autoForm.maxLossPct}%)에 닿으면 스스로 멈춥니다.`,
+              "",
+              "⚠️ PC를 끄면 자동매매도 함께 멈춥니다. 계속할까요?",
+            ].join("\n"),
+          );
+          if (!ok) return;
+        }
+        const r = await window.kyletool.sendCommand(wantStop ? "autoTradeStop" : "autoTradeStart");
+        setAutoToggleMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+        // PC 루프 주기(8초)보다 조금 넉넉하게 두 번 다시 확인해 "켜짐/꺼짐" 표시를 앞당긴다.
+        for (const delayMs of [4000, 10000]) {
+          setTimeout(() => {
+            void window.kyletool.getDesktopHeartbeat()
+              .then((hb) => { setPcLastSeenMs(hb.lastSeenMs); setPcAutoTradeEnabled(hb.autoTradeEnabled); })
+              .catch(() => {});
+          }, delayMs);
+        }
+        return;
+      }
       if (autoStatus?.enabled) {
         setAutoStatus(await window.kyletool.autoTradeStop());
         return;
@@ -3844,18 +3903,27 @@ ${msg}
             <div className="settings-block">
               <div className="form-row">
                 <button
-                  className={`btn ${autoStatus?.enabled ? "btn-kill kill-on" : "btn-start"}`}
-                  disabled={autoBusy || status?.killSwitch}
+                  className={`btn ${effectiveAutoEnabled ? "btn-kill kill-on" : "btn-start"}`}
+                  disabled={autoBusy || status?.killSwitch || (isWebApp && !pcConnected)}
                   onClick={toggleAutoTrade}
                 >
-                  {autoStatus?.enabled ? "🔴 자동매매 중지" : "▶ 자동매매 시작"}
+                  {effectiveAutoEnabled ? "🔴 자동매매 중지" : "▶ 자동매매 시작"}
                 </button>
                 <span className="hint">
-                  상태: <b>{autoStatus?.enabled ? "켜짐" : "꺼짐"}</b>
+                  상태: <b>{effectiveAutoEnabled ? "켜짐" : "꺼짐"}</b>
+                  {isWebApp && <> (PC 기준{pcConnected ? "" : " — PC 꺼짐, 값이 오래됐을 수 있음"})</>}
                   {autoStatus?.lastCycleAt && <> · 마지막 확인 {autoStatus.lastCycleAt}</>}
                   {autoStatus && <> · 이번 실행 누적손익 <b className={autoStatus.realizedPnlUsd < 0 ? "pnl-down" : "pnl-up"}>${autoStatus.realizedPnlUsd.toFixed(2)}</b></>}
                 </span>
               </div>
+              {isWebApp && !pcConnected && (
+                <p className="hint small danger">⚠️ PC(데스크톱 앱)가 꺼져 있어 지금은 시작/중지를 눌러도 실행되지 않습니다 — PC를 켜 주세요.</p>
+              )}
+              {autoToggleMsg && (
+                <p className={autoToggleMsg.includes("⚠️") ? "hint small danger" : "hint small ok"} style={{ whiteSpace: "pre-wrap" }}>
+                  {autoToggleMsg}
+                </p>
+              )}
               {status?.killSwitch && <p className="hint small danger">킬 스위치(🛑 비상 정지)가 켜져 있어 자동매매를 시작할 수 없습니다.</p>}
               {/* [v0.40.0] "투입 시드 비율에 맞지 않게 적게 투입됨" 버그 이후 — 지금 실제로 몇 %를
                   계산하는지 화면에서 바로 확인할 수 있게 기준 시드 금액을 그대로 보여준다. */}
@@ -4019,14 +4087,12 @@ ${msg}
               여기 버튼은 어디서든(외부망 포함) 로그인만 돼 있으면 눌러집니다 — 다만 <b>PC(데스크톱 앱)가
               켜져 있어야</b> 실제로 실행됩니다(위 상단바 배지 참고). PC가 꺼져 있으면 명령은 큐에 쌓여
               있다가 PC를 켜면 그때 실행됩니다 — "눌렀는데 반영 안 됐다"고 PC가 켜진 줄 착각하지 마세요.
+              {/* [v0.60.4] 자동매매 시작/중지는 이제 위 "🤖 자동매매" 카드의 평소 버튼이 폰에서도
+                  바로 이 원격 명령 경로를 그대로 쓴다 — 여기 따로 둘 필요가 없어 뺐다. */}
+              자동매매 <b>시작/중지는 위 "🤖 자동매매" 카드의 평소 버튼</b>을 그대로 쓰세요(폰에서도
+              같은 버튼이 원격으로 전달됩니다) — 여기는 그 외(비상정지·지금 스캔)만 모아 뒀습니다.
             </p>
             <div className="form-row">
-              <button className="btn btn-start" disabled={remoteBusy !== null || !pcConnected} onClick={() => void doSendCommand("autoTradeStart")}>
-                {remoteBusy === "autoTradeStart" ? "보내는 중…" : "▶ 자동매매 시작(원격)"}
-              </button>
-              <button className="btn btn-kill" disabled={remoteBusy !== null || !pcConnected} onClick={() => void doSendCommand("autoTradeStop")}>
-                {remoteBusy === "autoTradeStop" ? "보내는 중…" : "🔴 자동매매 중지(원격)"}
-              </button>
               <button className="btn btn-kill" disabled={remoteBusy !== null || !pcConnected} onClick={() => void doSendCommand("setKillSwitch", { on: true })}>
                 🛑 비상 정지 켜기(원격)
               </button>
@@ -4055,7 +4121,7 @@ ${msg}
                 <tbody>
                   {remoteCmds.map((c) => (
                     <tr key={c.id}>
-                      <td>{c.type}</td>
+                      <td>{REMOTE_CMD_LABEL[c.type] ?? c.type}</td>
                       <td>{c.status === "pending" ? "⏳ 대기" : c.status === "acked" ? "⏳ 처리 중" : c.status === "done" ? "✅ 완료" : "⚠️ 실패"}</td>
                       <td>{DateTime.fromISO(c.createdAt).setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss")}</td>
                     </tr>

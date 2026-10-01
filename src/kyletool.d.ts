@@ -646,7 +646,7 @@ interface KyletoolBridge {
   sendCommand(type: string, payload?: Record<string, unknown>): Promise<{ ok: boolean; message: string; commandId?: string }>;
   listMyCommands(limit?: number): Promise<Array<{ id: string; type: string; status: string; result: unknown; createdAt: string }>>;
   /** [v0.59.0] PC가 지금 켜져 있는지(최근 생존 신호). null이면 한 번도 신호가 없었던 것. */
-  getDesktopHeartbeat(): Promise<{ lastSeenMs: number | null }>;
+  getDesktopHeartbeat(): Promise<{ lastSeenMs: number | null; autoTradeEnabled: boolean | null }>;
   setKillSwitch(on: boolean): Promise<void>;
   setLiveOrders(on: boolean): Promise<void>;
   setPriceGuard(on: boolean, pct?: number): Promise<void>;

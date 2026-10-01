@@ -4395,10 +4395,13 @@ export class ToolEngine extends EventEmitter {
     const token = await this.ensureAccessToken();
     if (!token || !this.authUserId) return;
     try {
+      // [v0.60.4] auto_trade_enabled도 함께 실어 보낸다 — 폰이 "PC에서 지금 자동매매가
+      //   진짜로 돌고 있는지"를 알 방법이 이것뿐이었다(오너 실사용 보고: "원격으로 시작을
+      //   눌러도 진행되고 있는지 모르겠다").
       await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_desktop_heartbeat?on_conflict=user_id`, {
         method: "POST",
         headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
-        body: JSON.stringify({ user_id: this.authUserId, last_seen: new Date().toISOString() }),
+        body: JSON.stringify({ user_id: this.authUserId, last_seen: new Date().toISOString(), auto_trade_enabled: this.autoTradeEnabled }),
       });
     } catch {
       /* 생존 신호 실패는 조용히 무시(다음 8초 주기에 재시도) */
@@ -4527,20 +4530,27 @@ export class ToolEngine extends EventEmitter {
     }
   }
 
-  /** [폰/PC 공용] "PC가 지금 켜져 있나?" — 최근 생존 신호 시각(없으면 null). 화면이 임계값(예: 90초)과 비교해 판단한다. */
-  async getDesktopHeartbeat(): Promise<{ lastSeenMs: number | null }> {
+  /**
+   * [폰/PC 공용] "PC가 지금 켜져 있나? 자동매매는 켜져 있나?" — 최근 생존 신호 시각(없으면
+   *   null) + PC가 보낸 실제 자동매매 켜짐/꺼짐. 화면이 임계값(예: 90초)과 비교해 판단한다.
+   *   [v0.60.4] autoTradeEnabled 추가 — 예전엔 이 값이 없어 폰의 [자동매매 현황] 탭이
+   *   "그 기기 자체의 로컬 상태"(web 세션은 의미 없는 값)를 보여줄 수밖에 없었다(오너
+   *   실사용 보고: "원격으로 시작을 눌러도 진행되고 있는지 모르겠다"). 이제 PC가 실제로
+   *   보낸 값을 그대로 보여줄 수 있다.
+   */
+  async getDesktopHeartbeat(): Promise<{ lastSeenMs: number | null; autoTradeEnabled: boolean | null }> {
     const token = await this.ensureAccessToken();
-    if (!token) return { lastSeenMs: null };
+    if (!token) return { lastSeenMs: null, autoTradeEnabled: null };
     try {
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_desktop_heartbeat?select=last_seen`, {
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_desktop_heartbeat?select=last_seen,auto_trade_enabled`, {
         headers: this.authRestHeaders(token),
       });
-      if (!res.ok) return { lastSeenMs: null };
-      const rows = (await res.json()) as Array<{ last_seen: string }>;
-      if (!rows[0]) return { lastSeenMs: null };
-      return { lastSeenMs: new Date(rows[0].last_seen).getTime() };
+      if (!res.ok) return { lastSeenMs: null, autoTradeEnabled: null };
+      const rows = (await res.json()) as Array<{ last_seen: string; auto_trade_enabled: boolean | null }>;
+      if (!rows[0]) return { lastSeenMs: null, autoTradeEnabled: null };
+      return { lastSeenMs: new Date(rows[0].last_seen).getTime(), autoTradeEnabled: rows[0].auto_trade_enabled ?? null };
     } catch {
-      return { lastSeenMs: null };
+      return { lastSeenMs: null, autoTradeEnabled: null };
     }
   }
 
