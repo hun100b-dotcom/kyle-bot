@@ -24,6 +24,7 @@
 // =============================================================================
 
 import { roundPrice } from "./calc";
+import { fetchWithTimeout } from "./fetch-timeout";
 
 // -----------------------------------------------------------------------------
 // 0) 엔드포인트 경로 (실제 토스 스펙에 맞춤)
@@ -370,22 +371,6 @@ function getTimeoutMs(): number {
   const v = process.env.TOSS_TIMEOUT_MS;
   const n = v ? Number(v) : NaN;
   return Number.isFinite(n) && n > 0 ? n : 10_000;
-}
-
-/** 제한 시간 안에 응답이 없으면 요청을 끊는 fetch(봇이 한 요청에 매달려 멈추지 않게). */
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number, label: string): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") {
-      throw new Error(`요청 타임아웃(${timeoutMs}ms 초과): ${label}`);
-    }
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 let tokenCache: { accessToken: string; expiresAtMs: number } | null = null;

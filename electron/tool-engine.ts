@@ -30,6 +30,7 @@ import { buildCycles, analyzeTrades, type TradeCycle, type TradeInsights } from 
 import { toSyncPayload, isSyncPayload, type TradeSyncPayload } from "../lib/trade-sync";
 import { toAutoStateSyncPayload, isAutoStateSyncPayload, mergeAutoHistory, derivePositionsFromHistory, type AutoStateSyncPayload } from "../lib/auto-state-sync"; // [v0.31.0] 자동매매 기록 기기 간 동기화
 import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, WICK_MIN_RATIO, DOJI_MAX_AGE_MINUTES, type Candle, type SessionPattern } from "../lib/indicators";
+import { fetchWithTimeout } from "../lib/fetch-timeout"; // [v0.61.5 — ③ 전수조사 "높음-1"] Supabase REST 호출도 토스처럼 타임아웃을 건다
 import {
   getPrice,
   getTrades,
@@ -1889,11 +1890,11 @@ export class ToolEngine extends EventEmitter {
    */
   async authSignUp(email: string, password: string): Promise<{ ok: boolean; needsConfirm: boolean; message: string; canRequestAccess?: boolean }> {
     try {
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/auth/v1/signup`, {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/auth/v1/signup`, {
         method: "POST",
         headers: { apikey: ToolEngine.SUPABASE_ANON, "Content-Type": "application/json" },
         body: JSON.stringify({ email: email.trim(), password }),
-      });
+      }, 10_000, "signup");
       const data = (await res.json()) as Record<string, unknown>;
       if (!res.ok) {
         // [v0.53.0] 필드명이 서버 버전마다 다를 수 있어 전부 모아 본다(하나라도 단서를 놓치면
@@ -1937,11 +1938,11 @@ export class ToolEngine extends EventEmitter {
    */
   async authSignIn(email: string, password: string): Promise<{ ok: boolean; message: string }> {
     try {
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/auth/v1/token?grant_type=password`, {
         method: "POST",
         headers: { apikey: ToolEngine.SUPABASE_ANON, "Content-Type": "application/json" },
         body: JSON.stringify({ email: email.trim(), password }),
-      });
+      }, 10_000, "token");
       const data = (await res.json()) as Record<string, unknown>;
       if (!res.ok || !data.access_token) {
         let msg = String(data.error_description ?? data.msg ?? `로그인 실패(HTTP ${res.status})`);
@@ -2019,9 +2020,9 @@ export class ToolEngine extends EventEmitter {
     try {
       const token = await this.ensureAccessToken();
       if (!token) return { ...base, accountStatus: "unknown" as const };
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_accounts?select=status&user_id=eq.${this.authUserId}`, {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_accounts?select=status&user_id=eq.${this.authUserId}`, {
         headers: this.authRestHeaders(token),
-      });
+      }, 10_000, "capri_accounts");
       if (!res.ok) return { ...base, accountStatus: "unknown" as const };
       const rows = (await res.json()) as Array<{ status: "pending" | "approved" | "rejected" }>;
       const status = rows[0]?.status;
@@ -2052,11 +2053,11 @@ export class ToolEngine extends EventEmitter {
     if (this.authAccessToken && Date.now() < this.authExpiresAtMs - 60_000) return this.authAccessToken;
     if (!this.authRefreshToken) return null;
     try {
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
         method: "POST",
         headers: { apikey: ToolEngine.SUPABASE_ANON, "Content-Type": "application/json" },
         body: JSON.stringify({ refresh_token: this.authRefreshToken }),
-      });
+      }, 10_000, "token");
       const data = (await res.json()) as Record<string, unknown>;
       if (!res.ok || !data.access_token) return null;
       this.applySession(data);
@@ -2090,11 +2091,11 @@ export class ToolEngine extends EventEmitter {
     const e = email.trim().toLowerCase();
     if (!e || !e.includes("@")) return { ok: false, message: "올바른 이메일을 입력하세요." };
     try {
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_access_requests`, {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_access_requests`, {
         method: "POST",
         headers: { ...this.anonRestHeaders(), Prefer: "return=minimal" },
         body: JSON.stringify({ email: e, note: note?.trim() || null }),
-      });
+      }, 10_000, "capri_access_requests");
       if (res.status === 409) return { ok: true, message: "이미 신청하셨습니다. 운영자 승인을 기다려 주세요." };
       if (!res.ok) return { ok: false, message: `신청 실패(HTTP ${res.status}).` };
       return { ok: true, message: "사용 신청을 접수했습니다. 운영자 승인 후 가입할 수 있어요." };
@@ -2108,10 +2109,10 @@ export class ToolEngine extends EventEmitter {
     const token = await this.ensureAccessToken();
     if (!token) return [];
     try {
-      const res = await fetch(
+      const res = await fetchWithTimeout(
         `${ToolEngine.SUPABASE_URL}/rest/v1/capri_access_requests?status=eq.pending&select=email,note,requested_at&order=requested_at.asc`,
         { headers: this.authRestHeaders(token) },
-      );
+      10_000, "capri_access_requests");
       if (!res.ok) return [];
       const rows = (await res.json()) as Array<{ email: string; note: string | null; requested_at: string }>;
       return rows.map((r) => ({ email: r.email, note: r.note, requestedAt: r.requested_at }));
@@ -2126,19 +2127,19 @@ export class ToolEngine extends EventEmitter {
     if (!token) return { ok: false, message: "먼저 로그인하세요." };
     const e = email.trim().toLowerCase();
     try {
-      const insertRes = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_allowed_emails`, {
+      const insertRes = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_allowed_emails`, {
         method: "POST",
         headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
         body: JSON.stringify({ email: e, note: "앱에서 승인" }),
-      });
+      }, 10_000, "capri_allowed_emails");
       if (!insertRes.ok) {
         return { ok: false, message: `허용 목록 추가 실패(HTTP ${insertRes.status}). 운영자 계정으로 로그인했는지 확인하세요.` };
       }
-      await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_access_requests?email=eq.${encodeURIComponent(e)}`, {
+      await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_access_requests?email=eq.${encodeURIComponent(e)}`, {
         method: "PATCH",
         headers: { ...this.authRestHeaders(token), Prefer: "return=minimal" },
         body: JSON.stringify({ status: "approved", decided_at: new Date().toISOString() }),
-      });
+      }, 10_000, "capri_access_requests");
       this.addJournal({ kind: "info", symbol: "-", summary: `✅ 가입 승인: ${e}` });
       return { ok: true, message: `${e} 승인 완료. 이제 이 이메일로 가입할 수 있습니다.` };
     } catch (err) {
@@ -2152,11 +2153,11 @@ export class ToolEngine extends EventEmitter {
     if (!token) return { ok: false, message: "먼저 로그인하세요." };
     const e = email.trim().toLowerCase();
     try {
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_access_requests?email=eq.${encodeURIComponent(e)}`, {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_access_requests?email=eq.${encodeURIComponent(e)}`, {
         method: "PATCH",
         headers: { ...this.authRestHeaders(token), Prefer: "return=minimal" },
         body: JSON.stringify({ status: "rejected", decided_at: new Date().toISOString() }),
-      });
+      }, 10_000, "capri_access_requests");
       if (!res.ok) return { ok: false, message: `거절 처리 실패(HTTP ${res.status}).` };
       return { ok: true, message: `${e} 요청을 거절했습니다.` };
     } catch (err) {
@@ -2176,10 +2177,10 @@ export class ToolEngine extends EventEmitter {
     const token = await this.ensureAccessToken();
     if (!token) return [];
     try {
-      const res = await fetch(
+      const res = await fetchWithTimeout(
         `${ToolEngine.SUPABASE_URL}/rest/v1/capri_accounts?status=eq.pending&select=user_id,email,requested_at&order=requested_at.asc`,
         { headers: this.authRestHeaders(token) },
-      );
+      10_000, "capri_accounts");
       if (!res.ok) return [];
       const rows = (await res.json()) as Array<{ user_id: string; email: string; requested_at: string }>;
       return rows.map((r) => ({ userId: r.user_id, email: r.email, requestedAt: r.requested_at }));
@@ -2193,11 +2194,11 @@ export class ToolEngine extends EventEmitter {
     const token = await this.ensureAccessToken();
     if (!token) return { ok: false, message: "먼저 로그인하세요." };
     try {
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_accounts?user_id=eq.${userId}`, {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_accounts?user_id=eq.${userId}`, {
         method: "PATCH",
         headers: { ...this.authRestHeaders(token), Prefer: "return=minimal" },
         body: JSON.stringify({ status: decision, decided_at: new Date().toISOString(), decided_by: this.authEmail }),
-      });
+      }, 10_000, "capri_accounts");
       if (!res.ok) return { ok: false, message: `처리 실패(HTTP ${res.status}). 운영자 계정으로 로그인했는지 확인하세요.` };
       this.addJournal({ kind: "info", symbol: "-", summary: `${decision === "approved" ? "✅ 계정 승인" : "🚫 계정 거절"}: ${userId}` });
       return { ok: true, message: decision === "approved" ? "승인했습니다. 이제 바로 쓸 수 있습니다." : "거절했습니다." };
@@ -2217,9 +2218,9 @@ export class ToolEngine extends EventEmitter {
     const token = await this.ensureAccessToken();
     if (!token) return { discordWebhookUrl: null };
     try {
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_notify_settings?select=discord_webhook_url&id=eq.true`, {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_notify_settings?select=discord_webhook_url&id=eq.true`, {
         headers: this.authRestHeaders(token),
-      });
+      }, 10_000, "capri_notify_settings");
       if (!res.ok) return { discordWebhookUrl: null };
       const rows = (await res.json()) as Array<{ discord_webhook_url: string | null }>;
       return { discordWebhookUrl: rows[0]?.discord_webhook_url ?? null };
@@ -2233,11 +2234,11 @@ export class ToolEngine extends EventEmitter {
     const token = await this.ensureAccessToken();
     if (!token) return { ok: false, message: "먼저 로그인하세요." };
     try {
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_notify_settings?id=eq.true`, {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_notify_settings?id=eq.true`, {
         method: "PATCH",
         headers: { ...this.authRestHeaders(token), Prefer: "return=minimal" },
         body: JSON.stringify({ discord_webhook_url: discordWebhookUrl.trim() || null, updated_at: new Date().toISOString() }),
-      });
+      }, 10_000, "capri_notify_settings");
       if (!res.ok) return { ok: false, message: `저장 실패(HTTP ${res.status}). 운영자 계정으로 로그인했는지 확인하세요.` };
       return { ok: true, message: discordWebhookUrl.trim() ? "저장했습니다. 다음 신규 가입부터 디스코드로 알림이 갑니다." : "웹훅 주소를 비웠습니다(알림 꺼짐)." };
     } catch (err) {
@@ -2275,9 +2276,9 @@ export class ToolEngine extends EventEmitter {
         return { ok: false, message: errorDesc ? `로그인 실패: ${errorDesc}` : "로그인 정보를 받지 못했습니다." };
       }
       // /auth/v1/user 로 이 토큰의 계정 정보(이메일 등)를 확인한다.
-      const meRes = await fetch(`${ToolEngine.SUPABASE_URL}/auth/v1/user`, {
+      const meRes = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/auth/v1/user`, {
         headers: { apikey: ToolEngine.SUPABASE_ANON, Authorization: `Bearer ${accessToken}` },
-      });
+      }, 10_000, "user");
       const me = (await meRes.json()) as Record<string, unknown>;
       if (!meRes.ok || !me.id) return { ok: false, message: "로그인 정보를 확인하지 못했습니다." };
 
@@ -2315,11 +2316,11 @@ export class ToolEngine extends EventEmitter {
     try {
       const rec = await encryptSecret({ clientId, clientSecret, account }, this.authPassword);
       // upsert: 내 user_id 행이 있으면 갱신, 없으면 삽입. user_id 는 JWT의 것으로 명시(RLS with_check 통과).
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_secrets?on_conflict=user_id`, {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_secrets?on_conflict=user_id`, {
         method: "POST",
         headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
         body: JSON.stringify({ user_id: this.authUserId, ciphertext: rec.ciphertext, salt: rec.salt, iv: rec.iv, updated_at: new Date().toISOString() }),
-      });
+      }, 10_000, "capri_secrets");
       if (!res.ok) return { ok: false, message: `클라우드 저장 실패(HTTP ${res.status}). ${await res.text().catch(() => "")}`.slice(0, 160) };
       this.addJournal({ kind: "info", symbol: "-", summary: "🔐 내 토스 키를 암호화해 클라우드(내 계정)에 저장" });
       return { ok: true, message: "내 계정에 암호화 저장했습니다. 다른 기기에서 같은 계정으로 로그인만 하면 자동으로 받아집니다." };
@@ -2340,9 +2341,9 @@ export class ToolEngine extends EventEmitter {
     if (!this.authPassword) return { ok: false, message: "다시 로그인해야 키를 불러올 수 있습니다(비밀번호는 저장해 두지 않아요)." };
     try {
       // RLS 덕분에 select 는 자동으로 '내 행'만 돌려준다(user_id 조건 불필요).
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_secrets?select=ciphertext,salt,iv`, {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_secrets?select=ciphertext,salt,iv`, {
         headers: this.authRestHeaders(token),
-      });
+      }, 10_000, "capri_secrets");
       if (!res.ok) return { ok: false, message: `클라우드 조회 실패(HTTP ${res.status}).` };
       const rows = (await res.json()) as Array<{ ciphertext: string; salt: string; iv: string }>;
       if (!rows || rows.length === 0) {
@@ -4169,11 +4170,11 @@ export class ToolEngine extends EventEmitter {
 
     try {
       const rec = await encryptJson(toSyncPayload(this.savedFills, Date.now()), this.authPassword);
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_trades?on_conflict=user_id`, {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_trades?on_conflict=user_id`, {
         method: "POST",
         headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
         body: JSON.stringify({ user_id: this.authUserId, ciphertext: rec.ciphertext, salt: rec.salt, iv: rec.iv, updated_at: new Date().toISOString() }),
-      });
+      }, 10_000, "capri_trades");
       if (!res.ok) return { ok: false, message: `클라우드 저장 실패(HTTP ${res.status}).` };
       this.lastSyncPushAtMs = Date.now();
       return { ok: true, message: `매매 이력 ${this.savedFills.length}건을 올렸습니다(암호화됨).`, count: this.savedFills.length };
@@ -4192,9 +4193,9 @@ export class ToolEngine extends EventEmitter {
     if (!this.authPassword) return { ok: false, message: "다시 로그인해야 매매 이력을 받을 수 있습니다(비밀번호는 저장해 두지 않아요)." };
 
     try {
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_trades?select=ciphertext,salt,iv`, {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_trades?select=ciphertext,salt,iv`, {
         headers: this.authRestHeaders(token),
-      });
+      }, 10_000, "capri_trades");
       if (!res.ok) return { ok: false, message: `클라우드 조회 실패(HTTP ${res.status}).` };
       const rows = (await res.json()) as Array<{ ciphertext: string; salt: string; iv: string }>;
       if (!rows || rows.length === 0) {
@@ -4243,11 +4244,11 @@ export class ToolEngine extends EventEmitter {
 
     try {
       const rec = await encryptJson(toAutoStateSyncPayload(this.autoTradeHistory, Date.now()), this.authPassword);
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_auto_state?on_conflict=user_id`, {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_auto_state?on_conflict=user_id`, {
         method: "POST",
         headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
         body: JSON.stringify({ user_id: this.authUserId, ciphertext: rec.ciphertext, salt: rec.salt, iv: rec.iv, updated_at: new Date().toISOString() }),
-      });
+      }, 10_000, "capri_auto_state");
       if (!res.ok) return { ok: false, message: `클라우드 저장 실패(HTTP ${res.status}).` };
       this.lastAutoStatePushAtMs = Date.now();
       return { ok: true, message: `자동매매 기록 ${this.autoTradeHistory.length}건을 올렸습니다(암호화됨).`, count: this.autoTradeHistory.length };
@@ -4267,9 +4268,9 @@ export class ToolEngine extends EventEmitter {
     if (!this.authPassword) return { ok: false, message: "다시 로그인해야 자동매매 기록을 받을 수 있습니다(비밀번호는 저장해 두지 않아요)." };
 
     try {
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_auto_state?select=ciphertext,salt,iv`, {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_auto_state?select=ciphertext,salt,iv`, {
         headers: this.authRestHeaders(token),
-      });
+      }, 10_000, "capri_auto_state");
       if (!res.ok) return { ok: false, message: `클라우드 조회 실패(HTTP ${res.status}).` };
       const rows = (await res.json()) as Array<{ ciphertext: string; salt: string; iv: string }>;
       if (!rows || rows.length === 0) {
@@ -4332,11 +4333,11 @@ export class ToolEngine extends EventEmitter {
         killSwitch: this.killSwitch,
         scanProgress: this.scanProgressForMirror,
       };
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_live_state?on_conflict=user_id,kind`, {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_live_state?on_conflict=user_id,kind`, {
         method: "POST",
         headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
         body: JSON.stringify({ user_id: this.authUserId, kind: "snapshot", payload, updated_at: new Date().toISOString() }),
-      });
+      }, 10_000, "capri_live_state");
       if (res.ok) this.lastLiveStatePushAtMs = Date.now();
     } catch {
       /* 실패해도 조용히 무시 — 다음 기회(다음 사이클·다음 쓰로틀 통과)에 다시 시도 */
@@ -4377,9 +4378,9 @@ export class ToolEngine extends EventEmitter {
     const token = await this.ensureAccessToken();
     if (!token) return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, updatedAtMs: null, message: "먼저 로그인하세요." };
     try {
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_live_state?kind=eq.snapshot&select=payload,updated_at`, {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_live_state?kind=eq.snapshot&select=payload,updated_at`, {
         headers: this.authRestHeaders(token),
-      });
+      }, 10_000, "capri_live_state");
       if (!res.ok)
         return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, updatedAtMs: null, message: `조회 실패(HTTP ${res.status}).` };
       const rows = (await res.json()) as Array<{
@@ -4436,9 +4437,9 @@ export class ToolEngine extends EventEmitter {
 
     let merged: AutoTradeHistoryEntry[] = this.autoTradeHistory;
     try {
-      const existing = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_trades?user_id=eq.${this.authUserId}&select=history`, {
+      const existing = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_trades?user_id=eq.${this.authUserId}&select=history`, {
         headers: this.authRestHeaders(token),
-      });
+      }, 10_000, "capri_group_trades");
       if (existing.ok) {
         const rows = (await existing.json()) as Array<{ history: unknown }>;
         const remoteHistory = Array.isArray(rows[0]?.history) ? (rows[0].history as AutoTradeHistoryEntry[]) : [];
@@ -4449,7 +4450,7 @@ export class ToolEngine extends EventEmitter {
     }
 
     try {
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_trades?on_conflict=user_id`, {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_trades?on_conflict=user_id`, {
         method: "POST",
         headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
         body: JSON.stringify({
@@ -4458,7 +4459,7 @@ export class ToolEngine extends EventEmitter {
           history: merged,
           updated_at: new Date().toISOString(),
         }),
-      });
+      }, 10_000, "capri_group_trades");
       if (!res.ok) return { ok: false, message: `그룹 공유 저장 실패(HTTP ${res.status}).` };
       this.lastGroupPushAtMs = Date.now();
       return { ok: true, message: `그룹에 자동매매 기록 ${merged.length}건을 공유했습니다.`, count: merged.length };
@@ -4488,12 +4489,12 @@ export class ToolEngine extends EventEmitter {
 
     try {
       const [rosterRes, tradesRes] = await Promise.all([
-        fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_allowed_emails?select=email&order=email.asc`, {
+        fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_allowed_emails?select=email&order=email.asc`, {
           headers: this.authRestHeaders(token),
-        }),
-        fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_trades?select=member_email,history`, {
+        }, 10_000, "capri_allowed_emails"),
+        fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_trades?select=member_email,history`, {
           headers: this.authRestHeaders(token),
-        }),
+        }, 10_000, "capri_group_trades"),
       ]);
       if (!tradesRes.ok) return { ok: false, message: `그룹 기록 조회 실패(HTTP ${tradesRes.status}).`, members: [] };
       const tradeRows = (await tradesRes.json()) as Array<{ member_email: string; history: unknown }>;
@@ -4584,7 +4585,7 @@ export class ToolEngine extends EventEmitter {
       //   안 된 채로(옛 코드 그대로) 계속 돈다. 폰에서 "PC가 지금 몇 버전을 돌리는지"를
       //   바로 볼 수 있어야 "업데이트가 안 먹는 건지, PC가 아직 옛 버전인 건지"를 헷갈리지
       //   않는다 — 이 칼럼은 원래부터 있었는데 지금까지 아무도 채워 넣지 않고 있었다.
-      await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_desktop_heartbeat?on_conflict=user_id`, {
+      await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_desktop_heartbeat?on_conflict=user_id`, {
         method: "POST",
         headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
         body: JSON.stringify({
@@ -4593,15 +4594,15 @@ export class ToolEngine extends EventEmitter {
           auto_trade_enabled: this.autoTradeEnabled,
           app_version: this.appVersion,
         }),
-      });
+      }, 10_000, "capri_desktop_heartbeat");
     } catch {
       /* 생존 신호 실패는 조용히 무시(다음 8초 주기에 재시도) */
     }
     try {
-      const res = await fetch(
+      const res = await fetchWithTimeout(
         `${ToolEngine.SUPABASE_URL}/rest/v1/capri_commands?status=eq.pending&select=id,type,payload&order=created_at.asc&limit=5`,
         { headers: this.authRestHeaders(token) },
-      );
+      10_000, "capri_commands");
       if (!res.ok) return;
       const rows = (await res.json()) as Array<{ id: string; type: string; payload: Record<string, unknown> }>;
       for (const row of rows) await this.claimAndExecuteCommand(token, row);
@@ -4621,11 +4622,11 @@ export class ToolEngine extends EventEmitter {
   private async claimAndExecuteCommand(token: string, row: { id: string; type: string; payload: Record<string, unknown> }): Promise<void> {
     let claimed: unknown[] = [];
     try {
-      const claim = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_commands?id=eq.${row.id}&status=eq.pending`, {
+      const claim = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_commands?id=eq.${row.id}&status=eq.pending`, {
         method: "PATCH",
         headers: { ...this.authRestHeaders(token), Prefer: "return=representation" },
         body: JSON.stringify({ status: "acked" }),
-      });
+      }, 10_000, "capri_commands");
       if (!claim.ok) return;
       claimed = (await claim.json()) as unknown[];
     } catch {
@@ -4646,11 +4647,11 @@ export class ToolEngine extends EventEmitter {
       category: "자동매매",
     });
     try {
-      await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_commands?id=eq.${row.id}`, {
+      await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_commands?id=eq.${row.id}`, {
         method: "PATCH",
         headers: { ...this.authRestHeaders(token), Prefer: "return=minimal" },
         body: JSON.stringify({ status: result.ok ? "done" : "failed", result, executed_at: new Date().toISOString() }),
-      });
+      }, 10_000, "capri_commands");
     } catch {
       /* 결과 기록 실패는 조용히 무시 — 명령 자체는 이미 실행됐다(재실행 안 함) */
     }
@@ -4697,11 +4698,11 @@ export class ToolEngine extends EventEmitter {
     const token = await this.ensureAccessToken();
     if (!token || !this.authUserId) return { ok: false, message: "먼저 로그인하세요." };
     try {
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_commands`, {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_commands`, {
         method: "POST",
         headers: { ...this.authRestHeaders(token), Prefer: "return=representation" },
         body: JSON.stringify({ user_id: this.authUserId, type, payload }),
-      });
+      }, 10_000, "capri_commands");
       if (!res.ok) return { ok: false, message: `명령 접수 실패(HTTP ${res.status}). PC가 켜져 있고 승인된 계정인지 확인하세요.` };
       const rows = (await res.json()) as Array<{ id: string }>;
       return { ok: true, message: "명령을 보냈습니다. PC가 몇 초 안에 실행합니다.", commandId: rows[0]?.id };
@@ -4715,10 +4716,10 @@ export class ToolEngine extends EventEmitter {
     const token = await this.ensureAccessToken();
     if (!token) return [];
     try {
-      const res = await fetch(
+      const res = await fetchWithTimeout(
         `${ToolEngine.SUPABASE_URL}/rest/v1/capri_commands?select=id,type,status,result,created_at&order=created_at.desc&limit=${limit}`,
         { headers: this.authRestHeaders(token) },
-      );
+      10_000, "capri_commands");
       if (!res.ok) return [];
       const rows = (await res.json()) as Array<{ id: string; type: string; status: string; result: unknown; created_at: string }>;
       return rows.map((r) => ({ id: r.id, type: r.type, status: r.status, result: r.result, createdAt: r.created_at }));
@@ -4739,9 +4740,9 @@ export class ToolEngine extends EventEmitter {
     const token = await this.ensureAccessToken();
     if (!token) return { lastSeenMs: null, autoTradeEnabled: null, pcAppVersion: null };
     try {
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_desktop_heartbeat?select=last_seen,auto_trade_enabled,app_version`, {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_desktop_heartbeat?select=last_seen,auto_trade_enabled,app_version`, {
         headers: this.authRestHeaders(token),
-      });
+      }, 10_000, "capri_desktop_heartbeat");
       if (!res.ok) return { lastSeenMs: null, autoTradeEnabled: null, pcAppVersion: null };
       const rows = (await res.json()) as Array<{ last_seen: string; auto_trade_enabled: boolean | null; app_version: string | null }>;
       if (!rows[0]) return { lastSeenMs: null, autoTradeEnabled: null, pcAppVersion: null };
@@ -4770,11 +4771,11 @@ export class ToolEngine extends EventEmitter {
     if (!token) return { ok: false, message: "먼저 로그인하세요." };
     if (!this.authEmail || !this.authUserId) return { ok: false, message: "로그인 정보가 없습니다." };
     try {
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_chat`, {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_chat`, {
         method: "POST",
         headers: { ...this.authRestHeaders(token), Prefer: "return=minimal" },
         body: JSON.stringify({ user_id: this.authUserId, member_email: this.authEmail, body: text }),
-      });
+      }, 10_000, "capri_group_chat");
       if (!res.ok) return { ok: false, message: `채팅 전송 실패(HTTP ${res.status}).` };
       return { ok: true, message: "전송했습니다." };
     } catch (e) {
@@ -4787,10 +4788,10 @@ export class ToolEngine extends EventEmitter {
     const token = await this.ensureAccessToken();
     if (!token) return { ok: false, message: "먼저 로그인하세요.", chat: [] };
     try {
-      const res = await fetch(
+      const res = await fetchWithTimeout(
         `${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_chat?select=id,member_email,body,created_at&order=created_at.desc&limit=200`,
         { headers: this.authRestHeaders(token) },
-      );
+      10_000, "capri_group_chat");
       if (!res.ok) return { ok: false, message: `채팅 조회 실패(HTTP ${res.status}).`, chat: [] };
       const rows = (await res.json()) as Array<{ id: number; member_email: string; body: string; created_at: string }>;
       const chat: GroupChatMessage[] = rows
