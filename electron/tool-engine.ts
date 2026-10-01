@@ -598,6 +598,14 @@ export interface ScreenProgress {
   symbol: string; // 지금 처리 중인 종목
 }
 
+/** [v0.61.4] 상태 미러(capri_live_state)로 폰에 실시간 전달하는 스캔 진행률 — ScreenProgress에
+ *  "지금 돌고 있는 중인지"(running)와 "언제 시작했는지"(startedAtMs, 화면이 멈춘 건지 판단용)를
+ *  더한 모양. 스캔이 한 번도 안 돌았으면 null. */
+export interface LiveScanProgress extends ScreenProgress {
+  running: boolean;
+  startedAtMs: number;
+}
+
 /** [v0.11.0] 스크리너 스캔 옵션 — 화면에서 사용자가 조절한다(전부 선택, 없으면 기본값). */
 export interface ScreenOpts {
   bodyRatio?: number; // 도지 몸통비율 상한(0.1~0.8, 기본 0.3) — [v0.28.0] 0.5→0.8로 상한 확대
@@ -1153,6 +1161,13 @@ export class ToolEngine extends EventEmitter {
    *  (스캔 종료·시작/중지 직후처럼 "반드시 바로" 올려야 하는 시점에 쓴다). */
   private lastLiveStatePushAtMs: number | null = null;
   private static readonly LIVE_STATE_PUSH_THROTTLE_MS = 5_000;
+  /** [v0.61.4 — 오너 지시 "스크리닝시 진행되는 사항들 게이지가 차는 사항이 안 보인다"]
+   *  스캔 도중(랭킹 조회~종목별 조사~완료)의 실시간 진행률 — scanScreener가 채우고, 끝나면
+   *  running:false로 마감한다. 스캔이 한 번도 안 돌았으면 null(화면이 "진행 중 아님"으로 구분). */
+  private scanProgressForMirror: LiveScanProgress | null = null;
+  /** 위 scanProgressForMirror 업로드 전용 쓰로틀 — 종목 하나하나마다 올리면 과하므로 2초마다만. */
+  private lastScanProgressPushAtMs: number | null = null;
+  private static readonly SCAN_PROGRESS_PUSH_THROTTLE_MS = 2_000;
   /** [v0.56.0] "그룹 전체 실시간 동기화" — 로그인해 있는 동안 주기적으로 내 기록을 올리고
    *  그룹 전체 기록을 받아온다(버튼을 눌러야만 동작하던 걸 자동화). 로그인 안 돼 있으면
    *  절대 안 돈다(startGroupSyncLoop 참고). */
@@ -1632,6 +1647,12 @@ export class ToolEngine extends EventEmitter {
         summary: isCancel ? "🤖 자동매매 스크리너 수동 새로고침을 오너가 직접 취소했습니다." : `🤖 자동매매 스크리너 수동 새로고침 실패 — ${msg}`,
       });
     }
+    // [v0.61.4 긴급수정 — 오너 SQL 직접 조회로 확인된 버그] 자동매매가 꺼진 상태의 "미리보기"
+    //   스캔은 autoTradeTick()을 거치지 않아 그 finally의 pushLiveState 호출을 못 탄다 —
+    //   여기서 직접 저장(재시작 생존)+업로드(폰 반영)하지 않으면, 폰에서 "지금 새로고침"을
+    //   몇 번을 눌러도 PC 화면에만 보이고 클라우드로 올라간 적이 없었다.
+    this.saveAutoPositions();
+    void this.pushLiveState(true);
     return this.getAutoTradeStatus();
   }
 
@@ -4042,23 +4063,54 @@ export class ToolEngine extends EventEmitter {
   //   구조는 autoTradeHistory와 동일(파일 하나, 변경마다 원자적 저장) — usedKeys(중복진입 방지)도
   //   같은 파일에 함께 저장한다(둘 다 "지금 감시 대상이 뭔지"를 나타내는 한 묶음 상태이므로).
   // --------------------------------------------------------------------------
+  /**
+   * [v0.61.4 긴급수정 — 오너 SQL 직접 조회로 원인 확정] lastScan/lastCycleAt(Ms)도 이 파일에
+   *   함께 저장한다. 예전엔 이 셋이 메모리 전용이라 **앱이 재시작될 때마다 사라졌다** —
+   *   `autoTradePositions`(감시 포지션)는 이미 재시작해도 이어받는데, 정작 "방금 뭘 스캔했는지"는
+   *   매번 null로 리셋됐다. 평소엔 5분마다 새 스캔이 돌아 금방 다시 채워지니 티가 안 났지만,
+   *   **자동매매가 꺼진 상태로 재시작**되면(예: 자동 업데이트 — "자동매매 켜져 있으면 재시작 안
+   *   함" 안전장치가 풀리는 바로 그 순간) 아무도 다시 스캔을 안 돌려 영원히 null로 남았다.
+   *   거기다 그 "방금 리셋된 null"이 재시작 직후 포지션 재확인(reconcileAutoPositionsNow)의
+   *   `pushLiveState`를 타고 그대로 클라우드에 올라가, **재시작 전까지 폰에 잘 보이던 실제
+   *   스캔 결과를 null로 덮어써 지워버렸다** — 오너가 "지금 새로고침을 4번 눌러도 안 바뀐다"고
+   *   보고한 증상의 실제 원인(SQL로 직접 확인: PC app_version=0.61.3, 재시작 직후로 보이는
+   *   시점부터 lastScan·lastCycleAt이 전부 null).
+   */
   private loadAutoPositions(): void {
     try {
       if (!existsSync(this.autoPositionsPath)) return;
-      const raw = JSON.parse(readFileSync(this.autoPositionsPath, "utf8")) as { positions?: AutoPosition[]; usedKeys?: string[] };
+      const raw = JSON.parse(readFileSync(this.autoPositionsPath, "utf8")) as {
+        positions?: AutoPosition[];
+        usedKeys?: string[];
+        lastScan?: ScreenRun | null;
+        lastCycleAt?: string | null;
+        lastCycleAtMs?: number | null;
+      };
       this.autoTradePositions = Array.isArray(raw.positions) ? raw.positions : [];
       this.autoTradeUsedKeys = new Set(Array.isArray(raw.usedKeys) ? raw.usedKeys : []);
+      this.autoTradeLastScan = raw.lastScan ?? null;
+      this.autoTradeLastCycleAt = raw.lastCycleAt ?? null;
+      this.autoTradeLastCycleAtMs = raw.lastCycleAtMs ?? null;
     } catch {
       // 파일이 깨졌어도 앱이 죽으면 안 된다 — 빈 상태로 시작(실제 주문은 토스에 남아있으니
       // 오너가 [주문현황]에서 직접 확인 가능, 최소한 새 진입이 막히진 않음).
       this.autoTradePositions = [];
       this.autoTradeUsedKeys = new Set();
+      this.autoTradeLastScan = null;
+      this.autoTradeLastCycleAt = null;
+      this.autoTradeLastCycleAtMs = null;
     }
   }
 
   private saveAutoPositions(): void {
     try {
-      const payload = { positions: this.autoTradePositions, usedKeys: [...this.autoTradeUsedKeys] };
+      const payload = {
+        positions: this.autoTradePositions,
+        usedKeys: [...this.autoTradeUsedKeys],
+        lastScan: this.autoTradeLastScan,
+        lastCycleAt: this.autoTradeLastCycleAt,
+        lastCycleAtMs: this.autoTradeLastCycleAtMs,
+      };
       const tmp = this.autoPositionsPath + ".tmp";
       writeFileSync(tmp, JSON.stringify(payload, null, 2), "utf8");
       renameSync(tmp, this.autoPositionsPath);
@@ -4274,7 +4326,12 @@ export class ToolEngine extends EventEmitter {
       //   예전엔 상단 "🛑 비상 정지" 버튼이 웹(폰)에서도 로컬(의미 없는) 엔진의 killSwitch를
       //   직접 켰다 — 화면은 "🔴 비상 정지 중"으로 바뀌어도 PC의 실제 매매는 전혀 멈추지
       //   않는, 비상정지 버튼치고는 가장 위험한 종류의 거짓 안도감이었다.
-      const payload = { status: this.getAutoTradeStatus(), journal: this.getJournal().slice(-50), killSwitch: this.killSwitch };
+      const payload = {
+        status: this.getAutoTradeStatus(),
+        journal: this.getJournal().slice(-50),
+        killSwitch: this.killSwitch,
+        scanProgress: this.scanProgressForMirror,
+      };
       const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_live_state?on_conflict=user_id,kind`, {
         method: "POST",
         headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
@@ -4287,6 +4344,23 @@ export class ToolEngine extends EventEmitter {
   }
 
   /**
+   * [v0.61.4 — 오너 지시 "스크리닝시 진행되는 사항들 게이지가 차는 사항이 안 보인다"]
+   *   scanScreener 안에서만 쓰는 전용 쓰로틀 — 종목 하나 조사할 때마다(초 단위) 올리면
+   *   과하므로 2초에 한 번만. phase가 ranking/done일 때는 "스캔 시작/끝"이라는 중요한
+   *   전환 신호라 쓰로틀 없이 바로 올린다.
+   */
+  private pushScanProgress(p: LiveScanProgress): void {
+    this.scanProgressForMirror = p;
+    const isEdge = p.phase === "ranking" || p.phase === "done" || !p.running;
+    if (!isEdge) {
+      const longEnough = Date.now() - (this.lastScanProgressPushAtMs ?? 0) > ToolEngine.SCAN_PROGRESS_PUSH_THROTTLE_MS;
+      if (!longEnough) return;
+    }
+    this.lastScanProgressPushAtMs = Date.now();
+    void this.pushLiveState(true);
+  }
+
+  /**
    * getLiveState — PC가 올려 둔 최신 상태를 읽는다(폰이 주로 쓰지만 PC 자신도 쓸 수 있다).
    *   updatedAtMs(올라간 시각)를 함께 돌려줘, 화면이 "멈춘 건지 원래 이 상태인지"를
    *   구분해 보여줄 수 있게 한다(오너 지시: "마지막 갱신 시각을 표시해라").
@@ -4296,30 +4370,34 @@ export class ToolEngine extends EventEmitter {
     status: AutoTradeStatus | null;
     journal: JournalEntry[];
     killSwitch: boolean | null;
+    scanProgress: LiveScanProgress | null;
     updatedAtMs: number | null;
     message?: string;
   }> {
     const token = await this.ensureAccessToken();
-    if (!token) return { ok: false, status: null, journal: [], killSwitch: null, updatedAtMs: null, message: "먼저 로그인하세요." };
+    if (!token) return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, updatedAtMs: null, message: "먼저 로그인하세요." };
     try {
       const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_live_state?kind=eq.snapshot&select=payload,updated_at`, {
         headers: this.authRestHeaders(token),
       });
-      if (!res.ok) return { ok: false, status: null, journal: [], killSwitch: null, updatedAtMs: null, message: `조회 실패(HTTP ${res.status}).` };
+      if (!res.ok)
+        return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, updatedAtMs: null, message: `조회 실패(HTTP ${res.status}).` };
       const rows = (await res.json()) as Array<{
-        payload: { status?: AutoTradeStatus; journal?: JournalEntry[]; killSwitch?: boolean };
+        payload: { status?: AutoTradeStatus; journal?: JournalEntry[]; killSwitch?: boolean; scanProgress?: LiveScanProgress | null };
         updated_at: string;
       }>;
-      if (!rows[0]) return { ok: false, status: null, journal: [], killSwitch: null, updatedAtMs: null, message: "PC가 아직 상태를 올린 적이 없습니다." };
+      if (!rows[0])
+        return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, updatedAtMs: null, message: "PC가 아직 상태를 올린 적이 없습니다." };
       return {
         ok: true,
         status: rows[0].payload.status ?? null,
         journal: rows[0].payload.journal ?? [],
         killSwitch: rows[0].payload.killSwitch ?? null,
+        scanProgress: rows[0].payload.scanProgress ?? null,
         updatedAtMs: new Date(rows[0].updated_at).getTime(),
       };
     } catch (e) {
-      return { ok: false, status: null, journal: [], killSwitch: null, updatedAtMs: null, message: e instanceof Error ? e.message : String(e) };
+      return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, updatedAtMs: null, message: e instanceof Error ? e.message : String(e) };
     }
   }
 
@@ -5212,6 +5290,8 @@ export class ToolEngine extends EventEmitter {
 
       // 1) 거래량 랭킹으로 스캔 대상 종목 확보
       this.emit("screener:progress", { phase: "ranking", done: 0, total: count, symbol: "" } as ScreenProgress);
+      // [v0.61.4] 폰이 "지금 PC가 스캔 중"임을 바로 알 수 있게 — 시작 신호는 쓰로틀 없이 즉시 올린다.
+      this.pushScanProgress({ phase: "ranking", done: 0, total: count, symbol: "", running: true, startedAtMs: Date.now() });
       const ranked = await getRankings(count);
 
       // 1-b) [v0.6.3] ETF·레버리지·인버스 배제 — 종목 메타(securityType)를 한 번에 조회해 걸러낸다.
@@ -5252,6 +5332,7 @@ export class ToolEngine extends EventEmitter {
           throw new Error("오너 요청으로 스크리닝을 취소했습니다.");
         }
         this.emit("screener:progress", { phase: "scanning", done, total, symbol: rk.symbol } as ScreenProgress);
+        this.pushScanProgress({ phase: "scanning", done, total, symbol: rk.symbol, running: true, startedAtMs: this.scanProgressForMirror?.startedAtMs ?? Date.now() });
         try {
           // 1분봉을 과거로 당겨 확보한다.
           //   EMA200 에는 **완성된** 5분봉 200개(=1분봉 1000개)가 필요하다.
@@ -5338,6 +5419,8 @@ export class ToolEngine extends EventEmitter {
       }
 
       this.emit("screener:progress", { phase: "done", done, total, symbol: "" } as ScreenProgress);
+      // [v0.61.4] 완료 신호도 쓰로틀 없이 즉시 — 게이지가 꽉 찬 채로 안 멈추고 바로 사라지게.
+      this.pushScanProgress({ phase: "done", done, total, symbol: "", running: false, startedAtMs: this.scanProgressForMirror?.startedAtMs ?? Date.now() });
       // 정렬: 확정(🔴) → 관찰(🟡) → 나머지. 같은 등급이면 랭킹 순.
       const order: Record<ScreenStatus, number> = { confirmed: 0, watch: 1, none: 2, insufficient: 3 };
       results.sort((a, b) => order[a.status] - order[b.status] || a.rank - b.rank);
@@ -5361,6 +5444,11 @@ export class ToolEngine extends EventEmitter {
       };
     } finally {
       this.screenBusy = false;
+      // [v0.61.4] 취소·오류로 "done" 신호 없이 끝난 경우(위 try 블록 중간에 throw)도, 게이지가
+      //   "진행 중"에 영원히 멈춰 있지 않도록 여기서 반드시 running:false로 마감한다.
+      if (this.scanProgressForMirror?.running) {
+        this.pushScanProgress({ ...this.scanProgressForMirror, running: false });
+      }
     }
   }
 
@@ -5560,6 +5648,7 @@ export class ToolEngine extends EventEmitter {
     const carried = this.autoTradePositions.length;
     this.autoTradeLastScan = null; // 지난번 실행의 스캔 결과가 화면에 남아 헷갈리지 않게 초기화
     this.autoTradeLastScanError = null; // [v0.45.0] 마찬가지로 지난번 실행의 실패 기록도 초기화
+    this.saveAutoPositions(); // [v0.61.4] 초기화된 상태도 즉시 파일에 반영(재시작 시 옛 스캔이 되살아나지 않게)
     this.addJournal({
       kind: "info",
       symbol: "-",
@@ -6505,6 +6594,10 @@ export class ToolEngine extends EventEmitter {
       }
     } finally {
       this.autoTradeTickBusy = false;
+      // [v0.61.4] 사이클마다 최신 스캔·사이클 시각을 파일에도 반영한다(재시작해도 살아남게 —
+      //   positions만 영속화돼 있고 lastScan은 메모리 전용이던 게 "재시작 직후 폰 화면이
+      //   다시 비어 보이는" 문제의 근본 원인이었다. 자세한 배경은 saveAutoPositions 주석 참고).
+      this.saveAutoPositions();
       // [v0.61.0] 사이클 끝마다 지금 상태(스캔 결과 포함)를 capri_live_state에 올린다
       //   (로그인돼 있으면) — 오너 지시 "스크리너 스캔이 끝날 때마다는 반드시 올려야
       //   한다"를 그대로 구현. force=true로 쓰로틀을 무시해 체결 없이 스캔만 돈 사이클도

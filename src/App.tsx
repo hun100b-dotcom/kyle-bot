@@ -682,6 +682,11 @@ function App() {
   //   PC의 실제 매매는 전혀 안 멈추는데 화면만 "🔴 비상 정지 중"으로 바뀌는 게 가장 위험한
   //   종류의 거짓 안도감이었다. capri_live_state 미러로 PC의 진짜 값을 받는다.
   const [pcKillSwitch, setPcKillSwitch] = useState<boolean | null>(null);
+  // [v0.61.4 — 오너 지시 "스크리닝시 진행되는 사항들 게이지가 차는 사항이 안 보인다"] PC가 지금
+  //   스캔 중인지 + 진행률(상태 미러로 받음). canReconcileLive가 true인 세션(데스크톱·QR중계된
+  //   폰)은 이미 로컬 이벤트(onScreenerProgress → autoScanProg)로 실시간 게이지가 뜨므로, 이
+  //   필드는 그게 안 되는 "폰, 중계 없음" 세션 전용으로 쓴다(렌더링에서 분기).
+  const [pcScanProgress, setPcScanProgress] = useState<LiveScanProgress | null>(null);
   // [v0.60.9] PC가 보낸 "지금 실행 중인 버전" — "자동매매가 켜져 있으면 재시작 안 함"
   //   안전장치 때문에 PC가 몇 시간째 옛 버전을 그대로 돌릴 수 있다(오너 실사용 보고 —
   //   "폰에서 시작을 눌러도 자동 스크리너에 진행 상황이 안 뜬다"의 진짜 원인이 이거였다).
@@ -884,6 +889,7 @@ function App() {
       //   (pushLiveState) 여기서 같이 반영한다.
       if (r.journal.length > 0) setJournal(r.journal);
       if (r.killSwitch != null) setPcKillSwitch(r.killSwitch);
+      setPcScanProgress(r.scanProgress); // [v0.61.4] null도 의미 있다(= PC가 아직 한 번도 안 돈 것)
       return r.status;
     }
     return null;
@@ -943,6 +949,9 @@ function App() {
     });
   }
   const [autoScanProg, setAutoScanProg] = useState<ScreenProgress | null>(null); // 스캔 진행률(수동/자동 사이클 공용)
+  // [v0.61.4] 스캔 진행률 표시용 — canReconcileLive면 로컬 이벤트(onScreenerProgress)가 실시간으로
+  //   채워주는 autoScanProg를 그대로 쓰고, 아니면(웹, 중계 없음) 상태 미러로 받은 pcScanProgress를 쓴다.
+  const liveScanDisplay: ScreenProgress | null = canReconcileLive ? autoScanProg : pcScanProgress;
   // [v0.29.0] "다음 스캔까지 N분 N초" 카운트다운 표시용 — 1초마다 흘러가는 현재시각(서버 재조회 없이
   //   화면에서만 초 단위로 줄어들게 보여준다. 실제 값(nextCycleAtMs)은 20초 폴링으로 서버와 맞춘다).
   const [nowTick, setNowTick] = useState(Date.now());
@@ -1324,17 +1333,21 @@ function App() {
   }, [autoRefresh, tab, showTwoCol, tabL, tabR, canReconcileLive]);
 
   // [v0.61.2 — ② 전수조사에서 발견한 치명 버그 수정] 상태 미러(capri_live_state)를
-  //   조건 없이 항상 20초마다 받아온다 — 특히 비상 정지 표시는 자동매매 상태·포지션
+  //   조건 없이 항상 받아온다 — 특히 비상 정지 표시는 자동매매 상태·포지션
   //   유무와 무관하게 폰에서 "지금 PC가 실제로 멈춰 있는지"를 늘 정확히 보여줘야 한다
   //   (가장 안전 긴급한 표시). 같은 호출이 PC 최근 로그("서버 로그" 탭)도 함께 받아오므로
   //   더 이상 탭별로 따로 폴링을 걸 필요가 없다 — 아래 포지션/스캔 폴링의 웹 분기도 이제
   //   이 효과 하나로 통합됐다.
+  // [v0.61.4 — 오너 지시 "스크리닝시 진행되는 사항들 게이지"] PC가 지금 스캔 중이면(
+  //   pcScanProgress.running) 20초로는 게이지가 안 차 보인다 — 스캔 중에는 2초로 당기고,
+  //   평소엔 20초로 되돌려 부하를 줄인다.
   useEffect(() => {
     if (!isWebApp) return;
     void refreshLiveState();
-    const id = setInterval(() => void refreshLiveState(), 20_000);
+    const intervalMs = pcScanProgress?.running ? 2_000 : 20_000;
+    const id = setInterval(() => void refreshLiveState(), intervalMs);
     return () => clearInterval(id);
-  }, [isWebApp, refreshLiveState]);
+  }, [isWebApp, refreshLiveState, pcScanProgress?.running]);
 
   // [v0.26.0→v0.45.0→v0.48.0] 현황(포지션·누적손익)을 20초마다 새로고침.
   //   [v0.48.0 긴급 수정 — 오너 보고 "익절/손절 완료된 종목이 계속 감시 중으로 남아있다,
@@ -4397,21 +4410,28 @@ ${msg}
               {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
             </div>
 
-            {/* [v0.28.0] 진행률 바 — 자동 사이클이든 수동 새로고침이든 스캔이 도는 동안 똑같이 보여준다. */}
-            {autoScanProg && autoScanProg.phase !== "done" && (
+            {/* [v0.28.0→v0.61.4] 진행률 바 — 자동 사이클이든 수동 새로고침이든 스캔이 도는 동안
+                똑같이 보여준다. canReconcileLive면 로컬 이벤트(실시간), 웹·중계없음이면 상태
+                미러(pcScanProgress, 최대 2초 지연)로 PC가 지금 스캔 중임을 그대로 보여준다. */}
+            {liveScanDisplay && liveScanDisplay.phase !== "done" && (
               <div className="screen-prog">
                 <div className="screen-prog-bar">
-                  <div className="screen-prog-fill" style={{ width: `${autoScanProg.total ? Math.round((autoScanProg.done / autoScanProg.total) * 100) : 0}%` }} />
+                  <div className="screen-prog-fill" style={{ width: `${liveScanDisplay.total ? Math.round((liveScanDisplay.done / liveScanDisplay.total) * 100) : 0}%` }} />
                 </div>
                 <div className="hint" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span>
-                    {autoScanProg.phase === "ranking" ? "거래량 랭킹 불러오는 중…" : `${autoScanProg.done}/${autoScanProg.total} · ${autoScanProg.symbol} 분석 중…`}
+                    {liveScanDisplay.phase === "ranking" ? "거래량 랭킹 불러오는 중…" : `${liveScanDisplay.done}/${liveScanDisplay.total} · ${liveScanDisplay.symbol} 분석 중…`}
+                    {!canReconcileLive && " (PC에서)"}
                   </span>
                   {/* [v0.43.0] 자동 사이클이 지금 돌리는 스캔도 여기서 바로 취소할 수 있다(다음
-                      5분 사이클이 알아서 다시 시도하므로, 이번 한 번만 건너뛰는 셈). */}
-                  <button className="mini" disabled={scanCancelRequested} onClick={() => void doCancelScan()}>
-                    {scanCancelRequested ? "취소 중…" : "✕ 취소"}
-                  </button>
+                      5분 사이클이 알아서 다시 시도하므로, 이번 한 번만 건너뛰는 셈). 웹·중계없음은
+                      취소를 로컬에서 직접 못 걸 수 있어(PC가 도는 스캔) 이 버튼을 숨긴다 — 필요하면
+                      [원격 조종] 카드를 쓴다. */}
+                  {canReconcileLive && (
+                    <button className="mini" disabled={scanCancelRequested} onClick={() => void doCancelScan()}>
+                      {scanCancelRequested ? "취소 중…" : "✕ 취소"}
+                    </button>
+                  )}
                 </div>
               </div>
             )}
@@ -4440,11 +4460,24 @@ ${msg}
               </p>
             )}
 
-            {!autoStatus?.lastScan && (
+            {/* [v0.61.4 — 오너 지시 "화면을 구분해서 표시해라"] 예전엔 "자동매매 꺼짐"
+                한 가지 문구만 있어서, 오너가 분명 켰다고 생각하는데도 화면이 "자동매매를
+                시작하면..."이라고 떠 혼란을 줬다(PC가 꺼져 있어서 켠 게 반영 안 됐을
+                뿐이었는데 원인을 구분해 보여주지 못했다). 이제 ①PC 꺼짐 ②자동매매 꺼짐
+                ③첫 스캔 대기 세 가지를 구분한다(스캔 중엔 위 게이지가 이미 보이므로 이
+                빈 화면 문구 자체를 숨긴다). */}
+            {!autoStatus?.lastScan && !(liveScanDisplay && liveScanDisplay.phase !== "done") && (
               <div className="result-empty hint">
-                {autoStatus?.enabled
-                  ? "자동매매가 켜져 있어요 — 첫 스캔 결과가 곧 여기 뜹니다(최대 5분)."
-                  : "자동매매를 시작하면 여기에 스캔 결과가 자동으로 뜹니다. [🤖 자동매매 → 자동매매 현황]에서 켤 수 있어요."}
+                {isWebApp && !pcConnected ? (
+                  <>🔴 PC가 꺼져 있어요 — 집 PC에서 Capri 앱을 켜야 스캔이 돌아갑니다.</>
+                ) : !effectiveAutoEnabled ? (
+                  <>
+                    자동매매가 꺼져 있어요 — 켜야 5분마다 스스로 스캔합니다.{" "}
+                    <button className="mini" disabled={autoBusy} onClick={() => void toggleAutoTrade()}>▶ 지금 켜기</button>
+                  </>
+                ) : (
+                  <>자동매매가 켜져 있어요 — 첫 스캔 결과가 곧 여기 뜹니다(최대 5분, [🔄 지금 새로고침]으로 바로 당길 수 있어요).</>
+                )}
               </div>
             )}
 

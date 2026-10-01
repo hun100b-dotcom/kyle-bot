@@ -175,6 +175,125 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
     }
   }, 30_000);
 
+  // =============================================================================
+  // [v0.61.4 긴급수정 — 오너가 운영 DB를 직접 SQL로 조회해 확정한 버그]
+  //   "폰에서 지금 새로고침을 4번 눌러도 자동 스크리너가 빈 화면" 보고를 조사하며 capri_live_state를
+  //   직접 조회한 결과: 자동매매가 꺼진 상태에서의 autoScanNow(미리보기 스캔)는 실제로 PC에서
+  //   스캔이 성공했지만(lastScan이 PC 메모리엔 채워짐) **capri_live_state에 한 번도 올라간 적이
+  //   없었다** — pushLiveState 호출 자체가 이 분기에 빠져 있었다. 게다가 lastScan/lastCycleAt은
+  //   메모리 전용이라 PC가 재시작되면(자동 업데이트 등) 그 순간 사라지고, 재시작 직후의 포지션
+  //   재확인(reconcileAutoPositionsNow)이 그 "방금 리셋된 null"을 그대로 클라우드에 올려 기존
+  //   실제 스캔 결과를 덮어쓰기까지 했다 — 두 버그가 겹쳐 "폰에서 영원히 빈 화면"이 됐다.
+  // =============================================================================
+  it("[v0.61.4] autoScanNow(미리보기)는 lastScan을 파일에도 저장하고 상태 미러에도 올린다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const engAny = eng as unknown as {
+        authAccessToken: string | null;
+        authExpiresAtMs: number;
+        authUserId: string | null;
+        authPassword: string | null;
+      };
+      engAny.authAccessToken = "test-access-token";
+      engAny.authExpiresAtMs = Date.now() + 3_600_000;
+      engAny.authUserId = "test-user-id";
+      engAny.authPassword = "pw";
+      eng.saveAutoScanSettings({ count: 10 });
+
+      let capturedBody: string | null = null;
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+        const u = String(url);
+        const method = init?.method ?? "GET";
+        if (u.includes("capri_live_state") && method === "POST") {
+          capturedBody = String(init?.body ?? "");
+          return new Response(null, { status: 200 });
+        }
+        return originalFetch(url as never, init);
+      }) as typeof fetch;
+
+      try {
+        const s = await eng.autoScanNow();
+        expect(s.lastScan).not.toBeNull();
+        // pushLiveState(true)가 autoScanNow의 "미리보기" 분기에서도 호출돼야 한다 — 호출은
+        // fire-and-forget(void)이라 짧게 폴링해 기다린다(다른 push 테스트와 동일 패턴).
+        for (let i = 0; i < 40 && capturedBody === null; i++) {
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        expect(capturedBody).not.toBeNull();
+        const body = JSON.parse(capturedBody as unknown as string) as { payload: { status: { lastScan: unknown } } };
+        expect(body.payload.status.lastScan).not.toBeNull();
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+
+      // [핵심] "재시작"(같은 폴더로 새 엔진) 후에도 lastScan이 사라지지 않아야 한다 —
+      // positions만 영속화돼 있고 lastScan은 메모리 전용이던 게 이번 버그의 근본 원인이었다.
+      const eng2 = new ToolEngine(dir, { forceMock: true });
+      const s2 = eng2.getAutoTradeStatus();
+      expect(s2.lastScan).not.toBeNull();
+      expect(s2.lastScan?.results.length).toBeGreaterThan(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  // [v0.61.4 — 오너 지시 "스크리닝시 진행되는 사항들 게이지가 차는 사항이 안 보인다"] 스캔이
+  //   끝나면 상태 미러의 scanProgress가 running:false·phase:"done"·done===total로 마감돼야
+  //   폰 쪽 게이지가 "꽉 찬 채로 끝났다"를 알 수 있다(중간 진행 틱은 2초 쓰로틀이라 타이밍에
+  //   의존하지 않는 "최종 상태"만 안정적으로 검증한다).
+  it("[v0.61.4] 스캔이 끝나면 상태 미러의 scanProgress가 running:false로 마감된다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const engAny = eng as unknown as {
+        authAccessToken: string | null;
+        authExpiresAtMs: number;
+        authUserId: string | null;
+        authPassword: string | null;
+      };
+      engAny.authAccessToken = "test-access-token";
+      engAny.authExpiresAtMs = Date.now() + 3_600_000;
+      engAny.authUserId = "test-user-id";
+      engAny.authPassword = "pw";
+      eng.saveAutoScanSettings({ count: 10 });
+
+      // 여러 push가 겹쳐 들어올 수 있어(스캔 중 2초 쓰로틀 틱 + 완료 신호 + autoScanNow 자체의
+      // 마무리 push) "가장 최근에 도착한 것"이 아니라 "running:false로 마감된 것이 한 번이라도
+      // 왔는지"를 본다 — scanScreener가 끝난 시점엔 scanProgressForMirror가 이미 done으로
+      // 확정돼 있으므로(동기 대입), 그 이후 발생하는 모든 push는 전부 이 마감 상태를 담는다.
+      let sawDone: { running: boolean; phase: string; done: number; total: number } | null = null;
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+        const u = String(url);
+        const method = init?.method ?? "GET";
+        if (u.includes("capri_live_state") && method === "POST") {
+          const body = JSON.parse(String(init?.body ?? "{}")) as { payload?: { scanProgress?: typeof sawDone } };
+          if (body.payload?.scanProgress && body.payload.scanProgress.running === false && body.payload.scanProgress.phase === "done") {
+            sawDone = body.payload.scanProgress;
+          }
+          return new Response(null, { status: 200 });
+        }
+        return originalFetch(url as never, init);
+      }) as typeof fetch;
+
+      try {
+        await eng.autoScanNow();
+        for (let i = 0; i < 40 && sawDone === null; i++) {
+          await new Promise((r) => setTimeout(r, 50));
+        }
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+
+      expect(sawDone).not.toBeNull();
+      expect((sawDone as unknown as { done: number; total: number }).done).toBe((sawDone as unknown as { done: number; total: number }).total);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   // [v0.27.0] autoTradeTick이 실제로 lastScan을 채우는지(기본 60종목 스캔)는 여기서 끝까지 기다리며
   //   검증하지 않는다 — 직접 재보니 목 서버라도 기본 스캔(count=60)이 끝나는 데 70초 넘게 걸려
   //   이 테스트 파일의 기존 방침(파일 상단 주석: 실제 스캔 완료까지 시뮬레이션하지 않음)과 같은

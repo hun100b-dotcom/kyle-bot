@@ -447,6 +447,12 @@ interface ScreenProgress {
   total: number;
   symbol: string;
 }
+/** [v0.61.4] 상태 미러로 받는 실시간 스캔 진행률 — ScreenProgress + "지금 도는 중인지"(running) +
+ *  "언제 시작했는지"(startedAtMs). */
+interface LiveScanProgress extends ScreenProgress {
+  running: boolean;
+  startedAtMs: number;
+}
 interface ScreenRun {
   scannedAt: string;
   total: number;
@@ -826,6 +832,9 @@ interface KyletoolBridge {
     journal: JournalEntry[];
     /** [v0.61.2] PC의 실제 비상 정지(킬 스위치) 상태. 없으면(옛 버전 PC) null. */
     killSwitch: boolean | null;
+    /** [v0.61.4] 지금 PC가 스캔 중인지 + 진행률(게이지). 스캔이 한 번도 안 돌았거나 옛 버전
+     *  PC면 null. */
+    scanProgress: LiveScanProgress | null;
     updatedAtMs: number | null;
     message?: string;
   }>;
