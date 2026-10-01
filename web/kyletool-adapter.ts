@@ -279,6 +279,10 @@ export function installKyleTool(): ToolEngine {
     },
     groupChatSend: (body: string) => e.sendGroupChatMessage(body),
     groupChatList: () => e.getGroupChatMessages(),
+    // [v0.61.9] "업데이트 내역" 탭 — getChangelog는 async라 그대로, markChangelogSeen은
+    //   엔진에서 동기 함수라(getSettings 등과 동일 이유) Promise.resolve로 감싼다.
+    getChangelog: () => e.getChangelog(),
+    markChangelogSeen: (version: string) => Promise.resolve(e.markChangelogSeen(version)),
     tradesStats: () => Promise.resolve(e.getTradeStats()),
     tradesClose: (id: string, exitPrice: number, kind: "tp" | "sl" | "manual") => e.closeTradeManual(id, exitPrice, kind),
     tradesDelete: (id: string) => Promise.resolve(e.deleteTrade(id)),

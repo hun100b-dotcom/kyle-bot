@@ -37,7 +37,7 @@ import { summarizeAutoHistory, summarizeGroupHistory, summarizeByCriteria, autoH
 //   묻혀 있었다. 오너 요청("그룹원 관리 탭을 통해 승인·수기등록·근황 파악, 채팅까지")에 따라
 //   독립 탭으로 빼고, 그룹원 근황 현황판·채팅을 새로 추가했다. 같은 이유로 "기록"(journal, 예전엔
 //   설정 하위)도 "서버 로그"로 이름을 바꿔 독립 탭으로 뺐다(카테고리 토글 필터 추가, 아래 참고).
-const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "autoControl", "autoScan", "screenCriteria", "autoHistory", "research", "orders", "groupManage", "journal", "settings"] as const;
+const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "autoControl", "autoScan", "screenCriteria", "autoHistory", "research", "orders", "groupManage", "changelog", "journal", "settings"] as const;
 type TabId = (typeof ALL_TABS)[number];
 
 /** [v0.27.0] 상단 1단 — 매매방식·성격으로 묶은 그룹. 그룹 버튼을 누르면 하위 탭(2단)이 펼쳐진다. */
@@ -47,7 +47,7 @@ const TOP_GROUP_LABEL: Record<TopGroupId, string> = { manual: "메뉴얼", auto:
 const GROUP_CHILDREN: Record<TopGroupId, TabId[]> = {
   manual: ["calc", "screener", "splits"],
   auto: ["autoControl", "autoScan", "screenCriteria", "autoHistory", "research"],
-  status: ["report", "strength", "orders", "groupManage", "journal"],
+  status: ["report", "strength", "orders", "groupManage", "changelog", "journal"],
   settings: ["settings"],
 };
 const TOP_GROUPS: TopGroupId[] = ["manual", "auto", "status", "settings"];
@@ -55,7 +55,7 @@ const TOP_GROUPS: TopGroupId[] = ["manual", "auto", "status", "settings"];
 const TAB_GROUP: Record<TabId, TopGroupId> = {
   calc: "manual", screener: "manual", splits: "manual",
   autoControl: "auto", autoScan: "auto", screenCriteria: "auto", autoHistory: "auto", research: "auto",
-  report: "status", strength: "status", orders: "status", groupManage: "status", journal: "status",
+  report: "status", strength: "status", orders: "status", groupManage: "status", changelog: "status", journal: "status",
   settings: "settings",
 };
 
@@ -73,6 +73,7 @@ const TAB_LABEL: Record<TabId, string> = {
   research: "매매연구",
   orders: "주문 현황",
   groupManage: "👥 그룹원 관리",
+  changelog: "🆕 업데이트 내역",
   journal: "서버 로그",
   settings: "설정",
 };
@@ -1059,6 +1060,32 @@ function App() {
       setChatBusy(false);
     }
   }
+
+  // [v0.61.9 — 오너 지시 "업데이트 내역 탭 신설 + 개발 보고를 동업자들과 공유"] 그룹 전원이
+  //   함께 보는 공개 변경 로그. 로그인 직후 한 번 받아와서, 이 기기가 아직 못 본 최신
+  //   버전이 있으면 팝업(unseenChangelog)으로 띄운다 — "폰 PC 모두" 띄우라는 지시대로
+  //   기기(로컬)별로 "읽음" 상태를 따로 관리한다(markChangelogSeen).
+  const [changelog, setChangelog] = useState<ChangelogEntry[]>([]);
+  const [changelogBusy, setChangelogBusy] = useState(false);
+  const [unseenChangelog, setUnseenChangelog] = useState<ChangelogEntry | null>(null);
+  const loadChangelog = useCallback(async (checkPopup: boolean) => {
+    setChangelogBusy(true);
+    try {
+      const r = await window.kyletool.getChangelog?.();
+      if (!r?.ok) return;
+      setChangelog(r.entries);
+      if (checkPopup && r.entries.length > 0 && r.entries[0].version !== r.lastSeenVersion) {
+        setUnseenChangelog(r.entries[0]);
+      }
+    } finally {
+      setChangelogBusy(false);
+    }
+  }, []);
+  function dismissChangelogPopup() {
+    if (!unseenChangelog) return;
+    void window.kyletool.markChangelogSeen?.(unseenChangelog.version);
+    setUnseenChangelog(null);
+  }
   /**
    * [v0.48.0 버그 수정 — 오너 보고 "자동매매기록 탭도 실시간 연동 안 됨, 새로고침해도 그대로"]
    *   예전엔 이 함수가 로컬에 이미 저장돼 있는 기록 파일만 다시 읽어왔다(`autoTradeHistory()`).
@@ -1289,6 +1316,9 @@ function App() {
     else if (t === "autoHistory" || t === "research") void loadAutoHistory();
     // [v0.56.0] 그룹원 관리 탭을 열 때 근황(그룹 기록)·채팅을 바로 불러온다.
     else if (t === "groupManage") { void loadGroupResearch(); void loadGroupChat(); }
+    // [v0.61.9] 업데이트 내역 탭을 열 때 최신 목록을 다시 받아온다(팝업은 이미 로그인 직후
+    //   한 번 확인했으므로 여기선 다시 띄우지 않는다).
+    else if (t === "changelog") void loadChangelog(false);
   };
   // [v0.15.0] 2컬럼이 켜지거나 좌/우 패널 탭이 바뀌면 그 탭들의 데이터를 로드한다(1컬럼과 동일한 지연 로딩).
   useEffect(() => {
@@ -1322,6 +1352,14 @@ function App() {
     history.replaceState(null, "", location.pathname + location.search);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authState.loggedIn, authState.isOwner]);
+
+  // [v0.61.9] 로그인이 확인되는 즉시 업데이트 내역을 한 번 받아와, 이 기기가 아직 못 본
+  //   최신 버전이 있으면 팝업을 띄운다(오너 지시: "폰 PC 모두" — 탭을 열어보지 않아도 뜨게).
+  useEffect(() => {
+    if (!authState.loggedIn) return;
+    void loadChangelog(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authState.loggedIn]);
 
   // [v0.2.10→v0.60.6] 30초 자동 갱신. 기본은 꺼짐(자율 동작 최소화 원칙) — 오너가 켤 때만 돈다.
   //   주문 현황이 '보이는 동안'만 돈다. [v0.15.0] 2컬럼이면 좌/우 어느 패널에 있어도 인정.
@@ -6090,9 +6128,67 @@ ${msg}
           </section>
         </main>
       )}
+
+      {/* [v0.61.9 — 오너 지시 "업데이트 내역 탭 신설"] 그룹 전원이 함께 보는 공개 변경 로그.
+          제가(Claude) 매 버전마다 "오너에게 보고하는 것처럼" 고민·원인·수정 내용을 민감사항
+          (실제 종목명·손익 금액·계좌 세부사항)만 뺀 채 적어 둔다 — 쓰기는 오너 계정만 가능
+          (서버에서 직접, 이 화면엔 글쓰기 버튼이 없다). */}
+      {paneTab === "changelog" && (
+        <main className="pane">
+          <section className="card wide">
+            <h2>🆕 업데이트 내역</h2>
+            <p className="hint">
+              버전이 올라갈 때마다 무엇을 왜 고쳤는지, Claude가 어떻게 원인을 찾고 고민했는지를
+              여기 남깁니다 — 그룹원 전원이 함께 봅니다(민감사항은 뺐습니다).
+            </p>
+            <button className="mini" disabled={changelogBusy} onClick={() => void loadChangelog(false)}>
+              {changelogBusy ? "불러오는 중…" : "🔄 새로고침"}
+            </button>
+            {changelog.length === 0 ? (
+              <p className="hint">{changelogBusy ? "불러오는 중…" : "아직 등록된 업데이트 내역이 없습니다."}</p>
+            ) : (
+              changelog.map((c) => (
+                <article key={c.version} className="changelog-entry">
+                  <h3>
+                    v{c.version} — {c.title}
+                  </h3>
+                  <p className="hint small">
+                    {DateTime.fromISO(c.publishedAt).setZone("Asia/Seoul").toFormat("yyyy-MM-dd HH:mm")} KST
+                  </p>
+                  <div className="changelog-body">{c.body}</div>
+                </article>
+              ))
+            )}
+          </section>
+        </main>
+      )}
           </div>
         ))}
       </div>
+
+      {/* [v0.61.9] 로그인 직후 아직 못 본 최신 업데이트가 있으면 뜨는 팝업(폰·PC 둘 다). */}
+      {unseenChangelog && (
+        <div className="modal-back" onClick={dismissChangelogPopup}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2>🆕 새 업데이트 — v{unseenChangelog.version}</h2>
+            <p><b>{unseenChangelog.title}</b></p>
+            <div className="changelog-body">{unseenChangelog.body}</div>
+            <div className="form-row">
+              <button className="btn btn-start" onClick={dismissChangelogPopup}>확인했어요</button>
+              <button
+                className="mini"
+                onClick={() => {
+                  dismissChangelogPopup();
+                  goToTab("changelog");
+                  activateTab("changelog");
+                }}
+              >
+                업데이트 내역 전체 보기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ===== [v0.2.8] 조건주문 편집 창 — 값은 오너가 자유롭게 고친다 ===== */}
       {ocoEdit && (

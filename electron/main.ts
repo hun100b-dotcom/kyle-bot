@@ -603,6 +603,8 @@ function registerIpc(e: ToolEngine): void {
   // [v0.56.0] 그룹 채팅 — 가입 허용목록 전원이 실명으로 함께 쓰는 대화방.
   ipcMain.handle("tool:groupchat:send", (_ev, body: string) => e.sendGroupChatMessage(body));
   ipcMain.handle("tool:groupchat:list", () => e.getGroupChatMessages());
+  ipcMain.handle("tool:changelog:get", () => e.getChangelog());
+  ipcMain.handle("tool:changelog:seen", (_ev, version: string) => e.markChangelogSeen(version));
   ipcMain.handle("tool:trades:stats", () => e.getTradeStats());
   ipcMain.handle("tool:trades:close", (_ev, id: string, exitPrice: number, kind: "tp" | "sl" | "manual") => e.closeTradeManual(id, exitPrice, kind));
   ipcMain.handle("tool:trades:delete", (_ev, id: string) => e.deleteTrade(id));

@@ -126,6 +126,8 @@ contextBridge.exposeInMainWorld("kyletool", {
   },
   groupChatSend: (body) => ipcRenderer.invoke("tool:groupchat:send", body), // [v0.56.0] 그룹 채팅
   groupChatList: () => ipcRenderer.invoke("tool:groupchat:list"),
+  getChangelog: () => ipcRenderer.invoke("tool:changelog:get"), // [v0.61.9] 업데이트 내역
+  markChangelogSeen: (version) => ipcRenderer.invoke("tool:changelog:seen", version),
   tradesStats: () => ipcRenderer.invoke("tool:trades:stats"),
   tradesClose: (id, exitPrice, kind) => ipcRenderer.invoke("tool:trades:close", id, exitPrice, kind),
   tradesDelete: (id) => ipcRenderer.invoke("tool:trades:delete", id),

@@ -328,6 +328,14 @@ export interface GroupChatMessage {
   createdAt: string; // ISO(UTC) — 화면에서 로컬 시각으로 변환해 표시
 }
 
+/** [v0.61.9] "업데이트 내역" 탭 한 줄 — 그룹 전원이 함께 보는 공개 변경 로그. */
+export interface ChangelogEntry {
+  version: string;
+  title: string;
+  body: string; // 마크다운 형식의 상세 리포트
+  publishedAt: string; // ISO(UTC)
+}
+
 // -----------------------------------------------------------------------------
 // .env 파싱(경량)
 // -----------------------------------------------------------------------------
@@ -1057,6 +1065,10 @@ export class ToolEngine extends EventEmitter {
   private autoTradeMaxPositions = 3; //  동시 보유 최대 종목 수(오너 기본값)
   private autoTradeMaxLossPct = 5; //    최대손실 한도(시드 대비 %) — 넘으면 자동매매 자동 중단
   private autoTradeMaxInvestPct = 30; // 종목 1개당 배정하는 시드 대비 투입 비율(%) — 종목 수로 나누지 않음
+  /** [v0.61.9] "업데이트 내역" 탭을 이 기기가 마지막으로 읽은 버전 — 로컬(기기별)로만
+   *  저장한다(폰에서 읽었다고 PC의 새 업데이트 팝업까지 꺼지면 안 되므로, 오너 지시
+   *  "폰 PC 모두" 띄우라는 요구와 맞게 각 화면이 각자 확인). */
+  private lastSeenChangelogVersion: string | null = null;
   /** [v0.61.8 — 오너 지시] 삼분할 매매기법의 몇 분할 타점을 자동매매 매수가로 쓸지(1~2).
    *  1분할(얕은 눌림, EMA200과 전봉종가 간격의 1/3 지점)이 공장값. 2분할(gap의 2/3 지점,
    *  더 깊이 눌렸을 때)을 고르면 더 보수적인(더 싸게 사려는) 진입이 된다 — 그만큼 체결
@@ -1339,6 +1351,8 @@ export class ToolEngine extends EventEmitter {
     // [v0.61.8] 저장된 진입 타점 분할(1~2) 복원.
     const ael = Number(process.env.AUTO_ENTRY_LEVEL);
     if (ael === 1 || ael === 2) this.autoTradeEntryLevel = ael;
+    // [v0.61.9] 마지막으로 읽은 업데이트 내역 버전 복원(이 기기 전용 — 재시작해도 팝업 중복 안 뜨게).
+    if (process.env.LAST_SEEN_CHANGELOG) this.lastSeenChangelogVersion = process.env.LAST_SEEN_CHANGELOG;
     // [v0.44.0] 저장된 시스템 휴무 시간대 기능 켜짐 여부 복원(기본 켜짐 — 명시적으로 껐을 때만 꺼짐).
     if (process.env.SYSTEM_PAUSE_ENABLED === "false") this.systemPauseEnabled = false;
     // [v0.28.0] 저장된 자동매매 스크리너 조건 복원(4개 전부 오너가 수정 가능).
@@ -1748,6 +1762,7 @@ export class ToolEngine extends EventEmitter {
       `AUTO_MAX_INVEST_PCT=${this.autoTradeMaxInvestPct}`,
       `AUTO_WATCH_MINUTES=${this.autoTradeWatchMinutes}`, // [v0.42.0] 장기간 미체결 자동취소 기준(분)
       `AUTO_ENTRY_LEVEL=${this.autoTradeEntryLevel}`, // [v0.61.8] 진입 타점 분할(1~2)
+      `LAST_SEEN_CHANGELOG=${this.lastSeenChangelogVersion ?? ""}`, // [v0.61.9] 이 기기가 마지막으로 읽은 업데이트 내역 버전
       `SYSTEM_PAUSE_ENABLED=${this.systemPauseEnabled ? "true" : "false"}`, // [v0.44.0] 시스템 휴무 시간대 기능
       // --- [v0.28.0] 자동매매 스크리너 조건(4개) ---
       `AUTO_SCAN_COUNT=${this.autoScanCount}`,
@@ -4971,6 +4986,43 @@ export class ToolEngine extends EventEmitter {
     } catch (e) {
       return { ok: false, message: `조회 실패: ${e instanceof Error ? e.message : String(e)}`, chat: [] };
     }
+  }
+
+  // -----------------------------------------------------------------------------
+  // [v0.61.9 — 오너 지시] "업데이트 내역 탭을 신설하고, 개발 보고를 동업자들과 공유하고
+  //   싶다" — capri_group_chat과 같은 원칙(비공개 그룹, 평문, 그룹 전원이 함께 본다).
+  //   다만 쓰기는 오너 계정만(마이그레이션 RLS 참고) — 그룹원이 실수로 변경 로그를
+  //   건드리지 않게. 실제 글 작성은 이 앱의 UI가 아니라 각 버전을 커밋할 때 Supabase에
+  //   직접 올린다(오너가 "나에게 보고하는 것처럼" 요청한 리포트 — 민감사항은 뺀 버전).
+  // -----------------------------------------------------------------------------
+
+  /** getChangelog — 업데이트 내역을 최신순으로 받아온다(최대 50개) + 이 기기가 마지막으로
+   *  읽은 버전(팝업 표시 여부 판단용 — 로컬 저장, 기기별로 따로 관리). */
+  async getChangelog(): Promise<{ ok: boolean; message: string; entries: ChangelogEntry[]; lastSeenVersion: string | null }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요.", entries: [], lastSeenVersion: this.lastSeenChangelogVersion };
+    try {
+      const res = await fetchWithTimeout(
+        `${ToolEngine.SUPABASE_URL}/rest/v1/capri_changelog?select=version,title,body,published_at&order=published_at.desc&limit=50`,
+        { headers: this.authRestHeaders(token) },
+        10_000,
+        "capri_changelog",
+      );
+      if (!res.ok) return { ok: false, message: `업데이트 내역 조회 실패(HTTP ${res.status}).`, entries: [], lastSeenVersion: this.lastSeenChangelogVersion };
+      const rows = (await res.json()) as Array<{ version: string; title: string; body: string; published_at: string }>;
+      const entries: ChangelogEntry[] = rows.map((r) => ({ version: r.version, title: r.title, body: r.body, publishedAt: r.published_at }));
+      return { ok: true, message: `업데이트 내역 ${entries.length}건을 받았습니다.`, entries, lastSeenVersion: this.lastSeenChangelogVersion };
+    } catch (e) {
+      return { ok: false, message: `조회 실패: ${e instanceof Error ? e.message : String(e)}`, entries: [], lastSeenVersion: this.lastSeenChangelogVersion };
+    }
+  }
+
+  /** markChangelogSeen — "최신 업데이트 내역을 봤다"고 이 기기에 로컬로 기록한다(팝업이
+   *  매번 다시 뜨지 않게). 기기마다 따로 관리 — 폰에서 읽었다고 PC의 팝업까지 안 꺼진다
+   *  (오너 지시: "폰 pc 모두" 띄우라고 했으므로 각 화면이 각자 확인하는 게 맞다). */
+  markChangelogSeen(version: string): void {
+    this.lastSeenChangelogVersion = version;
+    this.persistEnv();
   }
 
   /** 새로 받은 체결을 저장본에 합친다(중복 제거). 다른 화면(주문 현황 등)에서도 부를 수 있다. */

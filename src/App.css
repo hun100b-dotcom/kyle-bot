@@ -358,6 +358,17 @@ ul.hint { padding-left: 18px; }
   line-height: 1.6;
   font-family: inherit;
 }
+
+/* ===== [v0.61.9] 업데이트 내역(변경 로그) 탭 + 팝업 ===== */
+.changelog-entry {
+  border-top: 1px solid var(--border); padding: 14px 0;
+}
+.changelog-entry:first-of-type { border-top: none; padding-top: 4px; }
+.changelog-entry h3 { margin: 0 0 2px; font-size: 14.5px; }
+.changelog-body {
+  white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.7;
+  margin-top: 8px;
+}
 .progress-wrap {
   position: relative;
   height: 22px;

@@ -199,6 +199,14 @@ interface GroupChatMessage {
   createdAt: string; // ISO(UTC) — 화면에서 로컬 시각으로 변환해 표시
 }
 
+/** [v0.61.9] "업데이트 내역" 탭 한 줄 — 그룹 전원이 함께 보는 공개 변경 로그. */
+interface ChangelogEntry {
+  version: string;
+  title: string;
+  body: string;
+  publishedAt: string;
+}
+
 /** [v0.30.0] 자동매매기록 한 줄 — "자동매매기록" 탭이 그대로 보여준다. */
 interface AutoTradeHistoryEntry {
   id: string;
@@ -816,6 +824,11 @@ interface KyletoolBridge {
   /** [v0.56.0] 그룹 채팅 — 가입 허용목록 전원이 실명으로 함께 쓰는 대화방. */
   groupChatSend(body: string): Promise<{ ok: boolean; message: string }>;
   groupChatList(): Promise<{ ok: boolean; message: string; chat: GroupChatMessage[] }>;
+  /** [v0.61.9] "업데이트 내역" 탭 — 그룹 전원이 함께 보는 공개 변경 로그(읽기 전용, 쓰기는
+   *  오너 계정만 서버에서 직접). 없으면(옛 버전) 선택적으로 건너뛴다. */
+  getChangelog?(): Promise<{ ok: boolean; message: string; entries: ChangelogEntry[]; lastSeenVersion: string | null }>;
+  /** [v0.61.9] "최신 업데이트를 봤다"고 이 기기에 로컬로 기록(팝업 중복 방지, 기기별 관리). */
+  markChangelogSeen?(version: string): Promise<void>;
   tradesStats(): Promise<TradeStats>;
   tradesClose(id: string, exitPrice: number, kind: "tp" | "sl" | "manual"): Promise<StrengthTrade[]>;
   tradesDelete(id: string): Promise<StrengthTrade[]>;
