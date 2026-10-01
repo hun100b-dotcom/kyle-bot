@@ -1174,11 +1174,22 @@ export class ToolEngine extends EventEmitter {
   private autoTradeHistory: AutoTradeHistoryEntry[] = [];
   private static readonly AUTO_TRADE_HISTORY_MAX = 500; // 오래된 것부터 정리(무한 증식 방지)
 
+  /**
+   * [v0.60.9] 이 엔진(PC)이 실제로 실행 중인 앱 버전 — electron/main.ts가 생성 시점에
+   *   app.getVersion()을 넘겨준다. 폰이 "PC가 진짜 최신 버전을 돌리고 있나"를 하트비트로
+   *   직접 확인할 수 있게 하는 용도(아래 remoteControlTick 참고) — 오너 실사용 보고
+   *   ("폰에서 시작을 눌러도 자동 스크리너가 안 뜬다")의 진짜 원인이 "자동매매가 켜져
+   *   있어 PC가 몇 시간째 재시작(=업데이트 적용) 못 하고 옛 코드를 그대로 돌리고 있었다"
+   *   였던 걸 뒤늦게 SQL로 확인했다 — 다음부터는 이 값으로 바로 알 수 있게 한다.
+   */
+  private appVersion: string | null = null;
+
   constructor(
     private userDataDir: string,
-    opts?: { forceMock?: boolean },
+    opts?: { forceMock?: boolean; appVersion?: string },
   ) {
     super();
+    this.appVersion = opts?.appVersion ?? null;
     mkdirSync(userDataDir, { recursive: true });
     this.envPath = join(userDataDir, ".env");
     this.journalPath = join(userDataDir, "kylebot-journal.json");
@@ -4422,10 +4433,20 @@ export class ToolEngine extends EventEmitter {
       // [v0.60.4] auto_trade_enabled도 함께 실어 보낸다 — 폰이 "PC에서 지금 자동매매가
       //   진짜로 돌고 있는지"를 알 방법이 이것뿐이었다(오너 실사용 보고: "원격으로 시작을
       //   눌러도 진행되고 있는지 모르겠다").
+      // [v0.60.9] app_version도 함께 보낸다 — "자동매매가 켜져 있으면 절대 재시작 안 함"
+      //   안전장치 때문에, PC가 몇 시간째 켜둔 자동매매를 안 끄면 새 버전을 받아도 적용이
+      //   안 된 채로(옛 코드 그대로) 계속 돈다. 폰에서 "PC가 지금 몇 버전을 돌리는지"를
+      //   바로 볼 수 있어야 "업데이트가 안 먹는 건지, PC가 아직 옛 버전인 건지"를 헷갈리지
+      //   않는다 — 이 칼럼은 원래부터 있었는데 지금까지 아무도 채워 넣지 않고 있었다.
       await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_desktop_heartbeat?on_conflict=user_id`, {
         method: "POST",
         headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
-        body: JSON.stringify({ user_id: this.authUserId, last_seen: new Date().toISOString(), auto_trade_enabled: this.autoTradeEnabled }),
+        body: JSON.stringify({
+          user_id: this.authUserId,
+          last_seen: new Date().toISOString(),
+          auto_trade_enabled: this.autoTradeEnabled,
+          app_version: this.appVersion,
+        }),
       });
     } catch {
       /* 생존 신호 실패는 조용히 무시(다음 8초 주기에 재시도) */
@@ -4562,19 +4583,23 @@ export class ToolEngine extends EventEmitter {
    *   실사용 보고: "원격으로 시작을 눌러도 진행되고 있는지 모르겠다"). 이제 PC가 실제로
    *   보낸 값을 그대로 보여줄 수 있다.
    */
-  async getDesktopHeartbeat(): Promise<{ lastSeenMs: number | null; autoTradeEnabled: boolean | null }> {
+  async getDesktopHeartbeat(): Promise<{ lastSeenMs: number | null; autoTradeEnabled: boolean | null; pcAppVersion: string | null }> {
     const token = await this.ensureAccessToken();
-    if (!token) return { lastSeenMs: null, autoTradeEnabled: null };
+    if (!token) return { lastSeenMs: null, autoTradeEnabled: null, pcAppVersion: null };
     try {
-      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_desktop_heartbeat?select=last_seen,auto_trade_enabled`, {
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_desktop_heartbeat?select=last_seen,auto_trade_enabled,app_version`, {
         headers: this.authRestHeaders(token),
       });
-      if (!res.ok) return { lastSeenMs: null, autoTradeEnabled: null };
-      const rows = (await res.json()) as Array<{ last_seen: string; auto_trade_enabled: boolean | null }>;
-      if (!rows[0]) return { lastSeenMs: null, autoTradeEnabled: null };
-      return { lastSeenMs: new Date(rows[0].last_seen).getTime(), autoTradeEnabled: rows[0].auto_trade_enabled ?? null };
+      if (!res.ok) return { lastSeenMs: null, autoTradeEnabled: null, pcAppVersion: null };
+      const rows = (await res.json()) as Array<{ last_seen: string; auto_trade_enabled: boolean | null; app_version: string | null }>;
+      if (!rows[0]) return { lastSeenMs: null, autoTradeEnabled: null, pcAppVersion: null };
+      return {
+        lastSeenMs: new Date(rows[0].last_seen).getTime(),
+        autoTradeEnabled: rows[0].auto_trade_enabled ?? null,
+        pcAppVersion: rows[0].app_version ?? null,
+      };
     } catch {
-      return { lastSeenMs: null, autoTradeEnabled: null };
+      return { lastSeenMs: null, autoTradeEnabled: null, pcAppVersion: null };
     }
   }
 

@@ -677,6 +677,11 @@ function App() {
   const [pcLastSeenMs, setPcLastSeenMs] = useState<number | null>(null);
   // [v0.60.4] PC가 실제로 보낸 "지금 자동매매 켜져 있나" — 폰(web)에서는 이 값이 진실.
   const [pcAutoTradeEnabled, setPcAutoTradeEnabled] = useState<boolean | null>(null);
+  // [v0.60.9] PC가 보낸 "지금 실행 중인 버전" — "자동매매가 켜져 있으면 재시작 안 함"
+  //   안전장치 때문에 PC가 몇 시간째 옛 버전을 그대로 돌릴 수 있다(오너 실사용 보고 —
+  //   "폰에서 시작을 눌러도 자동 스크리너에 진행 상황이 안 뜬다"의 진짜 원인이 이거였다).
+  //   폰 화면에서 PC 버전과 이 세션(appVer) 버전을 바로 비교할 수 있게 보여준다.
+  const [pcAppVersion, setPcAppVersion] = useState<string | null>(null);
   // [v0.60.4] 웹(폰)에서 자동매매 시작/중지를 원격 명령으로 보냈을 때의 결과 메시지.
   const [autoToggleMsg, setAutoToggleMsg] = useState("");
   const [remoteCmds, setRemoteCmds] = useState<Array<{ id: string; type: string; status: string; result: unknown; createdAt: string }>>([]);
@@ -1356,7 +1361,7 @@ function App() {
   useEffect(() => {
     const poll = () =>
       void window.kyletool.getDesktopHeartbeat()
-        .then((r) => { setPcLastSeenMs(r.lastSeenMs); setPcAutoTradeEnabled(r.autoTradeEnabled); })
+        .then((r) => { setPcLastSeenMs(r.lastSeenMs); setPcAutoTradeEnabled(r.autoTradeEnabled); setPcAppVersion(r.pcAppVersion); })
         .catch(() => {});
     poll();
     const id = setInterval(poll, 20_000);
@@ -2587,7 +2592,7 @@ ${msg}
         for (const delayMs of [4000, 10000]) {
           setTimeout(() => {
             void window.kyletool.getDesktopHeartbeat()
-              .then((hb) => { setPcLastSeenMs(hb.lastSeenMs); setPcAutoTradeEnabled(hb.autoTradeEnabled); })
+              .then((hb) => { setPcLastSeenMs(hb.lastSeenMs); setPcAutoTradeEnabled(hb.autoTradeEnabled); setPcAppVersion(hb.pcAppVersion); })
               .catch(() => {});
           }, delayMs);
         }
@@ -2975,6 +2980,16 @@ ${msg}
           >
             {pcConnected ? "🟢 PC 연결됨" : "🔴 PC 꺼져 있음"}
           </span>
+          {/* [v0.60.9 — 오너 실사용 보고 "폰에서 시작을 눌러도 자동 스크리너가 안 뜸"의
+              진짜 원인] "자동매매가 켜져 있으면 PC는 절대 재시작(=업데이트 적용) 안 함"
+              안전장치 때문에, PC가 몇 시간째 옛 버전을 그대로 돌릴 수 있다 — 겉보기엔
+              "연결됨"이라 다 됐나 싶지만 실제로는 새 기능이 아직 없는 옛 코드다. 폰에서
+              PC 버전과 지금 이 화면(appVer) 버전을 바로 대조해, 다르면 바로 보이게 한다. */}
+          {isWebApp && pcConnected && pcAppVersion && appVer && pcAppVersion !== appVer && (
+            <span className="badge badge-dry" title="PC가 자동매매를 켜 둔 채라 재시작(업데이트 적용)을 못 하고 있을 수 있습니다 — 자동매매를 끄면 PC가 유휴 상태를 거쳐 스스로 최신 버전으로 업데이트합니다.">
+              ⚠️ PC 버전 다름(PC: v{pcAppVersion} / 이 화면: v{appVer})
+            </span>
+          )}
         </div>
 
         <div className="controls">

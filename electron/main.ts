@@ -757,7 +757,11 @@ app.whenReady().then(async () => {
   }
 
   // KYLEBOT_E2E(자동 검증)일 때는 실서버 접근을 원천 차단(연습 모드 강제).
-  engine = new ToolEngine(app.getPath("userData"), { forceMock: process.env.KYLEBOT_E2E === "1" });
+  // [v0.60.9] 실행 중인 버전을 엔진에 넘겨 하트비트로 폰에 보고한다 — "자동매매가 켜져
+  //   있으면 재시작 안 함" 안전장치 때문에 PC가 몇 시간째 옛 버전을 그대로 돌릴 수 있는데,
+  //   폰에서 그 사실을 바로 알 수 있어야 "업데이트가 안 먹는 건지, PC가 아직 안 받은
+  //   건지"를 헷갈리지 않는다.
+  engine = new ToolEngine(app.getPath("userData"), { forceMock: process.env.KYLEBOT_E2E === "1", appVersion: app.getVersion() });
   registerIpc(engine);
   createWindow();
 
