@@ -1073,6 +1073,10 @@ export class ToolEngine extends EventEmitter {
   private autoTradeEnabled = false;
   private autoTradeTimer: ReturnType<typeof setInterval> | null = null;
   private autoTradeTickBusy = false; // 한 사이클이 겹쳐 실행되지 않게
+  /** [v0.61.6 — ③ 전수조사 낮음-1] 느린 네트워크에서 한 틱이 8초를 넘기면 다음 타이머와
+   *  겹쳐 돌 수 있다(정확성 문제는 없음 — capri_commands의 원자적 claim이 중복 실행을 이미
+   *  막는다 — 다만 쓸데없이 두 번 도는 비효율). autoTradeTickBusy와 같은 원칙으로 막는다. */
+  private remoteControlTickBusy = false;
   /** [v0.45.0 버그 수정 — 오너 보고 "자동매매 시작해도 스크리닝이 간헐적으로 안 돎"]
    *  원인: startAutoTrade()가 `void this.autoTradeTick()`으로 첫 사이클을 "발사 후 신경 안 씀"으로
    *  돌리고 곧바로 반환하는데, 화면(App.tsx toggleAutoTrade)은 그 직후 곧바로 autoScanNow()(=
@@ -4574,6 +4578,16 @@ export class ToolEngine extends EventEmitter {
 
   /** 한 주기: ①생존 신호 갱신 ②내 pending 명령을 폴링해 실행. 실패해도 다음 주기에 재시도. */
   private async remoteControlTick(): Promise<void> {
+    if (this.remoteControlTickBusy) return;
+    this.remoteControlTickBusy = true;
+    try {
+      await this.remoteControlTickInner();
+    } finally {
+      this.remoteControlTickBusy = false;
+    }
+  }
+
+  private async remoteControlTickInner(): Promise<void> {
     const token = await this.ensureAccessToken();
     if (!token || !this.authUserId) return;
     try {
@@ -4608,6 +4622,34 @@ export class ToolEngine extends EventEmitter {
       for (const row of rows) await this.claimAndExecuteCommand(token, row);
     } catch {
       /* 폴링 실패는 조용히 무시(다음 8초 주기에 재시도) */
+    }
+    void this.cleanupOldCommands(token);
+  }
+
+  private lastCommandsCleanupAtMs: number | null = null;
+  private static readonly COMMANDS_CLEANUP_INTERVAL_MS = 24 * 3600_000; // 하루에 한 번이면 충분
+
+  /**
+   * [v0.61.6 — ③ 전수조사 중간-4] capri_commands에 보존 기간이 없어 done/failed 행이
+   *   무한정 쌓이고 있었다(SQL로 확인: 당장은 208KB로 작지만 수개월~수년 누적되면 커진다).
+   *   PC가 8초마다 도는 이 루프에 묻어가되, 하루 한 번만(네트워크·DB 부담 최소화) 30일
+   *   지난 done/failed 행을 지운다. RLS가 "본인 행만"을 이미 강제하므로 user_id 조건은
+   *   없어도 안전하다(다른 사람 행은 애초에 안 보이고 못 지운다).
+   */
+  private async cleanupOldCommands(token: string): Promise<void> {
+    const longEnough = Date.now() - (this.lastCommandsCleanupAtMs ?? 0) > ToolEngine.COMMANDS_CLEANUP_INTERVAL_MS;
+    if (!longEnough) return;
+    this.lastCommandsCleanupAtMs = Date.now(); // 실패해도 다음 8초 주기에 바로 재시도하지 않도록 먼저 찍어 둔다(하루 뒤 재시도)
+    try {
+      const cutoff = new Date(Date.now() - 30 * 24 * 3600_000).toISOString();
+      await fetchWithTimeout(
+        `${ToolEngine.SUPABASE_URL}/rest/v1/capri_commands?status=in.(done,failed)&created_at=lt.${encodeURIComponent(cutoff)}`,
+        { method: "DELETE", headers: { ...this.authRestHeaders(token), Prefer: "return=minimal" } },
+        10_000,
+        "capri_commands_cleanup",
+      );
+    } catch {
+      /* 청소 실패는 조용히 무시 — 다음 날 다시 시도, 당장 기능엔 영향 없음 */
     }
   }
 
@@ -4680,6 +4722,16 @@ export class ToolEngine extends EventEmitter {
       case "setKillSwitch":
         await this.setKillSwitch(!!payload.on);
         return { ok: true };
+      case "setLiveOrders":
+        // [v0.61.6 — ③ 전수조사 중간-1, 오너 승인] 실주문 활성화는 killSwitch·자동매매 한도와
+        //   같은 "PC의 실제 매매 동작을 바꾸는" 공유 안전 설정이라 원격화했다 — 반면
+        //   setPriceGuard·setSkipConfirm은 그 기기 자신이 직접 내는 주문에만 적용되는
+        //   화면별 설정이라(각 기기가 자기 주문을 자기 설정으로 보호) 원격화하지 않는다
+        //   (docs/audit-2026-10-01.md [중간-1] 참고).
+        this.setLiveOrders(!!payload.on);
+        return { ok: true };
+      case "saveSystemPauseEnabled":
+        return { ok: true, settings: this.saveSystemPauseEnabled(!!payload.enabled) };
       case "placeEntry":
         return { ok: true, journal: await this.placeEntry(payload as Parameters<ToolEngine["placeEntry"]>[0]) };
       case "placeSell":

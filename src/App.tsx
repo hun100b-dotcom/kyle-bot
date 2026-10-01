@@ -2424,13 +2424,23 @@ ${msg}
     });
   }
 
-  /** [v0.3.0] 상단 바의 실주문 토글. 켤 때만 경고 확인을 거친다(끄는 건 즉시). 상태는 저장된다. */
+  /** [v0.3.0→v0.61.6] 상단 바의 실주문 토글. 켤 때만 경고 확인을 거친다(끄는 건 즉시). 상태는
+   *  저장된다. [v0.61.6 — ③ 전수조사 중간-1, 오너 승인] 웹(폰)에서는 로컬(의미 없는) 엔진을
+   *  직접 켜 봤자 PC의 실제 매매는 안 바뀐다 — 원격 명령으로 PC에 보낸다. */
   async function toggleLiveOrders(on: boolean) {
     if (on) {
       const ok = window.confirm(
         ["⚠️ 실주문을 활성화합니다.", "", "지금부터 주문 버튼을 누르면 실제 돈으로 주문이 전송됩니다.", "", "계속할까요?"].join("\n"),
       );
       if (!ok) return;
+    }
+    if (isWebApp) {
+      // [v0.61.6] 결과(실제로 PC에 반영된 값)를 이 자리에서 바로 되읽어올 방법은 아직 없다
+      // (saveAutoScanSettings 등과 같은 한계 — docs/progress.md v0.61.1 참고) — "보냈다"는
+      // 메시지까지만 보여준다.
+      const r = await window.kyletool.sendCommand("setLiveOrders", { on });
+      setAutoToggleMsg(r.ok ? "✅ PC로 실주문 토글 명령을 보냈습니다." : `⚠️ ${r.message}`);
+      return;
     }
     await window.kyletool.setLiveOrders(on);
     setSettings(await window.kyletool.getSettings());
@@ -5638,24 +5648,7 @@ ${msg}
                 <input
                   type="checkbox"
                   checked={settings.liveOrdersEnabled}
-                  onChange={async (e) => {
-                    const on = e.target.checked;
-                    if (on) {
-                      const ok = window.confirm(
-                        [
-                          "⚠️ 실주문을 활성화합니다.",
-                          "",
-                          "지금부터 주문 버튼을 누르면 실제 돈으로 주문이 전송되어 체결될 수 있습니다.",
-                          "",
-                          "계속할까요?",
-                        ].join("\n"),
-                      );
-                      if (!ok) return;
-                    }
-                    await window.kyletool.setLiveOrders(on);
-                    setSettings(await window.kyletool.getSettings());
-                    await refreshStatus();
-                  }}
+                  onChange={(e) => void toggleLiveOrders(e.target.checked)}
                 />
                 <b>진짜 돈으로 주문 나가게 허용</b> — 켤 때 한 번 더 확인을 거칩니다
               </label>
@@ -5862,6 +5855,14 @@ ${msg}
                   type="checkbox"
                   checked={settings.systemPauseEnabled}
                   onChange={async (e) => {
+                    // [v0.61.6 — ③ 전수조사 중간-1, 오너 승인] 웹(폰)에서는 로컬(의미 없는) 엔진의
+                    //   플래그만 바뀌어 PC의 실제 스캔·주문 차단 여부는 그대로였다 — 원격 명령으로
+                    //   보낸다(결과를 바로 되읽어올 방법은 아직 없어 "보냈다" 메시지까지만).
+                    if (isWebApp) {
+                      const r = await window.kyletool.sendCommand("saveSystemPauseEnabled", { enabled: e.target.checked });
+                      setAutoToggleMsg(r.ok ? "✅ PC로 휴무 시간대 설정 명령을 보냈습니다." : `⚠️ ${r.message}`);
+                      return;
+                    }
                     setSettings(await window.kyletool.saveSystemPauseEnabled(e.target.checked));
                     setSystemPause(await window.kyletool.getSystemPauseStatus());
                   }}
