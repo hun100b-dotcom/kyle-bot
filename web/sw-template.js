@@ -71,7 +71,14 @@ self.addEventListener("fetch", (event) => {
     event.respondWith(
       (async () => {
         try {
-          return await fetch(req);
+          // [v0.60.7 긴급 수정 — 오너 실사용 보고 "폰에서는 껐다 켜도 업데이트가 안 됨"]
+          //   fetch(req)만 쓰면 이 요청도 평범한 fetch라 브라우저의 보통 HTTP 캐시 규칙을
+          //   그대로 따른다 — GitHub Pages가 index.html에도 Cache-Control: max-age=600(10분)을
+          //   붙여 보내므로(실측 확인), "네트워크 먼저"라고 적힌 주석과 달리 실제로는 10분
+          //   안이면 로컬에 저장된 옛 index.html을 그대로 돌려줄 수 있었다 — 새 서비스워커가
+          //   활성화돼 reload()가 일어나도 정작 받아오는 화면이 옛 버전이면 소용없다.
+          //   cache: "no-store"로 명시해 이 요청만큼은 항상 서버에서 진짜 새로 받는다.
+          return await fetch(new Request(req, { cache: "no-store" }));
         } catch {
           const cache = await caches.open(CACHE);
           return (await cache.match("./index.html")) ?? Response.error();

@@ -47,7 +47,18 @@ export function useUpdate(): UpdateState {
       // [중요] 문자열 경로로 등록한다. new URL(..., import.meta.url) 로 쓰면 번들러가
       //   sw.js 를 /assets/sw-해시.js 로 옮겨 버리고, 그러면 **스코프가 /assets/ 로 제한돼**
       //   첫 화면을 제어하지 못한다(등록 자체가 실패). 그래서 public 폴더의 루트 sw.js 를 쓴다.
-      .register("./sw.js", { scope: "./" })
+      // [v0.60.7 긴급 수정 — 오너 실사용 보고 "폰에서는 껐다 켜도 업데이트가 안 됨"] 원인은
+      //   이 파일 위쪽 주석의 전제("sw.js는 브라우저가 항상 서버에서 새로 확인한다")가 실제로는
+      //   틀렸다는 것 — 실측해 보니(curl로 직접 확인) GitHub Pages가 sw.js에도 다른 파일과
+      //   똑같이 `Cache-Control: max-age=600`(10분)을 그대로 돌려준다. 브라우저가 reg.update()
+      //   때 이 로컬 캐시를 그대로 쓰면, 서버엔 새 버전이 올라가 있어도 "달라진 게 없다"고
+      //   오판해 업데이트 감지 자체가 스킵된다 — 특히 Safari(아이폰)는 서비스워커 스크립트
+      //   캐싱이 알려진 대로 더 적극적이라 이 증상이 훨씬 잦다. updateViaCache: "none"은
+      //   표준 옵션으로, 서비스워커 스크립트(와 그 안에서 importScripts하는 파일)의 업데이트
+      //   확인만큼은 로컬 HTTP 캐시를 아예 타지 않고 항상 네트워크로 새로 받게 강제한다
+      //   (서버 쪽 Cache-Control 헤더는 GitHub Pages가 고정이라 건드릴 수 없어, 이쪽에서
+      //   캐시를 안 타게 만드는 게 유일한 해법이다).
+      .register("./sw.js", { scope: "./", updateViaCache: "none" })
       .then((r) => {
         reg = r;
 
