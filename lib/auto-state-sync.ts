@@ -25,13 +25,27 @@
 //   근거 표가 어긋나던 것과 같은 종류의 문제), 하나만 옮기면 애초에 어긋날 방법이 없다.
 // =============================================================================
 
-import type { AutoPosition, AutoTradeHistoryEntry } from "../electron/tool-engine";
+import type { AutoPosition, AutoTradeHistoryEntry, ScreenRun } from "../electron/tool-engine";
 
-/** 동기화 파일에 담기는 내용(자동매매 기록 전체 — 위 주석대로 신원 정보는 없다) */
+/**
+ * 동기화 파일에 담기는 내용(자동매매 기록 전체 — 위 주석대로 신원 정보는 없다).
+ *
+ * [v0.60.5 — 오너 요청 "PC에서와같이 자동스크리닝이 돌아가면 자동스크리너에서 pc와
+ *   동일하게 조회할 수 있도록"] lastScan(마지막 스캔 전체 결과 — 확정/관찰/탈락 종목과
+ *   그 근거까지 전부)·skipReasons(확정됐는데 아직 안 들어간 이유)를 추가했다. 웹(폰)은
+ *   토스에 직접 못 붙어 스스로 스캔할 수 없으므로, PC가 실제로 돈 스캔을 그대로 받아와
+ *   보여주는 것이 유일한 방법이다 — history와 같은 자리(capri_auto_state, 암호화)에
+ *   얹었다(새 테이블 없이 재사용, 어차피 같은 "내 계정 전용" 보안 모델). v는 그대로 1로
+ *   둔다(두 필드 다 선택 필드라 구버전이 보내거나 받아도 깨지지 않음 — 구버전이 이
+ *   필드 없는 걸 보내면 신버전은 그냥 undefined로 받고, 신버전이 보낸 걸 구버전이
+ *   받으면 모르는 필드를 무시할 뿐 isAutoStateSyncPayload 통과엔 지장 없다).
+ */
 export interface AutoStateSyncPayload {
   v: 1; //             형식 버전(나중에 바꿔도 옛 파일을 읽을 수 있게)
   pushedAtMs: number; // 올린 시각
   history: AutoTradeHistoryEntry[]; // 자동매매 전체 생애주기 기록
+  lastScan?: ScreenRun | null; //                 [v0.60.5] 마지막 자동 스캔 결과 전체
+  skipReasons?: Record<string, string>; //         [v0.60.5] 확정됐는데 아직 미진입인 이유
 }
 
 /** 받은 파일이 올바른 모양인지 확인한다(깨진 파일로 화면이 망가지지 않게). */
@@ -40,8 +54,12 @@ export function isAutoStateSyncPayload(v: unknown): v is AutoStateSyncPayload {
   return !!o && o.v === 1 && Array.isArray(o.history) && typeof o.pushedAtMs === "number";
 }
 
-export function toAutoStateSyncPayload(history: AutoTradeHistoryEntry[], nowMs: number): AutoStateSyncPayload {
-  return { v: 1, pushedAtMs: nowMs, history };
+export function toAutoStateSyncPayload(
+  history: AutoTradeHistoryEntry[],
+  nowMs: number,
+  extra?: { lastScan?: ScreenRun | null; skipReasons?: Record<string, string> },
+): AutoStateSyncPayload {
+  return { v: 1, pushedAtMs: nowMs, history, lastScan: extra?.lastScan, skipReasons: extra?.skipReasons };
 }
 
 /**

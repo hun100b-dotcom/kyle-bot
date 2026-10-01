@@ -610,6 +610,19 @@ function App() {
   const [tab, setTab] = useState<TabId>("calc");
   /** 웹앱(폰)인가? — 데스크톱에만 있는 '폰 연결' 기능 유무로 구분한다 */
   const isWebApp = !window.kyletool.phoneStart;
+  /** [v0.60.5 — 오너 실사용 보고 "감시 중 포지션에 '폰 연결이 안 돼 있습니다' 경고가 84회
+   *  연속으로 쌓임"] 웹(폰)에서 QR 중계 연결이 안 돼 있으면 토스를 직접 호출하는 어떤
+   *  폴링도(reconcileAutoPositionsNow 등) 절대 성공할 수 없는데, 예전엔 이 사실을 모르고
+   *  20초마다 계속 시도해 실패만 쌓았다. 데스크톱(메서드 자체가 없음)이면 항상 true로
+   *  간주해 기존 동작을 그대로 둔다. */
+  const [hasTossRelay, setHasTossRelay] = useState(true);
+  useEffect(() => {
+    if (!isWebApp) return; // 데스크톱은 항상 true(기본값 유지) — 확인할 필요 없음
+    void window.kyletool.hasTossRelay?.().then(setHasTossRelay).catch(() => setHasTossRelay(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  /** 지금 이 세션이 토스를 직접(실시간) 호출해도 되는가 — 데스크톱은 항상, 웹은 중계 연결됐을 때만. */
+  const canReconcileLive = !isWebApp || hasTossRelay;
   // [v0.9.2] 탭 순서(드래그로 변경, 이 기기에 저장)
   // [v0.27.0] 이제 드래그로 순서를 바꾸는 건 '그룹'(4개) — 리프 탭은 그룹 안에서 고정 순서.
   const { order: groupOrder, dragProps, isDragging } = useTabOrder(TOP_GROUPS);
@@ -842,6 +855,13 @@ function App() {
   });
   const [autoStatus, setAutoStatus] = useState<AutoTradeStatus | null>(null);
   const [autoBusy, setAutoBusy] = useState(false);
+  // PC 생존 신호 임계값: 데스크톱 루프 주기(8초)의 여유를 넉넉히 둬 90초로 잡는다(한 주기 놓쳐도 오탐 안 하게).
+  const pcConnected = pcLastSeenMs != null && Date.now() - pcLastSeenMs < 90_000;
+  // [v0.60.4 — 오너 실사용 보고 "원격으로 시작을 눌러도 진행되고 있는지 모르겠다"] 웹(폰)
+  //   세션의 autoStatus.enabled는 이 브라우저 탭 자체의(의미 없는) 로컬 상태라, 웹에서는
+  //   PC가 실제로 보낸 값(pcAutoTradeEnabled)을 대신 쓴다 — 아직 못 받아왔으면(null) 기존
+  //   표시로 안전하게 대체.
+  const effectiveAutoEnabled = isWebApp && pcAutoTradeEnabled != null ? pcAutoTradeEnabled : (autoStatus?.enabled ?? false);
   // [v0.32.0] 자동매매 알림(관찰 확정·주문) — 브라우저/OS Notification 권한 상태.
   //   "unsupported"는 Notification API 자체가 없는 드문 환경(구형 브라우저 등).
   const [notifyPermission, setNotifyPermission] = useState<NotificationPermission | "unsupported">(
@@ -997,7 +1017,13 @@ function App() {
   async function loadAutoHistory() {
     setAutoHistoryBusy(true);
     try {
-      await window.kyletool.reconcileAutoPositionsNow().catch(() => {}); // 실패해도 기록 조회는 계속 진행
+      // [v0.60.5] 웹에서 중계(QR) 연결이 없으면 reconcileAutoPositionsNow는 항상 실패하므로
+      //   부르지 않는다 — 대신 PC가 올려 둔 최신 기록을 받아온다(autoStateSyncPull).
+      if (canReconcileLive) {
+        await window.kyletool.reconcileAutoPositionsNow().catch(() => {}); // 실패해도 기록 조회는 계속 진행
+      } else {
+        await window.kyletool.autoStateSyncPull().catch(() => {});
+      }
       setAutoHistory(await window.kyletool.autoTradeHistory());
     } finally {
       setAutoHistoryBusy(false);
@@ -1264,6 +1290,25 @@ function App() {
   //   지켜진다). 포지션이 없고 자동매매도 꺼져 있으면 폴링할 이유가 없어 그대로 멈춘다.
   useEffect(() => {
     const hasPositions = (autoStatus?.positions?.length ?? 0) > 0;
+    // [v0.60.5 — 오너 실사용 보고: "감시 중 포지션에 '폰 연결이 안 돼 있습니다' 경고가 84회
+    //   연속으로 쌓임" + "PC처럼 스크리너도 동일하게 보고 싶다"] 웹에서 토스 중계(QR)가 없으면
+    //   reconcileAutoPositionsNow(실제 토스 호출)는 절대 성공할 수 없다 — 매번 실패만 쌓는
+    //   대신, PC가 올려 둔 최신 기록(포지션+방금 돈 스캔 결과·탈락사유 포함, autoTradeTick이
+    //   매 사이클 끝에 올려 둠)을 그대로 받아와(autoStateSyncPull) 화면을 갱신한다. PC가 실제로
+    //   자동매매를 돌리고 있으면(effectiveAutoEnabled) 포지션이 아직 하나도 없어도(스캔 중이라
+    //   새로 생긴 게 없을 수 있음) 스캔 데이터는 계속 바뀌므로 그래도 계속 받아온다.
+    if (!canReconcileLive) {
+      if (!hasPositions && !effectiveAutoEnabled) return;
+      const tick = () => {
+        void window.kyletool.autoStateSyncPull()
+          .catch(() => {})
+          .then(() => window.kyletool.autoTradeStatus())
+          .then(setAutoStatus);
+      };
+      tick();
+      const id = setInterval(tick, 20_000);
+      return () => clearInterval(id);
+    }
     if (!autoStatus?.enabled && !hasPositions) return;
     const tick = () => {
       void (hasPositions ? window.kyletool.reconcileAutoPositionsNow() : window.kyletool.autoTradeStatus()).then(setAutoStatus);
@@ -1271,7 +1316,7 @@ function App() {
     tick(); // [v0.48.0] 20초를 기다리지 않고 이 탭에 들어오거나 상태가 바뀐 즉시 한 번 바로 확인
     const id = setInterval(tick, 20_000);
     return () => clearInterval(id);
-  }, [autoStatus?.enabled, autoStatus?.positions?.length]);
+  }, [autoStatus?.enabled, autoStatus?.positions?.length, canReconcileLive, effectiveAutoEnabled]);
 
   // [v0.29.0] 자동 스크리너 탭의 카운트다운용 — 자동매매가 켜져 있는 동안만 1초마다 화면을 흘려보낸다
   //   (오너 요청: "몇 분 후 스크리닝 진행 표시 필요" — 언제 다음 스캔이 도는지 눈에 보이게).
@@ -1312,13 +1357,6 @@ function App() {
     const id = setInterval(poll, 20_000);
     return () => clearInterval(id);
   }, []);
-  // PC 생존 신호 임계값: 데스크톱 루프 주기(8초)의 여유를 넉넉히 둬 90초로 잡는다(한 주기 놓쳐도 오탐 안 하게).
-  const pcConnected = pcLastSeenMs != null && Date.now() - pcLastSeenMs < 90_000;
-  // [v0.60.4 — 오너 실사용 보고 "원격으로 시작을 눌러도 진행되고 있는지 모르겠다"] 웹(폰)
-  //   세션의 autoStatus.enabled는 이 브라우저 탭 자체의(의미 없는) 로컬 상태라, 웹에서는
-  //   PC가 실제로 보낸 값(pcAutoTradeEnabled)을 대신 쓴다 — 아직 못 받아왔으면(null) 기존
-  //   표시로 안전하게 대체.
-  const effectiveAutoEnabled = isWebApp && pcAutoTradeEnabled != null ? pcAutoTradeEnabled : (autoStatus?.enabled ?? false);
 
   /** [v0.59.0] 원격 명령 목록을 다시 불러온다(최근 처리 상태 확인용). */
   async function loadRemoteCommands() {
@@ -2468,14 +2506,31 @@ ${msg}
     setTimeout(() => setSavedMsg(""), 4000);
   }
 
-  /** [v0.28.0→v0.39.0] 자동매매 스크리너 수동 새로고침 — 5분 사이클을 기다리지 않고 지금 바로
-   *   훑는다. 자동매매가 켜져 있으면 실제 진입 시도까지 그대로 도는 진짜 사이클이고(엔진의
-   *   autoScanNow 참고 — 5분 주기 자체는 유지, 기준 시각만 지금으로 당김), 꺼져 있으면 예전
-   *   그대로 미리보기(스캔만, 진입 없음)다. */
+  /**
+   * [v0.28.0→v0.39.0→v0.60.5] 자동매매 스크리너 수동 새로고침 — 5분 사이클을 기다리지 않고
+   *   지금 바로 훑는다. 자동매매가 켜져 있으면 실제 진입 시도까지 그대로 도는 진짜
+   *   사이클이고(엔진의 autoScanNow 참고 — 5분 주기 자체는 유지, 기준 시각만 지금으로
+   *   당김), 꺼져 있으면 예전 그대로 미리보기(스캔만, 진입 없음)다.
+   *   [v0.60.5] 웹에서 토스 중계(QR)가 없으면 autoScanNow가 직접 스캔(실제 토스 호출)을
+   *   시도해 항상 실패한다 — 대신 PC에 "지금 스캔해" 원격 명령을 보내고, PC가 끝낸 뒤
+   *   올려 둔 결과를 몇 초 뒤 받아오는 쪽으로 돌린다(원격 조종 카드의 "지금 스캔"과 동일한
+   *   경로).
+   */
   async function refreshAutoScanNow() {
     if (autoScanBusy) return;
     setAutoScanBusy(true);
     try {
+      if (!canReconcileLive) {
+        if (!pcConnected) { setAutoToggleMsg("⚠️ PC가 꺼져 있어 지금 스캔을 요청할 수 없습니다."); return; }
+        await window.kyletool.sendCommand("autoScanNow").catch(() => {});
+        // PC의 스캔은 몇 초~몇십 초 걸릴 수 있어(종목 수에 따라 다름), 넉넉히 두 번에 걸쳐 받아온다.
+        for (const delayMs of [5000, 15000]) {
+          setTimeout(() => {
+            void window.kyletool.autoStateSyncPull().catch(() => {}).then(() => window.kyletool.autoTradeStatus()).then(setAutoStatus);
+          }, delayMs);
+        }
+        return;
+      }
       setAutoStatus(await window.kyletool.autoScanNow());
     } finally {
       setAutoScanBusy(false);
@@ -4012,15 +4067,29 @@ ${msg}
                       onClick={async () => {
                         setReconcileBusy(true);
                         try {
-                          setAutoStatus(await window.kyletool.reconcileAutoPositionsNow());
+                          // [v0.60.5] 웹에서 중계(QR) 연결이 없으면 이 버튼도 PC가 올려 둔
+                          //   최신 기록을 받아오는 쪽으로(실제 토스 호출은 항상 실패하므로).
+                          if (canReconcileLive) {
+                            setAutoStatus(await window.kyletool.reconcileAutoPositionsNow());
+                          } else {
+                            await window.kyletool.autoStateSyncPull().catch(() => {});
+                            setAutoStatus(await window.kyletool.autoTradeStatus());
+                          }
                         } finally {
                           setReconcileBusy(false);
                         }
                       }}
                     >
-                      {reconcileBusy ? "확인 중…" : "🔄 지금 확인"}
+                      {reconcileBusy ? "확인 중…" : canReconcileLive ? "🔄 지금 확인" : "🔄 PC 최신 기록 받기"}
                     </button>
                   </div>
+                  {!canReconcileLive && (
+                    <p className="hint small">
+                      📱 이 세션은 토스에 직접 연결돼 있지 않아(QR 중계 미연결), 여기 보이는 상태는
+                      PC가 올려 둔 최신 기록 기준입니다 — 실제 체결 여부의 최종 확인은 항상 PC나
+                      토스 앱에서 하세요.
+                    </p>
+                  )}
                   <p className="hint">
                     이 기기에 저장돼 있어 앱을 껐다 켜거나 업데이트해도 그대로 남아요. 로그인
                     상태면 <b>다른 기기(PC↔폰)와도 자동으로 동기화</b>됩니다(로그인 직후, 그리고

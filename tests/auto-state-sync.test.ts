@@ -20,9 +20,19 @@ import {
   derivePositionsFromHistory,
   type AutoStateSyncPayload,
 } from "../lib/auto-state-sync";
-import type { AutoTradeHistoryEntry } from "../electron/tool-engine";
+import type { AutoTradeHistoryEntry, ScreenRun } from "../electron/tool-engine";
 
 const PASS = "capri-비밀번호-테스트";
+
+/** [v0.60.5] 최소한의 가짜 스캔 결과(필수 필드만) — lastScan 동기화 테스트용. */
+function fakeScreenRun(over: Partial<ScreenRun> = {}): ScreenRun {
+  return {
+    scannedAt: "09-30 12:00:00", total: 1, bodyRatio: 0.3, priceMin: 1, priceMax: 9,
+    excludedEtf: 0, results: [], emaTrendEnabled: true, emaPeriod: 200, cloudEnabled: true,
+    dojiWickMinRatio: 0.1, dojiMaxAgeEnabled: true, dojiMaxAgeMinutes: 20,
+    nextCandleConfirmEnabled: true, excludeEtf: true, ...over,
+  };
+}
 
 function entry(over: Partial<AutoTradeHistoryEntry> = {}): AutoTradeHistoryEntry {
   return {
@@ -61,6 +71,24 @@ describe("toAutoStateSyncPayload/isAutoStateSyncPayload — 형식", () => {
     expect(isAutoStateSyncPayload(null)).toBe(false);
     expect(isAutoStateSyncPayload({ v: 1, history: "nope", pushedAtMs: 1 })).toBe(false);
   });
+
+  // [v0.60.5 — 오너 요청 "PC와 동일하게 자동스크리너 조회"] lastScan/skipReasons가 생겨도
+  //   기존 형식 검사·기본 동작과 호환돼야 한다(구버전 폰이 받아도 안 깨지고, extra를 안
+  //   줘도 undefined로 조용히 빠질 뿐 오류가 안 남).
+  it("[v0.60.5] extra(lastScan/skipReasons)를 넘기면 그대로 담기고, 안 넘기면 undefined로 빠진다(하위호환)", () => {
+    const withExtra = toAutoStateSyncPayload([entry()], 1, {
+      lastScan: fakeScreenRun({ total: 42 }),
+      skipReasons: { AAPL: "이미 보유 중" },
+    });
+    expect(withExtra.lastScan?.total).toBe(42);
+    expect(withExtra.skipReasons?.AAPL).toBe("이미 보유 중");
+    expect(isAutoStateSyncPayload(withExtra)).toBe(true);
+
+    const withoutExtra = toAutoStateSyncPayload([entry()], 1);
+    expect(withoutExtra.lastScan).toBeUndefined();
+    expect(withoutExtra.skipReasons).toBeUndefined();
+    expect(isAutoStateSyncPayload(withoutExtra)).toBe(true); // extra 필드가 없어도 여전히 유효한 형식
+  });
 });
 
 describe("암호화 왕복", () => {
@@ -76,6 +104,17 @@ describe("암호화 왕복", () => {
   it("[보안] 비밀번호가 틀리면 실패한다(엉뚱한 값을 주지 않는다)", async () => {
     const rec = await encryptJson(toAutoStateSyncPayload([entry()], 1), PASS);
     await expect(decryptJson(rec, PASS + "틀림")).rejects.toThrow();
+  });
+
+  it("[v0.60.5] lastScan·skipReasons도 암호화 왕복 후 그대로 복원된다", async () => {
+    const payload = toAutoStateSyncPayload([entry()], 1, {
+      lastScan: fakeScreenRun({ total: 7 }),
+      skipReasons: { TSLA: "최대 종목 수 도달" },
+    });
+    const rec = await encryptJson(payload, PASS);
+    const back = await decryptJson<AutoStateSyncPayload>(rec, PASS);
+    expect(back.lastScan?.total).toBe(7);
+    expect(back.skipReasons?.TSLA).toBe("최대 종목 수 도달");
   });
 });
 

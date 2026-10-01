@@ -4157,15 +4157,30 @@ export class ToolEngine extends EventEmitter {
   //   lib/auto-state-sync.ts 파일 상단 주석 참고.
   // ---------------------------------------------------------------------------
 
-  /** syncPushAutoState — 자동매매 기록 전체를 암호화해 내 계정(capri_auto_state) 행에 올린다. */
+  /**
+   * syncPushAutoState — 자동매매 기록 전체(+ 마지막 스캔 결과·탈락 사유)를 암호화해 내
+   *   계정(capri_auto_state) 행에 올린다.
+   *   [v0.60.5] 예전엔 기록이 하나도 없으면 아예 올리지 않았다 — 그런데 "아직 한 건도
+   *   체결 안 됐지만 스캔은 계속 돌고 있는" 상황(막 시작했거나 계속 후보가 없는 경우)도
+   *   흔한데, 그럴 때도 폰이 "PC가 지금 뭘 스캔하고 있는지"는 볼 수 있어야 한다 — 스캔
+   *   결과가 있으면 기록이 비어 있어도 올린다.
+   */
   async syncPushAutoState(): Promise<{ ok: boolean; message: string; count?: number }> {
     const token = await this.ensureAccessToken();
     if (!token) return { ok: false, message: "먼저 로그인하세요." };
     if (!this.authPassword) return { ok: false, message: "다시 로그인해야 동기화할 수 있습니다(비밀번호는 저장해 두지 않아요)." };
-    if (this.autoTradeHistory.length === 0) return { ok: false, message: "올릴 자동매매 기록이 없습니다." };
+    if (this.autoTradeHistory.length === 0 && !this.autoTradeLastScan) {
+      return { ok: false, message: "올릴 자동매매 기록이 없습니다." };
+    }
 
     try {
-      const rec = await encryptJson(toAutoStateSyncPayload(this.autoTradeHistory, Date.now()), this.authPassword);
+      const rec = await encryptJson(
+        toAutoStateSyncPayload(this.autoTradeHistory, Date.now(), {
+          lastScan: this.autoTradeLastScan,
+          skipReasons: this.autoTradeSkipReasons,
+        }),
+        this.authPassword,
+      );
       const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_auto_state?on_conflict=user_id`, {
         method: "POST",
         headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
@@ -4209,6 +4224,13 @@ export class ToolEngine extends EventEmitter {
       //   있으면 이 기기도 그 번호로 실제 체결·발동 여부를 재확인할 수 있게 된다.
       this.autoTradePositions = derivePositionsFromHistory(this.autoTradeHistory);
       this.saveAutoPositions();
+      // [v0.60.5 — 오너 요청 "PC와 동일하게 스크리너 조회"] 마지막 스캔 결과·탈락 사유도
+      //   그대로 받아들인다 — 이 기기(특히 웹/폰)는 스스로 스캔할 수 없으므로, PC가 올려
+      //   둔 걸 그대로 보여주는 게 유일한 방법이다. 항상 pull 쪽 값을 채택한다(이 기기가
+      //   직접 돌린 스캔보다, "방금 로그인한 다른 기기가 PC의 최신 상태를 따라잡으려는"
+      //   이 호출의 목적상 PC 쪽이 항상 더 권위 있는 최신 값이라고 본다).
+      if (payload.lastScan !== undefined) this.autoTradeLastScan = payload.lastScan;
+      if (payload.skipReasons !== undefined) this.autoTradeSkipReasons = payload.skipReasons;
       const added = this.autoTradeHistory.length - before;
       return {
         ok: true,
@@ -6379,6 +6401,12 @@ export class ToolEngine extends EventEmitter {
       }
     } finally {
       this.autoTradeTickBusy = false;
+      // [v0.60.5 — 오너 요청 "PC와 동일하게 스크리너 조회"] 사이클 끝마다 최신 스캔 결과·
+      //   탈락 사유를 클라우드에 올린다(로그인돼 있으면). persistAutoTradeHistory의 push는
+      //   "기록이 바뀔 때만"이라 체결 없이 스캔만 돈 사이클은 안 걸렸다 — 그래서 여기서
+      //   따로, 매 사이클 끝에 명시적으로 올린다(실패해도 다음 사이클에 다시 시도하면
+      //   되므로 조용히 무시).
+      void this.syncPushAutoState().catch(() => {});
     }
   }
 

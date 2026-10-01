@@ -813,6 +813,10 @@ interface KyletoolBridge {
 
   mockSetPrice(symbol: string, price: number): Promise<boolean>;
 
+  /** [v0.60.5] 이 세션이 토스에 직접 닿을 수 있는지(데스크톱=항상 true, 웹=QR 중계 연결
+   *  여부). 없으면(옛 버전 등) 데스크톱으로 간주해 기존 동작 그대로 둔다. */
+  hasTossRelay?(): Promise<boolean>;
+
   // [폰에서 쓰기] 집 PC 릴레이 + 인터넷 터널 (웹앱에서는 없을 수 있어 선택 항목)
   phoneStart?(): Promise<PhoneState>;
   phoneStop?(): Promise<PhoneState>;

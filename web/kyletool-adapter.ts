@@ -299,6 +299,12 @@ export function installKyleTool(): ToolEngine {
     mockSetPrice: (_symbol: string, _price: number) =>
       Promise.reject(new Error("연습 모드는 웹앱에서 지원하지 않습니다(PC용 Capri를 사용하세요).")),
 
+    // [v0.60.5] 지금 이 웹 세션이 토스에 실제로 닿을 수 있는지(QR로 집 PC 중계 연결이 돼
+    //   있는지). 없으면(apiBase 빈 값) 화면이 "감시 중 포지션을 직접 재확인"처럼 실제
+    //   토스 호출이 필요한 폴링을 스스로 끄는 데 쓴다 — 안 그러면 매번 실패만 반복하며
+    //   "폰 연결이 아직 안 돼 있습니다" 경고가 포지션에 계속 쌓인다(오너 실사용 보고).
+    hasTossRelay: () => Promise.resolve(Boolean(apiBase)),
+
     // ── 앱 업데이트: 웹은 서비스 워커가 담당하므로 여기선 무해한 값만 ──
     appVersion: () => Promise.resolve(`web-${__BUILD_ID__}`),
     downloadUpdate: () => Promise.resolve({ ok: true }),
