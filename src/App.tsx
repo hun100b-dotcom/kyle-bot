@@ -860,6 +860,23 @@ function App() {
   });
   const [autoStatus, setAutoStatus] = useState<AutoTradeStatus | null>(null);
   const [autoBusy, setAutoBusy] = useState(false);
+  // [v0.61.0] 상태 미러(capri_live_state) — PC가 마지막으로 올린 시각(ms). canReconcileLive가
+  //   false인 세션(=폰, 중계 미연결)이 getLiveState()로 받아올 때마다 갱신한다. 화면에
+  //   "마지막 갱신 HH:MM:SS"로 보여줘, 멈춘 건지 원래 이 상태인지 구분할 수 있게 한다(오너 지시).
+  const [liveStateUpdatedAtMs, setLiveStateUpdatedAtMs] = useState<number | null>(null);
+  /** [v0.61.0] PC가 올려 둔 최신 상태(자동매매 현황 전체 + 최근 로그)를 받아와 화면에 반영한다.
+   *  canReconcileLive가 false인 세션(=폰, 토스에 직접 못 붙음) 전용 — PC가 push한 그대로
+   *  믿고 쓴다(과거엔 capri_auto_state에 lastScan/skipReasons를 끼워 넣어 받았는데, 이제
+   *  capri_live_state 전용 통로로 교체됐다 — lib/auto-state-sync.ts 참고). */
+  const refreshLiveState = useCallback(async (): Promise<AutoTradeStatus | null> => {
+    const r = await window.kyletool.getLiveState?.().catch(() => null);
+    if (r?.ok && r.status) {
+      setAutoStatus(r.status);
+      setLiveStateUpdatedAtMs(r.updatedAtMs);
+      return r.status;
+    }
+    return null;
+  }, []);
   // PC 생존 신호 임계값: 데스크톱 루프 주기(8초)의 여유를 넉넉히 둬 90초로 잡는다(한 주기 놓쳐도 오탐 안 하게).
   const pcConnected = pcLastSeenMs != null && Date.now() - pcLastSeenMs < 90_000;
   // [v0.60.4 — 오너 실사용 보고 "원격으로 시작을 눌러도 진행되고 있는지 모르겠다"] 웹(폰)
@@ -939,6 +956,16 @@ function App() {
     setAutoCancelBusyKey(key);
     setAutoCancelMsg("");
     try {
+      // [v0.61.0 — 오너 지시 "폰에서 조회만 되면 안 되고 조작도 돼야 한다"] 웹에서 토스 중계가
+      //   없으면 cancelAutoPosition을 직접 불러봤자 이 세션엔 토스 연결이 없어 항상 실패한다
+      //   — PC가 집어가 실행하는 원격 명령 큐로 보낸다(dispatchCommand의 cancelAutoPosition
+      //   그대로 재사용). 결과는 PC가 몇 초 안에 처리하므로, 잠시 뒤 상태 미러를 다시 받아온다.
+      if (!canReconcileLive) {
+        const r = await window.kyletool.sendCommand("cancelAutoPosition", { symbol: p.symbol, entry: p.entry, enteredAtMs: p.enteredAtMs });
+        setAutoCancelMsg(`${p.symbol}: ${r.ok ? "✅ 취소 명령을 PC로 보냈습니다. 잠시 후 반영됩니다." : `⚠️ ${r.message}`}`);
+        setTimeout(() => void refreshLiveState(), 10_000);
+        return;
+      }
       const r = await window.kyletool.cancelAutoPosition(p.symbol, p.entry, p.enteredAtMs);
       setAutoCancelMsg(`${p.symbol}: ${r.ok ? "✅ " : "⚠️ "}${r.message}`);
       if (r.ok) setAutoStatus(await window.kyletool.autoTradeStatus());
@@ -1300,23 +1327,17 @@ function App() {
   //   지켜진다). 포지션이 없고 자동매매도 꺼져 있으면 폴링할 이유가 없어 그대로 멈춘다.
   useEffect(() => {
     const hasPositions = (autoStatus?.positions?.length ?? 0) > 0;
-    // [v0.60.5 — 오너 실사용 보고: "감시 중 포지션에 '폰 연결이 안 돼 있습니다' 경고가 84회
-    //   연속으로 쌓임" + "PC처럼 스크리너도 동일하게 보고 싶다"] 웹에서 토스 중계(QR)가 없으면
+    // [v0.61.0 — 오너 지시 "상태 미러를 만들어라"] 웹에서 토스 중계(QR)가 없으면
     //   reconcileAutoPositionsNow(실제 토스 호출)는 절대 성공할 수 없다 — 매번 실패만 쌓는
-    //   대신, PC가 올려 둔 최신 기록(포지션+방금 돈 스캔 결과·탈락사유 포함, autoTradeTick이
-    //   매 사이클 끝에 올려 둠)을 그대로 받아와(autoStateSyncPull) 화면을 갱신한다. PC가 실제로
-    //   자동매매를 돌리고 있으면(effectiveAutoEnabled) 포지션이 아직 하나도 없어도(스캔 중이라
-    //   새로 생긴 게 없을 수 있음) 스캔 데이터는 계속 바뀌므로 그래도 계속 받아온다.
+    //   대신, PC가 capri_live_state에 올려 둔 최신 상태(포지션+방금 돈 스캔 결과·탈락사유
+    //   포함, autoTradeTick이 매 사이클 끝에 올려 둠)를 그대로 받아와(getLiveState) 화면을
+    //   갱신한다. PC가 실제로 자동매매를 돌리고 있으면(effectiveAutoEnabled) 포지션이 아직
+    //   하나도 없어도(스캔 중이라 새로 생긴 게 없을 수 있음) 스캔 데이터는 계속 바뀌므로
+    //   그래도 계속 받아온다.
     if (!canReconcileLive) {
       if (!hasPositions && !effectiveAutoEnabled) return;
-      const tick = () => {
-        void window.kyletool.autoStateSyncPull()
-          .catch(() => {})
-          .then(() => window.kyletool.autoTradeStatus())
-          .then(setAutoStatus);
-      };
-      tick();
-      const id = setInterval(tick, 20_000);
+      void refreshLiveState();
+      const id = setInterval(() => void refreshLiveState(), 20_000);
       return () => clearInterval(id);
     }
     if (!autoStatus?.enabled && !hasPositions) return;
@@ -1326,7 +1347,7 @@ function App() {
     tick(); // [v0.48.0] 20초를 기다리지 않고 이 탭에 들어오거나 상태가 바뀐 즉시 한 번 바로 확인
     const id = setInterval(tick, 20_000);
     return () => clearInterval(id);
-  }, [autoStatus?.enabled, autoStatus?.positions?.length, canReconcileLive, effectiveAutoEnabled]);
+  }, [autoStatus?.enabled, autoStatus?.positions?.length, canReconcileLive, effectiveAutoEnabled, refreshLiveState]);
 
   // [v0.29.0] 자동 스크리너 탭의 카운트다운용 — 자동매매가 켜져 있는 동안만 1초마다 화면을 흘려보낸다
   //   (오너 요청: "몇 분 후 스크리닝 진행 표시 필요" — 언제 다음 스캔이 도는지 눈에 보이게).
@@ -2541,10 +2562,8 @@ ${msg}
         const maxAttempts = 18; // 10초 × 18 = 최대 3분
         for (let i = 0; i < maxAttempts; i++) {
           await new Promise((r) => setTimeout(r, 10_000));
-          await window.kyletool.autoStateSyncPull().catch(() => {});
-          const s = await window.kyletool.autoTradeStatus();
-          setAutoStatus(s);
-          if (s.lastScan && s.lastScan.scannedAt !== priorScannedAt) return; // 새 스캔 결과 도착 — 완료
+          const s = await refreshLiveState();
+          if (s?.lastScan && s.lastScan.scannedAt !== priorScannedAt) return; // 새 스캔 결과 도착 — 완료
         }
         setAutoToggleMsg("⚠️ 3분 안에 새 스캔 결과를 못 받았습니다 — PC가 아직 스캔 중이거나 연결이 느릴 수 있습니다. 잠시 후 다시 시도해 주세요.");
         return;
@@ -2988,6 +3007,20 @@ ${msg}
           {isWebApp && pcConnected && pcAppVersion && appVer && pcAppVersion !== appVer && (
             <span className="badge badge-dry" title="PC가 자동매매를 켜 둔 채라 재시작(업데이트 적용)을 못 하고 있을 수 있습니다 — 자동매매를 끄면 PC가 유휴 상태를 거쳐 스스로 최신 버전으로 업데이트합니다.">
               ⚠️ PC 버전 다름(PC: v{pcAppVersion} / 이 화면: v{appVer})
+            </span>
+          )}
+          {/* [v0.61.0 — 오너 지시 "폰 화면에 마지막 갱신 시각을 표시해라"] 상태 미러
+              (capri_live_state)에서 받은 값이 언제 적힌 건지 — 멈춘 건지 원래 이 상태인지
+              구분할 수 있게. canReconcileLive(=토스 직접 연결)면 이 화면 자체가 실시간이라
+              따로 보일 필요 없다. */}
+          {!canReconcileLive && (
+            <span
+              className="badge badge-dry"
+              title="PC가 capri_live_state에 마지막으로 상태를 올린 시각입니다. 너무 오래전이면 PC가 꺼져 있거나 멈췄을 수 있습니다."
+            >
+              {liveStateUpdatedAtMs != null
+                ? `🕒 마지막 갱신 ${new Date(liveStateUpdatedAtMs).toLocaleTimeString("ko-KR", { hour12: false })}`
+                : "🕒 아직 못 받음"}
             </span>
           )}
         </div>
@@ -4095,13 +4128,12 @@ ${msg}
                       onClick={async () => {
                         setReconcileBusy(true);
                         try {
-                          // [v0.60.5] 웹에서 중계(QR) 연결이 없으면 이 버튼도 PC가 올려 둔
-                          //   최신 기록을 받아오는 쪽으로(실제 토스 호출은 항상 실패하므로).
+                          // [v0.61.0] 웹에서 중계(QR) 연결이 없으면 이 버튼도 PC가 capri_live_state에
+                          //   올려 둔 최신 상태를 받아오는 쪽으로(실제 토스 호출은 항상 실패하므로).
                           if (canReconcileLive) {
                             setAutoStatus(await window.kyletool.reconcileAutoPositionsNow());
                           } else {
-                            await window.kyletool.autoStateSyncPull().catch(() => {});
-                            setAutoStatus(await window.kyletool.autoTradeStatus());
+                            await refreshLiveState();
                           }
                         } finally {
                           setReconcileBusy(false);

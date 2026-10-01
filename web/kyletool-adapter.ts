@@ -304,6 +304,8 @@ export function installKyleTool(): ToolEngine {
     //   토스 호출이 필요한 폴링을 스스로 끄는 데 쓴다 — 안 그러면 매번 실패만 반복하며
     //   "폰 연결이 아직 안 돼 있습니다" 경고가 포지션에 계속 쌓인다(오너 실사용 보고).
     hasTossRelay: () => Promise.resolve(Boolean(apiBase)),
+    // [v0.61.0] 상태 미러 — PC가 올려 둔 최신 자동매매 현황+최근 로그를 읽는다(capri_live_state).
+    getLiveState: () => e.getLiveState(),
 
     // ── 앱 업데이트: 웹은 서비스 워커가 담당하므로 여기선 무해한 값만 ──
     // [v0.60.8 긴급 수정 — 오너 실사용 보고 "버전 정보에 vweb-202610010438만 떠서 뭔

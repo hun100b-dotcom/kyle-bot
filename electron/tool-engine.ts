@@ -1149,6 +1149,10 @@ export class ToolEngine extends EventEmitter {
   private lastSyncPushAtMs: number | null = null;
   private lastAutoStatePushAtMs: number | null = null; // [v0.31.0] 자동매매 기록 업로드 쓰로틀용
   private lastGroupPushAtMs: number | null = null; // [v0.35.0] 그룹 공유(capri_group_trades) 업로드 쓰로틀용
+  /** [v0.61.0] 상태 미러(capri_live_state) 업로드 쓰로틀용 — force=true면 이 쓰로틀을 무시한다
+   *  (스캔 종료·시작/중지 직후처럼 "반드시 바로" 올려야 하는 시점에 쓴다). */
+  private lastLiveStatePushAtMs: number | null = null;
+  private static readonly LIVE_STATE_PUSH_THROTTLE_MS = 5_000;
   /** [v0.56.0] "그룹 전체 실시간 동기화" — 로그인해 있는 동안 주기적으로 내 기록을 올리고
    *  그룹 전체 기록을 받아온다(버튼을 눌러야만 동작하던 걸 자동화). 로그인 안 돼 있으면
    *  절대 안 돈다(startGroupSyncLoop 참고). */
@@ -4169,29 +4173,23 @@ export class ToolEngine extends EventEmitter {
   // ---------------------------------------------------------------------------
 
   /**
-   * syncPushAutoState — 자동매매 기록 전체(+ 마지막 스캔 결과·탈락 사유)를 암호화해 내
-   *   계정(capri_auto_state) 행에 올린다.
-   *   [v0.60.5] 예전엔 기록이 하나도 없으면 아예 올리지 않았다 — 그런데 "아직 한 건도
-   *   체결 안 됐지만 스캔은 계속 돌고 있는" 상황(막 시작했거나 계속 후보가 없는 경우)도
-   *   흔한데, 그럴 때도 폰이 "PC가 지금 뭘 스캔하고 있는지"는 볼 수 있어야 한다 — 스캔
-   *   결과가 있으면 기록이 비어 있어도 올린다.
+   * syncPushAutoState — 자동매매 기록 전체를 암호화해 내 계정(capri_auto_state) 행에 올린다
+   *   (다른 기기가 로그인하면 내 매매이력을 그대로 이어받을 수 있게 — 순수 개인기록 동기화).
+   *   [v0.61.0] v0.60.5~v0.60.9가 여기 끼워 넣었던 "마지막 스캔 결과·탈락 사유"는
+   *   capri_live_state(pushLiveState/getLiveState, 평문·짧은 주기)로 옮겼다 — "실시간 상태
+   *   중계"와 "개인기록 동기화"는 성격이 달라 한 통로에 같이 두면 어느 쪽이 최신인지
+   *   헷갈리는 사고 위험이 있었다(자세한 배경은 docs/progress.md v0.61.0 참고).
    */
   async syncPushAutoState(): Promise<{ ok: boolean; message: string; count?: number }> {
     const token = await this.ensureAccessToken();
     if (!token) return { ok: false, message: "먼저 로그인하세요." };
     if (!this.authPassword) return { ok: false, message: "다시 로그인해야 동기화할 수 있습니다(비밀번호는 저장해 두지 않아요)." };
-    if (this.autoTradeHistory.length === 0 && !this.autoTradeLastScan) {
+    if (this.autoTradeHistory.length === 0) {
       return { ok: false, message: "올릴 자동매매 기록이 없습니다." };
     }
 
     try {
-      const rec = await encryptJson(
-        toAutoStateSyncPayload(this.autoTradeHistory, Date.now(), {
-          lastScan: this.autoTradeLastScan,
-          skipReasons: this.autoTradeSkipReasons,
-        }),
-        this.authPassword,
-      );
+      const rec = await encryptJson(toAutoStateSyncPayload(this.autoTradeHistory, Date.now()), this.authPassword);
       const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_auto_state?on_conflict=user_id`, {
         method: "POST",
         headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
@@ -4229,15 +4227,6 @@ export class ToolEngine extends EventEmitter {
 
       const before = this.autoTradeHistory.length;
       this.autoTradeHistory = mergeAutoHistory(this.autoTradeHistory, payload.history);
-      // [v0.60.6 긴급 수정 — 순서 버그] 마지막 스캔 결과·탈락 사유를 persistAutoTradeHistory()
-      //   보다 **먼저** 반영해야 한다. persistAutoTradeHistory()는 조건(15초 쓰로틀)이 맞으면
-      //   그 자리에서 곧바로 syncPushAutoState()를 다시 호출하는데, 그 push는 "지금 이 순간의"
-      //   this.autoTradeLastScan을 그대로 담는다 — 아래 줄보다 먼저 persistAutoTradeHistory를
-      //   부르면 이 기기(특히 폰)가 아직 한 번도 못 받은 옛 값(대개 null)을 그대로 되올려,
-      //   방금 PC가 올려 둔 진짜 스캔 결과를 곧바로 덮어써 지워버린다 — 오너 실사용 보고
-      //   ("폰에서 시작을 눌러도 자동 스크리너에 스캔 진행 상황이 전혀 안 뜬다")의 실제 원인.
-      if (payload.lastScan !== undefined) this.autoTradeLastScan = payload.lastScan;
-      if (payload.skipReasons !== undefined) this.autoTradeSkipReasons = payload.skipReasons;
       this.persistAutoTradeHistory();
       // [핵심] "지금 감시 중" 목록도 병합된 기록에서 다시 만든다 — 이 기기가 한 번도 진입시킨
       //   적 없는 포지션이라도, 다른 기기가 올려 둔 기록에 conditionalOrderId/buyOrderId가
@@ -4252,6 +4241,69 @@ export class ToolEngine extends EventEmitter {
       };
     } catch (e) {
       return { ok: false, message: `받기 실패: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // [v0.61.0] 상태 미러(state mirror) — PC → 폰 방향. capri_commands(폰→PC 명령 큐)와
+  //   capri_auto_state(암호화 개인기록 동기화)는 둘 다 "PC가 지금 뭘 하고 있는지"를
+  //   폰이 실시간으로 볼 수 있게 해주지 못했다(오너 보고: "PC에서와 같이 자동 스크리닝이
+  //   돌아가는 걸 폰에서도 보고 싶은데 아무것도 안 나온다" — 화면 문제가 아니라 애초에
+  //   PC가 그 데이터를 어디에도 올리지 않아서였다). capri_live_state는 그 전용 통로:
+  //   평문(capri_group_trades와 같은 원칙 — 이 테이블은 비공개 그룹 전원 소유, 전부 자기
+  //   계정 행만 RLS로 보호), kind별 한 행만 유지(upsert), Realtime 대신 폰이 짧은 주기로
+  //   폴링한다(이 프로젝트는 realtime.subscription 오류 상태라 못 씀).
+  // ---------------------------------------------------------------------------
+
+  /**
+   * pushLiveState — 지금 상태(getAutoTradeStatus 그대로 + 최근 저널 50건)를 통째로
+   *   capri_live_state에 올린다. force=true면 쓰로틀(5초)을 무시한다 — 스캔이 막 끝났을
+   *   때처럼 "반드시 바로" 올려야 하는 지점에서 쓴다. 로그인 안 돼 있으면 조용히 아무 일도
+   *   하지 않는다(웹/폰 세션도 이 함수를 그냥 불러도 안전 — fire-and-forget 전제).
+   */
+  async pushLiveState(force = false): Promise<void> {
+    if (!force) {
+      const longEnough = Date.now() - (this.lastLiveStatePushAtMs ?? 0) > ToolEngine.LIVE_STATE_PUSH_THROTTLE_MS;
+      if (!longEnough) return;
+    }
+    const token = await this.ensureAccessToken();
+    if (!token || !this.authUserId) return;
+    try {
+      const payload = { status: this.getAutoTradeStatus(), journal: this.getJournal().slice(-50) };
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_live_state?on_conflict=user_id,kind`, {
+        method: "POST",
+        headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({ user_id: this.authUserId, kind: "snapshot", payload, updated_at: new Date().toISOString() }),
+      });
+      if (res.ok) this.lastLiveStatePushAtMs = Date.now();
+    } catch {
+      /* 실패해도 조용히 무시 — 다음 기회(다음 사이클·다음 쓰로틀 통과)에 다시 시도 */
+    }
+  }
+
+  /**
+   * getLiveState — PC가 올려 둔 최신 상태를 읽는다(폰이 주로 쓰지만 PC 자신도 쓸 수 있다).
+   *   updatedAtMs(올라간 시각)를 함께 돌려줘, 화면이 "멈춘 건지 원래 이 상태인지"를
+   *   구분해 보여줄 수 있게 한다(오너 지시: "마지막 갱신 시각을 표시해라").
+   */
+  async getLiveState(): Promise<{ ok: boolean; status: AutoTradeStatus | null; journal: JournalEntry[]; updatedAtMs: number | null; message?: string }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, status: null, journal: [], updatedAtMs: null, message: "먼저 로그인하세요." };
+    try {
+      const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_live_state?kind=eq.snapshot&select=payload,updated_at`, {
+        headers: this.authRestHeaders(token),
+      });
+      if (!res.ok) return { ok: false, status: null, journal: [], updatedAtMs: null, message: `조회 실패(HTTP ${res.status}).` };
+      const rows = (await res.json()) as Array<{ payload: { status?: AutoTradeStatus; journal?: JournalEntry[] }; updated_at: string }>;
+      if (!rows[0]) return { ok: false, status: null, journal: [], updatedAtMs: null, message: "PC가 아직 상태를 올린 적이 없습니다." };
+      return {
+        ok: true,
+        status: rows[0].payload.status ?? null,
+        journal: rows[0].payload.journal ?? [],
+        updatedAtMs: new Date(rows[0].updated_at).getTime(),
+      };
+    } catch (e) {
+      return { ok: false, status: null, journal: [], updatedAtMs: null, message: e instanceof Error ? e.message : String(e) };
     }
   }
 
@@ -5498,6 +5550,7 @@ export class ToolEngine extends EventEmitter {
     });
     this.runAutoTradeTick(); // 시작하자마자 한 번 즉시 돌리고(이어받은 포지션도 곧바로 재확인됨)
     this.autoTradeTimer = setInterval(() => this.runAutoTradeTick(), ToolEngine.AUTO_TRADE_INTERVAL_MS); // 이후 5분마다
+    void this.pushLiveState(true); // [v0.61.0] "켜짐" 전환을 폰이 바로 볼 수 있게 즉시 올린다
     return this.getAutoTradeStatus();
   }
 
@@ -5517,6 +5570,7 @@ export class ToolEngine extends EventEmitter {
       notify: !!reason,
       notifyTitle: "🚨 자동매매 자동 중지",
     });
+    void this.pushLiveState(true); // [v0.61.0] "꺼짐" 전환을 폰이 바로 볼 수 있게 즉시 올린다
     return this.getAutoTradeStatus();
   }
 
@@ -5559,6 +5613,7 @@ export class ToolEngine extends EventEmitter {
     if (!this.autoTradeTickBusy) {
       await this.reconcileAutoPositions();
     }
+    void this.pushLiveState(true); // [v0.61.0] "지금 확인" 직후 바뀐 상태를 폰도 바로 볼 수 있게
     return this.getAutoTradeStatus();
   }
 
@@ -6428,12 +6483,11 @@ export class ToolEngine extends EventEmitter {
       }
     } finally {
       this.autoTradeTickBusy = false;
-      // [v0.60.5 — 오너 요청 "PC와 동일하게 스크리너 조회"] 사이클 끝마다 최신 스캔 결과·
-      //   탈락 사유를 클라우드에 올린다(로그인돼 있으면). persistAutoTradeHistory의 push는
-      //   "기록이 바뀔 때만"이라 체결 없이 스캔만 돈 사이클은 안 걸렸다 — 그래서 여기서
-      //   따로, 매 사이클 끝에 명시적으로 올린다(실패해도 다음 사이클에 다시 시도하면
-      //   되므로 조용히 무시).
-      void this.syncPushAutoState().catch(() => {});
+      // [v0.61.0] 사이클 끝마다 지금 상태(스캔 결과 포함)를 capri_live_state에 올린다
+      //   (로그인돼 있으면) — 오너 지시 "스크리너 스캔이 끝날 때마다는 반드시 올려야
+      //   한다"를 그대로 구현. force=true로 쓰로틀을 무시해 체결 없이 스캔만 돈 사이클도
+      //   빠짐없이 반영된다.
+      void this.pushLiveState(true);
     }
   }
 
