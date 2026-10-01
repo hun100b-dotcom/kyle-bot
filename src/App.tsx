@@ -2885,13 +2885,16 @@ ${msg}
       const rTrades = await window.kyletool.tradeSyncPull();
       // [v0.31.0] 자동매매 기록(포지션+이력)도 함께 — 다른 기기에서 진입한 것도 여기서 받아온다.
       const rAuto = await window.kyletool.autoStateSyncPull();
-      setSyncMsg([rKeys.message, rTrades.message, rAuto.message].filter(Boolean).join(" "));
+      // [v0.61.7 — ③ 전수조사 중간-2] 삼분할 타점 기록도 같이 받아온다.
+      const rSplits = await window.kyletool.splitsSyncPull?.().catch(() => null);
+      setSyncMsg([rKeys.message, rTrades.message, rAuto.message, rSplits?.message].filter(Boolean).join(" "));
       if (rKeys.ok) {
         const s = await window.kyletool.getSettings(); setSettings(s); setFormMode(s.mode); setFormAccount(s.account);
         await refreshStatus();
       }
       if (rTrades.ok) void loadReport();
       if (rAuto.ok) void window.kyletool.autoTradeStatus().then(setAutoStatus);
+      if (rSplits?.ok) void refreshSplits();
     } finally { setSyncBusy(false); }
   }
 

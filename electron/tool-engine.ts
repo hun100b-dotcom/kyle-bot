@@ -29,6 +29,7 @@ import { matchFifo, mergeFills, coveredSince, shouldReuseCache, type Fill, type 
 import { buildCycles, analyzeTrades, type TradeCycle, type TradeInsights } from "../lib/trade-analysis"; // [v0.19.0] 매매 사이클 자동추적·분석
 import { toSyncPayload, isSyncPayload, type TradeSyncPayload } from "../lib/trade-sync";
 import { toAutoStateSyncPayload, isAutoStateSyncPayload, mergeAutoHistory, derivePositionsFromHistory, type AutoStateSyncPayload } from "../lib/auto-state-sync"; // [v0.31.0] 자동매매 기록 기기 간 동기화
+import { toSplitsSyncPayload, isSplitsSyncPayload, mergeSplits, type SplitsSyncPayload } from "../lib/splits-sync"; // [v0.61.7] 삼분할 타점 기록 기기 간 동기화
 import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, WICK_MIN_RATIO, DOJI_MAX_AGE_MINUTES, type Candle, type SessionPattern } from "../lib/indicators";
 import { fetchWithTimeout } from "../lib/fetch-timeout"; // [v0.61.5 — ③ 전수조사 "높음-1"] Supabase REST 호출도 토스처럼 타임아웃을 건다
 import {
@@ -1161,6 +1162,7 @@ export class ToolEngine extends EventEmitter {
   /** 마지막으로 클라우드에 올린 시각(표시용) */
   private lastSyncPushAtMs: number | null = null;
   private lastAutoStatePushAtMs: number | null = null; // [v0.31.0] 자동매매 기록 업로드 쓰로틀용
+  private lastSplitsPushAtMs: number | null = null; // [v0.61.7] 삼분할 기록 업로드 쓰로틀용
   private lastGroupPushAtMs: number | null = null; // [v0.35.0] 그룹 공유(capri_group_trades) 업로드 쓰로틀용
   /** [v0.61.0] 상태 미러(capri_live_state) 업로드 쓰로틀용 — force=true면 이 쓰로틀을 무시한다
    *  (스캔 종료·시작/중지 직후처럼 "반드시 바로" 올려야 하는 시점에 쓴다). */
@@ -1967,6 +1969,9 @@ export class ToolEngine extends EventEmitter {
       if (pulledTrades?.ok && (pulledTrades.count ?? 0) > 0) extra += ` 매매 이력 ${pulledTrades.count}건도 함께 받아왔습니다.`;
       const pulledAutoState = await this.syncPullAutoState().catch(() => null);
       if (pulledAutoState?.ok && (pulledAutoState.count ?? 0) > 0) extra += ` 자동매매 기록도 함께 받아왔습니다.`;
+      // [v0.61.7 — ③ 전수조사 중간-2] 삼분할 타점 기록도 같은 타이밍에 받아온다.
+      const pulledSplits = await this.syncPullSplits().catch(() => null);
+      if (pulledSplits?.ok && (pulledSplits.count ?? 0) > 0) extra += ` 삼분할 기록도 함께 받아왔습니다.`;
       // [v0.35.0] 로그인 시점까지 쌓여 있던 기존 자동매매기록도 그룹 공유 표에 곧바로 올려 둔다
       //   (다음 매매가 나가야만 올라가면, 새로 로그인한 회원의 과거 기록이 그룹 연구탭에
       //   한참 안 보일 수 있음 — 로그인 직후 1회는 즉시 반영).
@@ -3705,6 +3710,14 @@ export class ToolEngine extends EventEmitter {
     const tmp = this.splitsPath + ".tmp";
     writeFileSync(tmp, JSON.stringify(this.splits, null, 2), "utf8");
     renameSync(tmp, this.splitsPath);
+    // [v0.61.7 — ③ 전수조사 중간-2] 로그인 상태면 다른 기기도 곧바로 볼 수 있게 클라우드에도
+    //   올려 둔다(persistAutoTradeHistory와 같은 패턴 — 15초 쓰로틀, 실패해도 조용히 무시).
+    const longEnough = Date.now() - (this.lastSplitsPushAtMs ?? 0) > 15_000;
+    if (longEnough && this.authPassword) {
+      void this.syncPushSplits().catch(() => {
+        /* 업로드 실패는 조용히 넘어간다 */
+      });
+    }
   }
 
   /**
@@ -4218,6 +4231,61 @@ export class ToolEngine extends EventEmitter {
         message: `매매 이력 ${payload.fills.length}건을 받았습니다(새로 추가 ${added}건).`,
         count: this.savedFills.length,
       };
+    } catch (e) {
+      return { ok: false, message: `받기 실패: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // [v0.61.7 — ③ 전수조사 중간-2] 삼분할 타점 기록(SavedSplit) 기기 간 동기화 —
+  //   capri_trades와 완전히 같은 패턴. 자세한 설계 이유는 lib/splits-sync.ts 참고.
+  // ---------------------------------------------------------------------------
+
+  /** syncPushSplits — 삼분할 타점 기록 전체를 암호화해 내 계정(capri_splits) 행에 올린다. */
+  async syncPushSplits(): Promise<{ ok: boolean; message: string; count?: number }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요." };
+    if (!this.authPassword) return { ok: false, message: "다시 로그인해야 동기화할 수 있습니다(비밀번호는 저장해 두지 않아요)." };
+    if (this.splits.length === 0) return { ok: false, message: "올릴 삼분할 기록이 없습니다." };
+
+    try {
+      const rec = await encryptJson(toSplitsSyncPayload(this.splits, Date.now()), this.authPassword);
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_splits?on_conflict=user_id`, {
+        method: "POST",
+        headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({ user_id: this.authUserId, ciphertext: rec.ciphertext, salt: rec.salt, iv: rec.iv, updated_at: new Date().toISOString() }),
+      }, 10_000, "capri_splits");
+      if (!res.ok) return { ok: false, message: `클라우드 저장 실패(HTTP ${res.status}).` };
+      this.lastSplitsPushAtMs = Date.now();
+      return { ok: true, message: `삼분할 기록 ${this.splits.length}건을 올렸습니다(암호화됨).`, count: this.splits.length };
+    } catch (e) {
+      return { ok: false, message: `올리기 실패: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+
+  /** syncPullSplits — 내 계정에 올려 둔 삼분할 기록을 받아 복호화해 병합한다. authSignIn이 로그인 직후 자동으로 부른다. */
+  async syncPullSplits(): Promise<{ ok: boolean; message: string; count?: number }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요." };
+    if (!this.authPassword) return { ok: false, message: "다시 로그인해야 삼분할 기록을 받을 수 있습니다(비밀번호는 저장해 두지 않아요)." };
+
+    try {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_splits?select=ciphertext,salt,iv`, {
+        headers: this.authRestHeaders(token),
+      }, 10_000, "capri_splits");
+      if (!res.ok) return { ok: false, message: `클라우드 조회 실패(HTTP ${res.status}).` };
+      const rows = (await res.json()) as Array<{ ciphertext: string; salt: string; iv: string }>;
+      if (!rows || rows.length === 0) {
+        return { ok: false, message: "내 계정에 저장된 삼분할 기록이 없습니다." };
+      }
+      const payload = await decryptJson<SplitsSyncPayload>(rows[0], this.authPassword); // 틀린 비번이면 여기서 실패
+      if (!isSplitsSyncPayload(payload)) return { ok: false, message: "받은 데이터 형식이 올바르지 않습니다." };
+
+      const before = this.splits.length;
+      this.splits = mergeSplits(this.splits, payload.splits);
+      this.persistSplits();
+      const added = this.splits.length - before;
+      return { ok: true, message: `삼분할 기록 ${payload.splits.length}건을 받았습니다(새로 추가 ${added}건).`, count: this.splits.length };
     } catch (e) {
       return { ok: false, message: `받기 실패: ${e instanceof Error ? e.message : String(e)}` };
     }

@@ -114,6 +114,8 @@ contextBridge.exposeInMainWorld("kyletool", {
   tradeSyncPull: () => ipcRenderer.invoke("tool:tradesync:pull"), // [v0.24.0] 로그인 시 자동 호출됨
   autoStateSyncPush: () => ipcRenderer.invoke("tool:autostatesync:push"), // [v0.31.0] 자동매매 기록 동기화
   autoStateSyncPull: () => ipcRenderer.invoke("tool:autostatesync:pull"), // [v0.31.0] 로그인 시 자동 호출됨
+  splitsSyncPush: () => ipcRenderer.invoke("tool:splitssync:push"), // [v0.61.7] 삼분할 타점 기록 동기화
+  splitsSyncPull: () => ipcRenderer.invoke("tool:splitssync:pull"), // [v0.61.7] 로그인 시 자동 호출됨
   groupTradesPush: () => ipcRenderer.invoke("tool:grouptrades:push"), // [v0.35.0] 그룹 공유(평문)
   groupTradesPull: () => ipcRenderer.invoke("tool:grouptrades:pull"), // [v0.35.0] 그룹 전원 기록 받기
   groupSyncEnsure: () => ipcRenderer.invoke("tool:groupsync:ensure"), // [v0.56.0] 실시간 자동 동기화 시작(이미 돌면 무해)

@@ -267,6 +267,9 @@ export function installKyleTool(): ToolEngine {
     tradeSyncPull: () => e.syncPullTrades(),
     autoStateSyncPush: () => e.syncPushAutoState(),
     autoStateSyncPull: () => e.syncPullAutoState(),
+    // [v0.61.7 — ③ 전수조사 중간-2] 삼분할 타점 기록 기기 간 동기화.
+    splitsSyncPush: () => e.syncPushSplits(),
+    splitsSyncPull: () => e.syncPullSplits(),
     groupTradesPush: () => e.syncPushGroupTrades(),
     groupTradesPull: () => e.syncPullGroupHistory(),
     groupSyncEnsure: () => { e.startGroupSyncLoop(); return Promise.resolve({ ok: true }); },
