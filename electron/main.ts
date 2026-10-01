@@ -450,9 +450,9 @@ async function stopPhoneAccess(): Promise<typeof phoneState> {
 
 /** 화면 요청(window.kyletool.*) ↔ 엔진 연결 */
 // =============================================================================
-// [v0.59.0] 소셜 로그인(구글·카카오) 팝업 — 데스크톱 전용
+// [v0.59.0→v0.60.0] 소셜 로그인(구글만 — 카카오는 오너 요청으로 제거) 팝업 — 데스크톱 전용
 // -----------------------------------------------------------------------------
-// [왜 팝업인가] Supabase OAuth는 "브라우저를 그 provider(구글/카카오) 로그인 페이지로
+// [왜 팝업인가] Supabase OAuth는 "브라우저를 그 provider(구글) 로그인 페이지로
 //   보냈다가, 로그인이 끝나면 우리가 정한 주소(redirect_to)로 돌려보내며 그 주소의
 //   #뒤에 access_token을 실어 준다"는 방식이다. 웹(폰)은 이걸 페이지 전체 이동으로
 //   처리하면 되지만, 데스크톱 앱은 메인 화면 자체를 구글 로그인 페이지로 이동시킬 수
@@ -467,7 +467,7 @@ async function stopPhoneAccess(): Promise<typeof phoneState> {
 // =============================================================================
 const OAUTH_REDIRECT_TO = "https://hun100b-dotcom.github.io/capri-web/";
 
-function startOAuthPopup(engine: ToolEngine, provider: "google" | "kakao"): Promise<{ ok: boolean; message: string }> {
+function startOAuthPopup(engine: ToolEngine, provider: "google"): Promise<{ ok: boolean; message: string }> {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (result: { ok: boolean; message: string }) => {
@@ -482,7 +482,7 @@ function startOAuthPopup(engine: ToolEngine, provider: "google" | "kakao"): Prom
       height: 640,
       parent: win ?? undefined,
       modal: false,
-      title: provider === "google" ? "구글로 로그인" : "카카오로 로그인",
+      title: "구글로 로그인",
       webPreferences: { contextIsolation: true, nodeIntegration: false },
     });
 
@@ -524,7 +524,7 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:auth:decideAccount", (_ev, userId: string, decision: "approved" | "rejected") => e.decideAccount(userId, decision));
   ipcMain.handle("tool:notify:get", () => e.getNotifySettings());
   ipcMain.handle("tool:notify:save", (_ev, url: string) => e.saveNotifySettings(url));
-  ipcMain.handle("tool:auth:oauth", (_ev, provider: "google" | "kakao") => startOAuthPopup(e, provider));
+  ipcMain.handle("tool:auth:oauth", (_ev, provider: "google") => startOAuthPopup(e, provider));
   // [v0.59.0] 폰 원격 조종 — 명령 보내기/조회 + PC 생존신호 조회. 명령 "실행"(폴링 루프)은
   //   IPC로 노출하지 않는다(engine.startRemoteControlLoop()는 main.ts가 직접 부른다 — 아래 참고).
   ipcMain.handle("tool:remote:send", (_ev, type: string, payload?: Record<string, unknown>) => e.sendCommand(type, payload));

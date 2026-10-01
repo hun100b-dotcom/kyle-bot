@@ -165,9 +165,10 @@ export function installKyleTool(): ToolEngine {
     decideAccount: (userId: string, decision: "approved" | "rejected") => e.decideAccount(userId, decision),
     getNotifySettings: () => e.getNotifySettings(),
     saveNotifySettings: (url: string) => e.saveNotifySettings(url),
-    // [v0.59.0] 소셜 로그인 — 웹은 전체 페이지 이동(리다이렉트) 방식. 돌아온 뒤 처리는
-    //   이 파일 아래 installOAuthCallbackHandler()가 페이지 로드 시 자동으로 한다.
-    authOAuth: (provider: "google" | "kakao") => {
+    // [v0.59.0→v0.60.0] 소셜 로그인(구글만 — 카카오는 오너 요청으로 제거) — 웹은 전체
+    //   페이지 이동(리다이렉트) 방식. 돌아온 뒤 처리는 이 파일 아래
+    //   installOAuthCallbackHandler()가 페이지 로드 시 자동으로 한다.
+    authOAuth: (provider: "google") => {
       const redirectTo = `${location.origin}${location.pathname}`;
       location.href = e.authOAuthUrl(provider, redirectTo);
       return new Promise<{ ok: boolean; message: string }>(() => {}); // 페이지가 이동하므로 이 값은 쓰이지 않는다

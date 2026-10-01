@@ -148,16 +148,12 @@ Supabase Auth 기반. 가입은 **항상 성공**하고(예전처럼 허용목�
 새 마이그레이션 파일 내용을 그대로 붙여넣어 실행하고, 같은 내용을
 `supabase/migrations/`에도 파일로 남겨 두세요(레포와 실제 DB가 항상 같은 상태를 유지하기 위함).
 
-### 소셜 로그인(구글·카카오)
+### 소셜 로그인(구글)
 - **구글**: 설정 완료·동작 중(Google Cloud 프로젝트 "Capri", OAuth 동의 화면은 테스트
   모드 — 테스트 사용자로 등록된 이메일만 로그인 가능, 100명까지 무료로 추가 가능).
   테스트 사용자 추가: [Google Cloud 콘솔 → 대상](https://console.cloud.google.com/auth/audience) →
   프로젝트 "Capri" 선택 → 테스트 사용자에 이메일 추가.
-- **카카오**: 아직 미설정. [Kakao Developers](https://developers.kakao.com)에서 앱 생성 →
-  카카오 로그인 활성화 → Redirect URI에 `https://fauieykjxdfkngwvfoky.supabase.co/auth/v1/callback`
-  등록 → REST API 키 + Client Secret 발급 → [Supabase Auth Providers](https://supabase.com/dashboard/project/fauieykjxdfkngwvfoky/auth/providers)의
-  Kakao 항목에 입력·저장. 오너의 카카오 계정 로그인이 필요해 이 저장소 작업만으로는
-  대신할 수 없습니다.
+- 카카오 로그인은 지원하지 않습니다(오너 지시, v0.60.0 — "카카오 로그인은 하지 않는다").
 
 ### 디스코드 알림
 새 가입 대기가 생기면 DB 트리거(`capri_notify_new_pending_account`, pg_net 사용)가

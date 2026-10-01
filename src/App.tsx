@@ -820,8 +820,8 @@ function App() {
   //   가르는 값 — 이게 false인 동안은 로그인 화면도, 본 화면도 아닌 "확인 중" 화면만 보여줘서
   //   "이미 로그인된 사람에게 로그인 화면이 잠깐 번쩍였다 사라지는" 깜빡임을 막는다.
   const [authChecked, setAuthChecked] = useState(false);
-  // [v0.59.0] 소셜 로그인(구글/카카오) 처리 중 표시.
-  const [oauthBusy, setOauthBusy] = useState<"google" | null>(null); // [v0.60.0] 카카오 로그인 제거(오너 요청 — "카카오 로그인은 하지 않는다")
+  // [v0.59.0→v0.60.0] 소셜 로그인(구글만 — 카카오는 오너 요청으로 제거) 처리 중 표시.
+  const [oauthBusy, setOauthBusy] = useState<"google" | null>(null);
   const [authMsg, setAuthMsg] = useState("");
   // [v0.24.0] 가입이 아직 승인 안 된 사람용 — "승인 요청 남기기" 버튼 노출 여부 + 처리 상태.
   const [canRequestAccess, setCanRequestAccess] = useState(false);

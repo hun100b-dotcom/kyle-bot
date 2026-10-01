@@ -2225,18 +2225,18 @@ export class ToolEngine extends EventEmitter {
   }
 
   // --------------------------------------------------------------------------
-  // [v0.59.0] 소셜 로그인(구글·카카오) — Supabase Auth의 OAuth 흐름을 그대로 쓴다.
+  // [v0.59.0→v0.60.0] 소셜 로그인(구글만 — 카카오는 오너 요청으로 제거, "카카오 로그인은
+  //   하지 않는다") — Supabase Auth의 OAuth 흐름을 그대로 쓴다.
   //   ⚠️ Supabase 대시보드에서 해당 provider를 켜고 Client ID/Secret을 등록해야만
-  //   실제로 동작한다(오너가 구글 클라우드/카카오 디벨로퍼스에서 발급받아야 하는
-  //   값 — 이 앱 코드로는 대신할 수 없다). 그 전까지는 버튼을 눌러도 provider가
-  //   비활성 상태라는 오류가 뜬다.
+  //   실제로 동작한다(오너가 구글 클라우드에서 발급받아야 하는 값 — 이 앱 코드로는
+  //   대신할 수 없다). 그 전까지는 버튼을 눌러도 provider가 비활성 상태라는 오류가 뜬다.
   //   [플랫폼별 흐름] 웹(폰)은 전체 페이지 이동(리다이렉트) 방식, 데스크톱은 별도
   //   팝업 창을 띄워 리다이렉트 주소만 가로채는 방식 — 각각 electron/main.ts와
   //   web/kyletool-adapter.ts에서 platform-specific으로 이 URL/콜백을 쓴다.
   // --------------------------------------------------------------------------
 
-  /** provider(google|kakao) 로그인 시작 주소. redirectTo는 로그인 뒤 돌아올 주소(플랫폼이 정한다). */
-  authOAuthUrl(provider: "google" | "kakao", redirectTo: string): string {
+  /** provider(google) 로그인 시작 주소. redirectTo는 로그인 뒤 돌아올 주소(플랫폼이 정한다). */
+  authOAuthUrl(provider: "google", redirectTo: string): string {
     return `${ToolEngine.SUPABASE_URL}/auth/v1/authorize?provider=${provider}&redirect_to=${encodeURIComponent(redirectTo)}`;
   }
 

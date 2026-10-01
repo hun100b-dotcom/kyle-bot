@@ -640,8 +640,9 @@ interface KyletoolBridge {
   /** [v0.59.0] 디스코드 웹훅 알림 설정(운영자 전용). */
   getNotifySettings(): Promise<{ discordWebhookUrl: string | null }>;
   saveNotifySettings(url: string): Promise<{ ok: boolean; message: string }>;
-  /** [v0.59.0] 소셜 로그인(구글·카카오) — Supabase에 provider가 설정돼 있어야 실제로 동작한다. */
-  authOAuth(provider: "google" | "kakao"): Promise<{ ok: boolean; message: string }>;
+  /** [v0.59.0→v0.60.0] 소셜 로그인(구글만 — 카카오는 오너 요청으로 제거). Supabase에
+   *  provider가 설정돼 있어야 실제로 동작한다. */
+  authOAuth(provider: "google"): Promise<{ ok: boolean; message: string }>;
   /** [v0.59.0] 폰 원격 조종 — 명령을 큐에 "넣기"만 한다. 실행은 로그인된 PC가 자동으로 한다. */
   sendCommand(type: string, payload?: Record<string, unknown>): Promise<{ ok: boolean; message: string; commandId?: string }>;
   listMyCommands(limit?: number): Promise<Array<{ id: string; type: string; status: string; result: unknown; createdAt: string }>>;
