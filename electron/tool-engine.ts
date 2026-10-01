@@ -2409,6 +2409,7 @@ export class ToolEngine extends EventEmitter {
   async setKillSwitch(on: boolean): Promise<void> {
     this.killSwitch = on;
     this.addJournal({ kind: "info", symbol: "-", summary: on ? "🔴 킬 스위치 ON — 신규 주문 전체 잠금" : "🟢 킬 스위치 OFF" });
+    void this.pushLiveState(true); // [v0.61.2] 폰이 "꺼짐/켜짐" 전환을 바로 볼 수 있게 즉시 올린다
     if (!on) return;
 
     // 켜졌을 때: 살아있는 주문을 거둬들인다(읽기+취소). 드라이런이면 기록만.
@@ -4269,7 +4270,11 @@ export class ToolEngine extends EventEmitter {
     const token = await this.ensureAccessToken();
     if (!token || !this.authUserId) return;
     try {
-      const payload = { status: this.getAutoTradeStatus(), journal: this.getJournal().slice(-50) };
+      // [v0.61.2 — ② 전수조사에서 발견한 치명 버그 수정] killSwitch(비상 정지)도 함께 싣는다.
+      //   예전엔 상단 "🛑 비상 정지" 버튼이 웹(폰)에서도 로컬(의미 없는) 엔진의 killSwitch를
+      //   직접 켰다 — 화면은 "🔴 비상 정지 중"으로 바뀌어도 PC의 실제 매매는 전혀 멈추지
+      //   않는, 비상정지 버튼치고는 가장 위험한 종류의 거짓 안도감이었다.
+      const payload = { status: this.getAutoTradeStatus(), journal: this.getJournal().slice(-50), killSwitch: this.killSwitch };
       const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_live_state?on_conflict=user_id,kind`, {
         method: "POST",
         headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
@@ -4286,24 +4291,35 @@ export class ToolEngine extends EventEmitter {
    *   updatedAtMs(올라간 시각)를 함께 돌려줘, 화면이 "멈춘 건지 원래 이 상태인지"를
    *   구분해 보여줄 수 있게 한다(오너 지시: "마지막 갱신 시각을 표시해라").
    */
-  async getLiveState(): Promise<{ ok: boolean; status: AutoTradeStatus | null; journal: JournalEntry[]; updatedAtMs: number | null; message?: string }> {
+  async getLiveState(): Promise<{
+    ok: boolean;
+    status: AutoTradeStatus | null;
+    journal: JournalEntry[];
+    killSwitch: boolean | null;
+    updatedAtMs: number | null;
+    message?: string;
+  }> {
     const token = await this.ensureAccessToken();
-    if (!token) return { ok: false, status: null, journal: [], updatedAtMs: null, message: "먼저 로그인하세요." };
+    if (!token) return { ok: false, status: null, journal: [], killSwitch: null, updatedAtMs: null, message: "먼저 로그인하세요." };
     try {
       const res = await fetch(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_live_state?kind=eq.snapshot&select=payload,updated_at`, {
         headers: this.authRestHeaders(token),
       });
-      if (!res.ok) return { ok: false, status: null, journal: [], updatedAtMs: null, message: `조회 실패(HTTP ${res.status}).` };
-      const rows = (await res.json()) as Array<{ payload: { status?: AutoTradeStatus; journal?: JournalEntry[] }; updated_at: string }>;
-      if (!rows[0]) return { ok: false, status: null, journal: [], updatedAtMs: null, message: "PC가 아직 상태를 올린 적이 없습니다." };
+      if (!res.ok) return { ok: false, status: null, journal: [], killSwitch: null, updatedAtMs: null, message: `조회 실패(HTTP ${res.status}).` };
+      const rows = (await res.json()) as Array<{
+        payload: { status?: AutoTradeStatus; journal?: JournalEntry[]; killSwitch?: boolean };
+        updated_at: string;
+      }>;
+      if (!rows[0]) return { ok: false, status: null, journal: [], killSwitch: null, updatedAtMs: null, message: "PC가 아직 상태를 올린 적이 없습니다." };
       return {
         ok: true,
         status: rows[0].payload.status ?? null,
         journal: rows[0].payload.journal ?? [],
+        killSwitch: rows[0].payload.killSwitch ?? null,
         updatedAtMs: new Date(rows[0].updated_at).getTime(),
       };
     } catch (e) {
-      return { ok: false, status: null, journal: [], updatedAtMs: null, message: e instanceof Error ? e.message : String(e) };
+      return { ok: false, status: null, journal: [], killSwitch: null, updatedAtMs: null, message: e instanceof Error ? e.message : String(e) };
     }
   }
 

@@ -819,7 +819,15 @@ interface KyletoolBridge {
   /** [v0.61.0] 상태 미러 — PC가 올려 둔 최신 자동매매 현황+최근 로그를 읽는다(폰 전용,
    *  주 사용처). updatedAtMs로 "마지막 갱신 시각"을 화면에 표시한다. 없으면(옛 버전) 화면은
    *  기존 방식(autoStateSyncPull 등)으로 대체한다. */
-  getLiveState?(): Promise<{ ok: boolean; status: AutoTradeStatus | null; journal: JournalEntry[]; updatedAtMs: number | null; message?: string }>;
+  getLiveState?(): Promise<{
+    ok: boolean;
+    status: AutoTradeStatus | null;
+    journal: JournalEntry[];
+    /** [v0.61.2] PC의 실제 비상 정지(킬 스위치) 상태. 없으면(옛 버전 PC) null. */
+    killSwitch: boolean | null;
+    updatedAtMs: number | null;
+    message?: string;
+  }>;
 
   // [폰에서 쓰기] 집 PC 릴레이 + 인터넷 터널 (웹앱에서는 없을 수 있어 선택 항목)
   phoneStart?(): Promise<PhoneState>;

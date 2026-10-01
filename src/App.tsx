@@ -677,6 +677,11 @@ function App() {
   const [pcLastSeenMs, setPcLastSeenMs] = useState<number | null>(null);
   // [v0.60.4] PC가 실제로 보낸 "지금 자동매매 켜져 있나" — 폰(web)에서는 이 값이 진실.
   const [pcAutoTradeEnabled, setPcAutoTradeEnabled] = useState<boolean | null>(null);
+  // [v0.61.2 — ② 전수조사에서 발견한 치명 버그 수정] PC가 실제로 보낸 "지금 비상 정지 중인가" —
+  //   예전엔 상단 "🛑 비상 정지" 버튼이 웹(폰)에서도 로컬(의미 없는) 상태만 켜고 꺼서, 눌러도
+  //   PC의 실제 매매는 전혀 안 멈추는데 화면만 "🔴 비상 정지 중"으로 바뀌는 게 가장 위험한
+  //   종류의 거짓 안도감이었다. capri_live_state 미러로 PC의 진짜 값을 받는다.
+  const [pcKillSwitch, setPcKillSwitch] = useState<boolean | null>(null);
   // [v0.60.9] PC가 보낸 "지금 실행 중인 버전" — "자동매매가 켜져 있으면 재시작 안 함"
   //   안전장치 때문에 PC가 몇 시간째 옛 버전을 그대로 돌릴 수 있다(오너 실사용 보고 —
   //   "폰에서 시작을 눌러도 자동 스크리너에 진행 상황이 안 뜬다"의 진짜 원인이 이거였다).
@@ -873,6 +878,12 @@ function App() {
     if (r?.ok && r.status) {
       setAutoStatus(r.status);
       setLiveStateUpdatedAtMs(r.updatedAtMs);
+      // [v0.61.2 — ② 전수조사에서 발견] "서버 로그" 탭은 이 세션의 로컬 저널만 보여줬는데,
+      //   폰(웹)의 로컬 엔진은 실제로 아무 일도 안 하므로(실행은 전부 PC가 한다) 이 탭이
+      //   사실상 항상 텅 비어 있었다 — PC의 최근 로그를 상태 미러에 함께 실어 보내므로
+      //   (pushLiveState) 여기서 같이 반영한다.
+      if (r.journal.length > 0) setJournal(r.journal);
+      if (r.killSwitch != null) setPcKillSwitch(r.killSwitch);
       return r.status;
     }
     return null;
@@ -884,6 +895,8 @@ function App() {
   //   PC가 실제로 보낸 값(pcAutoTradeEnabled)을 대신 쓴다 — 아직 못 받아왔으면(null) 기존
   //   표시로 안전하게 대체.
   const effectiveAutoEnabled = isWebApp && pcAutoTradeEnabled != null ? pcAutoTradeEnabled : (autoStatus?.enabled ?? false);
+  // [v0.61.2] 비상 정지도 같은 원칙 — 웹(폰)에서는 PC가 실제로 보낸 값(pcKillSwitch)이 진실.
+  const effectiveKillSwitch = isWebApp && pcKillSwitch != null ? pcKillSwitch : (status?.killSwitch ?? false);
   // [v0.32.0] 자동매매 알림(관찰 확정·주문) — 브라우저/OS Notification 권한 상태.
   //   "unsupported"는 Notification API 자체가 없는 드문 환경(구형 브라우저 등).
   const [notifyPermission, setNotifyPermission] = useState<NotificationPermission | "unsupported">(
@@ -1310,6 +1323,19 @@ function App() {
     return () => clearInterval(id);
   }, [autoRefresh, tab, showTwoCol, tabL, tabR, canReconcileLive]);
 
+  // [v0.61.2 — ② 전수조사에서 발견한 치명 버그 수정] 상태 미러(capri_live_state)를
+  //   조건 없이 항상 20초마다 받아온다 — 특히 비상 정지 표시는 자동매매 상태·포지션
+  //   유무와 무관하게 폰에서 "지금 PC가 실제로 멈춰 있는지"를 늘 정확히 보여줘야 한다
+  //   (가장 안전 긴급한 표시). 같은 호출이 PC 최근 로그("서버 로그" 탭)도 함께 받아오므로
+  //   더 이상 탭별로 따로 폴링을 걸 필요가 없다 — 아래 포지션/스캔 폴링의 웹 분기도 이제
+  //   이 효과 하나로 통합됐다.
+  useEffect(() => {
+    if (!isWebApp) return;
+    void refreshLiveState();
+    const id = setInterval(() => void refreshLiveState(), 20_000);
+    return () => clearInterval(id);
+  }, [isWebApp, refreshLiveState]);
+
   // [v0.26.0→v0.45.0→v0.48.0] 현황(포지션·누적손익)을 20초마다 새로고침.
   //   [v0.48.0 긴급 수정 — 오너 보고 "익절/손절 완료된 종목이 계속 감시 중으로 남아있다,
   //   실시간 연동이 안 된다"] 예전엔 이 폴링 전체가 "자동매매 켜짐"(enabled)에 걸려 있었다.
@@ -1326,20 +1352,11 @@ function App() {
   //   안전 규칙에 위배되지 않는다 — 신규 진입 게이트는 이 폴링과 완전히 별개로 항상
   //   지켜진다). 포지션이 없고 자동매매도 꺼져 있으면 폴링할 이유가 없어 그대로 멈춘다.
   useEffect(() => {
+    // [v0.61.0→v0.61.2] 웹에서 토스 중계(QR)가 없으면 reconcileAutoPositionsNow(실제 토스
+    //   호출)는 절대 성공할 수 없다 — 이 경우는 위의 "상태 미러" 효과가 isWebApp이면 조건
+    //   없이 항상 폴링해 처리하므로, 여기서는 중복으로 돌리지 않는다.
+    if (!canReconcileLive) return;
     const hasPositions = (autoStatus?.positions?.length ?? 0) > 0;
-    // [v0.61.0 — 오너 지시 "상태 미러를 만들어라"] 웹에서 토스 중계(QR)가 없으면
-    //   reconcileAutoPositionsNow(실제 토스 호출)는 절대 성공할 수 없다 — 매번 실패만 쌓는
-    //   대신, PC가 capri_live_state에 올려 둔 최신 상태(포지션+방금 돈 스캔 결과·탈락사유
-    //   포함, autoTradeTick이 매 사이클 끝에 올려 둠)를 그대로 받아와(getLiveState) 화면을
-    //   갱신한다. PC가 실제로 자동매매를 돌리고 있으면(effectiveAutoEnabled) 포지션이 아직
-    //   하나도 없어도(스캔 중이라 새로 생긴 게 없을 수 있음) 스캔 데이터는 계속 바뀌므로
-    //   그래도 계속 받아온다.
-    if (!canReconcileLive) {
-      if (!hasPositions && !effectiveAutoEnabled) return;
-      void refreshLiveState();
-      const id = setInterval(() => void refreshLiveState(), 20_000);
-      return () => clearInterval(id);
-    }
     if (!autoStatus?.enabled && !hasPositions) return;
     const tick = () => {
       void (hasPositions ? window.kyletool.reconcileAutoPositionsNow() : window.kyletool.autoTradeStatus()).then(setAutoStatus);
@@ -1347,7 +1364,7 @@ function App() {
     tick(); // [v0.48.0] 20초를 기다리지 않고 이 탭에 들어오거나 상태가 바뀐 즉시 한 번 바로 확인
     const id = setInterval(tick, 20_000);
     return () => clearInterval(id);
-  }, [autoStatus?.enabled, autoStatus?.positions?.length, canReconcileLive, effectiveAutoEnabled, refreshLiveState]);
+  }, [autoStatus?.enabled, autoStatus?.positions?.length, canReconcileLive]);
 
   // [v0.29.0] 자동 스크리너 탭의 카운트다운용 — 자동매매가 켜져 있는 동안만 1초마다 화면을 흘려보낸다
   //   (오너 요청: "몇 분 후 스크리닝 진행 표시 필요" — 언제 다음 스캔이 도는지 눈에 보이게).
@@ -3062,10 +3079,14 @@ ${msg}
             </button>
           )}
           <button
-            className={`btn btn-kill ${status.killSwitch ? "kill-on" : ""}`}
-            title="비상 정지 버튼이에요. 켜면 새 주문이 막히고, 아직 안 나간 주문·조건주문을 모두 취소합니다(계산·조회는 그대로 됩니다)."
+            className={`btn btn-kill ${effectiveKillSwitch ? "kill-on" : ""}`}
+            title={
+              isWebApp
+                ? "비상 정지 버튼이에요. PC에 원격 명령으로 전달돼 PC의 실제 매매를 멈춥니다(이 세션 자체엔 멈출 매매가 없어요)."
+                : "비상 정지 버튼이에요. 켜면 새 주문이 막히고, 아직 안 나간 주문·조건주문을 모두 취소합니다(계산·조회는 그대로 됩니다)."
+            }
             onClick={async () => {
-              const turningOn = !status.killSwitch;
+              const turningOn = !effectiveKillSwitch;
               if (
                 turningOn &&
                 !window.confirm(
@@ -3075,15 +3096,24 @@ ${msg}
                 return;
               setBusy(true);
               try {
-                await window.kyletool.setKillSwitch(turningOn);
-                if (isTabVisible("orders")) await refreshStatusTab();
+                // [v0.61.2 — ② 전수조사에서 발견한 치명 버그 수정] 웹(폰)에서는 로컬 엔진을
+                //   직접 켜 봤자 PC의 실제 매매에 아무 영향이 없다 — 원격 명령으로 PC에 보낸다
+                //   (원격 조종 카드의 비상정지 버튼과 완전히 같은 경로로 통일).
+                if (isWebApp) {
+                  const r = await window.kyletool.sendCommand("setKillSwitch", { on: turningOn });
+                  if (!r.ok) alert(`비상 정지 명령을 PC로 보내지 못했습니다: ${r.message}`);
+                  setTimeout(() => void refreshLiveState(), 2000);
+                } else {
+                  await window.kyletool.setKillSwitch(turningOn);
+                  if (isTabVisible("orders")) await refreshStatusTab();
+                }
               } finally {
                 setBusy(false);
               }
               refreshStatus();
             }}
           >
-            {status.killSwitch ? "🔴 비상 정지 중" : "🛑 비상 정지"}
+            {effectiveKillSwitch ? "🔴 비상 정지 중" : "🛑 비상 정지"}
           </button>
         </div>
       </header>

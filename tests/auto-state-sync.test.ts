@@ -172,12 +172,13 @@ describe("[v0.61.0] pushLiveState/getLiveState — PC→폰 상태 미러", () =
     return eng;
   }
 
-  it("pushLiveState가 지금 상태(스캔 결과 포함)를 capri_live_state에 평문으로 올린다", async () => {
+  it("pushLiveState가 지금 상태(스캔 결과+killSwitch 포함)를 capri_live_state에 평문으로 올린다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-livestate-"));
     try {
       const eng = loginEngine(dir);
-      const engAny = eng as unknown as { autoTradeLastScan: ScreenRun | null };
+      const engAny = eng as unknown as { autoTradeLastScan: ScreenRun | null; killSwitch: boolean };
       engAny.autoTradeLastScan = fakeScreenRun({ total: 42 });
+      engAny.killSwitch = true;
 
       let capturedBody: string | null = null;
       const fetchStub = vi.fn(async (url: string | URL, init?: RequestInit) => {
@@ -193,17 +194,24 @@ describe("[v0.61.0] pushLiveState/getLiveState — PC→폰 상태 미러", () =
 
       await eng.pushLiveState(true);
       expect(capturedBody).not.toBeNull();
-      const body = JSON.parse(capturedBody as unknown as string) as { user_id: string; kind: string; payload: { status: { lastScan: ScreenRun | null } } };
+      const body = JSON.parse(capturedBody as unknown as string) as {
+        user_id: string;
+        kind: string;
+        payload: { status: { lastScan: ScreenRun | null }; killSwitch: boolean };
+      };
       expect(body.kind).toBe("snapshot");
       // 암호화하지 않는다 — capri_group_trades와 같은 "평문" 원칙(테이블 자체가 본인 행만 RLS).
       expect(JSON.stringify(body)).not.toMatch(/ciphertext/);
       expect(body.payload.status.lastScan?.total).toBe(42);
+      // [v0.61.2] 비상 정지(킬 스위치) 실제 값도 그대로 실려야 한다 — 이게 빠지면 폰의
+      // "🛑 비상 정지" 표시가 PC의 진짜 상태를 반영 못 하는 치명적 상태 불일치로 되돌아간다.
+      expect(body.payload.killSwitch).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("getLiveState가 받아온 payload·updated_at을 그대로 돌려준다(폰이 쓰는 모양 그대로)", async () => {
+  it("getLiveState가 받아온 payload·updated_at·killSwitch를 그대로 돌려준다(폰이 쓰는 모양 그대로)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-livestate-"));
     try {
       const eng = loginEngine(dir);
@@ -212,7 +220,9 @@ describe("[v0.61.0] pushLiveState/getLiveState — PC→폰 상태 미러", () =
         const u = String(url);
         if (u.includes("capri_live_state")) {
           return new Response(
-            JSON.stringify([{ payload: { status: { enabled: true, lastScan: fakeScreenRun({ total: 7 }) }, journal: [] }, updated_at: updatedAt }]),
+            JSON.stringify([
+              { payload: { status: { enabled: true, lastScan: fakeScreenRun({ total: 7 }) }, journal: [], killSwitch: true }, updated_at: updatedAt },
+            ]),
             { status: 200 },
           );
         }
@@ -224,6 +234,7 @@ describe("[v0.61.0] pushLiveState/getLiveState — PC→폰 상태 미러", () =
       expect(r.ok).toBe(true);
       expect(r.status?.enabled).toBe(true);
       expect(r.status?.lastScan?.total).toBe(7);
+      expect(r.killSwitch).toBe(true);
       expect(r.updatedAtMs).toBe(new Date(updatedAt).getTime());
     } finally {
       rmSync(dir, { recursive: true, force: true });
