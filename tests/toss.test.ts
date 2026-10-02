@@ -20,12 +20,12 @@ import {
 } from "../lib/toss";
 
 describe("makeClientOrderId (멱등키 생성)", () => {
-  const sessionId = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+  const sessionId = "a1b2c3d4e5f67890";
 
-  it("규칙 `{세션앞8자}-{level}-{role}` 대로 만든다", () => {
-    expect(makeClientOrderId(sessionId, 1, "entry")).toBe("a1b2c3d4-1-entry");
-    expect(makeClientOrderId(sessionId, 2, "take_profit")).toBe("a1b2c3d4-2-take_profit");
-    expect(makeClientOrderId(sessionId, 3, "stop_loss")).toBe("a1b2c3d4-3-stop_loss");
+  it("규칙 `{세션앞24자}-{level}-{role}` 대로 만든다", () => {
+    expect(makeClientOrderId(sessionId, 1, "entry")).toBe("a1b2c3d4e5f67890-1-entry");
+    expect(makeClientOrderId(sessionId, 2, "take_profit")).toBe("a1b2c3d4e5f67890-2-take_profit");
+    expect(makeClientOrderId(sessionId, 3, "stop_loss")).toBe("a1b2c3d4e5f67890-3-stop_loss");
   });
 
   it("36자 이내 + 영숫자/-/_ 만 사용한다", () => {
@@ -37,6 +37,26 @@ describe("makeClientOrderId (멱등키 생성)", () => {
   it("허용되지 않는 문자는 제거한다", () => {
     const id = makeClientOrderId("ab cd@ef!12345", 1, "entry");
     expect(id).toMatch(/^[A-Za-z0-9_-]+$/);
+  });
+
+  // [v0.62.0 긴급 — 오너 실사용 재발: "idempotency-key-conflict"로 서로 다른 종목의
+  //   진입 주문이 실패함] 예전엔 head가 8자로 잘려, 종목명 없이 시각만 담긴 세션아이디
+  //   (`brk{HHmmss}` 등)가 같은 초(~10초 창) 안에서 서로 다른 종목에 쓰이면 완전히 같은
+  //   clientOrderId가 됐다 — 토스가 "같은 키로 다른 내용"이라며 뒤 주문을 거부한 실제 사고
+  //   (NAMM·SORA·VNDA 등). 호출부가 세션아이디에 종목명을 포함시키면(`brkAAPL093015` 등)
+  //   이제 head 상한이 24자라 종목명이 안 잘리고 끝까지 살아남아야 한다.
+  it("[v0.62.0] 같은 시각이어도 세션아이디에 종목명이 다르면 서로 다른 키가 나온다", () => {
+    const sameSecond = "093015"; // 같은 HHmmss(초단위) — 실제 사고의 핵심 조건
+    const a = makeClientOrderId(`brkAAPL${sameSecond}`, 1, "entry");
+    const b = makeClientOrderId(`brkTSLA${sameSecond}`, 1, "entry");
+    expect(a).not.toBe(b);
+  });
+
+  it("[v0.62.0] 긴 종목명+시각이어도 8자에서 잘려 종목명이 사라지지 않는다", () => {
+    // 예전 버그: head.slice(0,8) → "brkAAPL0"(종목명 끝자리만 겨우 살아남거나 아예 잘림).
+    //   24자 상한이면 "brkAAPL093015"(13자) 전체가 그대로 살아남아야 한다.
+    const id = makeClientOrderId("brkAAPL093015", 1, "entry");
+    expect(id).toBe("brkAAPL093015-1-entry");
   });
 });
 

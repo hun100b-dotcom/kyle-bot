@@ -332,6 +332,14 @@ ul.hint { padding-left: 18px; }
   background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
   padding: 22px 26px; max-width: 560px; width: 92%;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  /* [v0.62.0 긴급 수정 — 오너 스크린샷 보고: "업데이트 내역 팝업이 화면을 꽉 채우고
+   *  스크롤도 안 돼서 아무것도 못 한다"] 원인은 .modal에 높이 제한이 없었던 것 —
+   *  대부분의 모달(주문 확인 등)은 내용이 짧아 지금까지 드러나지 않았는데, v0.61.9의
+   *  "업데이트 내역" 팝업은 장문 보고를 그대로 담다 보니 뷰포트보다 커져서 그대로
+   *  화면을 가리고 닫을 방법도(스크롤해서 버튼까지 내려갈 수도) 없었다. 뷰포트 높이의
+   *  80%로 막고 넘치면 모달 안에서만 스크롤되게 한다(짧은 모달은 영향 없음). */
+  max-height: 80vh;
+  overflow-y: auto;
 }
 .modal h2 { margin-top: 0; }
 .modal p { margin: 8px 0; font-size: 13.5px; line-height: 1.6; }

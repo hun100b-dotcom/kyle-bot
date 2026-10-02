@@ -376,6 +376,56 @@ describe("[v0.57.0 긴급 수정] registerOcoForFilled — 체결 후 보호주�
   }, 10_000);
 });
 
+describe("[v0.62.0 긴급 수정] registerOcoForFilled — 재시도 내내 밴드위반만 반복돼도 포기하지 않고 마지막엔 보호매도한다(VEEA 실사례, v0.57.0 배포 이후 재발)", () => {
+  // [배경] v0.57.0은 "재시도 전 현재가를 다시 확인해 밴드 밖이면 즉시 보호매도"로 고쳤는데,
+  //   그 사전 확인이 "밴드 안"이라고 판단해 placeOco를 다시 보냈는데도 토스는 매번 "밴드
+  //   밖"이라며 거부하는 실제 사고가 재발했다(VEEA, 2026-10-02). 우리 쪽 확인 시점과 토스가
+  //   실제로 요청을 처리하는 시점 사이에도 가격이 또 움직이는 경쟁(TOCTOU)으로 추정된다.
+  //   이 테스트는 "사전 확인은 매번 밴드 안으로 통과하지만, 실제 OCO 등록 자체는 매번 밴드
+  //   위반으로 거부되는" 상황(목서버 conditionalOrderAlwaysRejectBand)을 재현해, 재시도를
+  //   전부 소진한 뒤에도 oco_failed로 포기하지 않고 마지막 보루로 보호매도하는지 확인한다.
+  type EngineInternals = { ocoRetryDelaysMs: number[] };
+
+  it("재시도를 전부 소진해도 마지막 실패 사유가 밴드위반이면 즉시 시장가로 매도해 보호한다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-oco-toctou-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      await eng.quote("AAPL"); // 목 서버 인스턴스를 먼저 깨워야 아래 state 조작이 먹는다.
+      (eng as unknown as EngineInternals).ocoRetryDelaysMs = [20, 20, 20];
+      // 현재가(2.1)는 tpTrigger(2.5)·slTrigger(1.8) 사이 — 우리 쪽 사전 확인은 매번 "밴드
+      // 안"으로 통과한다. 그런데도 목서버는 OCO 등록 자체를 매번 밴드위반으로 거부한다.
+      await eng.mockSetPrice("AAPL", 2.1);
+      (eng as unknown as { mock: { state: { conditionalOrderAlwaysRejectBand: boolean } } }).mock.state.conditionalOrderAlwaysRejectBand = true;
+
+      const protectedPromise = waitForJournal(eng, (e) => e.kind === "info" && e.summary.includes("즉시 시장가로 매도해 포지션을 정리했습니다"));
+      await eng.placeBracket({
+        symbol: "AAPL",
+        price: 2.15, // 현재가(2.1)보다 위 → 즉시 체결
+        quantity: 1,
+        tpTrigger: 2.5,
+        tpPrice: 2.5,
+        slTrigger: 1.8,
+        slPrice: 1.79,
+        expireDate: "2026-12-30",
+        watchMinutes: 1,
+        pollMs: 20,
+      });
+      const info = await protectedPromise;
+      // [핵심] "이미 올라/내려가 있다"는 기존 문구가 아니라, 재시도 내내 계속 거부됐다는
+      //   정직한 사유가 담겨야 한다(cur 자체는 실제로 밴드 안이었으므로).
+      expect(info.summary).toContain("재시도하는 내내 가격이");
+      expect(info.summary).not.toContain("⚠️ 체결을 확인했지만 조건주문(익절+손절) 자동 등록에");
+
+      // "보호주문 등록 실패"(oco_failed, 포기)로 끝나지 않았어야 한다.
+      const journal = eng.getJournal();
+      expect(journal.some((j) => j.summary.includes("자동 등록에") && j.summary.includes("번 시도해도 실패"))).toBe(false);
+      expect(journal.some((j) => j.kind === "oco")).toBe(false); // OCO는 끝내 등록되지 않았다.
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
+});
+
 describe("[v0.54.0 긴급 수정] placeOto — '오입력 방지' 가격가드가 예약 매수+익절 경로도 실제로 검사한다(프로퓨사 실사례 회귀)", () => {
   // AAPL 목 서버 기본 현재가는 2.05 — 이 값 대비 터무니없이 먼 진입가/익절가를 넣어
   // 재현한다(오너 보고: 프로퓨사가 현재가와 동떨어진 가격에 조건주문이 걸림).

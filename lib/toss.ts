@@ -259,11 +259,22 @@ function sanitizeIdPart(part: string): string {
 }
 
 /**
- * makeClientOrderId — 멱등키(중복 주문 방지) 생성. `{세션앞8자}-{level}-{role}`, 36자·영숫자-_.
+ * makeClientOrderId — 멱등키(중복 주문 방지) 생성. `{세션앞24자}-{level}-{role}`, 36자·영숫자-_.
  *   같은 주문을 재시도해도 토스가 "이미 받은 주문"으로 인식해 이중 체결을 막습니다.
+ *
+ * [v0.62.0 긴급 수정 — 오너 실사용 재발: "idempotency-key-conflict"로 서로 다른 종목의
+ *   진입 주문이 실패함] 예전엔 head를 8자로 잘랐는데, 호출부가 넘기는 sessionId가
+ *   이미 `brk{HHmmss}`(9자) 같은 "종목명 없이 시각만" 담은 문자열이라 8자로 자르면 초
+ *   단위 시각마저 일부 잘려나갔다. 자동매매가 한 사이클 안에서 여러 종목을 순차로
+ *   진입시킬 때, 두 종목이 같은 ~10초 창 안에 주문을 내면(흔한 일) head가 완전히
+ *   똑같아져 clientOrderId가 "종목이 다른데도 동일"해졌다 — 토스는 이를 "같은 키로
+ *   다른 내용의 주문"으로 보고 두 번째 종목의 주문 자체를 거부했다(실사용에서 NAMM·
+ *   SORA·VNDA·GLND·RZLV·NEXR·VBIO 등 반복 확인). 호출부를 전부 `{prefix}{symbol}
+ *   {HHmmss}` 형태(종목명 포함)로 맞추고, 그 문자열이 안 잘리도록 head 상한을 8→24로
+ *   올렸다(전체 36자 한도 안에서 `-{level}-{role}` 여유를 남겨도 충분하다).
  */
 export function makeClientOrderId(sessionId: string, level: number, role: string): string {
-  const head = sanitizeIdPart(sessionId).slice(0, 8);
+  const head = sanitizeIdPart(sessionId).slice(0, 24);
   const lvl = sanitizeIdPart(String(level));
   const r = sanitizeIdPart(role);
   let id = `${head}-${lvl}-${r}`;

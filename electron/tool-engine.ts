@@ -301,6 +301,17 @@ export function isWithinOcoBand(cur: number, tpTrigger: number, slTrigger: numbe
   return tpTrigger > cur && cur > slTrigger;
 }
 
+/** [v0.62.0 긴급 — 오너 실사용 재발(VEEA, v0.57.0 배포 이후에도 발생)] registerOcoForFilled가
+ *  재시도 전 현재가를 다시 확인해 "밴드 안"이라고 판단해도, 그 직후 보낸 placeOco 요청은
+ *  토스 쪽에서 매번 "밴드 밖"이라며 거부될 수 있다 — 우리가 확인한 시점과 토스가 실제로
+ *  요청을 처리하는 시점 사이에도 가격이 또 움직이는 경쟁(TOCTOU)이다. 변동성 큰 저가주에서는
+ *  이 경쟁에서 매 시도 계속 질 수 있어, 재시도를 전부 소진해도 "밴드 위반"만 반복될 수 있다.
+ *  이 함수는 그 최종 실패 사유가 정확히 이 밴드 위반인지 식별한다(마지막 보루 보호매도 판단용). */
+export function isOcoPriceBandError(e: unknown): boolean {
+  const s = String(e);
+  return s.includes("HTTP 400") && s.includes("두 감시가 사이에 있어야 합니다");
+}
+
 export function classifyJournalEntry(e: Pick<JournalEntry, "kind" | "summary">): JournalCategory {
   const s = e.summary;
   if (/⚠️|실패|오류/.test(s)) return "오류";
@@ -2945,7 +2956,7 @@ export class ToolEngine extends EventEmitter {
 
     // 주문번호(clientOrderId)를 **미리** 만든다. 근거 기록의 열쇠로 써야 하므로
     //   createOrder 호출 안에서 즉석 생성하면 우리가 그 값을 알 수 없다.
-    const clientOrderId = makeClientOrderId(`tool${DateTime.now().toFormat("HHmmss")}`, 1, "entry");
+    const clientOrderId = makeClientOrderId(`tool${symbol}${DateTime.now().toFormat("HHmmss")}`, 1, "entry");
 
     if (this.isDryRun()) {
       this.saveRationale(spec.rationale, {
@@ -3017,7 +3028,7 @@ export class ToolEngine extends EventEmitter {
     }
 
     // 근거 기록의 열쇠. 미리 만들어 두고 주문·기록에 같은 값을 쓴다(멱등키 겸용).
-    const clientOrderId = makeClientOrderId(`oco${DateTime.now().toFormat("HHmmss")}`, 1, "oco");
+    const clientOrderId = makeClientOrderId(`oco${symbol}${DateTime.now().toFormat("HHmmss")}`, 1, "oco");
 
     if (this.isDryRun()) {
       this.saveRationale(spec.rationale, {
@@ -3112,7 +3123,7 @@ export class ToolEngine extends EventEmitter {
     }
 
     // 근거 기록 열쇠 겸 멱등키(중복 전송 방지). 미리 만들어 주문·기록에 같은 값을 쓴다.
-    const clientOrderId = makeClientOrderId(`oto${DateTime.now().toFormat("HHmmss")}`, 1, "oto");
+    const clientOrderId = makeClientOrderId(`oto${symbol}${DateTime.now().toFormat("HHmmss")}`, 1, "oto");
 
     if (this.isDryRun()) {
       this.saveRationale(spec.rationale, {
@@ -3231,7 +3242,7 @@ export class ToolEngine extends EventEmitter {
     const cur = await this.orderGate(symbol, [spec.price]);
     await this.assertAffordable(spec.price, spec.quantity);
 
-    const clientOrderId = makeClientOrderId(`brk${DateTime.now().toFormat("HHmmss")}`, 1, "entry");
+    const clientOrderId = makeClientOrderId(`brk${symbol}${DateTime.now().toFormat("HHmmss")}`, 1, "entry");
 
     if (this.isDryRun()) {
       // 드라이런은 실제 체결이 없으니(연습·실주문잠금 공통) 진입+조건주문을 한 번에 시뮬레이션한다.
@@ -3369,6 +3380,28 @@ export class ToolEngine extends EventEmitter {
         lastError = String(e).replace(/^Error:\s*/, "");
       }
     }
+    // [v0.62.0 긴급 — VEEA 실사례] 재시도를 전부 소진했는데 마지막 실패 사유가 "밴드 위반"이면,
+    //   그동안의 사전 확인(위 isWithinOcoBand 체크)이 전부 토스의 실제 처리 시점과 어긋났다는
+    //   뜻이다 — 포기 대신 마지막으로 한 번 더 지금 가격으로 즉시 보호매도를 시도한다. 그 외
+    //   사유(매도가능수량 부족 등)는 가격과 무관해 블라인드 매도가 더 위험할 수 있어 그대로
+    //   아래 경고로 넘긴다.
+    if (isOcoPriceBandError(lastError)) {
+      try {
+        const { price: cur } = await getPrice(symbol);
+        if (Number.isFinite(cur) && cur > 0) {
+          return await this.protectByMarketSell(
+            symbol,
+            quantity,
+            cur,
+            spec,
+            `${maxAttempts}번 재시도하는 내내 가격이 익절 $${spec.tpTrigger}/손절 $${spec.slTrigger} 감시가 밴드를 벗어나` +
+              `(토스가 매번 "밴드 밖"으로 거부 — 확인 시점과 실제 처리 시점 사이 가격 변동으로 추정됩니다)`,
+          );
+        }
+      } catch {
+        // 현재가 조회조차 실패 — 아래 기존 경고(직접 확인 요청)로 폴백.
+      }
+    }
     this.addJournal({
       kind: "info",
       symbol,
@@ -3391,8 +3424,15 @@ export class ToolEngine extends EventEmitter {
     quantity: number,
     cur: number,
     spec: { tpTrigger: number; slTrigger: number },
+    /** [v0.62.0] registerOcoForFilled의 재시도-소진 폴백(아래 isOcoPriceBandError 분기)이
+     *  호출할 때는 cur 자체가 우리 쪽에서 보기엔 "밴드 안"일 수 있다(그런데도 토스가 매번
+     *  거부했다는 게 바로 그 상황의 핵심) — 그 경우 cur과 tpTrigger/slTrigger를 비교해
+     *  "이미 올라/내려가 있다"고 단정하는 기존 문구를 그대로 쓰면 사실과 다를 수 있어,
+     *  호출부가 정직한 사유를 직접 넘길 수 있게 한다. 생략하면 기존 비교 로직 그대로. */
+    reasonOverride?: string,
   ): Promise<WatchAndBracketResult> {
-    const reason = cur >= spec.tpTrigger ? `익절 감시가($${spec.tpTrigger}) 이상으로 이미 올라` : `손절 감시가($${spec.slTrigger}) 이하로 이미 내려가`;
+    const reason =
+      reasonOverride ?? (cur >= spec.tpTrigger ? `익절 감시가($${spec.tpTrigger}) 이상으로 이미 올라` : `손절 감시가($${spec.slTrigger}) 이하로 이미 내려가`);
     try {
       // [2차 검토 — 실제 체결가 vs 추정가] 시장가 주문 응답은 즉시 체결가를 안 주므로(토스
       //   스펙상 주문 생성 응답은 orderId뿐 — 실제 체결가는 별도 조회가 필요), 방금 조회한
@@ -7139,7 +7179,7 @@ export class ToolEngine extends EventEmitter {
     if (this.killSwitch) throw new Error("킬 스위치가 켜져 있습니다.");
     await this.prepareBackend();
     this.assertAccountReady();
-    const clientOrderId = makeClientOrderId(`sell${DateTime.now().toFormat("HHmmss")}`, 1, "sell");
+    const clientOrderId = makeClientOrderId(`sell${symbol}${DateTime.now().toFormat("HHmmss")}`, 1, "sell");
 
     if (this.isDryRun()) {
       void this.recordExit(symbol, spec.price ?? null, "manual", this.currentMode()); // [v0.7.0] 청산 체결강도+결과 자동 기록

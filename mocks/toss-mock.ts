@@ -103,6 +103,13 @@ export interface MockState {
    *  보호매도 안전망을 검증하는 용도. 값이 있으면 그 status/code/message로 실패시키고 한 번
    *  쓰면 다시 null로 돌아간다(기본은 null — 정상 동작, 기존 테스트 전부 그대로 통과). */
   conditionalOrderRejectOnce: { httpStatus: number; code: string; message: string } | null;
+  /** [v0.62.0] 오너 실사례(VEEA) 재현용 — OCO 등록이 "몇 번을 다시 시도해도 매번" 가격 밴드
+   *  위반(HTTP 400 "두 감시가 사이에 있어야 합니다")으로 거부되는 상황을 시뮬레이션한다.
+   *  conditionalOrderRejectOnce(한 번만 거부)와 달리 켜 두는 동안 계속 거부된다 — 우리 쪽
+   *  getPrice() 사전 확인은 "밴드 안"으로 통과해도(실제 토스 처리 시점과의 경쟁에서 매번
+   *  졌다고 가정) 매 시도가 동일한 밴드위반으로 실패하는 상황을 재현해, registerOcoForFilled의
+   *  "재시도 소진 후 마지막 보루 보호매도" 폴백을 검증한다. 기본은 false(기존 동작 그대로). */
+  conditionalOrderAlwaysRejectBand: boolean;
 }
 
 const INITIAL_PRICES: Record<string, number> = { AAPL: 2.05, PARTIAL: 2.05, REJECT: 2.05, SLOW: 2.05 };
@@ -203,6 +210,7 @@ export function createMockTossServer() {
     lastRankingsType: null,
     cancelReturnsStatus: null,
     conditionalOrderRejectOnce: null,
+    conditionalOrderAlwaysRejectBand: false,
   };
 
   const server = http.createServer(async (req, res) => {
@@ -442,6 +450,12 @@ export function createMockTossServer() {
         const { httpStatus, code, message } = state.conditionalOrderRejectOnce;
         state.conditionalOrderRejectOnce = null;
         return sendJson(res, httpStatus, { error: { requestId: "mock-req-id", code, message } });
+      }
+      // [v0.62.0] VEEA 재현용 — 켜져 있는 동안 OCO 등록을 매번 밴드위반으로 거부한다.
+      if (state.conditionalOrderAlwaysRejectBand) {
+        return sendJson(res, 400, {
+          error: { requestId: "mock-req-id", code: "invalid-request", message: "OCO 조건주문은 현재가가 두 감시가 사이에 있어야 합니다." },
+        });
       }
       const body = await readJsonBody(req);
       const type = String(body.type ?? "SINGLE") as MockConditional["type"];
