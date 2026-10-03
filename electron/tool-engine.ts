@@ -613,7 +613,9 @@ export interface ScreenEvidence {
     bothWicks: boolean; //   [v0.6.3] 위·아래 꼬리 둘 다 존재(망치형·유성형 아님)
     nextBearish: boolean; // 그 다음 봉도 음봉
     recentDoji: boolean; //  [v0.25.0] 도지 발생 시점이 20분 이내(오래되면 false → 불합격)
+    dojiNearHigh: boolean; // [v0.61.10] 도지가 최고점 '직후'(간격 한도 이내)에 생겼는지(한참 뒤면 false → 불합격)
   };
+  gapFromHighMinutes: number | null; // [v0.61.10] 최고점 봉→도지 봉 간격(분) — 화면 근거 표시용
 }
 
 /** 스크리너 결과 한 종목 */
@@ -669,6 +671,8 @@ export interface ScreenOpts {
   dojiWickMinRatio?: number; //   도지 최소 꼬리 비율(기본 WICK_MIN_RATIO=0.1)
   dojiMaxAgeEnabled?: boolean; // 도지 신선도 검사 켜짐 여부(기본 true)
   dojiMaxAgeMinutes?: number; //  도지 신선도 기준 분(기본 DOJI_MAX_AGE_MINUTES=40)
+  dojiMaxGapEnabled?: boolean; // [v0.61.10] 최고점→도지 간격 검사 켜짐 여부(기본 true)
+  dojiMaxGapMinutes?: number; //  [v0.61.10] 간격 상한 분(기본 30)
   nextCandleConfirmEnabled?: boolean; // 도지 다음 봉 음봉 확인 켜짐 여부(기본 true) — 끄면 도지만으로 확정
   excludeEtf?: boolean; //        ETF/ETN 등 제외 여부(기본 true)
 }
@@ -692,6 +696,8 @@ export interface ScreenRun {
   dojiWickMinRatio: number;
   dojiMaxAgeEnabled: boolean;
   dojiMaxAgeMinutes: number;
+  dojiMaxGapEnabled: boolean;
+  dojiMaxGapMinutes: number;
   nextCandleConfirmEnabled: boolean;
   excludeEtf: boolean;
 }
@@ -973,6 +979,8 @@ export interface AutoTradeHistoryEntry {
     dojiWickMinRatio: number;
     dojiMaxAgeEnabled: boolean;
     dojiMaxAgeMinutes: number;
+    dojiMaxGapEnabled?: boolean; // [v0.61.10] 옛 기록엔 없음
+    dojiMaxGapMinutes?: number;
     nextCandleConfirmEnabled: boolean;
     excludeEtf: boolean;
     session: Session; // 진입 당시 세션(day/pre/regular/after)
@@ -1111,6 +1119,8 @@ export class ToolEngine extends EventEmitter {
   private autoScanDojiWickMinRatio = 0.1; //  도지 최소 꼬리 비율(위·아래 각각, 0~0.4)
   private autoScanDojiMaxAgeEnabled = true; // 도지 신선도(너무 오래된 도지 배제) 켜짐 여부
   private autoScanDojiMaxAgeMinutes = 40; //  도지가 이보다 오래되면 배제(10~180분)
+  private autoScanDojiMaxGapEnabled = true; //  [v0.61.10] 최고점→도지 간격 제한 켜짐 여부
+  private autoScanDojiMaxGapMinutes = 30; //   최고점 봉에서 이보다 한참 뒤에 생긴 도지는 배제(5~240분)
   private autoScanNextCandleConfirmEnabled = true; // 도지 다음 봉까지 음봉이어야 "확정" — 끄면 도지만으로 확정
   private autoScanExcludeEtf = true; //       ETF·ETN 등(일반 주식 아닌 것) 제외 여부
   // [v0.45.0 — 오너 요청 "매매진행할 장 선택"] 자동매매가 어느 장(세션)에서 신규 진입을 시도할지
@@ -1389,6 +1399,10 @@ export class ToolEngine extends EventEmitter {
     else if (process.env.AUTO_SCAN_DOJI_MAX_AGE_ENABLED === "true") this.autoScanDojiMaxAgeEnabled = true;
     const asdma = Number(process.env.AUTO_SCAN_DOJI_MAX_AGE_MINUTES);
     if (Number.isFinite(asdma) && asdma > 0) this.autoScanDojiMaxAgeMinutes = Math.round(asdma);
+    if (process.env.AUTO_SCAN_DOJI_MAX_GAP_ENABLED === "false") this.autoScanDojiMaxGapEnabled = false;
+    else if (process.env.AUTO_SCAN_DOJI_MAX_GAP_ENABLED === "true") this.autoScanDojiMaxGapEnabled = true;
+    const asdmg = Number(process.env.AUTO_SCAN_DOJI_MAX_GAP_MINUTES);
+    if (Number.isFinite(asdmg) && asdmg > 0) this.autoScanDojiMaxGapMinutes = Math.round(asdmg);
     if (process.env.AUTO_SCAN_NEXT_CANDLE_CONFIRM_ENABLED === "false") this.autoScanNextCandleConfirmEnabled = false;
     else if (process.env.AUTO_SCAN_NEXT_CANDLE_CONFIRM_ENABLED === "true") this.autoScanNextCandleConfirmEnabled = true;
     if (process.env.AUTO_SCAN_EXCLUDE_ETF === "false") this.autoScanExcludeEtf = false;
@@ -1446,6 +1460,8 @@ export class ToolEngine extends EventEmitter {
       autoScanDojiWickMinRatio: this.autoScanDojiWickMinRatio,
       autoScanDojiMaxAgeEnabled: this.autoScanDojiMaxAgeEnabled,
       autoScanDojiMaxAgeMinutes: this.autoScanDojiMaxAgeMinutes,
+      autoScanDojiMaxGapEnabled: this.autoScanDojiMaxGapEnabled,
+      autoScanDojiMaxGapMinutes: this.autoScanDojiMaxGapMinutes,
       autoScanNextCandleConfirmEnabled: this.autoScanNextCandleConfirmEnabled,
       autoScanExcludeEtf: this.autoScanExcludeEtf,
       // [v0.45.0] "매매진행할 장" 선택
@@ -1592,6 +1608,8 @@ export class ToolEngine extends EventEmitter {
     dojiWickMinRatio?: number;
     dojiMaxAgeEnabled?: boolean;
     dojiMaxAgeMinutes?: number;
+    dojiMaxGapEnabled?: boolean;
+    dojiMaxGapMinutes?: number;
     nextCandleConfirmEnabled?: boolean;
     excludeEtf?: boolean;
     // [v0.45.0] "매매진행할 장" 선택 — 전부 선택(안 보내면 이전값 유지).
@@ -1624,6 +1642,10 @@ export class ToolEngine extends EventEmitter {
     if (typeof input.dojiMaxAgeMinutes === "number" && Number.isFinite(input.dojiMaxAgeMinutes) && input.dojiMaxAgeMinutes > 0) {
       this.autoScanDojiMaxAgeMinutes = Math.round(Math.min(180, Math.max(10, input.dojiMaxAgeMinutes)));
     }
+    if (typeof input.dojiMaxGapEnabled === "boolean") this.autoScanDojiMaxGapEnabled = input.dojiMaxGapEnabled;
+    if (typeof input.dojiMaxGapMinutes === "number" && Number.isFinite(input.dojiMaxGapMinutes) && input.dojiMaxGapMinutes > 0) {
+      this.autoScanDojiMaxGapMinutes = Math.round(Math.min(240, Math.max(5, input.dojiMaxGapMinutes)));
+    }
     if (typeof input.nextCandleConfirmEnabled === "boolean") this.autoScanNextCandleConfirmEnabled = input.nextCandleConfirmEnabled;
     if (typeof input.excludeEtf === "boolean") this.autoScanExcludeEtf = input.excludeEtf;
     if (typeof input.dayEnabled === "boolean") this.autoScanDayEnabled = input.dayEnabled;
@@ -1645,6 +1667,7 @@ export class ToolEngine extends EventEmitter {
         `도지 몸통상한 ${Math.round(this.autoScanBodyRatio * 100)}% · EMA${this.autoScanEmaPeriod} ${this.autoScanEmaTrendEnabled ? "ON" : "OFF"} · ` +
         `구름 ${this.autoScanCloudEnabled ? "ON" : "OFF"} · 꼬리비율 ${Math.round(this.autoScanDojiWickMinRatio * 100)}% · ` +
         `신선도 ${this.autoScanDojiMaxAgeEnabled ? `${this.autoScanDojiMaxAgeMinutes}분` : "OFF"} · ` +
+        `고점~도지 간격 ${this.autoScanDojiMaxGapEnabled ? `${this.autoScanDojiMaxGapMinutes}분` : "OFF"} · ` +
         `다음봉확인 ${this.autoScanNextCandleConfirmEnabled ? "ON" : "OFF"} · ETF제외 ${this.autoScanExcludeEtf ? "ON" : "OFF"} · ` +
         `매매 진행할 장: ${sessionsOn}`,
     });
@@ -1665,6 +1688,8 @@ export class ToolEngine extends EventEmitter {
       dojiWickMinRatio: this.autoScanDojiWickMinRatio,
       dojiMaxAgeEnabled: this.autoScanDojiMaxAgeEnabled,
       dojiMaxAgeMinutes: this.autoScanDojiMaxAgeMinutes,
+      dojiMaxGapEnabled: this.autoScanDojiMaxGapEnabled,
+      dojiMaxGapMinutes: this.autoScanDojiMaxGapMinutes,
       nextCandleConfirmEnabled: this.autoScanNextCandleConfirmEnabled,
       excludeEtf: this.autoScanExcludeEtf,
     };
@@ -1787,6 +1812,8 @@ export class ToolEngine extends EventEmitter {
       `AUTO_SCAN_DOJI_WICK_MIN_RATIO=${this.autoScanDojiWickMinRatio}`,
       `AUTO_SCAN_DOJI_MAX_AGE_ENABLED=${this.autoScanDojiMaxAgeEnabled}`,
       `AUTO_SCAN_DOJI_MAX_AGE_MINUTES=${this.autoScanDojiMaxAgeMinutes}`,
+      `AUTO_SCAN_DOJI_MAX_GAP_ENABLED=${this.autoScanDojiMaxGapEnabled}`,
+      `AUTO_SCAN_DOJI_MAX_GAP_MINUTES=${this.autoScanDojiMaxGapMinutes}`,
       `AUTO_SCAN_NEXT_CANDLE_CONFIRM_ENABLED=${this.autoScanNextCandleConfirmEnabled}`,
       `AUTO_SCAN_EXCLUDE_ETF=${this.autoScanExcludeEtf}`,
       // --- [v0.45.0] "매매진행할 장" 선택 ---
@@ -5546,6 +5573,8 @@ export class ToolEngine extends EventEmitter {
     const dojiWickMinRatio = Math.min(0.4, Math.max(0, opts.dojiWickMinRatio ?? WICK_MIN_RATIO));
     const dojiMaxAgeEnabled = opts.dojiMaxAgeEnabled ?? true;
     const dojiMaxAgeMinutes = Math.min(180, Math.max(10, Math.round(opts.dojiMaxAgeMinutes ?? DOJI_MAX_AGE_MINUTES)));
+    const dojiMaxGapEnabled = opts.dojiMaxGapEnabled ?? true;
+    const dojiMaxGapMinutes = Math.min(240, Math.max(5, Math.round(opts.dojiMaxGapMinutes ?? 30)));
     const nextCandleConfirmEnabled = opts.nextCandleConfirmEnabled ?? true;
     const excludeEtf = opts.excludeEtf ?? true;
     try {
@@ -5639,6 +5668,8 @@ export class ToolEngine extends EventEmitter {
             now.toMillis(),
             dojiMaxAgeEnabled ? dojiMaxAgeMinutes : Number.POSITIVE_INFINITY,
             nextCandleConfirmEnabled,
+            // [v0.61.10] 도지가 최고점 한참 뒤에 생긴 경우(RUBI 05:00 고점→08:55 도지) 배제
+            dojiMaxGapEnabled ? dojiMaxGapMinutes : Number.POSITIVE_INFINITY,
           ); // HA 캔들로 패턴 판정
 
           // 화면에 보여줄 값(aboveEma/aboveCloud)은 실제 비교 결과 그대로 — 조건을 꺼도 "지표상
@@ -5702,6 +5733,8 @@ export class ToolEngine extends EventEmitter {
         dojiWickMinRatio,
         dojiMaxAgeEnabled,
         dojiMaxAgeMinutes,
+        dojiMaxGapEnabled,
+        dojiMaxGapMinutes,
         nextCandleConfirmEnabled,
         excludeEtf,
       };
@@ -5814,7 +5847,9 @@ export class ToolEngine extends EventEmitter {
         bothWicks: pat.dojiUpperWickPct != null && pat.dojiLowerWickPct != null && pat.dojiUpperWickPct >= WICK_MIN_RATIO && pat.dojiLowerWickPct >= WICK_MIN_RATIO,
         nextBearish: pat.nextCandle ? pat.nextCandle.close < pat.nextCandle.open : false,
         recentDoji: !pat.tooOld,
+        dojiNearHigh: !pat.tooFarFromHigh,
       },
+      gapFromHighMinutes: pat.gapFromHighMinutes,
     };
   }
 
@@ -5838,7 +5873,18 @@ export class ToolEngine extends EventEmitter {
     const closes = candles5m.map((c) => c.close);
     const ema200 = ema(closes, 200);
     const cloud = ichimoku(candles5m);
-    const pat = scanSessionPattern(candles5m, sessionStartMs, 0.3, WICK_MIN_RATIO, now.toMillis());
+    // [v0.61.10] 표(스캔)와 차트가 서로 다른 기준으로 판정되는 일이 없게, 저장된 스크리닝 기준을 그대로 쓴다
+    //   (예전엔 몸통 0.3·꼬리 10%·신선도 40분 기본값 고정 → 설정을 바꾸면 표와 차트가 어긋날 수 있었다).
+    const pat = scanSessionPattern(
+      candles5m,
+      sessionStartMs,
+      this.autoScanBodyRatio,
+      this.autoScanDojiWickMinRatio,
+      now.toMillis(),
+      this.autoScanDojiMaxAgeEnabled ? this.autoScanDojiMaxAgeMinutes : Number.POSITIVE_INFINITY,
+      this.autoScanNextCandleConfirmEnabled,
+      this.autoScanDojiMaxGapEnabled ? this.autoScanDojiMaxGapMinutes : Number.POSITIVE_INFINITY,
+    );
 
     let price: number | null = null;
     try {
@@ -6808,6 +6854,8 @@ export class ToolEngine extends EventEmitter {
           dojiWickMinRatio: this.autoScanDojiWickMinRatio,
           dojiMaxAgeEnabled: this.autoScanDojiMaxAgeEnabled,
           dojiMaxAgeMinutes: this.autoScanDojiMaxAgeMinutes,
+          dojiMaxGapEnabled: this.autoScanDojiMaxGapEnabled,
+          dojiMaxGapMinutes: this.autoScanDojiMaxGapMinutes,
           nextCandleConfirmEnabled: this.autoScanNextCandleConfirmEnabled,
           excludeEtf: this.autoScanExcludeEtf,
           session: nowSession,

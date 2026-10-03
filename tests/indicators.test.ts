@@ -208,6 +208,45 @@ describe(`[v0.25.0/v0.29.0] 도지 신선도(기본 ${DOJI_MAX_AGE_MINUTES}분 �
   });
 });
 
+describe("[v0.61.10] 최고점→도지 간격 제한(RUBI 사례: 05:00 고점 → 08:55 도지)", () => {
+  const highC = c(0, 98, 100, 97, 99); // 최고점(0분)
+  const dojiAt = (min: number) => c(min * MIN, 99, 99.5, 98.5, 98.9); // 음봉 도지
+  const bearAt = (min: number) => c(min * MIN, 98.9, 99, 98, 98.2);
+
+  it("한도를 안 주면(과거 호출 호환) 간격과 무관 — 235분 뒤 도지도 그대로 confirmed", () => {
+    const r = scanSessionPattern([highC, dojiAt(235), bearAt(240)], 0, 0.3);
+    expect(r.status).toBe("confirmed");
+    expect(r.gapFromHighMinutes).toBe(235);
+    expect(r.tooFarFromHigh).toBe(false);
+  });
+
+  it("한도(30분)를 주면 235분 뒤 도지는 none + tooFarFromHigh (스크린샷 사례 차단)", () => {
+    const r = scanSessionPattern([highC, dojiAt(235), bearAt(240)], 0, 0.3, WICK_MIN_RATIO, undefined, undefined, true, 30);
+    expect(r.status).toBe("none");
+    expect(r.tooFarFromHigh).toBe(true);
+    expect(r.gapFromHighMinutes).toBe(235);
+    // 근거 표시용 도지 정보는 남겨 둔다(왜 탈락했는지 보여주기 위해)
+    expect(r.dojiCandle).not.toBeNull();
+  });
+
+  it("다음봉 확인을 꺼도(도지만으로 확정) 간격 한도는 여전히 적용된다", () => {
+    const r = scanSessionPattern([highC, dojiAt(235)], 0, 0.3, WICK_MIN_RATIO, undefined, undefined, false, 30);
+    expect(r.status).toBe("none");
+  });
+
+  it("한도 이내(10분 뒤)는 통과, 정확히 한도(30분)도 통과, 31분은 탈락", () => {
+    expect(scanSessionPattern([highC, dojiAt(10), bearAt(15)], 0, 0.3, WICK_MIN_RATIO, undefined, undefined, true, 30).status).toBe("confirmed");
+    expect(scanSessionPattern([highC, dojiAt(30), bearAt(35)], 0, 0.3, WICK_MIN_RATIO, undefined, undefined, true, 30).status).toBe("confirmed");
+    expect(scanSessionPattern([highC, dojiAt(31), bearAt(36)], 0, 0.3, WICK_MIN_RATIO, undefined, undefined, true, 30).status).toBe("none");
+  });
+
+  it("도지가 아예 없으면 간격은 null", () => {
+    const r = scanSessionPattern([highC], 0, 0.3, WICK_MIN_RATIO, undefined, undefined, true, 30);
+    expect(r.gapFromHighMinutes).toBeNull();
+    expect(r.tooFarFromHigh).toBe(false);
+  });
+});
+
 describe("미완성 5분봉 제외(dropIncompleteBucket)", () => {
   // 버킷 시작 0/5분/10분. 봉 [T,T+5분)은 now≥T+5분이라야 완성.
   const c0 = c(0, 1, 1, 1, 1);

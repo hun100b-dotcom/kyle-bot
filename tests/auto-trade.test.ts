@@ -1180,6 +1180,15 @@ describe("[v0.33.0] 스크리닝 기준 탭 — 조건별 켜짐/꺼짐 + 수치
       expect(eng.saveAutoScanSettings({ dojiWickMinRatio: 0.9 }).autoScanDojiWickMinRatio).toBe(0.4);
       expect(eng.saveAutoScanSettings({ dojiMaxAgeMinutes: 1 }).autoScanDojiMaxAgeMinutes).toBe(10);
       expect(eng.saveAutoScanSettings({ dojiMaxAgeMinutes: 999 }).autoScanDojiMaxAgeMinutes).toBe(180);
+      // [v0.61.10] 최고점→도지 간격: 공장값 ON·30분, 5~240 범위로 보정, 껐다 켜도 저장 유지
+      expect(eng.getSettings().autoScanDojiMaxGapEnabled).toBe(true);
+      expect(eng.getSettings().autoScanDojiMaxGapMinutes).toBe(30);
+      expect(eng.saveAutoScanSettings({ dojiMaxGapMinutes: 1 }).autoScanDojiMaxGapMinutes).toBe(5);
+      expect(eng.saveAutoScanSettings({ dojiMaxGapMinutes: 999 }).autoScanDojiMaxGapMinutes).toBe(240);
+      expect(eng.saveAutoScanSettings({ dojiMaxGapMinutes: 45, dojiMaxGapEnabled: false }).autoScanDojiMaxGapEnabled).toBe(false);
+      const eng2 = new ToolEngine(dir, { forceMock: true });
+      expect(eng2.getSettings().autoScanDojiMaxGapEnabled).toBe(false);
+      expect(eng2.getSettings().autoScanDojiMaxGapMinutes).toBe(45);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1193,6 +1202,7 @@ describe("[v0.33.0] 스크리닝 기준 탭 — 조건별 켜짐/꺼짐 + 수치
         count: 45, priceMin: 3, priceMax: 20, bodyRatio: 0.5,
         emaTrendEnabled: false, emaPeriod: 150, cloudEnabled: false,
         dojiWickMinRatio: 0.15, dojiMaxAgeEnabled: false, dojiMaxAgeMinutes: 77,
+        dojiMaxGapEnabled: false, dojiMaxGapMinutes: 60,
         nextCandleConfirmEnabled: false, excludeEtf: false,
       });
       const opts = (eng as unknown as { buildAutoScanOpts: () => Record<string, unknown> }).buildAutoScanOpts();
@@ -1200,6 +1210,7 @@ describe("[v0.33.0] 스크리닝 기준 탭 — 조건별 켜짐/꺼짐 + 수치
         count: 45, priceMin: 3, priceMax: 20, bodyRatio: 0.5,
         emaTrendEnabled: false, emaPeriod: 150, cloudEnabled: false,
         dojiWickMinRatio: 0.15, dojiMaxAgeEnabled: false, dojiMaxAgeMinutes: 77,
+        dojiMaxGapEnabled: false, dojiMaxGapMinutes: 60,
         nextCandleConfirmEnabled: false, excludeEtf: false,
       });
     } finally {

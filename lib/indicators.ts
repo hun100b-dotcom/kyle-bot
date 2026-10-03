@@ -227,6 +227,8 @@ export interface SessionPattern {
   nextCandle: Candle | null; // 도지 다음 봉(근거 표시용)
   status: PatternStatus; //     confirmed(도지+다음음봉) / watch(도지만) / none
   tooOld: boolean; //           [v0.25.0] 도지 발생 시점이 기준(maxAgeMinutes)보다 오래돼 강제로 none 처리됐는지
+  gapFromHighMinutes: number | null; // [v0.61.10] 최고점 봉 → 도지 봉 간격(분, 도지 없으면 null)
+  tooFarFromHigh: boolean; //   [v0.61.10] 그 간격이 한도를 넘어 강제로 none 처리됐는지
 }
 
 /**
@@ -248,6 +250,7 @@ export interface SessionPattern {
  *        [왜?] 세션 최고점 갱신 없이 오래 옆걸음치면, 몇 시간 전에 잡힌 도지가 계속 "확정"으로 남아
  *        나온다. 그 시점 가격 흐름은 이미 다 지나간 과거라 지금 매매 근거로 쓰기엔 불확실하다.
  *
+ *   @param maxGapFromHighMinutes [v0.61.10] 최고점 봉~도지 봉 간격 상한(분). 기본 Infinity=검사 안 함(과거 호환).
  *   @param nextCandleConfirmEnabled [v0.51.0 긴급 수정] 꺼져 있으면(false) 도지가 나온 즉시 confirmed —
  *     다음 봉이 아직 없든, 이미 나왔는데 양봉이든 상관없이 "다음 봉" 자체를 더 이상 보지 않는다.
  *     [버그였던 이전 동작] 이 파라미터가 아예 없어서, 스크리닝 기준 탭에서 "다음봉 확인"을 꺼도
@@ -267,13 +270,14 @@ export function scanSessionPattern(
   nowMs?: number,
   maxAgeMinutes = DOJI_MAX_AGE_MINUTES,
   nextCandleConfirmEnabled = true,
+  maxGapFromHighMinutes: number = Infinity,
 ): SessionPattern {
   // 현재 장 봉만 추린다(원래 인덱스 매핑은 필요 없어 새 배열로 다룬다).
   const s = candles5m.filter((c) => c.time >= sessionStartMs);
   const empty: SessionPattern = {
     sessionHigh: null, highTime: null, highIndex: -1, dojiIndex: -1, dojiCandle: null,
     dojiBodyRatio: null, dojiUpperWickPct: null, dojiLowerWickPct: null, nextCandle: null,
-    status: "none", tooOld: false,
+    status: "none", tooOld: false, gapFromHighMinutes: null, tooFarFromHigh: false,
   };
   if (s.length === 0) return empty;
 
@@ -308,7 +312,13 @@ export function scanSessionPattern(
 
   // 3) 도지 다음 봉 판정.
   const next = s[dojiIndex + 1] ?? null;
-  const base = { sessionHigh, highTime, highIndex, dojiIndex, dojiCandle, dojiBodyRatio, dojiUpperWickPct: wk.upperPct, dojiLowerWickPct: wk.lowerPct, nextCandle: next, tooOld };
+  // 5) [v0.61.10] 최고점→도지 간격. 도지가 최고점 '직후'가 아니라 한참 뒤(예: RUBI 05:00 고점 → 08:55 도지,
+  //    235분)에 나왔다면 그건 "고점 후 첫 꺾임"이 아니라 오래 눌린 뒤 우연히 생긴 큰 꼬리 봉일 뿐이라
+  //    매수 타점 근거가 못 된다. 간격이 한도를 넘으면 상태와 무관하게 none.
+  const gapFromHighMinutes = highTime != null ? Math.round((dojiCandle.time - highTime) / 60_000) : null;
+  const tooFarFromHigh = gapFromHighMinutes != null && gapFromHighMinutes > maxGapFromHighMinutes;
+  const base = { sessionHigh, highTime, highIndex, dojiIndex, dojiCandle, dojiBodyRatio, dojiUpperWickPct: wk.upperPct, dojiLowerWickPct: wk.lowerPct, nextCandle: next, tooOld, gapFromHighMinutes, tooFarFromHigh };
+  if (tooFarFromHigh) return { ...base, status: "none" };
   if (tooOld) return { ...base, status: "none" };
   // [v0.51.0] "다음 봉 확인" 자체를 꺼 뒀으면, 다음 봉이 있는지·무슨 색인지 아예 보지 않고
   //   도지 하나만으로 즉시 확정(위 함수 설명 참고 — 버그였던 이전 동작 설명 포함).

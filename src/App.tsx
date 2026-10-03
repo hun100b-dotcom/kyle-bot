@@ -419,7 +419,7 @@ function ScreenEvidenceView({
   ev: ScreenEvidence;
   price: number | null;
   /** 오너가 꺼 둔 조건 키(스크리닝 기준 탭 기준) — 넘긴 키는 통과/실패와 무관하게 회색 "off" 칩으로. */
-  disabled?: Partial<Record<"aboveEma" | "aboveCloud" | "recentDoji" | "nextBearish", boolean>>;
+  disabled?: Partial<Record<"aboveEma" | "aboveCloud" | "recentDoji" | "dojiNearHigh" | "nextBearish", boolean>>;
 }) {
   const chip = (ok: boolean, label: string, key?: keyof NonNullable<typeof disabled>) => {
     const isOff = key != null && disabled?.[key];
@@ -441,6 +441,7 @@ function ScreenEvidenceView({
         {chip(ev.filters.firstDoji, "최고점 후 첫 음봉 도지")}
         {chip(ev.filters.bothWicks, "위·아래 꼬리 둘 다(망치형 아님)")}
         {chip(ev.filters.recentDoji, "도지 발생 20분 이내", "recentDoji")}
+        {chip(ev.filters.dojiNearHigh ?? true, "도지가 최고점 직후(간격 한도 이내)", "dojiNearHigh")}
         {chip(ev.filters.nextBearish, "다음 봉도 음봉", "nextBearish")}
       </div>
       <table className="evid-table">
@@ -936,6 +937,8 @@ function App() {
     dojiWickMinRatio: "0.1",
     dojiMaxAgeEnabled: true,
     dojiMaxAgeMinutes: "40",
+    dojiMaxGapEnabled: true,
+    dojiMaxGapMinutes: "30",
     nextCandleConfirmEnabled: true,
     excludeEtf: true,
     // [v0.45.0] "매매진행할 장" 선택 — 기본 4개 전부 켜짐(지금까지의 동작과 동일).
@@ -1201,6 +1204,8 @@ function App() {
         dojiWickMinRatio: String(s.autoScanDojiWickMinRatio ?? 0.1),
         dojiMaxAgeEnabled: s.autoScanDojiMaxAgeEnabled ?? true,
         dojiMaxAgeMinutes: String(s.autoScanDojiMaxAgeMinutes ?? 40),
+        dojiMaxGapEnabled: s.autoScanDojiMaxGapEnabled ?? true,
+        dojiMaxGapMinutes: String(s.autoScanDojiMaxGapMinutes ?? 30),
         nextCandleConfirmEnabled: s.autoScanNextCandleConfirmEnabled ?? true,
         excludeEtf: s.autoScanExcludeEtf ?? true,
         dayEnabled: s.autoScanDayEnabled ?? true,
@@ -2245,7 +2250,7 @@ ${msg}
    */
   function missReasons(
     r: ScreenResult,
-    run: { emaTrendEnabled: boolean; cloudEnabled: boolean; nextCandleConfirmEnabled: boolean },
+    run: { emaTrendEnabled: boolean; cloudEnabled: boolean; nextCandleConfirmEnabled: boolean; dojiMaxGapMinutes?: number },
   ): { passed: number; reasons: string[] } {
     const reasons: string[] = [];
     // ① 하드 게이트(가격대·EMA·구름) 중 놓친 것 — 꺼진 조건은 애초에 탈락 원인이 될 수 없다.
@@ -2264,6 +2269,7 @@ ${msg}
       //   (= !bothWicks 가지는 현재 도달 안 함). 기준이 나중에 갈릴 경우 대비해 방어적으로 남겨 둔다.
       if (!f.firstDoji) reasons.push("최고점 이후 음봉 도지 없음");
       else if (!f.bothWicks) reasons.push("도지에 꼬리가 한쪽만(망치형·유성형)");
+      else if (f.dojiNearHigh === false) reasons.push(`도지가 최고점에서 너무 한참 뒤에 생김(${r.evidence.gapFromHighMinutes ?? "?"}분 간격 — ${run.dojiMaxGapMinutes}분 초과)`);
       else if (!f.recentDoji) reasons.push("도지 발생이 너무 오래전(20분 초과 — 신뢰 불가)");
       else if (run.nextCandleConfirmEnabled && !f.nextBearish) reasons.push("도지 다음 봉이 음봉 아님(패턴 미완성)");
     }
@@ -2288,7 +2294,7 @@ ${msg}
    */
   function tallyMissReasons(
     results: ScreenResult[],
-    run: { emaTrendEnabled: boolean; cloudEnabled: boolean; nextCandleConfirmEnabled: boolean },
+    run: { emaTrendEnabled: boolean; cloudEnabled: boolean; nextCandleConfirmEnabled: boolean; dojiMaxGapMinutes?: number },
   ): { label: string; count: number }[] {
     const counts: Record<string, number> = {};
     const bump = (k: string) => { counts[k] = (counts[k] ?? 0) + 1; };
@@ -2301,6 +2307,7 @@ ${msg}
         const f = r.evidence.filters;
         if (!f.firstDoji) bump("최고점 이후 음봉 도지 없음");
         else if (!f.bothWicks) bump("도지 꼬리 한쪽만(망치형 등)");
+        else if (f.dojiNearHigh === false) bump(`도지가 최고점 한참 뒤(${run.dojiMaxGapMinutes}분 초과)`);
         else if (!f.recentDoji) bump("도지 발생 20분 초과(신선도 불합격)");
         else if (run.nextCandleConfirmEnabled && !f.nextBearish) bump("도지 다음 봉이 음봉 아님(패턴 미완성)");
       }
@@ -2583,11 +2590,13 @@ ${msg}
     const emaPeriod = toNum(screenCritForm.emaPeriod);
     const dojiWickMinRatio = toNum(screenCritForm.dojiWickMinRatio);
     const dojiMaxAgeMinutes = toNum(screenCritForm.dojiMaxAgeMinutes);
+    const dojiMaxGapMinutes = toNum(screenCritForm.dojiMaxGapMinutes);
     if (
       scanCount === null || scanCount <= 0 || pMin === null || pMin < 0 || pMax === null || pMax < 0 ||
-      emaPeriod === null || emaPeriod <= 0 || dojiWickMinRatio === null || dojiWickMinRatio < 0 || dojiMaxAgeMinutes === null || dojiMaxAgeMinutes <= 0
+      emaPeriod === null || emaPeriod <= 0 || dojiWickMinRatio === null || dojiWickMinRatio < 0 || dojiMaxAgeMinutes === null || dojiMaxAgeMinutes <= 0 ||
+      dojiMaxGapMinutes === null || dojiMaxGapMinutes <= 0
     ) {
-      setSavedMsg("⚠️ 스캔 종목수·가격대·EMA 기간·도지 꼬리비율·신선도(분)를 올바른 숫자로 입력하세요.");
+      setSavedMsg("⚠️ 스캔 종목수·가격대·EMA 기간·도지 꼬리비율·신선도(분)·고점~도지 간격(분)을 올바른 숫자로 입력하세요.");
       setTimeout(() => setSavedMsg(""), 4000);
       return;
     }
@@ -2602,6 +2611,8 @@ ${msg}
       dojiWickMinRatio,
       dojiMaxAgeEnabled: screenCritForm.dojiMaxAgeEnabled,
       dojiMaxAgeMinutes,
+      dojiMaxGapEnabled: screenCritForm.dojiMaxGapEnabled,
+      dojiMaxGapMinutes,
       nextCandleConfirmEnabled: screenCritForm.nextCandleConfirmEnabled,
       excludeEtf: screenCritForm.excludeEtf,
       dayEnabled: screenCritForm.dayEnabled,
@@ -2634,6 +2645,8 @@ ${msg}
       dojiWickMinRatio: String(s.autoScanDojiWickMinRatio),
       dojiMaxAgeEnabled: s.autoScanDojiMaxAgeEnabled,
       dojiMaxAgeMinutes: String(s.autoScanDojiMaxAgeMinutes),
+      dojiMaxGapEnabled: s.autoScanDojiMaxGapEnabled ?? true,
+      dojiMaxGapMinutes: String(s.autoScanDojiMaxGapMinutes ?? 30),
       nextCandleConfirmEnabled: s.autoScanNextCandleConfirmEnabled,
       excludeEtf: s.autoScanExcludeEtf,
       dayEnabled: s.autoScanDayEnabled,
@@ -4631,6 +4644,7 @@ ${msg}
                                         aboveEma: settings ? !settings.autoScanEmaTrendEnabled : false,
                                         aboveCloud: settings ? !settings.autoScanCloudEnabled : false,
                                         recentDoji: settings ? !settings.autoScanDojiMaxAgeEnabled : false,
+                                        dojiNearHigh: settings ? !(settings.autoScanDojiMaxGapEnabled ?? true) : false,
                                         nextBearish: settings ? !settings.autoScanNextCandleConfirmEnabled : false,
                                       }}
                                     />
@@ -4675,6 +4689,7 @@ ${msg}
                           EMA{run.emaPeriod} 위 <b>{run.emaTrendEnabled ? "켜짐" : "꺼짐"}</b> ·
                           이치모쿠 구름 위 <b>{run.cloudEnabled ? "켜짐" : "꺼짐"}</b> ·
                           도지 신선도(최대 {run.dojiMaxAgeMinutes}분) <b>{run.dojiMaxAgeEnabled ? "켜짐" : "꺼짐"}</b> ·
+                          고점~도지 간격(최대 {run.dojiMaxGapMinutes ?? 30}분) <b>{(run.dojiMaxGapEnabled ?? true) ? "켜짐" : "꺼짐"}</b> ·
                           다음봉 음봉 확인 <b>{run.nextCandleConfirmEnabled ? "켜짐" : "꺼짐"}</b> ·
                           ETF/레버리지 제외 <b>{run.excludeEtf ? "켜짐" : "꺼짐"}</b>
                           {" — "}<button className="mini ghost" onClick={() => goToTab("screenCriteria")}>[스크리닝 기준]에서 수정</button>
@@ -4901,6 +4916,33 @@ ${msg}
                 <input type="text" inputMode="numeric" value={screenCritForm.dojiMaxAgeMinutes}
                   disabled={!screenCritForm.dojiMaxAgeEnabled}
                   onChange={(e) => setScreenCritForm({ ...screenCritForm, dojiMaxAgeMinutes: e.target.value })} />
+              </label>
+            </div>
+
+            {/* ④-2 [v0.61.10] 최고점→도지 간격 제한 */}
+            <div className="crit-card">
+              <div className="crit-head">
+                <label className="radio">
+                  <input type="checkbox" checked={screenCritForm.dojiMaxGapEnabled}
+                    onChange={(e) => setScreenCritForm({ ...screenCritForm, dojiMaxGapEnabled: e.target.checked })} />
+                  <b>최고점 → 도지 간격 제한</b>
+                </label>
+                <button className="mini" onClick={() => toggleCritDetail("gap")}>{openCritDetail.has("gap") ? "▾ 자세히" : "▸ 자세히"}</button>
+              </div>
+              <p className="hint">도지가 세션 최고점 "직후" 이 시간(분) 안에 나온 것만 인정해요(고점 후 첫 꺾임).</p>
+              {openCritDetail.has("gap") && (
+                <p className="hint crit-detail">
+                  이 전략은 "급등해서 최고점을 찍은 직후 처음 꺾이는 도지"를 노립니다. 그런데 최고점에서 몇 시간이
+                  지난 뒤 우연히 생긴 큰 도지(예: 05:00 고점 → 08:55 도지)는 "고점 후 첫 꺾임"이 아니라 오래
+                  눌려 있던 종목의 흔한 잡음 봉이라 매수 근거가 못 돼요. 값을 줄이면 고점 바로 뒤의 도지만,
+                  늘리면 더 늦게 나온 도지도 인정합니다. <b>꺼두면 간격 제한 없이</b> 예전처럼 동작합니다.
+                </p>
+              )}
+              <label className="str-field sf-num" style={{ maxWidth: 200, marginTop: 8 }}>
+                <span className="sb-k">최대 간격(분) <span className="hint">(5~240분, 기본 30분)</span></span>
+                <input type="text" inputMode="numeric" value={screenCritForm.dojiMaxGapMinutes}
+                  disabled={!screenCritForm.dojiMaxGapEnabled}
+                  onChange={(e) => setScreenCritForm({ ...screenCritForm, dojiMaxGapMinutes: e.target.value })} />
               </label>
             </div>
 

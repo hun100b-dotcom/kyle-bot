@@ -143,6 +143,8 @@ interface ToolSettings {
   autoScanDojiWickMinRatio: number;
   autoScanDojiMaxAgeEnabled: boolean;
   autoScanDojiMaxAgeMinutes: number;
+  autoScanDojiMaxGapEnabled: boolean; // [v0.61.10]
+  autoScanDojiMaxGapMinutes: number;
   autoScanNextCandleConfirmEnabled: boolean;
   autoScanExcludeEtf: boolean;
   /** [v0.45.0] "매매진행할 장" 선택 — 자동매매가 신규 진입을 시도할 세션(전부 켜짐/꺼짐). */
@@ -234,6 +236,8 @@ interface AutoTradeHistoryEntry {
     dojiWickMinRatio: number;
     dojiMaxAgeEnabled: boolean;
     dojiMaxAgeMinutes: number;
+    dojiMaxGapEnabled?: boolean; // [v0.61.10] 옛 기록엔 없음
+    dojiMaxGapMinutes?: number;
     nextCandleConfirmEnabled: boolean;
     excludeEtf: boolean;
     session: "day" | "pre" | "regular" | "after" | "closed";
@@ -430,7 +434,9 @@ interface ScreenEvidence {
     bothWicks: boolean;
     nextBearish: boolean;
     recentDoji: boolean; // [v0.25.0] 도지 발생 시점이 20분 이내인지
+    dojiNearHigh: boolean; // [v0.61.10] 도지가 최고점 직후(간격 한도 이내)인지
   };
+  gapFromHighMinutes: number | null; // [v0.61.10] 최고점→도지 간격(분)
 }
 interface ScreenResult {
   prevClose?: number | null; // [v0.16.0] 전봉종가(계산기 자동입력용)
@@ -479,6 +485,8 @@ interface ScreenRun {
   dojiWickMinRatio: number;
   dojiMaxAgeEnabled: boolean;
   dojiMaxAgeMinutes: number;
+  dojiMaxGapEnabled: boolean; // [v0.61.10]
+  dojiMaxGapMinutes: number;
   nextCandleConfirmEnabled: boolean;
   excludeEtf: boolean;
 }
@@ -760,6 +768,8 @@ interface KyletoolBridge {
     dojiWickMinRatio?: number;
     dojiMaxAgeEnabled?: boolean;
     dojiMaxAgeMinutes?: number;
+    dojiMaxGapEnabled?: boolean; // [v0.61.10]
+    dojiMaxGapMinutes?: number;
     nextCandleConfirmEnabled?: boolean;
     excludeEtf?: boolean;
     // [v0.45.0] "매매진행할 장" 선택
