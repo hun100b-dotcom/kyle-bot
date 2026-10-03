@@ -438,6 +438,40 @@ interface ScreenEvidence {
   };
   gapFromHighMinutes: number | null; // [v0.62.1] 최고점→도지 간격(분)
 }
+/** [v0.62.1] 자동매매 리포트 — lib/auto-report.ts의 AutoReport와 같은 모양(화면 표시용 복제). */
+interface AutoReport {
+  runId: string;
+  generatedAtMs: number;
+  live: boolean;
+  overview: { startedAtMs: number; endedAtMs: number; uptimeMs: number; loopCount: number; scanCount: number; endReason: string };
+  money: {
+    startAssetsUsd: number | null;
+    endAssetsUsd: number | null;
+    realizedGrossUsd: number;
+    estFeesUsd: number | null;
+    realizedNetUsd: number;
+    returnPct: number | null;
+    mddUsd: number;
+    mddPct: number | null;
+    slippage: "측정 불가";
+  };
+  trades: {
+    total: number;
+    wins: number;
+    losses: number;
+    winRatePct: number | null;
+    grossProfitUsd: number;
+    grossLossUsd: number;
+    profitFactor: number | null;
+    profitFactorLabel: string;
+    avgHoldMs: number | null;
+    cancelled: number;
+    ocoFailed: number;
+  };
+  positions: { openAtEnd: Array<{ symbol: string; status: string; entry: number; quantity: number }> };
+  system: { apiTimeouts: number; apiRetries: number; apiFailures: number; cycleErrors: number };
+  notes: string[];
+}
 interface ScreenResult {
   prevClose?: number | null; // [v0.16.0] 전봉종가(계산기 자동입력용)
   rank: number;
@@ -781,6 +815,8 @@ interface KyletoolBridge {
   autoScanNow(): Promise<AutoTradeStatus>;
   /** [v0.30.0] 자동매매기록 — 자동매매가 낸 매매의 전체 생애주기 로그(읽기 전용, 최신순). */
   autoTradeHistory(): Promise<AutoTradeHistoryEntry[]>;
+  /** [v0.62.1] 자동매매 리포트(최근 실행 최대 10건, 최신순). 폰은 PC가 올린 미러에서 읽는다. */
+  getAutoReports?(): Promise<{ ok: boolean; reports: AutoReport[]; source: "local" | "pc"; message?: string }>;
   rationales(): Promise<TradeRationale[]>;
   // [v0.4.0] 삼분할 타점 기록(여러 종목 동시 운용)
   splitsList(): Promise<SavedSplit[]>;

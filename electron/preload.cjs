@@ -73,6 +73,7 @@ contextBridge.exposeInMainWorld("kyletool", {
   saveAutoScanSettings: (input) => ipcRenderer.invoke("tool:autoTrade:scanSettings", input),
   autoScanNow: () => ipcRenderer.invoke("tool:autoTrade:scanNow"),
   autoTradeHistory: () => ipcRenderer.invoke("tool:autoTrade:history"),
+  getAutoReports: () => ipcRenderer.invoke("tool:autoTrade:reports"), // [v0.62.1] 자동매매 리포트
 
   // 주문 현황
   // [v0.2.10] 주문 근거(기법 스냅샷) 목록 / 보유 포지션 손익

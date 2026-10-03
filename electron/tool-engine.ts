@@ -31,7 +31,8 @@ import { toSyncPayload, isSyncPayload, type TradeSyncPayload } from "../lib/trad
 import { toAutoStateSyncPayload, isAutoStateSyncPayload, mergeAutoHistory, derivePositionsFromHistory, type AutoStateSyncPayload } from "../lib/auto-state-sync"; // [v0.31.0] 자동매매 기록 기기 간 동기화
 import { toSplitsSyncPayload, isSplitsSyncPayload, mergeSplits, type SplitsSyncPayload } from "../lib/splits-sync"; // [v0.61.7] 삼분할 타점 기록 기기 간 동기화
 import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, WICK_MIN_RATIO, DOJI_MAX_AGE_MINUTES, type Candle, type SessionPattern } from "../lib/indicators";
-import { fetchWithTimeout } from "../lib/fetch-timeout"; // [v0.61.5 — ③ 전수조사 "높음-1"] Supabase REST 호출도 토스처럼 타임아웃을 건다
+import { buildAutoReport, type AutoRunRecord, type AutoReport } from "../lib/auto-report"; // [v0.62.1] 자동매매 리포트
+import { fetchWithTimeout, netStats } from "../lib/fetch-timeout"; // [v0.61.5 — ③ 전수조사 "높음-1"] Supabase REST 호출도 토스처럼 타임아웃을 건다
 import {
   getPrice,
   getTrades,
@@ -1273,6 +1274,13 @@ export class ToolEngine extends EventEmitter {
   private autoTradeHistory: AutoTradeHistoryEntry[] = [];
   private static readonly AUTO_TRADE_HISTORY_MAX = 500; // 오래된 것부터 정리(무한 증식 방지)
 
+  /** [v0.62.1] 자동매매 "실행(run)" 기록 — 켬→끔 한 번마다 한 건. 리포트(lib/auto-report.ts)의 원본. */
+  private autoRunsPath = "";
+  private autoRuns: AutoRunRecord[] = [];
+  private currentAutoRun: AutoRunRecord | null = null;
+  private currentAutoRunNetBase = { timeouts: 0, failures: 0, retries: 0 }; // 이 실행 시작 시점의 전역 오류 카운터
+  private static readonly AUTO_RUNS_MAX = 30;
+
   /**
    * [v0.60.9] 이 엔진(PC)이 실제로 실행 중인 앱 버전 — electron/main.ts가 생성 시점에
    *   app.getVersion()을 넘겨준다. 폰이 "PC가 진짜 최신 버전을 돌리고 있나"를 하트비트로
@@ -1299,6 +1307,7 @@ export class ToolEngine extends EventEmitter {
     this.fillsPath = join(userDataDir, "kylebot-fills.json"); // [v0.9.8] 매매(체결) 이력 — 연결 없이도 리포트를 그리기 위해 보관
     this.autoTradeHistoryPath = join(userDataDir, "kylebot-auto-history.json"); // [v0.30.0] 자동매매기록
     this.autoPositionsPath = join(userDataDir, "kylebot-auto-positions.json"); // [v0.30.1] 감시 중 포지션(긴급수정)
+    this.autoRunsPath = join(userDataDir, "kylebot-auto-runs.json"); // [v0.62.1] 자동매매 실행 기록(리포트 원본)
     this.loadEnv();
     // [개발 검증용] E2E 등 자동 검증은 절대 실서버를 건드리면 안 되므로 연습 모드 강제.
     if (opts?.forceMock) this.mode = "mock";
@@ -1320,6 +1329,7 @@ export class ToolEngine extends EventEmitter {
     this.loadFills(); // [v0.9.8] 저장해 둔 매매 이력
     this.loadAutoTradeHistory(); // [v0.30.0] 자동매매기록
     this.loadAutoPositions(); // [v0.30.1] 감시 중 포지션(긴급수정 — 재시작해도 이어받기)
+    this.loadAutoRuns(); // [v0.62.1] 자동매매 실행 기록
   }
 
   // --------------------------------------------------------------------------
@@ -4119,6 +4129,143 @@ export class ToolEngine extends EventEmitter {
   //   막으면 안 된다 — saveRationale과 같은 원칙).
   // --------------------------------------------------------------------------
 
+  // --------------------------------------------------------------------------
+  // [v0.62.1] 자동매매 실행(run) 기록 + 리포트
+  //   · 켤 때 한 건 열고(openAutoRun), 사이클마다 갱신(touchAutoRun), 끌 때 닫는다(closeAutoRun).
+  //   · 앱이 갑자기 꺼져 닫히지 못한 기록은 다음 실행 때 "앱 종료"로 마감한다(loadAutoRuns).
+  //   · 모든 기록 작업은 try/catch — 리포트용 기록이 실패해도 매매를 절대 막지 않는다.
+  // --------------------------------------------------------------------------
+
+  private loadAutoRuns(): void {
+    try {
+      const arr = existsSync(this.autoRunsPath) ? (JSON.parse(readFileSync(this.autoRunsPath, "utf8")) as AutoRunRecord[]) : [];
+      this.autoRuns = Array.isArray(arr) ? arr : [];
+    } catch {
+      this.autoRuns = [];
+    }
+    // 닫히지 않은 채 남은 기록 = 앱이 꺼지면서 끝난 실행. 마지막 활동 시각을 종료 시각으로 삼는다.
+    let changed = false;
+    for (const r of this.autoRuns) {
+      if (r.endedAtMs == null) {
+        r.endedAtMs = r.lastActiveAtMs;
+        r.endReason = "앱 종료·재시작(자동매매는 앱이 켜져 있는 동안만 작동 — 종료 시각은 마지막 사이클 기준)";
+        changed = true;
+      }
+    }
+    if (changed) this.persistAutoRuns();
+  }
+
+  private persistAutoRuns(): void {
+    try {
+      if (this.autoRuns.length > ToolEngine.AUTO_RUNS_MAX) this.autoRuns = this.autoRuns.slice(-ToolEngine.AUTO_RUNS_MAX);
+      const tmp = this.autoRunsPath + ".tmp";
+      writeFileSync(tmp, JSON.stringify(this.autoRuns, null, 2), "utf8");
+      renameSync(tmp, this.autoRunsPath);
+    } catch {
+      /* 리포트용 기록 실패는 자동매매 진행을 막지 않는다 */
+    }
+  }
+
+  private openAutoRun(carried: number): void {
+    try {
+      const now = Date.now();
+      this.currentAutoRun = {
+        id: `run-${now}`,
+        startedAtMs: now,
+        lastActiveAtMs: now,
+        endedAtMs: null,
+        loopCount: 0,
+        scanCount: 0,
+        endReason: null,
+        startAssetsUsd: this.seedBasis === "fixed" ? this.seedFixedUsd : null, // 자동 시드는 첫 사이클에서 채움(touchAutoRun)
+        commissionRate: null,
+        carriedPositions: carried,
+        openPositions: [],
+        errors: { apiTimeouts: 0, apiRetries: 0, apiFailures: 0, cycleErrors: 0 },
+      };
+      this.currentAutoRunNetBase = { ...netStats };
+      this.autoRuns.push(this.currentAutoRun);
+      this.persistAutoRuns();
+    } catch {
+      this.currentAutoRun = null;
+    }
+  }
+
+  /** 사이클이 끝날 때마다(그리고 종료 직전) 실행 기록의 "지금 값"을 갱신하고 저장한다. */
+  private touchAutoRun(): void {
+    const run = this.currentAutoRun;
+    if (!run) return;
+    try {
+      run.lastActiveAtMs = Date.now();
+      run.errors.apiTimeouts = netStats.timeouts - this.currentAutoRunNetBase.timeouts;
+      run.errors.apiRetries = netStats.retries - this.currentAutoRunNetBase.retries;
+      run.errors.apiFailures = netStats.failures - this.currentAutoRunNetBase.failures;
+      run.openPositions = this.autoTradePositions.map((p) => ({ symbol: p.symbol, status: p.status, entry: p.entry, quantity: p.quantity }));
+      // 시작 자산: 이 실행의 시드 스냅샷이 잡히면 그 값을 한 번만 기록(이후 입금으로 스냅샷이 올라도 "시작 시점" 값 유지).
+      if (run.startAssetsUsd == null) {
+        const seed = this.seedBasis === "fixed" ? this.seedFixedUsd : this.autoTradeSeedSnapshotUsd;
+        if (seed != null && Number.isFinite(seed)) run.startAssetsUsd = seed;
+      }
+      this.persistAutoRuns();
+      // 수수료율은 한 번만 비동기로 조회(실패하면 null 유지 → 리포트가 "수수료 추정 불가"로 표시)
+      if (run.commissionRate == null && !this.commissionLookupBusy) {
+        this.commissionLookupBusy = true;
+        void this.resolveCommissionRate()
+          .then((rate) => {
+            if (rate != null && this.currentAutoRun === run) {
+              run.commissionRate = rate;
+              this.persistAutoRuns();
+            }
+          })
+          .catch(() => undefined)
+          .finally(() => {
+            this.commissionLookupBusy = false;
+          });
+      }
+    } catch {
+      /* 무시 */
+    }
+  }
+
+  private commissionLookupBusy = false;
+
+  private closeAutoRun(reason: string): void {
+    const run = this.currentAutoRun;
+    if (!run) return;
+    this.touchAutoRun();
+    run.endedAtMs = Date.now();
+    run.endReason = reason;
+    this.currentAutoRun = null;
+    this.persistAutoRuns();
+  }
+
+  /** 최근 실행 N건의 리포트(최신순). 지금 실행 중인 건 "진행 중" 리포트로 포함된다. */
+  private buildRecentReports(n: number): AutoReport[] {
+    try {
+      const now = Date.now();
+      return this.autoRuns
+        .slice(-n)
+        .reverse()
+        .map((r) => buildAutoReport(r, this.autoTradeHistory, now));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * [v0.62.1] 자동매매 리포트 목록. PC(실제로 자동매매를 돌리는 쪽)는 자기 실행 기록으로 계산하고,
+   *   기록이 없는 기기(폰 등)는 PC가 상태 미러(capri_live_state)에 올려 둔 최근 리포트를 대신 보여준다.
+   */
+  async getAutoReports(): Promise<{ ok: boolean; reports: AutoReport[]; source: "local" | "pc"; message?: string }> {
+    const local = this.buildRecentReports(10);
+    if (local.length > 0) return { ok: true, reports: local, source: "local" };
+    const live = await this.getLiveState();
+    if (live.ok) {
+      return { ok: true, reports: live.reports, source: "pc", message: live.reports.length === 0 ? "PC에 아직 자동매매 실행 기록이 없습니다." : undefined };
+    }
+    return { ok: true, reports: [], source: "local", message: "아직 자동매매 실행 기록이 없습니다. 자동매매를 한 번 켰다 끄면 리포트가 만들어집니다." };
+  }
+
   private loadAutoTradeHistory(): void {
     try {
       this.autoTradeHistory = existsSync(this.autoTradeHistoryPath)
@@ -4536,6 +4683,7 @@ export class ToolEngine extends EventEmitter {
         journal: this.getJournal().slice(-50),
         killSwitch: this.killSwitch,
         scanProgress: this.scanProgressForMirror,
+        reports: this.buildRecentReports(5), // [v0.62.1] 폰도 자동매매 리포트를 볼 수 있게
       };
       const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_live_state?on_conflict=user_id,kind`, {
         method: "POST",
@@ -4576,33 +4724,35 @@ export class ToolEngine extends EventEmitter {
     journal: JournalEntry[];
     killSwitch: boolean | null;
     scanProgress: LiveScanProgress | null;
+    reports: AutoReport[];
     updatedAtMs: number | null;
     message?: string;
   }> {
     const token = await this.ensureAccessToken();
-    if (!token) return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, updatedAtMs: null, message: "먼저 로그인하세요." };
+    if (!token) return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, reports: [], updatedAtMs: null, message: "먼저 로그인하세요." };
     try {
       const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_live_state?kind=eq.snapshot&select=payload,updated_at`, {
         headers: this.authRestHeaders(token),
       }, 10_000, "capri_live_state");
       if (!res.ok)
-        return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, updatedAtMs: null, message: `조회 실패(HTTP ${res.status}).` };
+        return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, reports: [], updatedAtMs: null, message: `조회 실패(HTTP ${res.status}).` };
       const rows = (await res.json()) as Array<{
-        payload: { status?: AutoTradeStatus; journal?: JournalEntry[]; killSwitch?: boolean; scanProgress?: LiveScanProgress | null };
+        payload: { status?: AutoTradeStatus; journal?: JournalEntry[]; killSwitch?: boolean; scanProgress?: LiveScanProgress | null; reports?: AutoReport[] };
         updated_at: string;
       }>;
       if (!rows[0])
-        return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, updatedAtMs: null, message: "PC가 아직 상태를 올린 적이 없습니다." };
+        return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, reports: [], updatedAtMs: null, message: "PC가 아직 상태를 올린 적이 없습니다." };
       return {
         ok: true,
         status: rows[0].payload.status ?? null,
         journal: rows[0].payload.journal ?? [],
         killSwitch: rows[0].payload.killSwitch ?? null,
         scanProgress: rows[0].payload.scanProgress ?? null,
+        reports: rows[0].payload.reports ?? [],
         updatedAtMs: new Date(rows[0].updated_at).getTime(),
       };
     } catch (e) {
-      return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, updatedAtMs: null, message: e instanceof Error ? e.message : String(e) };
+      return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, reports: [], updatedAtMs: null, message: e instanceof Error ? e.message : String(e) };
     }
   }
 
@@ -5959,6 +6109,7 @@ export class ToolEngine extends EventEmitter {
     this.autoTradeLastScan = null; // 지난번 실행의 스캔 결과가 화면에 남아 헷갈리지 않게 초기화
     this.autoTradeLastScanError = null; // [v0.45.0] 마찬가지로 지난번 실행의 실패 기록도 초기화
     this.saveAutoPositions(); // [v0.61.4] 초기화된 상태도 즉시 파일에 반영(재시작 시 옛 스캔이 되살아나지 않게)
+    this.openAutoRun(carried); // [v0.62.1] 리포트용 실행 기록 시작
     this.addJournal({
       kind: "info",
       symbol: "-",
@@ -5982,6 +6133,7 @@ export class ToolEngine extends EventEmitter {
       clearInterval(this.autoTradeTimer);
       this.autoTradeTimer = null;
     }
+    this.closeAutoRun(reason ?? "오너가 직접 중지"); // [v0.62.1] 리포트용 실행 기록 마감(종료 사유 포함)
     this.addJournal({
       kind: "info",
       symbol: "-",
@@ -6538,6 +6690,7 @@ export class ToolEngine extends EventEmitter {
     this.autoTradeTickBusy = true;
     this.autoTradeLastCycleAt = DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss");
     this.autoTradeLastCycleAtMs = Date.now(); // [v0.29.0] 카운트다운은 문자열이 아니라 ms 기준으로 계산해야 정확함
+    if (this.currentAutoRun) this.currentAutoRun.loopCount++; // [v0.62.1] 리포트: 사이클 실행 횟수
     try {
       await this.prepareBackend();
       await this.reconcileAutoPositions(); // ①빈자리 먼저 확인(같은 사이클 안에 채우기 위해) — 일시정지 중에도 계속
@@ -6647,6 +6800,7 @@ export class ToolEngine extends EventEmitter {
       let run: ScreenRun;
       try {
         // [v0.28.0→v0.33.0] 오너가 "스크리닝 기준" 탭에서 조절한 조건을 그대로 쓴다(전부).
+        if (this.currentAutoRun) this.currentAutoRun.scanCount++; // [v0.62.1] 리포트: 실제로 스크리닝까지 돈 횟수
         run = await this.scanScreener(this.buildAutoScanOpts()); // ③빈자리를 "현재 스크리닝으로 탐색된 다른 종목"으로 채움
         this.autoTradeLastScan = run; // [v0.27.0] 버리지 않고 보관 → "스크리닝 결과" 탭이 그대로 보여줌
         this.autoTradeLastScanError = null; // [v0.45.0] 성공했으니 이전 실패 기록은 지운다
@@ -6944,6 +7098,7 @@ export class ToolEngine extends EventEmitter {
         placed++;
       }
     } catch (e) {
+      if (this.currentAutoRun) this.currentAutoRun.errors.cycleErrors++; // [v0.62.1] 리포트: 사이클 예외 횟수
       // [안전장치] 이 사이클 안에서 예상 못 한 오류가 나도(네트워크 순단 등) 자동매매 전체가
       //   조용히 죽어버리면 안 된다(백그라운드 실행이라 사람이 못 봄 — void로 호출되므로 여기서
       //   막지 않으면 처리되지 않은 프라미스 거부가 된다). 저널에 남기고 다음 5분 사이클에서
@@ -6956,6 +7111,7 @@ export class ToolEngine extends EventEmitter {
       }
     } finally {
       this.autoTradeTickBusy = false;
+      this.touchAutoRun(); // [v0.62.1] 마지막 활동 시각·오류 카운터·보유 포지션을 실행 기록에 반영(파일 저장 포함)
       // [v0.61.4] 사이클마다 최신 스캔·사이클 시각을 파일에도 반영한다(재시작해도 살아남게 —
       //   positions만 영속화돼 있고 lastScan은 메모리 전용이던 게 "재시작 직후 폰 화면이
       //   다시 비어 보이는" 문제의 근본 원인이었다. 자세한 배경은 saveAutoPositions 주석 참고).

@@ -12,6 +12,17 @@
 //   헬퍼로 일괄 적용한다(토스·Supabase 양쪽이 이제 같은 함수를 쓴다 — 로직 중복 없음).
 // =============================================================================
 
+/**
+ * [v0.62.1 — 자동매매 리포트의 "오류 로그 요약"용] 프로세스 전체 네트워크 오류 카운터.
+ *   fetchWithTimeout가 타임아웃·네트워크 실패를 셀 수 있는 유일한 공통 지점이고, 재시도는
+ *   토스 호출부(lib/toss.ts)가 recordApiRetry()로 센다. 자동매매 한 번의 실행(run)은 시작 때
+ *   이 값을 기준점으로 저장하고 끝날 때 차이만 가져가 "그 실행 동안의 횟수"를 얻는다.
+ */
+export const netStats = { timeouts: 0, failures: 0, retries: 0 };
+export function recordApiRetry(): void {
+  netStats.retries++;
+}
+
 /** 제한 시간 안에 응답이 없으면 요청을 끊는 fetch(봇이 한 요청에 매달려 멈추지 않게). */
 export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number, label: string): Promise<Response> {
   const controller = new AbortController();
@@ -20,8 +31,10 @@ export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs
     return await fetch(url, { ...init, signal: controller.signal });
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
+      netStats.timeouts++;
       throw new Error(`요청 타임아웃(${timeoutMs}ms 초과): ${label}`);
     }
+    netStats.failures++; // 타임아웃이 아닌 네트워크 실패(연결 거부·DNS 등)
     throw err;
   } finally {
     clearTimeout(timer);

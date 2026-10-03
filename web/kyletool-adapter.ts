@@ -218,6 +218,7 @@ export function installKyleTool(): ToolEngine {
     saveAutoScanSettings: (input: Parameters<ToolEngine["saveAutoScanSettings"]>[0]) => Promise.resolve(e.saveAutoScanSettings(input)),
     autoScanNow: () => e.autoScanNow(),
     autoTradeHistory: () => Promise.resolve(e.getAutoTradeHistory()),
+    getAutoReports: () => e.getAutoReports(), // [v0.62.1] 폰은 로컬 기록이 없어 PC가 올린 미러에서 읽는다
     placeSell: (spec: Parameters<ToolEngine["placeSell"]>[0]) => e.placeSell(spec),
     openOrders: () => e.openOrders(),
     conditionals: () => e.conditionals(),

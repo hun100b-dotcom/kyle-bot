@@ -24,7 +24,7 @@
 // =============================================================================
 
 import { roundPrice } from "./calc";
-import { fetchWithTimeout } from "./fetch-timeout";
+import { fetchWithTimeout, recordApiRetry } from "./fetch-timeout";
 
 // -----------------------------------------------------------------------------
 // 0) 엔드포인트 경로 (실제 토스 스펙에 맞춤)
@@ -551,6 +551,7 @@ async function tossFetch<T>(path: string, opts: RequestOptions = {}, isRetry = f
   //   (읽기 요청은 재시도해도 안전. 무한 재시도는 금지 — isRetry 플래그로 1회 제한)
   if (res.status === 401 && !isRetry) {
     clearTokenCache();
+    recordApiRetry(); // [v0.62.1] 자동매매 리포트 오류 요약용 카운트
     return tossFetch<T>(path, opts, true);
   }
 
@@ -559,6 +560,7 @@ async function tossFetch<T>(path: string, opts: RequestOptions = {}, isRetry = f
   //   그 종목/요청만 건너뛰고 계속 진행하게 한다(무한 재시도 금지 — 401과 같은 원칙).
   if (res.status === 429 && !isRateLimitRetry) {
     const retryAfterSec = Number(res.headers.get("retry-after"));
+    recordApiRetry(); // [v0.62.1]
     await sleep(Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? retryAfterSec * 1000 : 800);
     return tossFetch<T>(path, opts, isRetry, true);
   }

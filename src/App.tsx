@@ -18,6 +18,7 @@ import "./App.css";
 import TodayReport from "./TodayReport"; // [v0.9.1] 오늘의 매매 리포트 화면
 import { useTabOrder } from "./useTabOrder"; // [v0.9.2] 탭 순서 드래그로 변경
 import { restoreInputsFromSaved } from "../lib/split-restore"; // [v0.9.3] 옛 기록도 계산기로 불러오기
+import { reportToMarkdown, reportAiPrompt, fmtDuration } from "../lib/auto-report"; // [v0.62.1] 자동매매 리포트 표시·복사
 import { getSession } from "../lib/session"; // [v0.48.1] 자동 스크리너 탭에 "지금 세션" 켜짐/꺼짐을 바로 보여주기 위함
 import { DateTime } from "luxon";
 import { summarizeAutoHistory, summarizeGroupHistory, summarizeByCriteria, autoHistoryToCsv, type RawHistoryRow } from "../lib/auto-research"; // [v0.33.0/v0.35.0/v0.49.0] 연구탭 통계(순수 함수)
@@ -37,7 +38,7 @@ import { summarizeAutoHistory, summarizeGroupHistory, summarizeByCriteria, autoH
 //   묻혀 있었다. 오너 요청("그룹원 관리 탭을 통해 승인·수기등록·근황 파악, 채팅까지")에 따라
 //   독립 탭으로 빼고, 그룹원 근황 현황판·채팅을 새로 추가했다. 같은 이유로 "기록"(journal, 예전엔
 //   설정 하위)도 "서버 로그"로 이름을 바꿔 독립 탭으로 뺐다(카테고리 토글 필터 추가, 아래 참고).
-const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "autoControl", "autoScan", "screenCriteria", "autoHistory", "research", "orders", "groupManage", "changelog", "journal", "settings"] as const;
+const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "autoControl", "autoScan", "screenCriteria", "autoHistory", "autoReport", "research", "orders", "groupManage", "changelog", "journal", "settings"] as const;
 type TabId = (typeof ALL_TABS)[number];
 
 /** [v0.27.0] 상단 1단 — 매매방식·성격으로 묶은 그룹. 그룹 버튼을 누르면 하위 탭(2단)이 펼쳐진다. */
@@ -46,7 +47,7 @@ const TOP_GROUP_LABEL: Record<TopGroupId, string> = { manual: "메뉴얼", auto:
 /** 그룹 순서(드래그로 바뀔 수 있는 기본값) + 그룹별 하위 탭 목록(이 순서로 서브탭이 뜬다). */
 const GROUP_CHILDREN: Record<TopGroupId, TabId[]> = {
   manual: ["calc", "screener", "splits"],
-  auto: ["autoControl", "autoScan", "screenCriteria", "autoHistory", "research"],
+  auto: ["autoControl", "autoScan", "screenCriteria", "autoHistory", "autoReport", "research"],
   status: ["report", "strength", "orders", "groupManage", "changelog", "journal"],
   settings: ["settings"],
 };
@@ -54,7 +55,7 @@ const TOP_GROUPS: TopGroupId[] = ["manual", "auto", "status", "settings"];
 /** 리프 탭 → 소속 그룹(역방향 조회용). */
 const TAB_GROUP: Record<TabId, TopGroupId> = {
   calc: "manual", screener: "manual", splits: "manual",
-  autoControl: "auto", autoScan: "auto", screenCriteria: "auto", autoHistory: "auto", research: "auto",
+  autoControl: "auto", autoScan: "auto", screenCriteria: "auto", autoHistory: "auto", autoReport: "auto", research: "auto",
   report: "status", strength: "status", orders: "status", groupManage: "status", changelog: "status", journal: "status",
   settings: "settings",
 };
@@ -70,6 +71,7 @@ const TAB_LABEL: Record<TabId, string> = {
   autoScan: "자동 스크리너",
   screenCriteria: "스크리닝 기준",
   autoHistory: "자동매매기록",
+  autoReport: "📑 자동매매 리포트",
   research: "매매연구",
   orders: "주문 현황",
   groupManage: "👥 그룹원 관리",
@@ -1070,6 +1072,30 @@ function App() {
   //   기기(로컬)별로 "읽음" 상태를 따로 관리한다(markChangelogSeen).
   const [changelog, setChangelog] = useState<ChangelogEntry[]>([]);
   const [changelogBusy, setChangelogBusy] = useState(false);
+  // [v0.62.1] 자동매매 리포트 탭 — 최근 실행(켬→끔) 기록별 4부분 리포트 + 마크다운/AI 프롬프트 복사.
+  const [autoReports, setAutoReports] = useState<AutoReport[]>([]);
+  const [autoReportMsg, setAutoReportMsg] = useState("");
+  const [autoReportBusy, setAutoReportBusy] = useState(false);
+  const loadAutoReports = useCallback(async () => {
+    setAutoReportBusy(true);
+    try {
+      const r = await window.kyletool.getAutoReports?.();
+      setAutoReports(r?.reports ?? []);
+      setAutoReportMsg(r ? (r.message ?? (r.source === "pc" ? "PC가 올려 둔 리포트입니다(폰에서 보는 중)." : "")) : "이 버전에서는 리포트를 지원하지 않습니다.");
+    } catch (e) {
+      setAutoReportMsg(`불러오기 실패: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setAutoReportBusy(false);
+    }
+  }, []);
+  const copyReportText = async (text: string, what: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setAutoReportMsg(`✅ ${what}을(를) 복사했습니다. 원하는 곳(예: Claude 대화창)에 붙여 넣으세요.`);
+    } catch {
+      setAutoReportMsg("⚠️ 복사에 실패했습니다(브라우저 권한). 아래 리포트 글자를 직접 선택해 복사해 주세요.");
+    }
+  };
   const [unseenChangelog, setUnseenChangelog] = useState<ChangelogEntry | null>(null);
   const loadChangelog = useCallback(async (checkPopup: boolean) => {
     setChangelogBusy(true);
@@ -1319,6 +1345,8 @@ function App() {
     // [v0.30.0] 자동매매기록 탭을 열 때 최신 기록을 불러온다.
     // [v0.33.0] 매매연구 탭도 같은 기록(autoHistory)을 재료로 통계를 내므로 똑같이 불러온다.
     else if (t === "autoHistory" || t === "research") void loadAutoHistory();
+    // [v0.62.1] 자동매매 리포트 탭을 열 때 최신 실행 기록으로 리포트를 다시 만든다.
+    else if (t === "autoReport") void loadAutoReports();
     // [v0.56.0] 그룹원 관리 탭을 열 때 근황(그룹 기록)·채팅을 바로 불러온다.
     else if (t === "groupManage") { void loadGroupResearch(); void loadGroupChat(); }
     // [v0.61.9] 업데이트 내역 탭을 열 때 최신 목록을 다시 받아온다(팝업은 이미 로그인 직후
@@ -6175,6 +6203,64 @@ ${msg}
           제가(Claude) 매 버전마다 "오너에게 보고하는 것처럼" 고민·원인·수정 내용을 민감사항
           (실제 종목명·손익 금액·계좌 세부사항)만 뺀 채 적어 둔다 — 쓰기는 오너 계정만 가능
           (서버에서 직접, 이 화면엔 글쓰기 버튼이 없다). */}
+      {paneTab === "autoReport" && (
+        <main className="pane">
+          <section className="card wide">
+            <h2>📑 자동매매 리포트</h2>
+            <p className="hint">
+              자동매매를 켠 뒤 끌 때까지(또는 앱이 꺼질 때까지)를 "한 번의 운용"으로 보고, 그 동안의 성적을 한 장으로 정리합니다.
+              ① 운용 개요 ② 수익·자산 ③ 매매 통계 ④ 포지션·시스템. 맨 위가 가장 최근 운용이며, 진행 중이면 "현재까지" 기준입니다.
+            </p>
+            <button className="mini" disabled={autoReportBusy} onClick={() => void loadAutoReports()}>
+              {autoReportBusy ? "불러오는 중…" : "🔄 새로고침"}
+            </button>
+            {autoReportMsg && <p className="hint">{autoReportMsg}</p>}
+            {autoReports.length === 0 && !autoReportBusy && (
+              <p className="hint">아직 운용 기록이 없습니다. 자동매매를 한 번 켰다 끄면 이곳에 리포트가 생겨요.</p>
+            )}
+            {autoReports.map((r) => (
+              <article key={r.runId} className="changelog-entry">
+                <h3>
+                  {DateTime.fromMillis(r.overview.startedAtMs).setZone("Asia/Seoul").toFormat("MM-dd HH:mm")} 시작
+                  {r.live ? " · 🟢 진행 중(현재까지)" : ` · 종료: ${r.overview.endReason}`}
+                </h3>
+                <div className="hist-actions" style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "6px 0" }}>
+                  <button className="mini" onClick={() => void copyReportText(reportToMarkdown(r), "리포트(마크다운)")}>📋 리포트 복사</button>
+                  <button className="mini" onClick={() => void copyReportText(reportAiPrompt(r), "AI 분석용 프롬프트+리포트")}>🤖 AI 분석용으로 복사</button>
+                </div>
+                <table className="result-table">
+                  <tbody>
+                    <tr><th colSpan={2}>① 운용 개요</th></tr>
+                    <tr><td>운용 시간</td><td>{DateTime.fromMillis(r.overview.startedAtMs).setZone("Asia/Seoul").toFormat("yyyy-MM-dd HH:mm")} ~ {r.live ? "진행 중" : DateTime.fromMillis(r.overview.endedAtMs).setZone("Asia/Seoul").toFormat("yyyy-MM-dd HH:mm")} (총 {fmtDuration(r.overview.uptimeMs)})</td></tr>
+                    <tr><td>사이클·스크리닝 횟수</td><td>{r.overview.loopCount}회 중 스크리닝 {r.overview.scanCount}회</td></tr>
+                    <tr><td>종료 사유</td><td>{r.overview.endReason}</td></tr>
+                    <tr><th colSpan={2}>② 수익·자산</th></tr>
+                    <tr><td>시작 → 종료 자산(추정)</td><td>{r.money.startAssetsUsd != null ? `$${r.money.startAssetsUsd.toFixed(2)}` : "—"} → {r.money.endAssetsUsd != null ? `$${r.money.endAssetsUsd.toFixed(2)}` : "—"}</td></tr>
+                    <tr><td>실현 손익(총 / 수수료 추정 / 순)</td><td className={pnlClass(r.money.realizedNetUsd)}>{r.money.realizedGrossUsd >= 0 ? "+" : ""}${r.money.realizedGrossUsd.toFixed(2)} / {r.money.estFeesUsd != null ? `$${r.money.estFeesUsd.toFixed(2)}` : "추정 불가"} / <b>{r.money.realizedNetUsd >= 0 ? "+" : ""}${r.money.realizedNetUsd.toFixed(2)}{r.money.returnPct != null ? ` (${r.money.returnPct}%)` : ""}</b></td></tr>
+                    <tr><td>최대 낙폭(MDD)</td><td>${r.money.mddUsd.toFixed(2)}{r.money.mddPct != null ? ` (${r.money.mddPct}%)` : ""}</td></tr>
+                    <tr><td>슬리피지</td><td>{r.money.slippage}</td></tr>
+                    <tr><th colSpan={2}>③ 매매 통계</th></tr>
+                    <tr><td>총 매매(청산 완료)</td><td>{r.trades.total}건 (이익 {r.trades.wins} / 손실 {r.trades.losses})</td></tr>
+                    <tr><td>승률</td><td>{r.trades.winRatePct != null ? `${r.trades.winRatePct}%` : "—"}</td></tr>
+                    <tr><td>손익비(총이익÷총손실)</td><td>{r.trades.profitFactorLabel} <span className="hint">(이익 ${r.trades.grossProfitUsd.toFixed(2)} / 손실 ${r.trades.grossLossUsd.toFixed(2)})</span></td></tr>
+                    <tr><td>평균 보유 시간</td><td>{r.trades.avgHoldMs != null ? fmtDuration(r.trades.avgHoldMs) : "—"}</td></tr>
+                    <tr><th colSpan={2}>④ 포지션·시스템</th></tr>
+                    <tr><td>종료 시점 보유·대기</td><td>{r.positions.openAtEnd.length === 0 ? "없음" : r.positions.openAtEnd.map((p) => `${p.symbol}(${p.status === "active" ? "보유" : "대기"} $${p.entry}×${p.quantity})`).join(", ")}</td></tr>
+                    <tr><td>오류 로그 요약</td><td>타임아웃 {r.system.apiTimeouts} · 자동 재시도 {r.system.apiRetries} · 요청 실패 {r.system.apiFailures} · 사이클 예외 {r.system.cycleErrors}</td></tr>
+                  </tbody>
+                </table>
+                <details>
+                  <summary className="hint">계산 기준·한계 보기</summary>
+                  <ul className="hint">
+                    {r.notes.map((n, i) => <li key={i}>{n}</li>)}
+                  </ul>
+                </details>
+              </article>
+            ))}
+          </section>
+        </main>
+      )}
+
       {paneTab === "changelog" && (
         <main className="pane">
           <section className="card wide">
