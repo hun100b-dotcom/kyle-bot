@@ -377,6 +377,28 @@ ul.hint { padding-left: 18px; }
   white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.7;
   margin-top: 8px;
 }
+/* [v0.62.3] 업데이트 내역 아코디언 — 접힌 상태에선 버전(포인트색)·제목(밝은 글자)·날짜(보조색)만 */
+.cl-item {
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  background: var(--panel2); margin: 10px 0; overflow: hidden;
+}
+.cl-item[open] { border-color: var(--blue); }
+.cl-item > summary {
+  list-style: none; cursor: pointer; padding: 12px 14px 12px 36px; position: relative;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.cl-item > summary::-webkit-details-marker { display: none; }
+.cl-item > summary::before {
+  content: "▸"; position: absolute; left: 14px; top: 12px; color: var(--blue); font-size: 14px;
+}
+.cl-item[open] > summary::before { content: "▾"; }
+.cl-item > summary:hover { background: var(--surface3); }
+.cl-ver { color: var(--blue); font-weight: 700; font-size: 13px; }
+.cl-title { color: var(--text); font-weight: 600; font-size: 14.5px; line-height: 1.4; }
+.cl-date { color: var(--muted); font-size: 12px; }
+.cl-item .changelog-body {
+  margin: 0; padding: 12px 14px 14px; border-top: 1px solid var(--border); color: var(--text);
+}
 .progress-wrap {
   position: relative;
   height: 22px;

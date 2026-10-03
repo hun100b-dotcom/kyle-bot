@@ -6276,15 +6276,17 @@ ${msg}
               <p className="hint">{changelogBusy ? "불러오는 중…" : "아직 등록된 업데이트 내역이 없습니다."}</p>
             ) : (
               changelog.map((c) => (
-                <article key={c.version} className="changelog-entry">
-                  <h3>
-                    v{c.version} — {c.title}
-                  </h3>
-                  <p className="hint small">
-                    {DateTime.fromISO(c.publishedAt).setZone("Asia/Seoul").toFormat("yyyy-MM-dd HH:mm")} KST
-                  </p>
+                // [v0.62.3] 제목+날짜만 한 줄씩 보이고, 누르면 본문이 펼쳐지는 아코디언(기본 접힘) — 목록 가시성용.
+                <details key={c.version} className="cl-item">
+                  <summary>
+                    <span className="cl-ver">v{c.version}</span>
+                    <span className="cl-title">{c.title}</span>
+                    <span className="cl-date">
+                      {DateTime.fromISO(c.publishedAt).setZone("Asia/Seoul").toFormat("yyyy-MM-dd HH:mm")} KST
+                    </span>
+                  </summary>
                   <div className="changelog-body">{c.body}</div>
-                </article>
+                </details>
               ))
             )}
           </section>
