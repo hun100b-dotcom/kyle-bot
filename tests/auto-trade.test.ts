@@ -1180,7 +1180,7 @@ describe("[v0.33.0] 스크리닝 기준 탭 — 조건별 켜짐/꺼짐 + 수치
       expect(eng.saveAutoScanSettings({ dojiWickMinRatio: 0.9 }).autoScanDojiWickMinRatio).toBe(0.4);
       expect(eng.saveAutoScanSettings({ dojiMaxAgeMinutes: 1 }).autoScanDojiMaxAgeMinutes).toBe(10);
       expect(eng.saveAutoScanSettings({ dojiMaxAgeMinutes: 999 }).autoScanDojiMaxAgeMinutes).toBe(180);
-      // [v0.61.10] 최고점→도지 간격: 공장값 ON·30분, 5~240 범위로 보정, 껐다 켜도 저장 유지
+      // [v0.62.1] 최고점→도지 간격: 공장값 ON·30분, 5~240 범위로 보정, 껐다 켜도 저장 유지
       expect(eng.getSettings().autoScanDojiMaxGapEnabled).toBe(true);
       expect(eng.getSettings().autoScanDojiMaxGapMinutes).toBe(30);
       expect(eng.saveAutoScanSettings({ dojiMaxGapMinutes: 1 }).autoScanDojiMaxGapMinutes).toBe(5);

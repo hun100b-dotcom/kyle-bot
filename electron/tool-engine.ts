@@ -613,9 +613,9 @@ export interface ScreenEvidence {
     bothWicks: boolean; //   [v0.6.3] 위·아래 꼬리 둘 다 존재(망치형·유성형 아님)
     nextBearish: boolean; // 그 다음 봉도 음봉
     recentDoji: boolean; //  [v0.25.0] 도지 발생 시점이 20분 이내(오래되면 false → 불합격)
-    dojiNearHigh: boolean; // [v0.61.10] 도지가 최고점 '직후'(간격 한도 이내)에 생겼는지(한참 뒤면 false → 불합격)
+    dojiNearHigh: boolean; // [v0.62.1] 도지가 최고점 '직후'(간격 한도 이내)에 생겼는지(한참 뒤면 false → 불합격)
   };
-  gapFromHighMinutes: number | null; // [v0.61.10] 최고점 봉→도지 봉 간격(분) — 화면 근거 표시용
+  gapFromHighMinutes: number | null; // [v0.62.1] 최고점 봉→도지 봉 간격(분) — 화면 근거 표시용
 }
 
 /** 스크리너 결과 한 종목 */
@@ -671,8 +671,8 @@ export interface ScreenOpts {
   dojiWickMinRatio?: number; //   도지 최소 꼬리 비율(기본 WICK_MIN_RATIO=0.1)
   dojiMaxAgeEnabled?: boolean; // 도지 신선도 검사 켜짐 여부(기본 true)
   dojiMaxAgeMinutes?: number; //  도지 신선도 기준 분(기본 DOJI_MAX_AGE_MINUTES=40)
-  dojiMaxGapEnabled?: boolean; // [v0.61.10] 최고점→도지 간격 검사 켜짐 여부(기본 true)
-  dojiMaxGapMinutes?: number; //  [v0.61.10] 간격 상한 분(기본 30)
+  dojiMaxGapEnabled?: boolean; // [v0.62.1] 최고점→도지 간격 검사 켜짐 여부(기본 true)
+  dojiMaxGapMinutes?: number; //  [v0.62.1] 간격 상한 분(기본 30)
   nextCandleConfirmEnabled?: boolean; // 도지 다음 봉 음봉 확인 켜짐 여부(기본 true) — 끄면 도지만으로 확정
   excludeEtf?: boolean; //        ETF/ETN 등 제외 여부(기본 true)
 }
@@ -979,7 +979,7 @@ export interface AutoTradeHistoryEntry {
     dojiWickMinRatio: number;
     dojiMaxAgeEnabled: boolean;
     dojiMaxAgeMinutes: number;
-    dojiMaxGapEnabled?: boolean; // [v0.61.10] 옛 기록엔 없음
+    dojiMaxGapEnabled?: boolean; // [v0.62.1] 옛 기록엔 없음
     dojiMaxGapMinutes?: number;
     nextCandleConfirmEnabled: boolean;
     excludeEtf: boolean;
@@ -1119,7 +1119,7 @@ export class ToolEngine extends EventEmitter {
   private autoScanDojiWickMinRatio = 0.1; //  도지 최소 꼬리 비율(위·아래 각각, 0~0.4)
   private autoScanDojiMaxAgeEnabled = true; // 도지 신선도(너무 오래된 도지 배제) 켜짐 여부
   private autoScanDojiMaxAgeMinutes = 40; //  도지가 이보다 오래되면 배제(10~180분)
-  private autoScanDojiMaxGapEnabled = true; //  [v0.61.10] 최고점→도지 간격 제한 켜짐 여부
+  private autoScanDojiMaxGapEnabled = true; //  [v0.62.1] 최고점→도지 간격 제한 켜짐 여부
   private autoScanDojiMaxGapMinutes = 30; //   최고점 봉에서 이보다 한참 뒤에 생긴 도지는 배제(5~240분)
   private autoScanNextCandleConfirmEnabled = true; // 도지 다음 봉까지 음봉이어야 "확정" — 끄면 도지만으로 확정
   private autoScanExcludeEtf = true; //       ETF·ETN 등(일반 주식 아닌 것) 제외 여부
@@ -5668,7 +5668,7 @@ export class ToolEngine extends EventEmitter {
             now.toMillis(),
             dojiMaxAgeEnabled ? dojiMaxAgeMinutes : Number.POSITIVE_INFINITY,
             nextCandleConfirmEnabled,
-            // [v0.61.10] 도지가 최고점 한참 뒤에 생긴 경우(RUBI 05:00 고점→08:55 도지) 배제
+            // [v0.62.1] 도지가 최고점 한참 뒤에 생긴 경우(RUBI 05:00 고점→08:55 도지) 배제
             dojiMaxGapEnabled ? dojiMaxGapMinutes : Number.POSITIVE_INFINITY,
           ); // HA 캔들로 패턴 판정
 
@@ -5873,7 +5873,7 @@ export class ToolEngine extends EventEmitter {
     const closes = candles5m.map((c) => c.close);
     const ema200 = ema(closes, 200);
     const cloud = ichimoku(candles5m);
-    // [v0.61.10] 표(스캔)와 차트가 서로 다른 기준으로 판정되는 일이 없게, 저장된 스크리닝 기준을 그대로 쓴다
+    // [v0.62.1] 표(스캔)와 차트가 서로 다른 기준으로 판정되는 일이 없게, 저장된 스크리닝 기준을 그대로 쓴다
     //   (예전엔 몸통 0.3·꼬리 10%·신선도 40분 기본값 고정 → 설정을 바꾸면 표와 차트가 어긋날 수 있었다).
     const pat = scanSessionPattern(
       candles5m,

@@ -208,7 +208,7 @@ describe(`[v0.25.0/v0.29.0] 도지 신선도(기본 ${DOJI_MAX_AGE_MINUTES}분 �
   });
 });
 
-describe("[v0.61.10] 최고점→도지 간격 제한(RUBI 사례: 05:00 고점 → 08:55 도지)", () => {
+describe("[v0.62.1] 최고점→도지 간격 제한(RUBI 사례: 05:00 고점 → 08:55 도지)", () => {
   const highC = c(0, 98, 100, 97, 99); // 최고점(0분)
   const dojiAt = (min: number) => c(min * MIN, 99, 99.5, 98.5, 98.9); // 음봉 도지
   const bearAt = (min: number) => c(min * MIN, 98.9, 99, 98, 98.2);

@@ -4919,7 +4919,7 @@ ${msg}
               </label>
             </div>
 
-            {/* ④-2 [v0.61.10] 최고점→도지 간격 제한 */}
+            {/* ④-2 [v0.62.1] 최고점→도지 간격 제한 */}
             <div className="crit-card">
               <div className="crit-head">
                 <label className="radio">
