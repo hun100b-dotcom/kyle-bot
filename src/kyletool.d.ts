@@ -127,6 +127,11 @@ interface ToolSettings {
   /** [v0.61.8] 삼분할 매매기법의 몇 분할 타점을 자동매매 매수가로 쓸지(1~2). 공장값 1(가장
    *  얕은 눌림). 2를 고르면 더 깊이 눌렸을 때만 사는 보수적 진입(체결 자체는 덜 될 수 있음). */
   autoTradeEntryLevel: 1 | 2;
+  /** [v0.63.0] 방어 전략 — 손절 방식(고정 % / EMA 기준), EMA 아래 여유%, 손절 종목 당일 재진입 금지, 연속 손절 자동중지 횟수(0=끔). 옛 PC면 없을 수 있음. */
+  autoTradeSlMode?: "fixed" | "ema";
+  autoTradeEmaStopBufferPct?: number;
+  autoTradeReentryBlockEnabled?: boolean;
+  autoTradeLossStreakLimit?: number;
   autoTradeEnabled: boolean;
   /** [v0.44.0] 시스템 휴무 시간대(매일 05:00~17:00 KST — 스크리닝·주문·자동매매 전부 정지) 기능
    *  켜짐 여부. 다른 자동매매 토글과 달리 이건 재시작해도 유지된다(안전장치). */
@@ -145,6 +150,12 @@ interface ToolSettings {
   autoScanDojiMaxAgeMinutes: number;
   autoScanDojiMaxGapEnabled: boolean; // [v0.62.1]
   autoScanDojiMaxGapMinutes: number;
+  /** [v0.63.0] 방어 필터 — EMA 최소 이격도·EMA 상승·변동성 상한(옛 PC면 없을 수 있음) */
+  autoScanEmaMinGapEnabled?: boolean;
+  autoScanEmaMinGapPct?: number;
+  autoScanEmaSlopeEnabled?: boolean;
+  autoScanAtrFilterEnabled?: boolean;
+  autoScanAtrMaxPct?: number;
   autoScanNextCandleConfirmEnabled: boolean;
   autoScanExcludeEtf: boolean;
   /** [v0.45.0] "매매진행할 장" 선택 — 자동매매가 신규 진입을 시도할 세션(전부 켜짐/꺼짐). */
@@ -245,7 +256,28 @@ interface AutoTradeHistoryEntry {
     maxLossPct: number;
     maxInvestPct: number;
     watchMinutes: number;
+    entryLevel?: 1 | 2;
+    emaMinGapEnabled?: boolean; // [v0.63.0]
+    emaMinGapPct?: number;
+    emaSlopeEnabled?: boolean;
+    atrFilterEnabled?: boolean;
+    atrMaxPct?: number;
+    slMode?: "fixed" | "ema";
+    emaStopBufferPct?: number;
   };
+  /** [v0.63.0 측정] 진입 당시 이격도·ATR%·EMA 기울기 / 보유 중 최대 역행·순행 / 실제 체결가·슬리피지 */
+  entryMetrics?: EntryMetrics;
+  maePct?: number | null;
+  mfePct?: number | null;
+  exitFillPrice?: number | null;
+  slippagePct?: number | null;
+}
+
+/** [v0.63.0] 진입 시점 측정값(lib/defense.ts와 같은 모양). */
+interface EntryMetrics {
+  emaGapPct: number | null;
+  atrPct: number | null;
+  emaSlopePct: number | null;
 }
 
 /** [v0.3.0] orderCapacity(capacity) 응답 — 주문가능/보유 + 세션 시드 제안 */
@@ -453,7 +485,7 @@ interface AutoReport {
     returnPct: number | null;
     mddUsd: number;
     mddPct: number | null;
-    slippage: "측정 불가";
+    slippage: string;
   };
   trades: {
     total: number;
@@ -491,6 +523,9 @@ interface ScreenResult {
   note?: string;
   /** [v0.36.0] 워런트 의심 코멘트(확정/관찰 후보만, 티커 추측 방식 — 차단 아님, 표시 전용). */
   warrantWarning?: string | null;
+  /** [v0.63.0] 진입 시점 측정값 + 방어 필터 탈락 사유 */
+  entryMetrics?: EntryMetrics;
+  defenseReasons?: string[];
 }
 interface ScreenProgress {
   phase: "ranking" | "scanning" | "done";
@@ -521,6 +556,11 @@ interface ScreenRun {
   dojiMaxAgeMinutes: number;
   dojiMaxGapEnabled: boolean; // [v0.62.1]
   dojiMaxGapMinutes: number;
+  emaMinGapEnabled?: boolean; // [v0.63.0] 옛 PC 스캔엔 없을 수 있음
+  emaMinGapPct?: number;
+  emaSlopeEnabled?: boolean;
+  atrFilterEnabled?: boolean;
+  atrMaxPct?: number;
   nextCandleConfirmEnabled: boolean;
   excludeEtf: boolean;
 }
@@ -784,6 +824,11 @@ interface KyletoolBridge {
     watchMinutes?: number;
     /** [v0.61.8] 진입 타점 분할(1~2). */
     entryLevel?: 1 | 2;
+    /** [v0.63.0] 방어 전략 */
+    slMode?: "fixed" | "ema";
+    emaStopBufferPct?: number;
+    reentryBlockEnabled?: boolean;
+    lossStreakLimit?: number;
   }): Promise<ToolSettings>;
   /** [v0.44.0] 지금 "시스템 휴무 시간대(또는 휴장)"인지 + 왜 + 언제 재개되는지. */
   getSystemPauseStatus(): Promise<{ paused: boolean; reason: string | null; resumesAtMs: number | null }>;
@@ -804,6 +849,11 @@ interface KyletoolBridge {
     dojiMaxAgeMinutes?: number;
     dojiMaxGapEnabled?: boolean; // [v0.62.1]
     dojiMaxGapMinutes?: number;
+    emaMinGapEnabled?: boolean; // [v0.63.0]
+    emaMinGapPct?: number;
+    emaSlopeEnabled?: boolean;
+    atrFilterEnabled?: boolean;
+    atrMaxPct?: number;
     nextCandleConfirmEnabled?: boolean;
     excludeEtf?: boolean;
     // [v0.45.0] "매매진행할 장" 선택

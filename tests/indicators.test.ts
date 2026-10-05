@@ -347,6 +347,13 @@ describe("엔진 스캔 왕복(연습 모드 + 목 서버)", () => {
       // 목 서버가 1300분치 1분봉을 주므로 5분봉 200개 이상 합성돼야 한다(데이터 부족 아님)
       const anySufficient = run.results.some((r) => r.status !== "insufficient" && r.n5m >= 200);
       expect(anySufficient).toBe(true);
+      // [v0.63.0] 방어 필터는 옵션 안 주면 전부 꺼짐으로 echo되고, 측정값(이격도·ATR·기울기)은 항상 채워진다
+      expect(run.emaMinGapEnabled).toBe(false);
+      expect(run.atrFilterEnabled).toBe(false);
+      const measured = run.results.find((r) => r.status !== "insufficient" && r.n5m >= 200)!;
+      expect(measured.entryMetrics?.emaGapPct).not.toBeNull();
+      expect(measured.entryMetrics?.atrPct).not.toBeNull();
+      expect(measured.defenseReasons).toEqual([]);
       // 각 결과에 지표가 채워진다
       const ok = run.results.find((r) => r.status !== "insufficient")!;
       expect(ok.ema200).not.toBeNull();

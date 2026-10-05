@@ -32,6 +32,17 @@ import { toAutoStateSyncPayload, isAutoStateSyncPayload, mergeAutoHistory, deriv
 import { toSplitsSyncPayload, isSplitsSyncPayload, mergeSplits, type SplitsSyncPayload } from "../lib/splits-sync"; // [v0.61.7] 삼분할 타점 기록 기기 간 동기화
 import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, WICK_MIN_RATIO, DOJI_MAX_AGE_MINUTES, type Candle, type SessionPattern } from "../lib/indicators";
 import { buildAutoReport, type AutoRunRecord, type AutoReport } from "../lib/auto-report"; // [v0.62.1] 자동매매 리포트
+import {
+  atrPct,
+  emaSlopePct,
+  emaGapPct,
+  evaluateDefenseFilters,
+  structuralStopPrice,
+  isReentryBlocked,
+  trailingStopLossStreak,
+  excursion,
+  type EntryMetrics,
+} from "../lib/defense"; // [v0.63.0] 방어 전략(이격도·기울기·변동성 필터, EMA 기준 손절, 재진입 금지, 연속 손절 중지)
 import { fetchWithTimeout, netStats } from "../lib/fetch-timeout"; // [v0.61.5 — ③ 전수조사 "높음-1"] Supabase REST 호출도 토스처럼 타임아웃을 건다
 import {
   getPrice,
@@ -640,6 +651,10 @@ export interface ScreenResult {
   /** [v0.36.0] 워런트 의심 코멘트(확정/관찰 후보만 확인 — 티커 추측 방식이라 100% 정확하진 않음,
    *  "차단"이 아니라 화면에 경고만 표시하는 용도. 없으면 확인 안 됨/문제 없음). */
   warrantWarning?: string | null;
+  /** [v0.63.0] 진입 시점 측정값(이격도·ATR%·EMA 기울기) — 필터 판정·기록·화면 표시 공용. */
+  entryMetrics?: EntryMetrics;
+  /** [v0.63.0] 방어 필터(이격도·기울기·변동성)에서 떨어진 사유 — 통과면 빈 배열. */
+  defenseReasons?: string[];
 }
 
 /** 스캔 진행 상황(진행률 바) */
@@ -674,6 +689,11 @@ export interface ScreenOpts {
   dojiMaxAgeMinutes?: number; //  도지 신선도 기준 분(기본 DOJI_MAX_AGE_MINUTES=40)
   dojiMaxGapEnabled?: boolean; // [v0.62.1] 최고점→도지 간격 검사 켜짐 여부(기본 true)
   dojiMaxGapMinutes?: number; //  [v0.62.1] 간격 상한 분(기본 30)
+  emaMinGapEnabled?: boolean; //  [v0.63.0] EMA 최소 이격도(전봉종가 기준) 켜짐 여부(기본 false)
+  emaMinGapPct?: number; //       [v0.63.0] 최소 이격도 %(기본 6 — 카일 제안)
+  emaSlopeEnabled?: boolean; //   [v0.63.0] EMA 상승 중(1시간 전보다 높음) 조건 켜짐 여부(기본 false)
+  atrFilterEnabled?: boolean; //  [v0.63.0] 변동성(ATR%) 상한 켜짐 여부(기본 false)
+  atrMaxPct?: number; //          [v0.63.0] 5분봉 평균 변동폭 상한 %(기본 3)
   nextCandleConfirmEnabled?: boolean; // 도지 다음 봉 음봉 확인 켜짐 여부(기본 true) — 끄면 도지만으로 확정
   excludeEtf?: boolean; //        ETF/ETN 등 제외 여부(기본 true)
 }
@@ -699,6 +719,11 @@ export interface ScreenRun {
   dojiMaxAgeMinutes: number;
   dojiMaxGapEnabled: boolean;
   dojiMaxGapMinutes: number;
+  emaMinGapEnabled: boolean; // [v0.63.0]
+  emaMinGapPct: number;
+  emaSlopeEnabled: boolean;
+  atrFilterEnabled: boolean;
+  atrMaxPct: number;
   nextCandleConfirmEnabled: boolean;
   excludeEtf: boolean;
 }
@@ -993,7 +1018,23 @@ export interface AutoTradeHistoryEntry {
      *  성적이 어땠는지" 비교할 수 있게. 이 필드가 생기기 전 기록은 undefined(=당시엔 늘
      *  1분할 고정이었으므로 해석 시 1로 간주해도 된다). */
     entryLevel?: 1 | 2;
+    // [v0.63.0] 방어 전략 설정(옛 기록엔 없음)
+    emaMinGapEnabled?: boolean;
+    emaMinGapPct?: number;
+    emaSlopeEnabled?: boolean;
+    atrFilterEnabled?: boolean;
+    atrMaxPct?: number;
+    slMode?: "fixed" | "ema";
+    emaStopBufferPct?: number;
   };
+  /** [v0.63.0 ② 측정] 진입 당시 이격도·ATR%·EMA 기울기. 나중에 "어떤 조건의 매매가 손절됐나"를 분석하는 재료. */
+  entryMetrics?: EntryMetrics;
+  /** [v0.63.0 ② 측정] 보유 기간 최대 역행(MAE, 음수 %)·최대 순행(MFE, 양수 %) — 청산 직후 1분봉으로 계산. */
+  maePct?: number | null;
+  mfePct?: number | null;
+  /** [v0.63.0 ② 측정] 익절/손절 주문의 실제 평균 체결가(토스 조회)와, 목표가 대비 차이(슬리피지 %). */
+  exitFillPrice?: number | null;
+  slippagePct?: number | null;
 }
 
 // -----------------------------------------------------------------------------
@@ -1097,6 +1138,11 @@ export class ToolEngine extends EventEmitter {
    *  더 신중한 사람 판단이 필요하다는 게 오너 기존 설계 의도(자동매매는 1분할만 쓴다는
    *  원래 결정)와 결이 맞다. */
   private autoTradeEntryLevel: 1 | 2 = 1;
+  // [v0.63.0] 방어 전략 — 매매 리스크 설정
+  private autoTradeSlMode: "fixed" | "ema" = "fixed"; // ① 손절 방식: 고정 %(기존) / EMA 기준(구조적 손절)
+  private autoTradeEmaStopBufferPct = 1.5; //            EMA 기준 손절일 때 EMA 아래 여유(%)
+  private autoTradeReentryBlockEnabled = true; //       ⑤ 손절된 종목은 그날(KST) 재진입 금지 — 보험 성격이라 공장값 켜짐
+  private autoTradeLossStreakLimit = 3; //              ⑤ 이번 실행에서 연속 손절 N회면 자동매매 자동 중지(0=끔)
   // [v0.44.0] 오너 결정 — 매일 05:00~17:00 KST(데이마켓+애프터 구간, 토스 합성시세)는 스크리닝·
   //   수동 주문·자동매매를 전부 멈춘다. 재개는 정확히 17:00(프리마켓 시작)이다. "켜짐" 여부는
   //   다른 자동매매 토글과 달리 껐다 켜도 유지한다(안전장치라 기본 켜짐을 지키는 게 맞음).
@@ -1122,6 +1168,12 @@ export class ToolEngine extends EventEmitter {
   private autoScanDojiMaxAgeMinutes = 40; //  도지가 이보다 오래되면 배제(10~180분)
   private autoScanDojiMaxGapEnabled = true; //  [v0.62.1] 최고점→도지 간격 제한 켜짐 여부
   private autoScanDojiMaxGapMinutes = 30; //   최고점 봉에서 이보다 한참 뒤에 생긴 도지는 배제(5~240분)
+  // [v0.63.0] 방어 전략 — 스크리닝 필터(공장값은 전부 꺼짐: 데이터로 효과 확인 후 켜기로 오너와 합의)
+  private autoScanEmaMinGapEnabled = false; // ④ EMA 최소 이격도(전봉종가 기준)
+  private autoScanEmaMinGapPct = 6; //         카일 제안값
+  private autoScanEmaSlopeEnabled = false; //  ④ EMA 상승 중(1시간 전보다 높음)
+  private autoScanAtrFilterEnabled = false; // ③ 변동성 상한
+  private autoScanAtrMaxPct = 3; //            5분봉 평균 변동폭 상한(%)
   private autoScanNextCandleConfirmEnabled = true; // 도지 다음 봉까지 음봉이어야 "확정" — 끄면 도지만으로 확정
   private autoScanExcludeEtf = true; //       ETF·ETN 등(일반 주식 아닌 것) 제외 여부
   // [v0.45.0 — 오너 요청 "매매진행할 장 선택"] 자동매매가 어느 장(세션)에서 신규 진입을 시도할지
@@ -1382,6 +1434,14 @@ export class ToolEngine extends EventEmitter {
     // [v0.61.8] 저장된 진입 타점 분할(1~2) 복원.
     const ael = Number(process.env.AUTO_ENTRY_LEVEL);
     if (ael === 1 || ael === 2) this.autoTradeEntryLevel = ael;
+    // [v0.63.0] 방어 전략 설정 복원
+    if (process.env.AUTO_SL_MODE === "ema" || process.env.AUTO_SL_MODE === "fixed") this.autoTradeSlMode = process.env.AUTO_SL_MODE;
+    const aesb = Number(process.env.AUTO_EMA_STOP_BUFFER_PCT);
+    if (Number.isFinite(aesb) && aesb >= 0) this.autoTradeEmaStopBufferPct = aesb;
+    if (process.env.AUTO_REENTRY_BLOCK_ENABLED === "false") this.autoTradeReentryBlockEnabled = false;
+    else if (process.env.AUTO_REENTRY_BLOCK_ENABLED === "true") this.autoTradeReentryBlockEnabled = true;
+    const alsl = Number(process.env.AUTO_LOSS_STREAK_LIMIT);
+    if (process.env.AUTO_LOSS_STREAK_LIMIT && Number.isFinite(alsl) && alsl >= 0) this.autoTradeLossStreakLimit = Math.round(alsl);
     // [v0.61.9] 마지막으로 읽은 업데이트 내역 버전 복원(이 기기 전용 — 재시작해도 팝업 중복 안 뜨게).
     if (process.env.LAST_SEEN_CHANGELOG) this.lastSeenChangelogVersion = process.env.LAST_SEEN_CHANGELOG;
     // [v0.44.0] 저장된 시스템 휴무 시간대 기능 켜짐 여부 복원(기본 켜짐 — 명시적으로 껐을 때만 꺼짐).
@@ -1413,6 +1473,16 @@ export class ToolEngine extends EventEmitter {
     else if (process.env.AUTO_SCAN_DOJI_MAX_GAP_ENABLED === "true") this.autoScanDojiMaxGapEnabled = true;
     const asdmg = Number(process.env.AUTO_SCAN_DOJI_MAX_GAP_MINUTES);
     if (Number.isFinite(asdmg) && asdmg > 0) this.autoScanDojiMaxGapMinutes = Math.round(asdmg);
+    if (process.env.AUTO_SCAN_EMA_MIN_GAP_ENABLED === "true") this.autoScanEmaMinGapEnabled = true;
+    else if (process.env.AUTO_SCAN_EMA_MIN_GAP_ENABLED === "false") this.autoScanEmaMinGapEnabled = false;
+    const asemg = Number(process.env.AUTO_SCAN_EMA_MIN_GAP_PCT);
+    if (Number.isFinite(asemg) && asemg > 0) this.autoScanEmaMinGapPct = asemg;
+    if (process.env.AUTO_SCAN_EMA_SLOPE_ENABLED === "true") this.autoScanEmaSlopeEnabled = true;
+    else if (process.env.AUTO_SCAN_EMA_SLOPE_ENABLED === "false") this.autoScanEmaSlopeEnabled = false;
+    if (process.env.AUTO_SCAN_ATR_FILTER_ENABLED === "true") this.autoScanAtrFilterEnabled = true;
+    else if (process.env.AUTO_SCAN_ATR_FILTER_ENABLED === "false") this.autoScanAtrFilterEnabled = false;
+    const asam = Number(process.env.AUTO_SCAN_ATR_MAX_PCT);
+    if (Number.isFinite(asam) && asam > 0) this.autoScanAtrMaxPct = asam;
     if (process.env.AUTO_SCAN_NEXT_CANDLE_CONFIRM_ENABLED === "false") this.autoScanNextCandleConfirmEnabled = false;
     else if (process.env.AUTO_SCAN_NEXT_CANDLE_CONFIRM_ENABLED === "true") this.autoScanNextCandleConfirmEnabled = true;
     if (process.env.AUTO_SCAN_EXCLUDE_ETF === "false") this.autoScanExcludeEtf = false;
@@ -1456,6 +1526,10 @@ export class ToolEngine extends EventEmitter {
       autoTradeMaxInvestPct: this.autoTradeMaxInvestPct,
       autoTradeWatchMinutes: this.autoTradeWatchMinutes, // [v0.42.0] 장기간 미체결 자동취소 기준(분)
       autoTradeEntryLevel: this.autoTradeEntryLevel, // [v0.61.8] 진입 타점 분할(1~2)
+      autoTradeSlMode: this.autoTradeSlMode, // [v0.63.0] 방어 전략
+      autoTradeEmaStopBufferPct: this.autoTradeEmaStopBufferPct,
+      autoTradeReentryBlockEnabled: this.autoTradeReentryBlockEnabled,
+      autoTradeLossStreakLimit: this.autoTradeLossStreakLimit,
       autoTradeEnabled: this.autoTradeEnabled,
       systemPauseEnabled: this.systemPauseEnabled, // [v0.44.0] 시스템 휴무 시간대(05:00~17:00 KST) 기능
       // [v0.28.0] 자동매매 스크리너 조건(4개)
@@ -1472,6 +1546,11 @@ export class ToolEngine extends EventEmitter {
       autoScanDojiMaxAgeMinutes: this.autoScanDojiMaxAgeMinutes,
       autoScanDojiMaxGapEnabled: this.autoScanDojiMaxGapEnabled,
       autoScanDojiMaxGapMinutes: this.autoScanDojiMaxGapMinutes,
+      autoScanEmaMinGapEnabled: this.autoScanEmaMinGapEnabled, // [v0.63.0]
+      autoScanEmaMinGapPct: this.autoScanEmaMinGapPct,
+      autoScanEmaSlopeEnabled: this.autoScanEmaSlopeEnabled,
+      autoScanAtrFilterEnabled: this.autoScanAtrFilterEnabled,
+      autoScanAtrMaxPct: this.autoScanAtrMaxPct,
       autoScanNextCandleConfirmEnabled: this.autoScanNextCandleConfirmEnabled,
       autoScanExcludeEtf: this.autoScanExcludeEtf,
       // [v0.45.0] "매매진행할 장" 선택
@@ -1504,7 +1583,19 @@ export class ToolEngine extends EventEmitter {
     maxInvestPct?: number;
     watchMinutes?: number; // [v0.42.0] 장기간 미체결 자동취소 기준(분) — 여기서 함께 저장
     entryLevel?: 1 | 2; // [v0.61.8] 진입 타점 분할(1~2) — 여기서 함께 저장
+    slMode?: "fixed" | "ema"; // [v0.63.0] 방어 전략
+    emaStopBufferPct?: number;
+    reentryBlockEnabled?: boolean;
+    lossStreakLimit?: number;
   }) {
+    if (input.slMode === "fixed" || input.slMode === "ema") this.autoTradeSlMode = input.slMode;
+    if (typeof input.emaStopBufferPct === "number" && Number.isFinite(input.emaStopBufferPct) && input.emaStopBufferPct >= 0) {
+      this.autoTradeEmaStopBufferPct = Math.min(10, input.emaStopBufferPct); // 0~10%
+    }
+    if (typeof input.reentryBlockEnabled === "boolean") this.autoTradeReentryBlockEnabled = input.reentryBlockEnabled;
+    if (typeof input.lossStreakLimit === "number" && Number.isFinite(input.lossStreakLimit) && input.lossStreakLimit >= 0) {
+      this.autoTradeLossStreakLimit = Math.round(Math.min(10, input.lossStreakLimit)); // 0(끔)~10
+    }
     if (typeof input.maxPositions === "number" && Number.isFinite(input.maxPositions) && input.maxPositions > 0) {
       this.autoTradeMaxPositions = Math.round(input.maxPositions);
     }
@@ -1529,7 +1620,10 @@ export class ToolEngine extends EventEmitter {
       summary:
         `자동매매 한도 저장 — 최대 ${this.autoTradeMaxPositions}종목 · 최대손실 시드대비 ${this.autoTradeMaxLossPct}% · ` +
         `총 투입한도 시드대비 ${this.autoTradeMaxInvestPct}% · 미체결 자동취소 ${this.autoTradeWatchMinutes}분 · ` +
-        `진입 타점 ${this.autoTradeEntryLevel}분할`,
+        `진입 타점 ${this.autoTradeEntryLevel}분할 · ` +
+        `손절 방식 ${this.autoTradeSlMode === "ema" ? `EMA 기준(EMA 아래 ${this.autoTradeEmaStopBufferPct}%)` : "고정 %"} · ` +
+        `손절 종목 당일 재진입 금지 ${this.autoTradeReentryBlockEnabled ? "ON" : "OFF"} · ` +
+        `연속 손절 자동중지 ${this.autoTradeLossStreakLimit > 0 ? `${this.autoTradeLossStreakLimit}회` : "OFF"}`,
     });
     return this.getSettings();
   }
@@ -1620,6 +1714,11 @@ export class ToolEngine extends EventEmitter {
     dojiMaxAgeMinutes?: number;
     dojiMaxGapEnabled?: boolean;
     dojiMaxGapMinutes?: number;
+    emaMinGapEnabled?: boolean; // [v0.63.0]
+    emaMinGapPct?: number;
+    emaSlopeEnabled?: boolean;
+    atrFilterEnabled?: boolean;
+    atrMaxPct?: number;
     nextCandleConfirmEnabled?: boolean;
     excludeEtf?: boolean;
     // [v0.45.0] "매매진행할 장" 선택 — 전부 선택(안 보내면 이전값 유지).
@@ -1656,6 +1755,15 @@ export class ToolEngine extends EventEmitter {
     if (typeof input.dojiMaxGapMinutes === "number" && Number.isFinite(input.dojiMaxGapMinutes) && input.dojiMaxGapMinutes > 0) {
       this.autoScanDojiMaxGapMinutes = Math.round(Math.min(240, Math.max(5, input.dojiMaxGapMinutes)));
     }
+    if (typeof input.emaMinGapEnabled === "boolean") this.autoScanEmaMinGapEnabled = input.emaMinGapEnabled;
+    if (typeof input.emaMinGapPct === "number" && Number.isFinite(input.emaMinGapPct) && input.emaMinGapPct > 0) {
+      this.autoScanEmaMinGapPct = Math.round(Math.min(50, Math.max(0.5, input.emaMinGapPct)) * 10) / 10; // 0.5~50%
+    }
+    if (typeof input.emaSlopeEnabled === "boolean") this.autoScanEmaSlopeEnabled = input.emaSlopeEnabled;
+    if (typeof input.atrFilterEnabled === "boolean") this.autoScanAtrFilterEnabled = input.atrFilterEnabled;
+    if (typeof input.atrMaxPct === "number" && Number.isFinite(input.atrMaxPct) && input.atrMaxPct > 0) {
+      this.autoScanAtrMaxPct = Math.round(Math.min(20, Math.max(0.5, input.atrMaxPct)) * 10) / 10; // 0.5~20%
+    }
     if (typeof input.nextCandleConfirmEnabled === "boolean") this.autoScanNextCandleConfirmEnabled = input.nextCandleConfirmEnabled;
     if (typeof input.excludeEtf === "boolean") this.autoScanExcludeEtf = input.excludeEtf;
     if (typeof input.dayEnabled === "boolean") this.autoScanDayEnabled = input.dayEnabled;
@@ -1678,6 +1786,9 @@ export class ToolEngine extends EventEmitter {
         `구름 ${this.autoScanCloudEnabled ? "ON" : "OFF"} · 꼬리비율 ${Math.round(this.autoScanDojiWickMinRatio * 100)}% · ` +
         `신선도 ${this.autoScanDojiMaxAgeEnabled ? `${this.autoScanDojiMaxAgeMinutes}분` : "OFF"} · ` +
         `고점~도지 간격 ${this.autoScanDojiMaxGapEnabled ? `${this.autoScanDojiMaxGapMinutes}분` : "OFF"} · ` +
+        `EMA 이격도 ${this.autoScanEmaMinGapEnabled ? `≥${this.autoScanEmaMinGapPct}%` : "OFF"} · ` +
+        `EMA 상승 ${this.autoScanEmaSlopeEnabled ? "ON" : "OFF"} · ` +
+        `변동성 상한 ${this.autoScanAtrFilterEnabled ? `≤${this.autoScanAtrMaxPct}%` : "OFF"} · ` +
         `다음봉확인 ${this.autoScanNextCandleConfirmEnabled ? "ON" : "OFF"} · ETF제외 ${this.autoScanExcludeEtf ? "ON" : "OFF"} · ` +
         `매매 진행할 장: ${sessionsOn}`,
     });
@@ -1700,6 +1811,11 @@ export class ToolEngine extends EventEmitter {
       dojiMaxAgeMinutes: this.autoScanDojiMaxAgeMinutes,
       dojiMaxGapEnabled: this.autoScanDojiMaxGapEnabled,
       dojiMaxGapMinutes: this.autoScanDojiMaxGapMinutes,
+      emaMinGapEnabled: this.autoScanEmaMinGapEnabled,
+      emaMinGapPct: this.autoScanEmaMinGapPct,
+      emaSlopeEnabled: this.autoScanEmaSlopeEnabled,
+      atrFilterEnabled: this.autoScanAtrFilterEnabled,
+      atrMaxPct: this.autoScanAtrMaxPct,
       nextCandleConfirmEnabled: this.autoScanNextCandleConfirmEnabled,
       excludeEtf: this.autoScanExcludeEtf,
     };
@@ -1808,6 +1924,10 @@ export class ToolEngine extends EventEmitter {
       `AUTO_MAX_INVEST_PCT=${this.autoTradeMaxInvestPct}`,
       `AUTO_WATCH_MINUTES=${this.autoTradeWatchMinutes}`, // [v0.42.0] 장기간 미체결 자동취소 기준(분)
       `AUTO_ENTRY_LEVEL=${this.autoTradeEntryLevel}`, // [v0.61.8] 진입 타점 분할(1~2)
+      `AUTO_SL_MODE=${this.autoTradeSlMode}`, // [v0.63.0] 방어 전략
+      `AUTO_EMA_STOP_BUFFER_PCT=${this.autoTradeEmaStopBufferPct}`,
+      `AUTO_REENTRY_BLOCK_ENABLED=${this.autoTradeReentryBlockEnabled}`,
+      `AUTO_LOSS_STREAK_LIMIT=${this.autoTradeLossStreakLimit}`,
       `LAST_SEEN_CHANGELOG=${this.lastSeenChangelogVersion ?? ""}`, // [v0.61.9] 이 기기가 마지막으로 읽은 업데이트 내역 버전
       `SYSTEM_PAUSE_ENABLED=${this.systemPauseEnabled ? "true" : "false"}`, // [v0.44.0] 시스템 휴무 시간대 기능
       // --- [v0.28.0] 자동매매 스크리너 조건(4개) ---
@@ -1824,6 +1944,11 @@ export class ToolEngine extends EventEmitter {
       `AUTO_SCAN_DOJI_MAX_AGE_MINUTES=${this.autoScanDojiMaxAgeMinutes}`,
       `AUTO_SCAN_DOJI_MAX_GAP_ENABLED=${this.autoScanDojiMaxGapEnabled}`,
       `AUTO_SCAN_DOJI_MAX_GAP_MINUTES=${this.autoScanDojiMaxGapMinutes}`,
+      `AUTO_SCAN_EMA_MIN_GAP_ENABLED=${this.autoScanEmaMinGapEnabled}`, // [v0.63.0] 방어 전략
+      `AUTO_SCAN_EMA_MIN_GAP_PCT=${this.autoScanEmaMinGapPct}`,
+      `AUTO_SCAN_EMA_SLOPE_ENABLED=${this.autoScanEmaSlopeEnabled}`,
+      `AUTO_SCAN_ATR_FILTER_ENABLED=${this.autoScanAtrFilterEnabled}`,
+      `AUTO_SCAN_ATR_MAX_PCT=${this.autoScanAtrMaxPct}`,
       `AUTO_SCAN_NEXT_CANDLE_CONFIRM_ENABLED=${this.autoScanNextCandleConfirmEnabled}`,
       `AUTO_SCAN_EXCLUDE_ETF=${this.autoScanExcludeEtf}`,
       // --- [v0.45.0] "매매진행할 장" 선택 ---
@@ -4336,14 +4461,58 @@ export class ToolEngine extends EventEmitter {
     }
   }
 
+  /**
+   * [v0.63.0] 매매 하나가 익절/손절로 끝난 직후 실행.
+   *   ⑤-b 이번 실행에서 연속 손절이 한도에 닿으면 자동매매를 스스로 멈춘다(보험).
+   *   ② 보유 기간의 최저·최고가(MAE/MFE)를 1분봉으로 계산해 기록한다(fire-and-forget, 실패해도 무시).
+   */
+  private afterAutoTradeClosed(h: AutoTradeHistoryEntry): void {
+    try {
+      if (h.status === "closed_loss" && this.autoTradeEnabled && this.autoTradeLossStreakLimit > 0) {
+        const since = this.currentAutoRun?.startedAtMs;
+        const streak = trailingStopLossStreak(this.autoTradeHistory, since, Date.now());
+        if (streak >= this.autoTradeLossStreakLimit) {
+          this.stopAutoTrade(
+            `연속 손절 ${streak}회(한도 ${this.autoTradeLossStreakLimit}회) — 시장 상황이 전략과 맞지 않을 수 있어 자동으로 멈췄습니다. ` +
+              `확인 후 다시 켜 주세요(설정에서 한도 조절·끄기 가능).`,
+          );
+        }
+      }
+    } catch {
+      /* 무시 — 기록 훅 실패가 매매 흐름을 막으면 안 된다 */
+    }
+    void this.recordExcursion(h).catch(() => undefined);
+  }
+
+  /** ② 보유 중 최대 역행·순행(MAE/MFE) — 진입 접수 시각부터 지금까지의 1분봉 최저·최고가로 계산. */
+  private async recordExcursion(h: AutoTradeHistoryEntry): Promise<void> {
+    const enteredMs = Number(h.id.split("@").pop());
+    if (!Number.isFinite(enteredMs)) return;
+    const nowMs = Date.now();
+    const minutes = Math.ceil((nowMs - enteredMs) / 60_000) + 5;
+    if (minutes > 1100) return; // 너무 오래 보유한 건(약 18시간 초과) 1분봉 조회량이 커 생략
+    const candles = await getCandles1mPaged(h.symbol, minutes, 6);
+    const ex = excursion(candles, h.entry, enteredMs, nowMs);
+    if (!ex) return;
+    const idx = this.autoTradeHistory.findIndex((x) => x.id === h.id);
+    if (idx === -1) return;
+    this.autoTradeHistory[idx] = { ...this.autoTradeHistory[idx], maePct: ex.maePct, mfePct: ex.mfePct };
+    this.persistAutoTradeHistory();
+  }
+
   /** 이후 상태 전이(체결확인/청산/취소) 때 같은 줄을 id로 찾아 갱신. */
   private updateAutoTradeHistory(symbol: string, entry: number, enteredAtMs: number, patch: Partial<AutoTradeHistoryEntry>): void {
     try {
       const id = `${symbol}@${entry}@${enteredAtMs}`;
       const idx = this.autoTradeHistory.findIndex((h) => h.id === id);
       if (idx === -1) return; // 기록 자체가 없으면(예: 구버전 데이터) 조용히 무시
-      this.autoTradeHistory[idx] = { ...this.autoTradeHistory[idx], ...patch };
+      const before = this.autoTradeHistory[idx];
+      this.autoTradeHistory[idx] = { ...before, ...patch };
       this.persistAutoTradeHistory();
+      // [v0.63.0] 익절/손절로 "막 끝난" 순간(전이 시점에 한 번만) — 측정·연속 손절 확인.
+      const wasClosed = before.status === "closed_win" || before.status === "closed_loss";
+      const nowClosed = patch.status === "closed_win" || patch.status === "closed_loss";
+      if (!wasClosed && nowClosed) this.afterAutoTradeClosed(this.autoTradeHistory[idx]);
     } catch {
       /* 위와 동일 */
     }
@@ -5725,6 +5894,14 @@ export class ToolEngine extends EventEmitter {
     const dojiMaxAgeMinutes = Math.min(180, Math.max(10, Math.round(opts.dojiMaxAgeMinutes ?? DOJI_MAX_AGE_MINUTES)));
     const dojiMaxGapEnabled = opts.dojiMaxGapEnabled ?? true;
     const dojiMaxGapMinutes = Math.min(240, Math.max(5, Math.round(opts.dojiMaxGapMinutes ?? 30)));
+    // [v0.63.0] 방어 필터(③④) — 안 넘기면 전부 꺼짐(과거 호출 호환)
+    const defense = {
+      emaMinGapEnabled: opts.emaMinGapEnabled ?? false,
+      emaMinGapPct: Math.min(50, Math.max(0.5, opts.emaMinGapPct ?? 6)),
+      emaSlopeEnabled: opts.emaSlopeEnabled ?? false,
+      atrFilterEnabled: opts.atrFilterEnabled ?? false,
+      atrMaxPct: Math.min(20, Math.max(0.5, opts.atrMaxPct ?? 3)),
+    };
     const nextCandleConfirmEnabled = opts.nextCandleConfirmEnabled ?? true;
     const excludeEtf = opts.excludeEtf ?? true;
     try {
@@ -5828,7 +6005,18 @@ export class ToolEngine extends EventEmitter {
           const aboveCloud = cloud != null && price > cloud.cloudTop;
           const emaGateOk = !emaTrendEnabled || aboveEma;
           const cloudGateOk = !cloudEnabled || aboveCloud;
-          const status = applyScreenGates(pat.status, { priceInBand, emaGateOk, cloudGateOk, nextCandleConfirmEnabled });
+          const gatedStatus = applyScreenGates(pat.status, { priceInBand, emaGateOk, cloudGateOk, nextCandleConfirmEnabled });
+          // [v0.63.0 ②③④] 진입 시점 측정값 — 이격도는 삼분할 계산과 같은 "전봉종가"(원본 5분봉) 기준,
+          //   ATR%는 원본 캔들(하이킨아시는 변동폭을 줄여 보이게 함), EMA 기울기는 판정과 같은 HA 종가 EMA.
+          const prevCloseRaw = raw5m.length ? raw5m[raw5m.length - 1].close : null;
+          const entryMetrics: EntryMetrics = {
+            emaGapPct: emaGapPct(prevCloseRaw, ema200),
+            atrPct: atrPct(raw5m),
+            emaSlopePct: emaSlopePct(closes, emaPeriod),
+          };
+          const defenseEval = evaluateDefenseFilters(entryMetrics, defense);
+          // 패턴이 후보(확정·관찰)인데 방어 필터에서 떨어지면 후보에서 뺀다(사유는 defenseReasons로 남겨 화면·통계에 표시).
+          const status = gatedStatus !== "none" && !defenseEval.ok ? "none" : gatedStatus;
           const proximityPct = pat.sessionHigh && Number.isFinite(price) ? ((price - pat.sessionHigh) / pat.sessionHigh) * 100 : null;
           // [v0.36.0] 워런트 의심 확인 — 확정/관찰 후보만(API 호출 절약, 어차피 나머지는 진입
           //   대상이 아니라 확인할 의미가 없다). 차단하지 않고 코멘트만 붙인다(위 파일 상단 이유).
@@ -5853,6 +6041,8 @@ export class ToolEngine extends EventEmitter {
             n5m: candles5m.length,
             evidence: this.buildEvidence(sessionStart, pat, { priceInBand, aboveEma, aboveCloud }),
             warrantWarning,
+            entryMetrics, // [v0.63.0]
+            defenseReasons: defenseEval.reasons,
           });
         } catch (err) {
           // 한 종목 실패가 전체 스캔을 죽이지 않게(개별 오류는 '데이터 부족'류로 표시)
@@ -5885,6 +6075,7 @@ export class ToolEngine extends EventEmitter {
         dojiMaxAgeMinutes,
         dojiMaxGapEnabled,
         dojiMaxGapMinutes,
+        ...defense, // [v0.63.0] 이번 스캔에 실제로 쓰인 방어 필터 값
         nextCandleConfirmEnabled,
         excludeEtf,
       };
@@ -6272,7 +6463,38 @@ export class ToolEngine extends EventEmitter {
     if (firstTriggered || secondTriggered) {
       // 익절(first)/손절(second) 중 어느 쪽이 발동됐는지에 따라 우리가 등록해 둔 그 가격을 그대로 쓴다
       // (실제 체결가 조회 없이도 정확 — 조건주문 지정가로 나가므로).
-      const exitPrice = secondTriggered ? pos.sl : pos.tp;
+      // [v0.63.0 ② 측정] 발동된 주문의 실제 평균 체결가를 토스에 물어본다. 손절 다리는 "감시가 1% 아래
+      //   지정가"로 나가므로 급락 때는 그보다 더 나쁘게(또는 아예 안) 체결될 수 있다 — 예전엔 항상
+      //   "목표가에 정확히 체결"로 가정해 실제 손실을 과소평가했을 수 있다. 조회 실패면 예전처럼 목표가 사용.
+      const targetPrice = secondTriggered ? pos.sl : pos.tp;
+      const triggeredOrderId = (secondTriggered ? resp.second?.triggeredOrderId : resp.first?.triggeredOrderId) ?? null;
+      let exitFillPrice: number | null = null;
+      let exitOrderUnfilled = false;
+      if (triggeredOrderId) {
+        try {
+          const o = await getOrder(triggeredOrderId);
+          if (o.avg_filled_price != null && o.avg_filled_price > 0) exitFillPrice = o.avg_filled_price;
+          else if (o.status !== "filled") exitOrderUnfilled = true;
+        } catch {
+          /* 조회 실패 — 목표가로 계산(예전 동작) */
+        }
+      }
+      if (exitOrderUnfilled) {
+        // 발동은 됐는데 매도가 아직 안 체결됨 = 급락으로 지정가 아래로 가격이 뚫고 내려간 상황일 수 있다.
+        //   자동으로 시장가 매도까지 하지는 않는다(실주문 — 사람 판단). 대신 강하게 알린다.
+        this.addJournal({
+          kind: "info",
+          symbol: pos.symbol,
+          summary:
+            `🚨 ${pos.symbol} ${secondTriggered ? "손절" : "익절"} 조건이 발동됐지만 매도 주문이 아직 체결되지 않았습니다 ` +
+            `(급락으로 지정가 $${secondTriggered ? roundPrice(pos.sl * 0.99) : pos.tp}보다 아래로 내려갔을 수 있음). ` +
+            `토스 앱/[주문현황]에서 직접 확인하고 필요하면 시장가로 정리하세요.`,
+          notify: true,
+          notifyTitle: `🚨 매도 미체결: ${pos.symbol}`,
+        });
+      }
+      const exitPrice = exitFillPrice ?? targetPrice;
+      const slippagePct = exitFillPrice != null ? Math.round((exitFillPrice / targetPrice - 1) * 10000) / 100 : null;
       const pnlUsd = (exitPrice - pos.entry) * pos.quantity;
       const pnlPct = ((exitPrice - pos.entry) / pos.entry) * 100;
       this.autoTradeRealizedPnlUsd += pnlUsd;
@@ -6292,9 +6514,13 @@ export class ToolEngine extends EventEmitter {
         status: secondTriggered ? "closed_loss" : "closed_win",
         exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
         exitPrice,
+        exitFillPrice,
+        slippagePct,
         pnlUsd: Math.round(pnlUsd * 100) / 100,
         pnlPct: Math.round(pnlPct * 100) / 100,
-        note: `${kindKo} 발동으로 자동 청산`,
+        note:
+          `${kindKo} 발동으로 자동 청산` +
+          (exitFillPrice != null ? ` (실제 체결가 $${exitFillPrice}, 목표가 대비 ${slippagePct}%)` : " (체결가 조회 안 됨 — 목표가로 계산)"),
       });
     } else {
       // 어느 다리도 발동 안 했는데 그룹이 COMPLETED = 사람이 [주문현황]에서 직접 취소한 경우
@@ -6888,6 +7114,24 @@ export class ToolEngine extends EventEmitter {
           continue; // 진입 필터 불성립(전봉종가<=EMA200) — 이 종목은 건너뜀
         }
 
+        // [v0.63.0 ① EMA 기준 손절] 손절가를 "진입가 −N%"(고정) 대신 "EMA200 아래 여유%"로 —
+        //   매매 근거(EMA 지지)가 깨지면 바로 나가고, 그래도 고정 손절보다 깊어지지는 않게(둘 중 높은 쪽).
+        if (this.autoTradeSlMode === "ema") {
+          const sSl = structuralStopPrice(level1.entry, cand.ema200, this.autoTradeEmaStopBufferPct, level1.sl);
+          if (sSl == null) {
+            this.autoTradeSkipReasons[cand.symbol] =
+              `EMA 기준 손절가(EMA $${cand.ema200.toFixed(4)} 아래 ${this.autoTradeEmaStopBufferPct}%)가 진입가 $${level1.entry} 이상이라 손절선을 둘 수 없어 건너뜁니다.`;
+            continue;
+          }
+          level1 = { ...level1, sl: roundPrice(sSl) };
+        }
+
+        // [v0.63.0 ⑤-a] 오늘(KST) 이미 손절된 종목이면 다시 들어가지 않는다(하락 추세 속 반등에 또 물리는 것 방지).
+        if (this.autoTradeReentryBlockEnabled && isReentryBlocked(this.autoTradeHistory, cand.symbol, Date.now())) {
+          this.autoTradeSkipReasons[cand.symbol] = "오늘 이미 손절된 종목이라 재진입하지 않습니다(손절 종목 당일 재진입 금지 — 설정에서 끌 수 있음).";
+          continue;
+        }
+
         const usedKey = `${cand.symbol}@${level1.entry}`;
         if (this.autoTradeUsedKeys.has(usedKey)) {
           this.autoTradeSkipReasons[cand.symbol] = `이미 이 타점($${level1.entry})으로 진입을 완료한 적이 있습니다(동일종목 동일타점 재진입 방지).`;
@@ -7018,7 +7262,16 @@ export class ToolEngine extends EventEmitter {
           maxInvestPct: this.autoTradeMaxInvestPct,
           watchMinutes: this.autoTradeWatchMinutes,
           entryLevel: this.autoTradeEntryLevel,
+          emaMinGapEnabled: this.autoScanEmaMinGapEnabled, // [v0.63.0]
+          emaMinGapPct: this.autoScanEmaMinGapPct,
+          emaSlopeEnabled: this.autoScanEmaSlopeEnabled,
+          atrFilterEnabled: this.autoScanAtrFilterEnabled,
+          atrMaxPct: this.autoScanAtrMaxPct,
+          slMode: this.autoTradeSlMode,
+          emaStopBufferPct: this.autoTradeEmaStopBufferPct,
         }); // [v0.30.0] 자동매매기록 — 접수 즉시 한 줄 남김
+        // [v0.63.0 ② 측정] 진입 당시 이격도·ATR%·EMA 기울기를 같은 줄에 남긴다(그룹 연구 데이터로도 올라감).
+        if (cand.entryMetrics) this.updateAutoTradeHistory(cand.symbol, level1.entry, posDraft.enteredAtMs, { entryMetrics: cand.entryMetrics });
 
         try {
           const { entryJournal, watchPromise } = await this.placeBracketCore({

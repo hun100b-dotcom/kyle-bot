@@ -237,6 +237,8 @@ export interface OrderResponse {
   side?: OrderSide;
   price?: number;
   filled_qty?: number;
+  /** [v0.63.0] 평균 체결가(체결이 있을 때만) — 손절/익절 실제 체결가·슬리피지 측정용. */
+  avg_filled_price?: number;
 }
 
 export interface OrderListResponse {
@@ -831,6 +833,10 @@ function toOrderResponse(raw: OrderDetailRaw): OrderResponse {
     side: raw.side,
     price: raw.price != null ? Number(raw.price) : undefined,
     filled_qty: raw.execution ? Number(raw.execution.filledQuantity) : 0,
+    avg_filled_price:
+      raw.execution?.averageFilledPrice != null && Number.isFinite(Number(raw.execution.averageFilledPrice))
+        ? Number(raw.execution.averageFilledPrice)
+        : undefined,
   };
 }
 

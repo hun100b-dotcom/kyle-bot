@@ -417,9 +417,14 @@ function ScreenEvidenceView({
   ev,
   price,
   disabled,
+  metrics,
+  defenseReasons,
 }: {
   ev: ScreenEvidence;
   price: number | null;
+  /** [v0.63.0] 진입 시점 측정값(이격도·ATR%·EMA 기울기)과 방어 필터 탈락 사유 */
+  metrics?: EntryMetrics;
+  defenseReasons?: string[];
   /** 오너가 꺼 둔 조건 키(스크리닝 기준 탭 기준) — 넘긴 키는 통과/실패와 무관하게 회색 "off" 칩으로. */
   disabled?: Partial<Record<"aboveEma" | "aboveCloud" | "recentDoji" | "dojiNearHigh" | "nextBearish", boolean>>;
 }) {
@@ -449,6 +454,17 @@ function ScreenEvidenceView({
       <table className="evid-table">
         <tbody>
           <tr><td>현재가</td><td>{price != null ? `$${price}` : "—"}</td></tr>
+          {metrics && (
+            <tr>
+              <td>방어 지표</td>
+              <td>
+                EMA 이격도(전봉종가) {metrics.emaGapPct != null ? `${metrics.emaGapPct}%` : "—"} ·
+                {" "}변동성(5분봉 ATR) {metrics.atrPct != null ? `${metrics.atrPct}%` : "—"} ·
+                {" "}EMA 1시간 변화 {metrics.emaSlopePct != null ? `${metrics.emaSlopePct > 0 ? "+" : ""}${metrics.emaSlopePct}%` : "—"}
+                {defenseReasons && defenseReasons.length > 0 && <span className="err"> · ✗ {defenseReasons.join(" / ")}</span>}
+              </td>
+            </tr>
+          )}
           <tr><td>현재 장 시작</td><td>{ev.sessionStart}</td></tr>
           <tr><td>세션 최고점(HA)</td><td>{ev.sessionHigh != null ? `$${ev.sessionHigh}${ev.sessionHighTime ? ` @ ${ev.sessionHighTime}` : ""}` : "—"}</td></tr>
           <tr>
@@ -876,6 +892,8 @@ function App() {
   //   타점 분할(1~2). 위 autoForm과 별도 상태로 둔 이유: 저게 전부 "숫자 입력칸(문자열)"인
   //   반면 이건 "둘 중 하나 고르는" 선택지라 모양이 달라 섞으면 폼 렌더 로직이 지저분해진다.
   const [autoEntryLevel, setAutoEntryLevel] = useState<1 | 2>(1);
+  // [v0.63.0] 방어 전략 — 손절 방식·EMA 아래 여유%·손절 종목 당일 재진입 금지·연속 손절 자동중지
+  const [defenseForm, setDefenseForm] = useState({ slMode: "fixed" as "fixed" | "ema", emaStopBufferPct: "1.5", reentryBlockEnabled: true, lossStreakLimit: "3" });
   const [autoStatus, setAutoStatus] = useState<AutoTradeStatus | null>(null);
   const [autoBusy, setAutoBusy] = useState(false);
   // [v0.61.0] 상태 미러(capri_live_state) — PC가 마지막으로 올린 시각(ms). canReconcileLive가
@@ -941,6 +959,11 @@ function App() {
     dojiMaxAgeMinutes: "40",
     dojiMaxGapEnabled: true,
     dojiMaxGapMinutes: "30",
+    emaMinGapEnabled: false, // [v0.63.0] 방어 필터 — 공장값 꺼짐
+    emaMinGapPct: "6",
+    emaSlopeEnabled: false,
+    atrFilterEnabled: false,
+    atrMaxPct: "3",
     nextCandleConfirmEnabled: true,
     excludeEtf: true,
     // [v0.45.0] "매매진행할 장" 선택 — 기본 4개 전부 켜짐(지금까지의 동작과 동일).
@@ -1215,6 +1238,12 @@ function App() {
         watchMinutes: String(s.autoTradeWatchMinutes ?? 10),
       });
       setAutoEntryLevel(s.autoTradeEntryLevel === 2 ? 2 : 1); // [v0.61.8]
+      setDefenseForm({
+        slMode: s.autoTradeSlMode === "ema" ? "ema" : "fixed",
+        emaStopBufferPct: String(s.autoTradeEmaStopBufferPct ?? 1.5),
+        reentryBlockEnabled: s.autoTradeReentryBlockEnabled ?? true,
+        lossStreakLimit: String(s.autoTradeLossStreakLimit ?? 3),
+      });
       // [v0.28.0] 저장된 자동매매 스크리너 조건을 입력칸 초기값으로.
       setAutoScanForm({
         scanCount: String(s.autoScanCount ?? 60),
@@ -1232,6 +1261,11 @@ function App() {
         dojiMaxAgeMinutes: String(s.autoScanDojiMaxAgeMinutes ?? 40),
         dojiMaxGapEnabled: s.autoScanDojiMaxGapEnabled ?? true,
         dojiMaxGapMinutes: String(s.autoScanDojiMaxGapMinutes ?? 30),
+        emaMinGapEnabled: s.autoScanEmaMinGapEnabled ?? false,
+        emaMinGapPct: String(s.autoScanEmaMinGapPct ?? 6),
+        emaSlopeEnabled: s.autoScanEmaSlopeEnabled ?? false,
+        atrFilterEnabled: s.autoScanAtrFilterEnabled ?? false,
+        atrMaxPct: String(s.autoScanAtrMaxPct ?? 3),
         nextCandleConfirmEnabled: s.autoScanNextCandleConfirmEnabled ?? true,
         excludeEtf: s.autoScanExcludeEtf ?? true,
         dayEnabled: s.autoScanDayEnabled ?? true,
@@ -2301,6 +2335,8 @@ ${msg}
       else if (!f.recentDoji) reasons.push("도지 발생이 너무 오래전(20분 초과 — 신뢰 불가)");
       else if (run.nextCandleConfirmEnabled && !f.nextBearish) reasons.push("도지 다음 봉이 음봉 아님(패턴 미완성)");
     }
+    // [v0.63.0] 방어 필터(이격도·기울기·변동성) 탈락 사유 — 엔진이 켜진 필터만 판정해 넣어 준다.
+    for (const d of r.defenseReasons ?? []) reasons.push(d);
     return { passed, reasons };
   }
 
@@ -2338,6 +2374,10 @@ ${msg}
         else if (f.dojiNearHigh === false) bump(`도지가 최고점 한참 뒤(${run.dojiMaxGapMinutes}분 초과)`);
         else if (!f.recentDoji) bump("도지 발생 20분 초과(신선도 불합격)");
         else if (run.nextCandleConfirmEnabled && !f.nextBearish) bump("도지 다음 봉이 음봉 아님(패턴 미완성)");
+      }
+      // [v0.63.0] 방어 필터 사유는 숫자를 떼고 종류별로 집계
+      for (const d of r.defenseReasons ?? []) {
+        bump(d.startsWith("EMA 이격도") ? "EMA 이격도 미달" : d.startsWith("EMA가 상승") || d.startsWith("EMA 기울기") ? "EMA 상승 중 아님" : "변동성 과다/계산 불가");
       }
     }
     return Object.entries(counts)
@@ -2576,6 +2616,15 @@ ${msg}
     const maxLossPct = toNum(autoForm.maxLossPct);
     const maxInvestPct = toNum(autoForm.maxInvestPct);
     const watchMinutes = toNum(autoForm.watchMinutes);
+    // [v0.63.0] 방어 전략 값
+    const emaStopBufferPct = toNum(defenseForm.emaStopBufferPct);
+    const lossStreakLimit = toNum(defenseForm.lossStreakLimit);
+    if (emaStopBufferPct === null || emaStopBufferPct < 0 || lossStreakLimit === null || lossStreakLimit < 0) {
+      setSavedMsg("⚠️ EMA 손절 여유(%)와 연속 손절 횟수는 0 이상 숫자로 입력하세요(연속 손절 0 = 끔).");
+      setTimeout(() => setSavedMsg(""), 4000);
+      return;
+    }
+    const defense = { slMode: defenseForm.slMode, emaStopBufferPct, reentryBlockEnabled: defenseForm.reentryBlockEnabled, lossStreakLimit };
     if (
       maxPositions === null || maxPositions <= 0 ||
       maxLossPct === null || maxLossPct <= 0 ||
@@ -2587,16 +2636,17 @@ ${msg}
       return;
     }
     if (isWebApp) {
-      const r = await window.kyletool.sendCommand("saveAutoTradeSettings", { maxPositions, maxLossPct, maxInvestPct, watchMinutes, entryLevel: autoEntryLevel });
+      const r = await window.kyletool.sendCommand("saveAutoTradeSettings", { maxPositions, maxLossPct, maxInvestPct, watchMinutes, entryLevel: autoEntryLevel, ...defense });
       setSavedMsg(r.ok ? "✅ PC로 자동매매 한도 저장 명령을 보냈습니다(PC가 몇 초 안에 반영)." : `⚠️ ${r.message}`);
       setTimeout(() => setSavedMsg(""), 4000);
       return;
     }
-    const s = await window.kyletool.saveAutoTradeSettings({ maxPositions, maxLossPct, maxInvestPct, watchMinutes, entryLevel: autoEntryLevel });
+    const s = await window.kyletool.saveAutoTradeSettings({ maxPositions, maxLossPct, maxInvestPct, watchMinutes, entryLevel: autoEntryLevel, ...defense });
     setSettings(s);
     setSavedMsg(
       `자동매매 한도 저장됨 — 최대 ${s.autoTradeMaxPositions}종목 · 손실한도 ${s.autoTradeMaxLossPct}% · ` +
-      `투입한도 ${s.autoTradeMaxInvestPct}% · 미체결 자동취소 ${s.autoTradeWatchMinutes}분 · 진입 타점 ${s.autoTradeEntryLevel}분할`,
+      `투입한도 ${s.autoTradeMaxInvestPct}% · 미체결 자동취소 ${s.autoTradeWatchMinutes}분 · 진입 타점 ${s.autoTradeEntryLevel}분할 · ` +
+      `손절 ${s.autoTradeSlMode === "ema" ? `EMA 기준(-${s.autoTradeEmaStopBufferPct}%)` : "고정 %"} · 연속손절 중지 ${s.autoTradeLossStreakLimit ? `${s.autoTradeLossStreakLimit}회` : "끔"}`,
     );
     setTimeout(() => setSavedMsg(""), 4000);
   }
@@ -2619,12 +2669,15 @@ ${msg}
     const dojiWickMinRatio = toNum(screenCritForm.dojiWickMinRatio);
     const dojiMaxAgeMinutes = toNum(screenCritForm.dojiMaxAgeMinutes);
     const dojiMaxGapMinutes = toNum(screenCritForm.dojiMaxGapMinutes);
+    const emaMinGapPct = toNum(screenCritForm.emaMinGapPct);
+    const atrMaxPct = toNum(screenCritForm.atrMaxPct);
     if (
       scanCount === null || scanCount <= 0 || pMin === null || pMin < 0 || pMax === null || pMax < 0 ||
       emaPeriod === null || emaPeriod <= 0 || dojiWickMinRatio === null || dojiWickMinRatio < 0 || dojiMaxAgeMinutes === null || dojiMaxAgeMinutes <= 0 ||
-      dojiMaxGapMinutes === null || dojiMaxGapMinutes <= 0
+      dojiMaxGapMinutes === null || dojiMaxGapMinutes <= 0 ||
+      emaMinGapPct === null || emaMinGapPct <= 0 || atrMaxPct === null || atrMaxPct <= 0
     ) {
-      setSavedMsg("⚠️ 스캔 종목수·가격대·EMA 기간·도지 꼬리비율·신선도(분)·고점~도지 간격(분)을 올바른 숫자로 입력하세요.");
+      setSavedMsg("⚠️ 스캔 종목수·가격대·EMA 기간·도지 꼬리비율·신선도(분)·고점~도지 간격(분)·이격도(%)·변동성 상한(%)을 올바른 숫자로 입력하세요.");
       setTimeout(() => setSavedMsg(""), 4000);
       return;
     }
@@ -2641,6 +2694,11 @@ ${msg}
       dojiMaxAgeMinutes,
       dojiMaxGapEnabled: screenCritForm.dojiMaxGapEnabled,
       dojiMaxGapMinutes,
+      emaMinGapEnabled: screenCritForm.emaMinGapEnabled,
+      emaMinGapPct,
+      emaSlopeEnabled: screenCritForm.emaSlopeEnabled,
+      atrFilterEnabled: screenCritForm.atrFilterEnabled,
+      atrMaxPct,
       nextCandleConfirmEnabled: screenCritForm.nextCandleConfirmEnabled,
       excludeEtf: screenCritForm.excludeEtf,
       dayEnabled: screenCritForm.dayEnabled,
@@ -2675,6 +2733,11 @@ ${msg}
       dojiMaxAgeMinutes: String(s.autoScanDojiMaxAgeMinutes),
       dojiMaxGapEnabled: s.autoScanDojiMaxGapEnabled ?? true,
       dojiMaxGapMinutes: String(s.autoScanDojiMaxGapMinutes ?? 30),
+      emaMinGapEnabled: s.autoScanEmaMinGapEnabled ?? false,
+      emaMinGapPct: String(s.autoScanEmaMinGapPct ?? 6),
+      emaSlopeEnabled: s.autoScanEmaSlopeEnabled ?? false,
+      atrFilterEnabled: s.autoScanAtrFilterEnabled ?? false,
+      atrMaxPct: String(s.autoScanAtrMaxPct ?? 3),
       nextCandleConfirmEnabled: s.autoScanNextCandleConfirmEnabled,
       excludeEtf: s.autoScanExcludeEtf,
       dayEnabled: s.autoScanDayEnabled,
@@ -3764,7 +3827,7 @@ ${msg}
                             )}
                             {open && r.evidence && (
                               <tr className="evid-row">
-                                <td colSpan={9}><ScreenEvidenceView ev={r.evidence} price={r.price} /></td>
+                                <td colSpan={9}><ScreenEvidenceView ev={r.evidence} price={r.price} metrics={r.entryMetrics} defenseReasons={r.defenseReasons} /></td>
                               </tr>
                             )}
                             {chartOpen && (
@@ -4244,6 +4307,26 @@ ${msg}
                     <option value={2}>2분할(더 깊이 눌렸을 때만 — 보수적)</option>
                   </select>
                 </label>
+                {/* [v0.63.0] 방어 전략 */}
+                <label>🛡 손절 방식
+                  <select value={defenseForm.slMode} onChange={(e) => setDefenseForm({ ...defenseForm, slMode: e.target.value === "ema" ? "ema" : "fixed" })}>
+                    <option value="fixed">고정 % (진입가 대비 — 기존 방식)</option>
+                    <option value="ema">EMA 기준 (EMA200 아래로 깨지면 손절)</option>
+                  </select>
+                </label>
+                <label>EMA 기준 손절 여유 (EMA 아래 %)
+                  <input type="text" inputMode="decimal" value={defenseForm.emaStopBufferPct} disabled={defenseForm.slMode !== "ema"}
+                    onChange={(e) => isNumericDraft(e.target.value) && setDefenseForm({ ...defenseForm, emaStopBufferPct: e.target.value })} placeholder="1.5" />
+                </label>
+                <label className="radio">
+                  <input type="checkbox" checked={defenseForm.reentryBlockEnabled}
+                    onChange={(e) => setDefenseForm({ ...defenseForm, reentryBlockEnabled: e.target.checked })} />
+                  🛡 손절된 종목은 그날 재진입 금지
+                </label>
+                <label>🛡 연속 손절 시 자동 중지 (회, 0=끔)
+                  <input type="text" inputMode="numeric" value={defenseForm.lossStreakLimit}
+                    onChange={(e) => isNumericDraft(e.target.value) && setDefenseForm({ ...defenseForm, lossStreakLimit: e.target.value })} placeholder="3" />
+                </label>
                 <button className="btn btn-start" onClick={saveAutoSettings}>한도 저장</button>
                 {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
               </div>
@@ -4251,6 +4334,13 @@ ${msg}
                 예) 최대 투입 30% → 종목 1개당 예산은 시드의 30%(종목 수로 나누지 않습니다 — 3종목이면 최대
                 동시 투입 합계는 시드의 최대 90%까지 커질 수 있습니다). 손실 한도는 이번 자동매매 실행 동안
                 누적된 실현손익(달러) 기준으로, 시드 대비 %를 넘으면 자동매매가 스스로 멈춥니다.
+              </p>
+              <p className="hint small">
+                🛡 <b>EMA 기준 손절</b>이란: 손절가를 "진입가 −10%" 대신 "EMA200 × (1 − 여유%)"로 둡니다. 이 기법의 근거는
+                "EMA200 위 눌림"이라, EMA가 깨지면 근거가 사라진 것이니 거기서 바로 나가자는 뜻입니다(지금 손절 사례들은
+                EMA가 깨진 뒤에도 6% 가까이 더 버티다 −10%로 나갔습니다). 단, 기존 고정 손절선보다 더 깊어지지는
+                않습니다(둘 중 더 빨리 끊는 쪽). 진입가가 EMA에 너무 붙어 손절선을 둘 수 없으면 그 종목은 건너뜁니다.
+                연속 손절 자동중지는 "이번에 켠 이후" 손절이 연달아 N번 나오면 자동매매를 스스로 끕니다(익절이 끼면 0부터 다시).
               </p>
               <p className="hint small">
                 ⏱ <b>장기간 미체결 자동취소 기준</b>이란: 자동매매가 진입 주문(매수)을 넣었는데 이 시간
@@ -4668,6 +4758,8 @@ ${msg}
                                     <ScreenEvidenceView
                                       ev={r.evidence}
                                       price={r.price}
+                                      metrics={r.entryMetrics}
+                                      defenseReasons={r.defenseReasons}
                                       disabled={{
                                         aboveEma: settings ? !settings.autoScanEmaTrendEnabled : false,
                                         aboveCloud: settings ? !settings.autoScanCloudEnabled : false,
@@ -4718,6 +4810,9 @@ ${msg}
                           이치모쿠 구름 위 <b>{run.cloudEnabled ? "켜짐" : "꺼짐"}</b> ·
                           도지 신선도(최대 {run.dojiMaxAgeMinutes}분) <b>{run.dojiMaxAgeEnabled ? "켜짐" : "꺼짐"}</b> ·
                           고점~도지 간격(최대 {run.dojiMaxGapMinutes ?? 30}분) <b>{(run.dojiMaxGapEnabled ?? true) ? "켜짐" : "꺼짐"}</b> ·
+                          EMA 이격도(≥{run.emaMinGapPct ?? 6}%) <b>{run.emaMinGapEnabled ? "켜짐" : "꺼짐"}</b> ·
+                          EMA 상승 <b>{run.emaSlopeEnabled ? "켜짐" : "꺼짐"}</b> ·
+                          변동성 상한(≤{run.atrMaxPct ?? 3}%) <b>{run.atrFilterEnabled ? "켜짐" : "꺼짐"}</b> ·
                           다음봉 음봉 확인 <b>{run.nextCandleConfirmEnabled ? "켜짐" : "꺼짐"}</b> ·
                           ETF/레버리지 제외 <b>{run.excludeEtf ? "켜짐" : "꺼짐"}</b>
                           {" — "}<button className="mini ghost" onClick={() => goToTab("screenCriteria")}>[스크리닝 기준]에서 수정</button>
@@ -4974,6 +5069,77 @@ ${msg}
               </label>
             </div>
 
+            {/* [v0.63.0] 방어 필터 ① EMA 최소 이격도 */}
+            <div className="crit-card">
+              <div className="crit-head">
+                <label className="radio">
+                  <input type="checkbox" checked={screenCritForm.emaMinGapEnabled}
+                    onChange={(e) => setScreenCritForm({ ...screenCritForm, emaMinGapEnabled: e.target.checked })} />
+                  <b>🛡 EMA 최소 이격도 (방어)</b>
+                </label>
+                <button className="mini" onClick={() => toggleCritDetail("emaGap")}>{openCritDetail.has("emaGap") ? "▾ 자세히" : "▸ 자세히"}</button>
+              </div>
+              <p className="hint">전봉 종가가 EMA200보다 이 % 이상 위에 있는 종목만 후보로(카일 제안 6%).</p>
+              {openCritDetail.has("emaGap") && (
+                <p className="hint crit-detail">
+                  EMA200에 바짝 붙어 있는 종목은 조금만 밀려도 EMA 아래로 떨어지기 쉬워요. 이격도는 삼분할 계산과 같은
+                  "전봉 종가" 기준입니다. 참고로 1분할 진입가는 전봉 종가~EMA 거리의 1/3 아래라서, 이격도 6%면 실제
+                  진입가는 EMA 위 약 4%, 2분할이면 약 2%입니다. 값을 올리면 더 안전한 자리만 남지만 후보 수가 줄어요.
+                </p>
+              )}
+              <label className="str-field sf-num" style={{ maxWidth: 200, marginTop: 8 }}>
+                <span className="sb-k">최소 이격도(%) <span className="hint">(0.5~50, 기본 6)</span></span>
+                <input type="text" inputMode="decimal" value={screenCritForm.emaMinGapPct}
+                  disabled={!screenCritForm.emaMinGapEnabled}
+                  onChange={(e) => setScreenCritForm({ ...screenCritForm, emaMinGapPct: e.target.value })} />
+              </label>
+            </div>
+
+            {/* [v0.63.0] 방어 필터 ② EMA 상승 중 */}
+            <div className="crit-card">
+              <div className="crit-head">
+                <label className="radio">
+                  <input type="checkbox" checked={screenCritForm.emaSlopeEnabled}
+                    onChange={(e) => setScreenCritForm({ ...screenCritForm, emaSlopeEnabled: e.target.checked })} />
+                  <b>🛡 EMA200이 상승 중일 것 (방어)</b>
+                </label>
+                <button className="mini" onClick={() => toggleCritDetail("emaSlope")}>{openCritDetail.has("emaSlope") ? "▾ 자세히" : "▸ 자세히"}</button>
+              </div>
+              <p className="hint">지금 EMA200이 1시간 전보다 높은(위로 기울어진) 종목만 후보로.</p>
+              {openCritDetail.has("emaSlope") && (
+                <p className="hint crit-detail">
+                  평평하거나 아래로 꺾인 EMA는 "받쳐 주는 힘"이 약해 눌림이 지지되지 않고 그대로 뚫리기 쉬워요.
+                  EMA가 아직 올라가고 있는 종목만 고르면 추세가 살아 있는 자리만 남습니다.
+                </p>
+              )}
+            </div>
+
+            {/* [v0.63.0] 방어 필터 ③ 변동성 상한 */}
+            <div className="crit-card">
+              <div className="crit-head">
+                <label className="radio">
+                  <input type="checkbox" checked={screenCritForm.atrFilterEnabled}
+                    onChange={(e) => setScreenCritForm({ ...screenCritForm, atrFilterEnabled: e.target.checked })} />
+                  <b>🛡 변동성 상한 (방어)</b>
+                </label>
+                <button className="mini" onClick={() => toggleCritDetail("atr")}>{openCritDetail.has("atr") ? "▾ 자세히" : "▸ 자세히"}</button>
+              </div>
+              <p className="hint">5분봉 하나가 평균적으로 이 %보다 크게 출렁이는 종목은 제외.</p>
+              {openCritDetail.has("atr") && (
+                <p className="hint crit-detail">
+                  익절 목표가 1.5% 안팎인데 5분봉 하나가 평균 3~5%씩 움직이는 종목이면, 익절은 잡음 수준이고
+                  −10% 급락도 흔한 일이 됩니다(실제 손절 사례는 진입 후 평균 8분 만에 −10%가 난 급락형이었어요).
+                  이 %(ATR — 평균 실제 변동폭 ÷ 가격)를 넘는 종목은 후보에서 뺍니다.
+                </p>
+              )}
+              <label className="str-field sf-num" style={{ maxWidth: 200, marginTop: 8 }}>
+                <span className="sb-k">최대 변동성(%) <span className="hint">(0.5~20, 기본 3)</span></span>
+                <input type="text" inputMode="decimal" value={screenCritForm.atrMaxPct}
+                  disabled={!screenCritForm.atrFilterEnabled}
+                  onChange={(e) => setScreenCritForm({ ...screenCritForm, atrMaxPct: e.target.value })} />
+              </label>
+            </div>
+
             {/* ⑤ 다음봉 확인 */}
             <div className="crit-card">
               <div className="crit-head">
@@ -5079,7 +5245,7 @@ ${msg}
 
                   <table className="result-table screen-table">
                     <thead>
-                      <tr><th>진입시각</th><th>종목</th><th>진입가→청산가</th><th>수량</th><th>손익</th><th>상태</th><th>사유</th><th>진입 당시 설정</th></tr>
+                      <tr><th>진입시각</th><th>종목</th><th>진입가→청산가</th><th>수량</th><th>손익</th><th>상태</th><th>사유</th><th>진입 당시 설정</th><th>측정(이격·변동성·최대역행/순행·슬리피지)</th></tr>
                     </thead>
                     <tbody>
                       {autoHistory.map((h) => (
@@ -5106,6 +5272,19 @@ ${msg}
                                 {" "}EMA{h.criteriaSnapshot.emaTrendEnabled ? h.criteriaSnapshot.emaPeriod : "끔"} ·
                                 {" "}구름{h.criteriaSnapshot.cloudEnabled ? "켬" : "끔"} ·
                                 {" "}투입{h.criteriaSnapshot.maxInvestPct}%
+                                {h.criteriaSnapshot.slMode === "ema" && <>{" "}· 손절EMA-{h.criteriaSnapshot.emaStopBufferPct}%</>}
+                              </>
+                            ) : "—"}
+                          </td>
+                          {/* [v0.63.0 ② 측정] 손절 원인 분석용 — 이 값들이 쌓여야 방어 필터 효과를 숫자로 검증할 수 있다. */}
+                          <td className="hint small">
+                            {h.entryMetrics || h.maePct != null || h.slippagePct != null ? (
+                              <>
+                                {h.entryMetrics?.emaGapPct != null && <>이격 {h.entryMetrics.emaGapPct}% · </>}
+                                {h.entryMetrics?.atrPct != null && <>ATR {h.entryMetrics.atrPct}% · </>}
+                                {h.maePct != null && <>최대역행 {h.maePct}% · </>}
+                                {h.mfePct != null && <>최대순행 +{h.mfePct}% · </>}
+                                {h.slippagePct != null && <>슬리피지 {h.slippagePct}%</>}
                               </>
                             ) : "—"}
                           </td>

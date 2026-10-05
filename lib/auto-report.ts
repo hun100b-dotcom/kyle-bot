@@ -57,6 +57,8 @@ export interface ReportHistoryEntry {
   exitedAt: string | null;
   exitPrice: number | null;
   pnlUsd: number | null;
+  /** [v0.63.0] 목표가 대비 실제 체결가 차이(%) — 체결가를 조회할 수 있었던 청산만 값이 있다. */
+  slippagePct?: number | null;
 }
 
 export interface AutoReport {
@@ -80,7 +82,7 @@ export interface AutoReport {
     returnPct: number | null; //      순손익 ÷ 시작자산
     mddUsd: number; //                실현손익 곡선 기준 최대 낙폭(달러)
     mddPct: number | null; //         최대 낙폭 ÷ (그 시점까지의 최고 자산)
-    slippage: "측정 불가"; //         체결가를 주문가로 기록해 실제 슬리피지는 알 수 없음
+    slippage: string; //              [v0.63.0] 실제 체결가를 조회한 청산의 평균 슬리피지(없으면 "측정 불가")
   };
   trades: {
     total: number; //            청산 완료 매매 수(익절·손절·수동)
@@ -125,7 +127,7 @@ export function buildAutoReport(
   const windowEnd = live ? nowMs : endMs + 60_000; // 종료 직후 기록 지연 1분 여유
 
   // ── 이 실행 기간에 청산된 매매만 골라낸다(청산 시각 기준) ──
-  type T = { exitMs: number; holdMs: number | null; pnl: number; fee: number | null };
+  type T = { exitMs: number; holdMs: number | null; pnl: number; fee: number | null; slip: number | null };
   const trades: T[] = [];
   let cancelled = 0;
   let ocoFailed = 0;
@@ -141,7 +143,7 @@ export function buildAutoReport(
     const enteredMs = Number.isFinite(idMs) && idMs > 1e12 ? idMs : parseKstNoYear(h.enteredAt, run.startedAtMs);
     const fee =
       run.commissionRate != null ? run.commissionRate * (h.entry * h.quantity + (h.exitPrice ?? h.entry) * h.quantity) : null;
-    trades.push({ exitMs, holdMs: enteredMs != null ? Math.max(0, exitMs - enteredMs) : null, pnl: h.pnlUsd, fee });
+    trades.push({ exitMs, holdMs: enteredMs != null ? Math.max(0, exitMs - enteredMs) : null, pnl: h.pnlUsd, fee, slip: h.slippagePct ?? null });
   }
   trades.sort((a, b) => a.exitMs - b.exitMs);
 
@@ -173,6 +175,11 @@ export function buildAutoReport(
   const pf = grossLoss > 0 ? grossProfit / grossLoss : null;
   const pfLabel = pf != null ? pf.toFixed(2) : grossProfit > 0 ? "∞(손실 없음)" : "—";
   const holds = trades.map((t) => t.holdMs).filter((x): x is number => x != null);
+  const slips = trades.map((t) => t.slip).filter((x): x is number => x != null && Number.isFinite(x));
+  const slippageText =
+    slips.length > 0
+      ? `평균 ${round2(slips.reduce((s, x) => s + x, 0) / slips.length)}% (${slips.length}건 실측, 음수=목표가보다 불리하게 체결)`
+      : "측정 불가";
 
   const notes = [
     "손익은 '진입가→익절/손절가' 기준 실현손익입니다(보유 중인 종목의 평가손익은 제외).",
@@ -180,7 +187,9 @@ export function buildAutoReport(
     run.commissionRate != null
       ? `수수료는 수수료율(${(run.commissionRate * 100).toFixed(3)}%)×(매수금액+매도금액)으로 추정한 값입니다(실제 청구액과 다를 수 있음).`
       : "수수료율을 조회하지 못해 수수료는 계산에 넣지 못했습니다(순손익=총손익).",
-    "슬리피지는 체결가를 주문가로 기록하므로 측정할 수 없습니다.",
+    slips.length > 0
+      ? `슬리피지는 토스에서 실제 체결가를 조회할 수 있었던 ${slips.length}건 기준입니다(나머지는 목표가로 계산).`
+      : "슬리피지는 실제 체결가를 조회한 청산이 없어 측정하지 못했습니다(v0.63.0부터 기록 시작).",
     "종료 시점 자산은 '시작 시드 + 실현 순손익'이며 계좌 실제 잔고 조회값이 아닙니다.",
   ];
 
@@ -205,7 +214,7 @@ export function buildAutoReport(
       returnPct: start != null && start > 0 ? round2((net / start) * 100) : null,
       mddUsd: round2(mddUsd),
       mddPct: mddPct != null ? round2(mddPct) : null,
-      slippage: "측정 불가",
+      slippage: slippageText,
     },
     trades: {
       total: trades.length,

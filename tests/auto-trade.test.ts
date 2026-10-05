@@ -1211,6 +1211,8 @@ describe("[v0.33.0] 스크리닝 기준 탭 — 조건별 켜짐/꺼짐 + 수치
         emaTrendEnabled: false, emaPeriod: 150, cloudEnabled: false,
         dojiWickMinRatio: 0.15, dojiMaxAgeEnabled: false, dojiMaxAgeMinutes: 77,
         dojiMaxGapEnabled: false, dojiMaxGapMinutes: 60,
+        // [v0.63.0] 방어 필터 공장값(전부 꺼짐, 이격도 6%·변동성 3%)
+        emaMinGapEnabled: false, emaMinGapPct: 6, emaSlopeEnabled: false, atrFilterEnabled: false, atrMaxPct: 3,
         nextCandleConfirmEnabled: false, excludeEtf: false,
       });
     } finally {
