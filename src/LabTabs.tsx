@@ -610,7 +610,7 @@ export function LabCompareTab({ lab }: { lab: LabApi }) {
             <div className="lab-scroll" data-guide="compare-table">
               <table className="result-table lab-table">
                 <thead>
-                  <tr><th>변형</th><th>시도</th><th>체결</th><th>체결률</th><th>승률</th><th>평균 순손익</th><th>손익비</th><th>신호당 기대값</th><th>평균 손절폭</th><th>평균 최대역행</th><th>평균 보유</th></tr>
+                  <tr><th>변형</th><th>시도</th><th>체결</th><th>체결률</th><th>승률</th><th>평균 순손익</th><th>손익비</th><th>신호당 기대값</th><th title="체결 건마다 추가 비용(스프레드·슬리피지)을 뺀 값">스트레스 후</th><th>평균 손절폭</th><th title="체결 건 중 가장 나빴던 한 번">최악 1회</th><th title="진입 순서대로 이은 누적 곡선의 최대 하락(%p)">최대 낙폭</th><th>평균 최대역행</th><th>평균 보유</th></tr>
                 </thead>
                 <tbody>
                   {sorted.slice(0, 60).map((r) => (
@@ -623,7 +623,10 @@ export function LabCompareTab({ lab }: { lab: LabApi }) {
                       <td className={cls(r.avgNetPct)}>{sgn(r.avgNetPct)}</td>
                       <td>{num(r.profitFactor, 2)}</td>
                       <td className={cls(r.expectancyPerSignal)}><b>{sgn(r.expectancyPerSignal)}</b></td>
+                      <td className={cls(r.stressExpectancy)}>{sgn(r.stressExpectancy)}</td>
                       <td>{num(r.avgRiskPct, 1, "%")}</td>
+                      <td className={cls(r.worstNetPct)}>{sgn(r.worstNetPct)}</td>
+                      <td>{num(r.maxDrawdownPct, 1, "%p")}</td>
                       <td>{sgn(r.avgMaePct)}</td>
                       <td>{r.avgHoldMin != null ? `${Math.round(r.avgHoldMin)}분` : "—"}</td>
                     </tr>

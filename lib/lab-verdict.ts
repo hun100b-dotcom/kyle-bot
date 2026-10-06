@@ -8,7 +8,7 @@
 // [원칙] 결론은 "표본이 충분한가"를 먼저 말하고, 자료가 부족하면 부족하다고 한다(단정 금지).
 // =============================================================================
 
-import { bodyPct, volRatioAt, type LabParams, type LabSignal, type LabLinkage, type VariantRow, LAB_PARAMS_DEFAULT, LAB_ENTRY_LABEL, LAB_STOP_LABEL } from "./lab";
+import { bodyPct, volRatioAt, simulateSignal, summarizeVariants, summarizeLinkage, passFilter, type LabParams, type LabSignal, type LabLinkage, type VariantRow, LAB_PARAMS_DEFAULT, LAB_ENTRY_LABEL, LAB_STOP_LABEL } from "./lab";
 import type { Candle } from "./indicators";
 
 const FIVE = 5 * 60_000;
@@ -338,4 +338,245 @@ export function compareWithFresh(sig: LabSignal, fresh5m: Candle[]): TossCompare
   const maxPriceDiffPct = r2(Math.max(pd(stored.o, fresh.o), pd(stored.h, fresh.h), pd(stored.l, fresh.l), pd(stored.c, fresh.c)));
   const volDiffPct = r2(pd(stored.v, fresh.v));
   return { id: sig.id, symbol: sig.symbol, c2T: sig.c2T, status: maxPriceDiffPct <= 0.05 && volDiffPct <= 5 ? "match" : "diff", stored, fresh, maxPriceDiffPct, volDiffPct };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4) [v0.67.0] 종합 평가(허점 점검 + 실매매 전환 게이트)
+// -----------------------------------------------------------------------------
+// [왜 필요한가 — 오너 요청 "허점·리스크 검토, 완벽한 데이터 분석, 최종적으로는 베스트 방법으로 실매매"]
+//   변형이 100개 넘게 비교되면 "우연히 좋아 보이는 1위"가 생기고(승자의 저주), 가상 체결은 현실보다 낙관적일 수 있으며,
+//   과거 백필 데이터는 "오늘 거래량이 많은 종목"만 골라 본 것이라 편향이 있다. 그래서 1위 숫자를 그대로 믿지 않고
+//   ① 부트스트랩 신뢰구간 ② 시간 분할 검증(앞 60%로 고르고 뒤 40%로 확인) ③ 스트레스 테스트(추가 비용)
+//   ④ 종목·날짜 집중도 ⑤ 지연 가정 대비 실측 ⑥ 규칙 일관성 ⑦ 데이터 검증 최신성을 모두 통과해야 "실매매 검토 가능"으로 본다.
+// =============================================================================
+
+export interface Concentration {
+  eligible: number;
+  symbols: number;
+  days: number;
+  topSymbol: string | null;
+  topShare: number | null; // 최다 종목이 인정 신호에서 차지하는 비율(0~1)
+}
+
+export interface Ci {
+  n: number;
+  mean: number;
+  lo: number;
+  hi: number;
+}
+
+export interface Holdout {
+  key: string | null;
+  trainN: number;
+  testN: number;
+  trainExp: number | null;
+  testExp: number | null;
+  testFilled: number;
+  holds: boolean | null; // 검증 구간에서도 플러스였는가(표본 부족이면 null)
+}
+
+export interface Gate {
+  id: string;
+  label: string;
+  ok: boolean | null; // null = 확인 불가(자료 없음)
+  detail: string;
+}
+
+export interface VerifyState {
+  localOk: boolean | null;
+  localAt: number | null;
+  tossRate: number | null; // 최근 토스 대조 일치율(0~1)
+  tossAt: number | null;
+}
+
+export interface Assessment {
+  scope: "realtime" | "all";
+  asOf: number;
+  counts: { realtimeEligible: number; allEligible: number; backfilledEligible: number; total: number; complete: number; open: number };
+  verdict: Verdict;
+  ci: Ci | null;
+  holdout: Holdout | null;
+  stress: { pct: number; expectancy: number | null } | null;
+  concentration: Concentration;
+  latency: { n: number; medianMin: number | null; p90Min: number | null; assumedMin: number };
+  ruleVersions: number;
+  gates: Gate[];
+  gatesPassed: number;
+  readiness: "no" | "close" | "ready";
+  readinessText: string;
+  topVariants: VariantRow[];
+}
+
+/** 결정적 난수(테스트 재현성) — mulberry32 */
+function rng(seed: number) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const hash = (s: string) => [...s].reduce((h, ch) => (Math.imul(h, 31) + ch.charCodeAt(0)) | 0, 7);
+
+/** 한 변형의 "신호당 기여값" 벡터: 체결·청산된 신호는 순손익, 미체결은 0, 성립 불가·진행 중은 제외. */
+export function contributionVector(signals: LabSignal[], key: string, P: LabParams): number[] {
+  const out: number[] = [];
+  for (const s of signals) {
+    const t = simulateSignal(s, P).find((x) => x.key === key);
+    if (!t || t.status === "skipped") continue;
+    if (t.fillPx == null) { out.push(0); continue; }
+    if (t.status === "open") continue;
+    out.push(t.netPct as number);
+  }
+  return out;
+}
+
+/** 부트스트랩 95% 신뢰구간(신호를 복원추출). 신호 수가 너무 적으면 null. */
+export function bootstrapCi(values: number[], iters = 1000, seed = 1): Ci | null {
+  const n = values.length;
+  if (n < 5) return null;
+  const rand = rng(seed);
+  const means: number[] = [];
+  for (let b = 0; b < iters; b++) {
+    let sum = 0;
+    for (let i = 0; i < n; i++) sum += values[Math.floor(rand() * n)];
+    means.push(sum / n);
+  }
+  means.sort((a, c) => a - c);
+  const mean = values.reduce((s, x) => s + x, 0) / n;
+  return { n, mean: r2(mean), lo: r2(means[Math.floor(iters * 0.025)]), hi: r2(means[Math.floor(iters * 0.975)]) };
+}
+
+/** 시간 분할 검증: 앞 60%의 신호로 1위 조합을 고르고, 뒤 40%에서 같은 조합이 여전히 플러스인지 본다. */
+export function holdoutCheck(signals: LabSignal[], P: LabParams, minFilled = 5): Holdout {
+  const sorted = [...signals].sort((a, b) => a.c2T - b.c2T);
+  const cut = Math.floor(sorted.length * 0.6);
+  const train = sorted.slice(0, cut);
+  const test = sorted.slice(cut);
+  const f = { includeThin: true, includeBackfilled: true, includeIneligible: true };
+  const trainRows = summarizeVariants(train, f, P).filter((v) => v.kind === "candle" && v.entryIdx === 1 && v.filled >= Math.max(3, Math.floor(minFilled / 2)));
+  const pick = [...trainRows].sort((a, b) => (b.expectancyPerSignal ?? -999) - (a.expectancyPerSignal ?? -999))[0];
+  if (!pick || test.length < 5) return { key: pick?.key ?? null, trainN: train.length, testN: test.length, trainExp: pick?.expectancyPerSignal ?? null, testExp: null, testFilled: 0, holds: null };
+  const testRow = summarizeVariants(test, f, P).find((v) => v.key === pick.key);
+  const testExp = testRow?.expectancyPerSignal ?? null;
+  const testFilled = testRow?.filled ?? 0;
+  return { key: pick.key, trainN: train.length, testN: test.length, trainExp: pick.expectancyPerSignal, testExp, testFilled, holds: testFilled >= 5 && testExp != null ? testExp > 0 : null };
+}
+
+const kstDay = (ms: number) => new Date(ms + 9 * 3600_000).toISOString().slice(0, 10);
+
+export function concentrationOf(signals: LabSignal[]): Concentration {
+  const sym = new Map<string, number>();
+  const days = new Set<string>();
+  for (const s of signals) {
+    sym.set(s.symbol, (sym.get(s.symbol) ?? 0) + 1);
+    days.add(kstDay(s.c2T));
+  }
+  const top = [...sym.entries()].sort((a, b) => b[1] - a[1])[0];
+  return { eligible: signals.length, symbols: sym.size, days: days.size, topSymbol: top?.[0] ?? null, topShare: top && signals.length ? r2(top[1] / signals.length) : null };
+}
+
+function percentile(sorted: number[], p: number): number | null {
+  if (!sorted.length) return null;
+  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
+}
+
+export const GATE_THRESHOLDS = {
+  realtimeEligible: 100,
+  days: 10,
+  symbols: 15,
+  topShareMax: 0.2,
+  bestFilled: 30,
+  profitFactorMin: 1.2,
+  minLosses: 3,
+  maxDrawdownPct: 15,
+  verifyFreshMs: 24 * 3600_000,
+  tossRateMin: 0.8,
+};
+
+/**
+ * buildAssessment — 결과 요약의 결론 + 허점 점검 + 실매매 전환 게이트를 한꺼번에 계산한다.
+ *   @param realtimeOnly true면 "신호 봉이 마감된 직후 실시간으로 발견한 신호"만으로 결론을 낸다(권장 — 백필은
+ *     오늘 거래량 상위 종목만 골라 과거를 본 것이라 선택 편향이 있다). false면 백필 포함.
+ */
+export function buildAssessment(
+  signals: LabSignal[],
+  P: LabParams,
+  opts: { realtimeOnly: boolean; minFilled?: number; nowMs?: number; verify?: VerifyState | null },
+): Assessment {
+  const nowMs = opts.nowMs ?? Date.now();
+  const minFilled = opts.minFilled ?? 5;
+  const scopeFilter = { includeBackfilled: !opts.realtimeOnly, includeThin: false, includeIneligible: false };
+  const scoped = signals.filter((s) => !(opts.realtimeOnly && s.backfilled));
+  const elig = signals.filter((s) => passFilter(s, { includeBackfilled: true, includeThin: false, includeIneligible: false }));
+  const scopedElig = scoped.filter((s) => passFilter(s, scopeFilter));
+
+  const variants = summarizeVariants(signals, scopeFilter, P);
+  const linkage = summarizeLinkage(signals, scopeFilter);
+  const counts = {
+    realtimeEligible: elig.filter((s) => !s.backfilled).length,
+    allEligible: elig.length,
+    backfilledEligible: elig.filter((s) => s.backfilled).length,
+    total: scoped.length,
+    complete: scoped.filter((s) => s.complete).length,
+    open: scoped.filter((s) => !s.complete).length,
+  };
+  const verdict = buildVerdict(variants, { total: counts.total, eligible: scopedElig.length, complete: counts.complete, open: counts.open }, linkage, minFilled);
+  const best = verdict.best;
+
+  // ① 신뢰구간 ② 시간 분할 ③ 스트레스
+  const ci = best ? bootstrapCi(contributionVector(scopedElig, best.key, P), 1000, hash(best.key)) : null;
+  const holdout = scopedElig.length >= 10 ? holdoutCheck(scopedElig, P, minFilled) : null;
+  const stress = best ? { pct: P.stressPct ?? 0, expectancy: best.stressExpectancy } : null;
+
+  // ④ 집중도
+  const concentration = concentrationOf(scopedElig);
+
+  // ⑤ 지연: 실시간 신호의 (발견 시각 − 신호 봉 마감) 실측
+  const lat = signals.filter((s) => !s.backfilled).map((s) => (s.detectedAtMs - (s.c2T + FIVE)) / 60_000).filter((x) => Number.isFinite(x) && x >= 0).sort((a, b) => a - b);
+  const latency = { n: lat.length, medianMin: percentile(lat, 0.5) != null ? r2(percentile(lat, 0.5) as number) : null, p90Min: percentile(lat, 0.9) != null ? r2(percentile(lat, 0.9) as number) : null, assumedMin: P.latencyMin ?? 0 };
+
+  // ⑥ 규칙 일관성
+  const ruleVersions = new Set(signals.filter((s) => s.rule).map((s) => JSON.stringify(s.rule))).size;
+
+  // ── 게이트 ──
+  const T = GATE_THRESHOLDS;
+  const v = opts.verify ?? null;
+  const fresh = (t: number | null) => t != null && nowMs - t <= T.verifyFreshMs;
+  const gates: Gate[] = [
+    { id: "realtime", label: `실시간 인정 신호 ${T.realtimeEligible}건 이상`, ok: counts.realtimeEligible >= T.realtimeEligible, detail: `${counts.realtimeEligible}건 (백필 ${counts.backfilledEligible}건은 선택 편향이 있어 세지 않음)` },
+    { id: "days", label: `서로 다른 거래일 ${T.days}일 이상`, ok: concentration.days >= T.days, detail: `${concentration.days}일 — 하루·이틀의 장세에 우연히 맞았을 수 있어요` },
+    { id: "symbols", label: `종목 ${T.symbols}개 이상 + 한 종목 비중 ${T.topShareMax * 100}% 이하`, ok: concentration.symbols >= T.symbols && (concentration.topShare ?? 1) <= T.topShareMax, detail: `${concentration.symbols}종목 · 최다 ${concentration.topSymbol ?? "—"} ${concentration.topShare != null ? Math.round(concentration.topShare * 100) : "—"}%` },
+    { id: "filled", label: `1위 조합 체결 ${T.bestFilled}건 이상`, ok: best ? best.filled >= T.bestFilled : false, detail: best ? `${best.filled}건` : "비교할 조합 없음" },
+    { id: "ci", label: "기대값 95% 신뢰구간의 하한이 0보다 큼", ok: ci ? ci.lo > 0 : false, detail: ci ? `${sgnPct(ci.lo)} ~ ${sgnPct(ci.hi)} (평균 ${sgnPct(ci.mean)}, n=${ci.n})` : "표본 부족(5건 미만)" },
+    { id: "stress", label: `스트레스(추가 비용 ${P.stressPct ?? 0}%) 후에도 기대값 플러스`, ok: stress?.expectancy != null ? stress.expectancy > 0 : false, detail: stress?.expectancy != null ? `${sgnPct(stress.expectancy)}` : "—" },
+    { id: "holdout", label: "시간 분할 검증(앞 60%로 선택 → 뒤 40%)에서도 플러스", ok: holdout?.holds ?? null, detail: holdout ? (holdout.holds == null ? `검증 구간 체결 ${holdout.testFilled}건 — 표본 부족` : `선택 ${holdout.key} · 앞 ${sgnPct(holdout.trainExp)} → 뒤 ${sgnPct(holdout.testExp)} (체결 ${holdout.testFilled}건)`) : "신호 10건 미만" },
+    { id: "pf", label: `손익비 ${T.profitFactorMin} 이상 + 손실 ${T.minLosses}건 이상 경험`, ok: best ? (best.profitFactor ?? 0) >= T.profitFactorMin && best.losses >= T.minLosses : false, detail: best ? `손익비 ${best.profitFactor ?? "—"} · 손실 ${best.losses}건 (손실이 안 나온 표본은 위험이 가려져 있어요)` : "—" },
+    { id: "mdd", label: `최대 낙폭 ${T.maxDrawdownPct}%p 이하`, ok: best?.maxDrawdownPct != null ? best.maxDrawdownPct <= T.maxDrawdownPct : false, detail: best?.maxDrawdownPct != null ? `${best.maxDrawdownPct}%p · 최악 한 번 ${best.worstNetPct ?? "—"}%` : "—" },
+    { id: "latency", label: "지연 가정(주문까지 걸리는 시간)이 실측 중앙값 이상", ok: latency.n >= 10 && latency.medianMin != null ? latency.assumedMin >= latency.medianMin : null, detail: latency.n ? `가정 ${latency.assumedMin}분 · 실측 중앙값 ${latency.medianMin}분 · 90% ${latency.p90Min}분 (n=${latency.n})` : "실시간 신호가 아직 없음" },
+    { id: "verify", label: "최근 24시간 안의 데이터 검증 통과(재계산 전부 + 토스 대조 80% 이상)", ok: v && v.localAt != null ? fresh(v.localAt) && v.localOk === true && (v.tossRate == null || (fresh(v.tossAt) && v.tossRate >= T.tossRateMin)) : null, detail: v && v.localAt != null ? `재계산 ${v.localOk ? "통과" : "실패"}${v.tossRate != null ? ` · 토스 대조 ${Math.round(v.tossRate * 100)}%` : " · 토스 대조 아직 없음"}` : "검증 기록 없음" },
+    { id: "rule", label: "기록 도중 판정 기준이 바뀌지 않음", ok: ruleVersions <= 1, detail: ruleVersions <= 1 ? "일관" : `서로 다른 기준 ${ruleVersions}종이 섞여 있어요` },
+  ];
+  const passed = gates.filter((g) => g.ok === true).length;
+  const critical = ["ci", "stress", "holdout", "verify"].some((id) => gates.find((g) => g.id === id)?.ok === false);
+  const readiness: Assessment["readiness"] = passed === gates.length ? "ready" : passed >= Math.ceil(gates.length * 0.75) && !critical ? "close" : "no";
+  const readinessText =
+    readiness === "ready"
+      ? "🟢 모든 게이트 통과 — 소액·드라이런(실주문 잠금) 검증 단계로 넘어갈 수 있습니다. 바로 실계좌 자동매매로 가면 안 됩니다."
+      : readiness === "close"
+        ? `🟡 ${passed}/${gates.length} 통과 — 거의 왔지만 남은 게이트를 채우기 전엔 실매매 금지.`
+        : `🔴 ${passed}/${gates.length} 통과 — 아직 실매매를 검토할 단계가 아닙니다(데이터를 더 쌓으세요).`;
+
+  const topVariants = variants
+    .filter((x) => x.kind === "candle" && x.entryIdx === 1 && x.filled >= minFilled)
+    .sort((a, b) => (b.expectancyPerSignal ?? -999) - (a.expectancyPerSignal ?? -999))
+    .slice(0, 12);
+
+  return { scope: opts.realtimeOnly ? "realtime" : "all", asOf: nowMs, counts, verdict, ci, holdout, stress, concentration, latency, ruleVersions, gates, gatesPassed: passed, readiness, readinessText, topVariants };
+}
+
+function sgnPct(v: number | null | undefined): string {
+  return v == null ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(2)}%`;
 }

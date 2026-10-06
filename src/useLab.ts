@@ -34,6 +34,7 @@ function mirrorToSummary(m: LabMirror): LabSummary {
     signals: m.signals,
     refKey: m.refKey,
     counts: m.counts,
+    assessment: m.assessment,
   };
 }
 

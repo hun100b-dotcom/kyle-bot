@@ -230,6 +230,7 @@ export function installKyleTool(): ToolEngine {
     getLabCombined: (candleKey: string, linkKey: string, filter?: Parameters<typeof e.getLabCombined>[2]) => Promise.resolve(e.getLabCombined(candleKey, linkKey, filter)),
     exportLab: (kind: Parameters<typeof e.exportLab>[0]) => Promise.resolve(e.exportLab(kind)),
     verifyLab: (sample?: number) => e.verifyLab(sample),
+    getLabAssessment: (realtimeOnly?: boolean) => Promise.resolve(e.getLabAssessment(realtimeOnly !== false)),
     placeSell: (spec: Parameters<ToolEngine["placeSell"]>[0]) => e.placeSell(spec),
     openOrders: () => e.openOrders(),
     conditionals: () => e.conditionals(),

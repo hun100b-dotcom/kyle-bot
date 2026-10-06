@@ -488,6 +488,8 @@ interface LabParamsT {
 }
 interface LabStatus {
   enabled: boolean; rankCount: number; dojiBodyMaxPct: number; bodyMinPct: number; volRatioMin: number; minRangePct: number; note: string | null; scanning: boolean;
+  verify: { localAt: number | null; localOk: boolean | null; localFailed: string[]; tossAt: number | null; tossRequested: number; tossMatched: number };
+  feePct: number | null;
   lastTickAtMs: number | null; lastTickDurMs: number | null; lastScanned: number; lastError: string | null; lastSkip: string | null;
   startedAtMs: number | null; nextTickAtMs: number | null; totalSignals: number; params: LabParamsT;
 }
@@ -505,16 +507,18 @@ interface LabVariantRow {
   key: string; kind: "candle" | "link"; entryIdx: number; entryMode: string; stopMode: string; tpPct: number; signals: number; filled: number;
   fillRate: number | null; closed: number; wins: number; losses: number; winRate: number | null; avgNetPct: number | null; avgWinPct: number | null;
   avgLossPct: number | null; profitFactor: number | null; expectancyPerSignal: number | null; totalNetPct: number; avgMaePct: number | null;
-  avgRiskPct: number | null; avgHoldMin: number | null;
+  avgRiskPct: number | null; avgHoldMin: number | null; stressExpectancy: number | null; worstNetPct: number | null; maxDrawdownPct: number | null;
 }
 interface LabCounts { total: number; eligible: number; complete: number; open: number }
 interface LabSummary {
   updatedAtMs: number; status: LabStatus; funnel: LabFunnel; linkage: LabLinkageSummary; variants: LabVariantRow[]; signals: LabSignalRow[];
   refKey: string; counts: LabCounts;
+  assessment?: import("../lib/lab-verdict").Assessment; // 폰(미러) 전용
 }
 interface LabMirror {
   updatedAtMs: number; status: LabStatus; funnel: LabFunnel; linkage: LabLinkageSummary; topVariants: LabVariantRow[]; signals: LabSignalRow[];
   counts: LabCounts; refKey: string;
+  assessment?: import("../lib/lab-verdict").Assessment;
 }
 interface LabBar5 { t: number; o: number; h: number; l: number; c: number; v: number; ho: number; hh: number; hl: number; hc: number; e: number | null }
 interface LabSignalFull {
@@ -950,6 +954,8 @@ interface KyletoolBridge {
   getLabCombined?(candleKey: string, linkKey: string, filter?: LabQueryFilter): Promise<LabCombined>;
   exportLab?(kind: "signals-csv" | "trades-csv" | "json"): Promise<{ filename: string; text: string }>;
   /** [v0.66.0] 데이터 검증: 저장된 로우 재계산 + 토스 실데이터 대조(표본). */
+  /** [v0.67.0] 종합 평가(결론+허점 점검+실매매 전환 게이트). realtimeOnly 기본 true. */
+  getLabAssessment?(realtimeOnly?: boolean): Promise<import("../lib/lab-verdict").Assessment>;
   verifyLab?(sample?: number): Promise<{
     at: number;
     local: import("../lib/lab-verdict").LocalVerify;

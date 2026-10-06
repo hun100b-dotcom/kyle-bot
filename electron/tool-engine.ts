@@ -69,7 +69,8 @@ import {
   type BreakdownRow,
   type CombinedResult,
 } from "../lib/lab"; // [v0.65.0] 매매연구소(신호 기록 모드)
-import { verifyLocal, compareWithFresh, type LocalVerify, type TossCompareRow } from "../lib/lab-verdict"; // [v0.66.0] 데이터 검증
+import { verifyLocal, compareWithFresh, buildAssessment, type LocalVerify, type TossCompareRow, type Assessment } from "../lib/lab-verdict"; // [v0.66.0] 데이터 검증 + [v0.67.0] 종합 평가
+import { requiredPathEndMs } from "../lib/lab";
 import { fetchWithTimeout, netStats } from "../lib/fetch-timeout"; // [v0.61.5 — ③ 전수조사 "높음-1"] Supabase REST 호출도 토스처럼 타임아웃을 건다
 import {
   getPrice,
@@ -1079,6 +1080,9 @@ export interface LabStatus {
   volRatioMin: number;
   minRangePct: number;
   note: string | null;
+  /** [v0.67.0] 자동 검증 상태(스캔마다 로우 재계산, 1시간마다 토스 대조) */
+  verify: { localAt: number | null; localOk: boolean | null; localFailed: string[]; tossAt: number | null; tossRequested: number; tossMatched: number };
+  feePct: number | null;
   scanning: boolean;
   lastTickAtMs: number | null;
   lastTickDurMs: number | null;
@@ -1139,6 +1143,7 @@ export interface LabMirror {
   signals: LabSignalRow[];
   counts: { total: number; eligible: number; complete: number; open: number };
   refKey: string;
+  assessment?: Assessment;
 }
 
 export class ToolEngine extends EventEmitter {
@@ -4506,6 +4511,14 @@ export class ToolEngine extends EventEmitter {
   private labVolMin = 1.5; //       신호 캔들 거래량 배수(직전 5개 평균 대비)
   private labMinRangePct = 0.5; //   [v0.65.1] 신호 캔들 최소 크기(고저폭 ÷ 종가 %) — 1~2틱짜리 초소형 봉의 "몸통 100%" 잡음 제거(0=끔)
   private labNote: string | null = null; // 화면에 한 번 보여 줄 안내(예: 규칙 오류로 옛 데이터 폐기)
+  private labGen = 0; //            [v0.67.0] 초기화 세대 — 스캔 도중 초기화하면 진행 중이던 스캔이 옛 데이터를 다시 쓰지 못하게
+  private labFeePct: number | null = null; // 왕복 수수료 추정(%) — 토스 수수료율 조회가 되면 그 값
+  private labLocalVerify: LocalVerify | null = null;
+  private labLocalVerifyAt: number | null = null;
+  private labTossVerify: { at: number; requested: number; matched: number } | null = null;
+  private labDeferTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly LAB_LATENCY_MIN = 2; // 가상 체결의 주문 지연 가정(분)
+  private static readonly LAB_TOSS_VERIFY_EVERY_MS = 60 * 60_000; // 토스 대조 자동 점검 주기(1시간)
   private static readonly LAB_SCHEMA = 2;
   private labTimer: ReturnType<typeof setInterval> | null = null;
   private labBusy = false;
@@ -4538,7 +4551,15 @@ export class ToolEngine extends EventEmitter {
   }
 
   private labParams(): LabParams {
-    return { ...LAB_PARAMS_DEFAULT, dojiBodyMaxPct: this.labDojiBodyMax, bodyMinPct: this.labBodyMin, volRatioMin: this.labVolMin, minRangePct: this.labMinRangePct };
+    return {
+      ...LAB_PARAMS_DEFAULT,
+      dojiBodyMaxPct: this.labDojiBodyMax,
+      bodyMinPct: this.labBodyMin,
+      volRatioMin: this.labVolMin,
+      minRangePct: this.labMinRangePct,
+      latencyMin: ToolEngine.LAB_LATENCY_MIN, //     [v0.67.0] 주문 지연 가정
+      feeRoundTripPct: this.labFeePct ?? LAB_PARAMS_DEFAULT.feeRoundTripPct, // 실제 수수료율을 알면 그 값
+    };
   }
 
   private loadLab(): void {
@@ -4578,12 +4599,15 @@ export class ToolEngine extends EventEmitter {
   private startLabTimer(): void {
     if (this.labTimer) return;
     if (this.labStartedAtMs == null) this.labStartedAtMs = Date.now();
-    void this.labScanOnce();
+    // [v0.67.0] 앱을 막 켠 직후엔 자동매매·다른 초기 조회가 몰리므로 첫 스캔을 45초 늦춘다(자동매매가 실주문 경로라 우선).
+    this.labDeferTimer = setTimeout(() => void this.labScanOnce(), 45_000);
     this.labTimer = setInterval(() => void this.labScanOnce(), ToolEngine.LAB_INTERVAL_MS);
   }
 
   private stopLabTimer(): void {
     if (this.labTimer) clearInterval(this.labTimer);
+    if (this.labDeferTimer) clearTimeout(this.labDeferTimer);
+    this.labDeferTimer = null;
     this.labTimer = null;
   }
 
@@ -4596,8 +4620,11 @@ export class ToolEngine extends EventEmitter {
     if (typeof input.volRatioMin === "number" && Number.isFinite(input.volRatioMin)) this.labVolMin = Math.round(Math.min(5, Math.max(1, input.volRatioMin)) * 100) / 100;
     if (typeof input.enabled === "boolean") {
       this.labEnabled = input.enabled;
-      if (input.enabled) this.startLabTimer();
-      else this.stopLabTimer();
+      if (input.enabled) {
+        this.startLabTimer();
+        // 오너가 직접 켠 경우엔 45초를 기다리지 않고 바로 한 번 스캔한다(앱 시작 때 자동 재개만 늦춘다).
+        if (this.labDeferTimer) { clearTimeout(this.labDeferTimer); this.labDeferTimer = null; void this.labScanOnce(true); }
+      } else this.stopLabTimer();
     }
     this.persistEnv();
     this.addJournal({
@@ -4622,6 +4649,15 @@ export class ToolEngine extends EventEmitter {
       volRatioMin: this.labVolMin,
       minRangePct: this.labMinRangePct,
       note: this.labNote,
+      verify: {
+        localAt: this.labLocalVerifyAt,
+        localOk: this.labLocalVerify ? this.labLocalVerify.allOk : null,
+        localFailed: (this.labLocalVerify?.checks ?? []).filter((c) => c.failed > 0).map((c) => `${c.label} ${c.failed}건`),
+        tossAt: this.labTossVerify?.at ?? null,
+        tossRequested: this.labTossVerify?.requested ?? 0,
+        tossMatched: this.labTossVerify?.matched ?? 0,
+      },
+      feePct: this.labFeePct,
       scanning: this.labBusy,
       lastTickAtMs: this.labLastTickAtMs,
       lastTickDurMs: this.labLastTickDurMs,
@@ -4637,14 +4673,18 @@ export class ToolEngine extends EventEmitter {
 
   /** "지금 스캔" — 켜짐 여부와 무관하게 한 번 훑는다(첫 실행에는 지금 데이터에 남아 있는 과거 약 18시간 분량을 백필한다). */
   async labScanNow(): Promise<LabStatus> {
-    await this.labScanOnce();
+    await this.labScanOnce(true); // 오너가 직접 누른 스캔은 양보하지 않는다
     return this.getLabStatus();
   }
 
   /** 모든 연구소 데이터 삭제(복구 불가 — 화면에서 확인 후에만 호출). */
   labReset(): LabStatus {
+    this.labGen++; // 진행 중인 스캔의 결과가 초기화 뒤에 다시 쓰이지 않게
     this.labSignals = [];
     this.labAttempts = {};
+    this.labLocalVerify = null;
+    this.labLocalVerifyAt = null;
+    this.labTossVerify = null;
     this.labStartedAtMs = this.labEnabled ? Date.now() : null;
     this.persistLab();
     this.labVersion++;
@@ -4652,9 +4692,17 @@ export class ToolEngine extends EventEmitter {
     return this.getLabStatus();
   }
 
-  private async labScanOnce(): Promise<void> {
+  private async labScanOnce(manual = false): Promise<void> {
     if (this.labBusy) return;
+    // [v0.67.0 리스크 해소] 자동매매는 실주문 경로다. 자동매매 사이클·스크리닝이 돌고 있으면 연구소는 양보한다
+    //   (같은 토스 "차트" 요청 한도 — 초당 약 5회 — 를 나눠 쓰므로, 연구소가 점유하면 자동매매 스캔이 느려지거나 429가 난다).
+    if (!manual && (this.autoTradeTickBusy || this.screenBusy)) {
+      this.labLastSkip = "자동매매·스크리닝이 진행 중이라 양보했습니다(곧 다시 시도)";
+      if (!this.labDeferTimer) this.labDeferTimer = setTimeout(() => { this.labDeferTimer = null; void this.labScanOnce(); }, 60_000);
+      return;
+    }
     this.labBusy = true;
+    const gen = this.labGen;
     const t0 = Date.now();
     this.labLastError = null;
     this.labLastSkip = null;
@@ -4665,6 +4713,10 @@ export class ToolEngine extends EventEmitter {
         return;
       }
       await this.prepareBackend();
+      if (this.labFeePct == null) {
+        const rate = await this.resolveCommissionRate().catch(() => null);
+        if (rate != null && rate > 0) this.labFeePct = Math.max(0.1, Math.round(rate * 2 * 100 * 1000) / 1000); // 왕복 %
+      }
       const ranked = await getRankings(this.labRankCount);
       let rankings = ranked;
       if (this.autoScanExcludeEtf) {
@@ -4681,18 +4733,25 @@ export class ToolEngine extends EventEmitter {
       }
       const nowMs = Date.now();
       let scanned = 0;
+      // 자동매매가 켜져 있으면 깊은 백필(종목당 최대 14회 요청)은 하지 않고 얕게만 — 실주문 경로의 요청 한도를 아낀다.
+      const allowDeep = !this.autoTradeEnabled;
       for (const rk of rankings) {
+        if (gen !== this.labGen) break; // 스캔 도중 초기화됨
         try {
-          await this.labProcessSymbol(rk.symbol, rk.rank, Number.isFinite(rk.lastPrice) ? rk.lastPrice : null, nowMs);
+          await this.labProcessSymbol(rk.symbol, rk.rank, Number.isFinite(rk.lastPrice) ? rk.lastPrice : null, nowMs, gen, allowDeep);
           scanned++;
         } catch {
           /* 종목 하나의 실패가 전체를 멈추지 않게 */
         }
+        await new Promise((r) => setTimeout(r, this.autoTradeEnabled ? 400 : 120)); // 요청 간격을 벌려 한도를 나눠 쓴다
       }
+      if (gen !== this.labGen) return;
       this.labLastScanned = scanned;
+      this.labFinalizeStale(nowMs);
       this.labTrim();
       this.persistLab();
       this.labVersion++;
+      await this.labAutoVerify();
     } catch (e) {
       this.labLastError = String(e).replace(/^Error:\s*/, "");
     } finally {
@@ -4703,10 +4762,45 @@ export class ToolEngine extends EventEmitter {
     }
   }
 
-  private async labProcessSymbol(symbol: string, rank: number, lastPrice: number | null, nowMs: number): Promise<void> {
+  /** [v0.67.0] 갱신이 끊긴(시리즈에서 사라진) 미완료 신호를 정리한다 — 필요한 관찰 구간이 지났으면 그대로 마감한다(영원히 "진행 중"으로 남지 않게). */
+  private labFinalizeStale(nowMs: number): void {
+    const P = this.labParams();
+    this.labSignals = this.labSignals.map((s) => (!s.complete && nowMs >= requiredPathEndMs(s, P) + 10 * 60_000 ? { ...s, complete: true, linkageDone: true } : s));
+  }
+
+  /**
+   * [v0.67.0 — 오너 질문 "실제 데이터 검증을 주기적으로 하고 있나?"] 예전엔 버튼을 눌러야만 검증이 돌았다. 이제 스캔이 끝날 때마다
+   *   ① 저장된 로우 재계산 검증(가벼움)을 자동으로 돌리고 ② 1시간마다 표본 3건을 토스에서 다시 받아 대조한다.
+   *   실패하면 서버 로그에 경고를 남기고(화면 배너에도 표시) 결과 요약의 "실매매 전환 게이트"가 막힌다.
+   */
+  private async labAutoVerify(): Promise<void> {
+    try {
+      const prevOk = this.labLocalVerify?.allOk ?? true;
+      this.labLocalVerify = verifyLocal(this.labSignals, this.labParams());
+      this.labLocalVerifyAt = Date.now();
+      if (!this.labLocalVerify.allOk && prevOk) {
+        const bad = this.labLocalVerify.checks.filter((c) => c.failed > 0).map((c) => `${c.label} ${c.failed}건`).join(", ");
+        this.addJournal({ kind: "info", symbol: "-", summary: `🔬 매매연구소 데이터 검증 경고 — 저장된 로우 재계산에서 불일치: ${bad}`, category: "시스템" });
+      }
+      const due = this.labTossVerify == null || Date.now() - this.labTossVerify.at >= ToolEngine.LAB_TOSS_VERIFY_EVERY_MS;
+      if (due && this.labSignals.length > 0) {
+        const t = await this.labTossCheck(3);
+        if (t.requested > 0) {
+          this.labTossVerify = { at: Date.now(), requested: t.requested, matched: t.matched };
+          if (t.matched / t.requested < 0.8) {
+            this.addJournal({ kind: "info", symbol: "-", summary: `🔬 매매연구소 토스 대조 경고 — 표본 ${t.requested}건 중 ${t.matched}건만 일치(저장된 봉이 토스 재조회 값과 다름)`, category: "시스템" });
+          }
+        }
+      }
+    } catch {
+      /* 검증 자체의 실패가 연구소 동작을 막지 않게 */
+    }
+  }
+
+  private async labProcessSymbol(symbol: string, rank: number, lastPrice: number | null, nowMs: number, gen: number = this.labGen, allowDeep = true): Promise<void> {
     // EMA200은 5분봉 200개(1분봉 1000개)가 있어야 시작되므로 보통 받는 1100개로는 최근 약 3시간만 패턴을 찾을 수 있다.
     //   그래서 종목마다 처음 한 번은 더 깊게(2400개) 받아 과거 신호를 백필하고, 그 뒤엔 공용 캐시(1100개)로 가볍게 이어간다.
-    const deep = !this.labDeepDone.has(symbol);
+    const deep = allowDeep && !this.labDeepDone.has(symbol);
     const oneMin = await this.getCandles1mCached(symbol, 120_000, deep ? 2400 : 1100);
     if (deep) this.labDeepDone.add(symbol);
     const raw5m: Candle[] = dropIncompleteBucket(aggregate1mTo5m(oneMin), nowMs);
@@ -4757,6 +4851,7 @@ export class ToolEngine extends EventEmitter {
       });
       // 처음 발견한 시각·순위·실시간 여부는 보존한다.
       const next: LabSignal = existing ? { ...built, detectedAtMs: existing.detectedAtMs, backfilled: existing.backfilled, rank: existing.rank } : built;
+      if (gen !== this.labGen) return; // 초기화된 뒤엔 옛 스캔 결과를 쓰지 않는다
       if (idx >= 0) this.labSignals[idx] = next;
       else this.labSignals.push(next);
     }
@@ -4882,7 +4977,17 @@ export class ToolEngine extends EventEmitter {
    */
   async verifyLab(sample = 8): Promise<{ at: number; local: LocalVerify; toss: { requested: number; matched: number; rows: TossCompareRow[]; error: string | null } | null }> {
     const local = verifyLocal(this.labSignals, this.labParams());
-    let toss: { requested: number; matched: number; rows: TossCompareRow[]; error: string | null } | null = null;
+    this.labLocalVerify = local;
+    this.labLocalVerifyAt = Date.now();
+    const toss = await this.labTossCheck(sample);
+    if (toss.requested > 0) this.labTossVerify = { at: Date.now(), requested: toss.requested, matched: toss.matched };
+    this.labVersion++; // 게이트(검증 최신성)가 바뀌므로 평가 캐시 무효화
+    return { at: Date.now(), local, toss };
+  }
+
+  /** 표본 신호의 신호 봉을 토스에서 캐시 없이 다시 받아 비교한다. */
+  private async labTossCheck(sample: number): Promise<{ requested: number; matched: number; rows: TossCompareRow[]; error: string | null }> {
+    let toss: { requested: number; matched: number; rows: TossCompareRow[]; error: string | null };
     try {
       await this.prepareBackend();
       // 표본: 최근 신호 위주(토스 1분봉은 최근 약 하루 반만 받을 수 있다), 종목이 겹치지 않게
@@ -4910,7 +5015,27 @@ export class ToolEngine extends EventEmitter {
     } catch (e) {
       toss = { requested: 0, matched: 0, rows: [], error: String(e).replace(/^Error:\s*/, "") };
     }
-    return { at: Date.now(), local, toss };
+    return toss;
+  }
+
+  /**
+   * [v0.67.0] 종합 평가 — 결론 + 허점 점검(신뢰구간·시간 분할 검증·스트레스·집중도·지연) + 실매매 전환 게이트.
+   *   realtimeOnly=true(기본, 권장): 신호 봉이 마감된 직후 실시간으로 발견한 신호만으로 결론(백필은 오늘 거래량 상위 종목만 골라 본 선택 편향이 있다).
+   */
+  getLabAssessment(realtimeOnly = true): Assessment {
+    const key = `as|${realtimeOnly}|${this.labLocalVerifyAt ?? 0}|${this.labTossVerify?.at ?? 0}`;
+    return this.labMemoGet(key, () =>
+      buildAssessment(this.labSignals, this.labParams(), {
+        realtimeOnly,
+        nowMs: Date.now(),
+        verify: {
+          localOk: this.labLocalVerify ? this.labLocalVerify.allOk : null,
+          localAt: this.labLocalVerifyAt,
+          tossRate: this.labTossVerify && this.labTossVerify.requested > 0 ? this.labTossVerify.matched / this.labTossVerify.requested : null,
+          tossAt: this.labTossVerify?.at ?? null,
+        },
+      }),
+    );
   }
 
   /** 폰 미러용 가벼운 요약(상위 변형 + 최근 신호). */
@@ -4922,7 +5047,7 @@ export class ToolEngine extends EventEmitter {
         .filter((v) => v.filled >= 3 && v.kind === "candle" && v.entryIdx === 1)
         .sort((a, b) => (b.expectancyPerSignal ?? -999) - (a.expectancyPerSignal ?? -999))
         .slice(0, 12);
-      return { updatedAtMs: s.updatedAtMs, status: s.status, funnel: s.funnel, linkage: s.linkage, topVariants: top, signals: s.signals.slice(0, 40), counts: s.counts, refKey: s.refKey };
+      return { updatedAtMs: s.updatedAtMs, status: s.status, funnel: s.funnel, linkage: s.linkage, topVariants: top, signals: s.signals.slice(0, 40), counts: s.counts, refKey: s.refKey, assessment: this.getLabAssessment(true) };
     } catch {
       return null;
     }

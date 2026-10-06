@@ -1312,3 +1312,35 @@ body:has(.update-banner) .topbar {
   .gd-pop, .gd-fade, .gd-grow, .gd-move, .gd-draw, .rs-bar .rs-fill, .rs-gauge i { transition: none; }
   .gd-spot, .rs-arrow { animation: none; }
 }
+
+/* ===== [v0.67.0] 허점 점검 · 실매매 전환 게이트 · 자동 검증 띠 ===== */
+.rs-scope { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
+.rs-vbar { display: flex; flex-direction: column; gap: 3px; padding: 10px 14px; border-radius: var(--r-sm); border: 1px solid var(--border-strong); margin: 8px 0; font-size: 13px; }
+.rs-vbar.ok { border-color: var(--green); background: rgba(61, 220, 151, 0.06); }
+.rs-vbar.bad { border-color: var(--red); background: rgba(255, 107, 129, 0.10); animation: rs-blink 1.6s ease-in-out infinite; }
+.rs-vbar.none { background: var(--panel2); }
+.rs-vbar span { color: var(--muted); font-size: 12px; }
+.rs-checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; }
+.rs-check { background: var(--panel2); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 12px 14px; animation: rs-rise 0.5s ease both; }
+.rs-check p { margin: 8px 0 0; font-size: 12.5px; line-height: 1.65; color: var(--muted); }
+.rs-check p b { color: var(--text); }
+.rs-ci { position: relative; height: 14px; margin: 10px 0 2px; background: rgba(255, 255, 255, 0.06); border-radius: 7px; }
+.rs-ci .rs-ci-zero { position: absolute; left: 50%; top: -3px; bottom: -3px; width: 2px; background: rgba(255, 255, 255, 0.5); }
+.rs-ci u { position: absolute; top: 3px; bottom: 3px; border-radius: 4px; background: var(--amber); opacity: 0.85; transition: left 0.9s ease, width 0.9s ease; }
+.rs-ci u.pos { background: var(--green); }
+.rs-ci s { position: absolute; top: -2px; bottom: -2px; width: 3px; background: #fff; border-radius: 2px; text-decoration: none; transition: left 0.9s ease; }
+.rs-ready { border-radius: var(--r-md); padding: 14px 16px; border: 1px solid var(--border-strong); background: var(--panel2); margin: 8px 0; }
+.rs-ready.ready { border-color: var(--green); background: rgba(61, 220, 151, 0.07); }
+.rs-ready.close { border-color: var(--amber); background: rgba(247, 185, 85, 0.07); }
+.rs-ready.no { border-color: var(--red); background: rgba(255, 107, 129, 0.06); }
+.rs-ready-title { font-weight: 800; font-size: 15px; line-height: 1.5; }
+.rs-gates { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.rs-gates li { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border-radius: 8px; background: rgba(255, 255, 255, 0.03); }
+.rs-gates li.ok { background: rgba(61, 220, 151, 0.07); }
+.rs-gates li.no { background: rgba(255, 107, 129, 0.07); }
+.rs-gates li div { display: flex; flex-direction: column; gap: 2px; }
+.rs-gates li b { font-size: 13px; }
+.rs-gates li small { font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+.rs-ready .lab-rules ol { margin: 8px 0 4px 18px; padding: 0; line-height: 1.7; font-size: 13px; color: var(--muted); }
+@keyframes rs-blink { 0%, 100% { box-shadow: 0 0 0 0 rgba(255, 107, 129, 0.0); } 50% { box-shadow: 0 0 0 6px rgba(255, 107, 129, 0.18); } }
+@media (prefers-reduced-motion: reduce) { .rs-vbar.bad, .rs-check { animation: none; } .rs-ci u, .rs-ci s { transition: none; } }

@@ -7,7 +7,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { DateTime } from "luxon";
 import type { LabApi } from "./useLab";
-import { buildVerdict, type DimVerdict, type Verdict, type Confidence } from "../lib/lab-verdict";
+import type { DimVerdict, Verdict, Confidence, Assessment, Gate } from "../lib/lab-verdict";
 import { GuideButton, GuideModal, useGuide } from "./LabGuide";
 
 const kst = (ms: number | null | undefined, fmt = "MM-dd HH:mm") => (ms == null ? "—" : DateTime.fromMillis(ms).setZone("Asia/Seoul").toFormat(fmt));
@@ -85,6 +85,99 @@ function DimBlock({ title, hint, v }: { title: string; hint: string; v: DimVerdi
   );
 }
 
+/** 자동 검증 상태 띠 — 스캔마다 재계산, 1시간마다 토스 대조. 실패하면 붉게. */
+function VerifyBar({ s }: { s: LabStatus["verify"] }) {
+  const bad = s.localOk === false || (s.tossRequested > 0 && s.tossMatched / s.tossRequested < 0.8);
+  const never = s.localAt == null;
+  return (
+    <div className={`rs-vbar ${never ? "none" : bad ? "bad" : "ok"}`} data-guide="result-autover">
+      <b>{never ? "⏳ 자동 검증 대기 중" : bad ? "🚨 데이터 검증 경고" : "✅ 자동 검증 정상"}</b>
+      <span>
+        {never
+          ? "다음 스캔이 끝나면 저장된 로우를 자동으로 재계산합니다(이후 스캔마다, 토스 대조는 1시간마다)."
+          : `로우 재계산 ${kst(s.localAt, "HH:mm:ss")} ${s.localOk ? "통과" : `실패 — ${s.localFailed.join(", ")}`}${s.tossAt ? ` · 토스 대조 ${kst(s.tossAt, "HH:mm")} ${s.tossMatched}/${s.tossRequested} 일치` : " · 토스 대조 아직 없음"}`}
+      </span>
+    </div>
+  );
+}
+
+/** 허점 점검 5종 */
+function Flaws({ a }: { a: Assessment }) {
+  const ci = a.ci;
+  const ho = a.holdout;
+  const st = a.stress;
+  const c = a.concentration;
+  const lat = a.latency;
+  const icon = (ok: boolean | null) => (ok === true ? "✅" : ok === false ? "⚠️" : "❔");
+  const span = ci ? Math.max(Math.abs(ci.lo), Math.abs(ci.hi), 0.3) * 1.2 : 1;
+  const pos = (v: number) => `${50 + (v / span) * 50}%`;
+  return (
+    <>
+      <h3>🧪 허점 점검 <span className="hint">(1위 숫자를 그대로 믿지 않기 위한 5가지 검사)</span></h3>
+      <div className="rs-checks">
+        <div className="rs-check">
+          <b>{icon(ci ? ci.lo > 0 : false)} ① 우연일 가능성 (신뢰구간)</b>
+          {ci ? (
+            <>
+              <div className="rs-ci"><i className="rs-ci-zero" /><u style={{ left: pos(ci.lo), width: `calc(${pos(ci.hi)} - ${pos(ci.lo)})` }} className={ci.lo > 0 ? "pos" : "mix"} /><s style={{ left: pos(ci.mean) }} /></div>
+              <p>1위 조합의 신호당 기대값 <b>{sgn(ci.mean)}</b>, 95% 범위 <b>{sgn(ci.lo)} ~ {sgn(ci.hi)}</b>. {ci.lo > 0 ? "범위 전체가 플러스라 우연일 가능성이 낮습니다." : "범위가 0을 걸치므로 우연일 수 있습니다."}</p>
+            </>
+          ) : <p>표본이 5건 미만이라 계산할 수 없습니다.</p>}
+        </div>
+        <div className="rs-check">
+          <b>{icon(ho?.holds ?? null)} ② 처음 보는 데이터에서도? (시간 분할 검증)</b>
+          {ho && ho.key ? (
+            <p>앞쪽 60%({ho.trainN}건)로 고른 조합 <b>{ho.key}</b>이 뒤쪽 40%({ho.testN}건)에서 <b>{sgn(ho.trainExp)} → {sgn(ho.testExp)}</b>. {ho.holds == null ? "검증 구간 체결이 적어 판단 불가." : ho.holds ? "처음 보는 구간에서도 플러스." : "처음 보는 구간에서는 플러스가 아님 — 과거에만 맞았을 수 있습니다."}</p>
+          ) : <p>신호가 10건 미만이라 나눌 수 없습니다.</p>}
+        </div>
+        <div className="rs-check">
+          <b>{icon(st?.expectancy != null ? st.expectancy > 0 : null)} ③ 현실 비용을 더하면? (스트레스)</b>
+          <p>1분봉으로는 알 수 없는 호가 차이·슬리피지를 체결 건마다 <b>{st?.pct ?? 0}%</b> 더 낸다고 가정하면 기대값은 <b className={cls(st?.expectancy)}>{sgn(st?.expectancy)}</b>.</p>
+        </div>
+        <div className="rs-check">
+          <b>{icon(c.symbols >= 15 && (c.topShare ?? 1) <= 0.2 && c.days >= 10)} ④ 한쪽에 쏠리지 않았나? (집중도)</b>
+          <p>인정 신호 {c.eligible}건이 <b>{c.symbols}종목 · {c.days}거래일</b>에 걸쳐 있고, 최다 종목 <b>{c.topSymbol ?? "—"}</b>이 {c.topShare != null ? Math.round(c.topShare * 100) : "—"}%. 같은 종목·같은 날의 신호는 서로 닮아서 실제 표본 수는 건수보다 적습니다.</p>
+        </div>
+        <div className="rs-check">
+          <b>{icon(lat.n >= 10 && lat.medianMin != null ? lat.assumedMin >= lat.medianMin : null)} ⑤ 주문까지 걸리는 시간 (지연)</b>
+          <p>가상 체결은 신호 봉 마감 <b>{lat.assumedMin}분 뒤</b>부터 시작한다고 가정합니다. 실시간 신호 {lat.n}건의 실측: 중앙값 <b>{lat.medianMin ?? "—"}분</b> · 90% <b>{lat.p90Min ?? "—"}분</b>. 실측이 가정보다 길면 실제 성과는 더 나쁩니다.</p>
+        </div>
+      </div>
+    </>
+  );
+}
+
+/** 실매매 전환 게이트 */
+function GatePanel({ a }: { a: Assessment }) {
+  const icon = (g: Gate) => (g.ok === true ? "✅" : g.ok === false ? "❌" : "❔");
+  return (
+    <>
+      <h3>🚦 실매매 전환 게이트 <span className="hint">(전부 통과해야 다음 단계)</span></h3>
+      <div className={`rs-ready ${a.readiness}`} data-guide="result-gates">
+        <div className="rs-ready-title">{a.readinessText}</div>
+        <div className="rs-gauge"><i style={{ width: `${(a.gatesPassed / a.gates.length) * 100}%` }} /></div>
+        <ul className="rs-gates">
+          {a.gates.map((g) => (
+            <li key={g.id} className={g.ok === true ? "ok" : g.ok === false ? "no" : "na"}>
+              <span>{icon(g)}</span>
+              <div><b>{g.label}</b><small>{g.detail}</small></div>
+            </li>
+          ))}
+        </ul>
+        <details className="lab-rules">
+          <summary>🛣 게이트를 모두 통과한 뒤의 순서 (바로 실계좌 자동매매로 가지 않습니다)</summary>
+          <ol>
+            <li><b>엔진 사전 작업</b>: 같은 종목 2회 진입(불타기) 허용 · 종목당 투입 한도(지금 30%) 개편 · 캔들 마감 직후 반응(지금 스캔은 5분 주기라 지연이 큼) · 캔들 포지션 청산 뒤에만 삼분할 전환 · 손절 종목 당일 재진입 금지 연동.</li>
+            <li><b>드라이런(실주문 잠금) 1~2주</b>: 실제와 똑같이 신호를 내되 주문은 막고, 연구소 가상 결과와 일치하는지 확인.</li>
+            <li><b>소액 실주문</b>: 종목당 투입을 매우 작게(시드의 몇 %) 시작, 체결가·슬리피지를 가상값과 비교. 최대 손실 한도·연속 손절 자동 중지 그대로 적용.</li>
+            <li><b>점진 확대</b>: 실제 성과가 가상 성과의 범위 안일 때만 단계적으로. 범위를 벗어나면 즉시 중단하고 원인 분석.</li>
+          </ol>
+        </details>
+      </div>
+    </>
+  );
+}
+
 function GradeBanner({ v }: { v: Verdict }) {
   const pct = Math.min(100, (v.eligible / 100) * 100);
   const [on, setOn] = useState(false);
@@ -102,10 +195,21 @@ function GradeBanner({ v }: { v: Verdict }) {
   );
 }
 
-export function LabResultTab({ lab }: { lab: LabApi }) {
+export function LabResultTab({ lab, initialAssessment }: { lab: LabApi; initialAssessment?: Assessment | null }) {
   const s = lab.summary;
   const guide = useGuide("result");
-  const verdict = useMemo(() => (s ? buildVerdict(s.variants, s.counts, s.linkage, 5) : null), [s]);
+  // [v0.67.0] 결론은 서버(엔진)가 계산한 종합 평가를 쓴다 — 신뢰구간·시간 분할 검증·스트레스·집중도·게이트까지 포함.
+  //   기본은 "실시간 신호만"(백필은 오늘 거래량 상위 종목만 골라 과거를 본 선택 편향이 있어 결론에서 제외).
+  const [scope, setScope] = useState<"realtime" | "all">("realtime");
+  const [assessLocal, setAssessLocal] = useState<Assessment | null>(initialAssessment ?? null);
+  useEffect(() => {
+    if (lab.isMirror) return;
+    let alive = true;
+    void window.kyletool.getLabAssessment?.(scope === "realtime").then((a) => alive && setAssessLocal(a ?? null));
+    return () => { alive = false; };
+  }, [lab.isMirror, scope, s?.updatedAtMs]);
+  const assess: Assessment | null = lab.isMirror ? (s?.assessment ?? null) : assessLocal;
+  const verdict: Verdict | null = assess?.verdict ?? null;
   const [ver, setVer] = useState<Awaited<ReturnType<NonNullable<typeof window.kyletool.verifyLab>>> | null>(null);
   const [verBusy, setVerBusy] = useState(false);
   const [verErr, setVerErr] = useState("");
@@ -160,6 +264,18 @@ export function LabResultTab({ lab }: { lab: LabApi }) {
         {s.status.note && <p className="lab-note">ℹ️ {s.status.note}</p>}
         {mirror && <p className="hint">📱 폰에서는 PC가 올려 둔 요약(상위 변형)만 보입니다. 항목별 막대는 PC에서 더 정확합니다. (갱신 {kst(s.updatedAtMs, "MM-dd HH:mm:ss")})</p>}
 
+        {!mirror && (
+          <div className="rs-scope">
+            <span className="hint">결론에 쓸 데이터:</span>
+            <button className={scope === "realtime" ? "mini active" : "mini"} onClick={() => setScope("realtime")}>실시간 신호만 (권장)</button>
+            <button className={scope === "all" ? "mini active" : "mini"} onClick={() => setScope("all")}>백필 포함 전체</button>
+            {assess && <span className="hint small"> 실시간 인정 {assess.counts.realtimeEligible}건 · 백필 인정 {assess.counts.backfilledEligible}건</span>}
+          </div>
+        )}
+        {scope === "all" && !mirror && (
+          <p className="lab-note">⚠️ 백필 신호는 "오늘 거래량이 많은 종목"만 골라 과거를 본 것이라 선택 편향이 있어 성과가 좋게 나오기 쉽습니다. 결론은 실시간 신호로 내려야 합니다.</p>
+        )}
+        <VerifyBar s={s.status.verify} />
         <GradeBanner v={verdict} />
 
         <div className="rs-headline" data-guide="result-headline">
@@ -214,6 +330,9 @@ export function LabResultTab({ lab }: { lab: LabApi }) {
             </div>
           ))}
         </div>
+
+        {assess && <div data-guide="result-flaws"><Flaws a={assess} /></div>}
+        {assess && <GatePanel a={assess} />}
 
         <h3>다음에 할 일</h3>
         <ol className="rs-actions">

@@ -44,6 +44,11 @@ export interface LabParams {
   minRangePct: number;
   maxSignalAgeHours: number; // 이보다 오래된 패턴은 무시(거래가 드문 종목의 몇 주 전 봉 방지) — 72
   maxEmaSpanDays: number; //    EMA200을 만든 봉 200개가 이 일수보다 넓게 퍼져 있으면(거래 드문 종목) 그 EMA는 믿지 않음 — 5
+  /** [v0.67.0] 신호 봉 마감 후 실제로 주문이 나가기까지의 지연(분). 가상 체결은 이 시간이 지난 뒤부터 시작한다
+   *  (실제 봇은 5분 스캔 + 스캔 소요 시간 때문에 봉 마감 즉시 주문할 수 없다). 순수 기본값 0, 엔진은 2를 쓴다. */
+  latencyMin: number;
+  /** [v0.67.0] 스트레스 테스트용 추가 비용(왕복 %) — 호가 스프레드·슬리피지처럼 1분봉으로는 알 수 없는 비용을 가정. */
+  stressPct: number;
 }
 
 export const LAB_PARAMS_DEFAULT: LabParams = {
@@ -60,6 +65,8 @@ export const LAB_PARAMS_DEFAULT: LabParams = {
   minRangePct: 0.5,
   maxSignalAgeHours: 72,
   maxEmaSpanDays: 5,
+  latencyMin: 0,
+  stressPct: 0.3,
 };
 
 /** 익절 목표(%) — 오너 지정 "1.3~2%" 범위를 3점으로 비교한다. */
@@ -252,6 +259,9 @@ export interface LabSignal {
   thinHours: boolean; //         05:00~17:00 KST(시세가 얇은 휴무 시간대)에 발생
   session: string; //            day/pre/regular/after/closed
   eligible: boolean; //          2번째 캔들이 몸통·거래량·봉 크기 모두 충족(실투입 인정 신호)
+  /** [v0.67.0] 이 신호를 판정할 때 쓴 기준(도지 몸통 상한·신호 몸통 하한·거래량 배수·최소 봉 크기). 기준을 중간에 바꾸면
+   *  서로 다른 규칙의 신호가 섞이므로, 나중에 구분하고 검증할 수 있게 남긴다. */
+  rule?: { d: number; b: number; v: number; r: number };
   rangePct2?: number | null; //  [v0.65.1] 2번째 캔들 크기(고저폭 ÷ 종가 %)
   whyIneligible?: "volume" | "range" | "both" | null; // [v0.65.1] 비인정 사유
   dojiT: number;
@@ -457,6 +467,7 @@ export function buildSignal(a: {
     backfilled: a.nowMs - c2Close > 10 * MIN,
     thinHours: a.thinHours,
     session: a.session,
+    rule: { d: P.dojiBodyMaxPct, b: P.bodyMinPct, v: P.volRatioMin, r: P.minRangePct },
     eligible: r.volOk2 === true && r.rangeOk2 === true,
     rangePct2: r2(rangePct(ha[i2])),
     whyIneligible: r.volOk2 && r.rangeOk2 ? null : !r.volOk2 && !r.rangeOk2 ? "both" : !r.volOk2 ? "volume" : "range",
@@ -652,7 +663,8 @@ export function simulateSignal(sig: LabSignal, P: LabParams = LAB_PARAMS_DEFAULT
         } else {
           const from = sig.c2T + FIVE;
           const { level, kind } = entryLevel(em, bar2);
-          const fill = scanFill(sig.path1m, from, from + P.fillWindowMin * MIN, level, kind);
+          // 주문은 봉 마감 직후가 아니라 지연(latencyMin) 뒤에 나간다 — 유효 시간은 봉 마감 기준 그대로(지연만큼 짧아짐)
+          const fill = scanFill(sig.path1m, from + (P.latencyMin ?? 0) * MIN, from + P.fillWindowMin * MIN, level, kind);
           if (!fill) {
             t1 = { ...t1, note: `${P.fillWindowMin}분 안에 체결 안 됨` };
           } else {
@@ -677,7 +689,7 @@ export function simulateSignal(sig: LabSignal, P: LabParams = LAB_PARAMS_DEFAULT
           else if (!(bar3.c > (t1.fillPx as number))) t2 = { ...t2, status: "skipped", note: "1차가 수익권이 아님(손실 중 추가 금지)" };
           else {
             const { level, kind } = entryLevel(em, bar3);
-            const fill = scanFill(sig.path1m, s3Close, s3Close + P.fillWindowMin * MIN, level, kind);
+            const fill = scanFill(sig.path1m, s3Close + (P.latencyMin ?? 0) * MIN, s3Close + P.fillWindowMin * MIN, level, kind);
             if (!fill) t2 = { ...t2, note: `${P.fillWindowMin}분 안에 체결 안 됨` };
             else {
               const stop = stopFor(sm, fill.px, bar3, P);
@@ -703,7 +715,7 @@ export function simulateSignal(sig: LabSignal, P: LabParams = LAB_PARAMS_DEFAULT
       for (const sm of ["A", "B"] as const) {
         for (const tp of LAB_TP_LIST) {
           const base: SimTrade = { key: `L${sp.level}${sm}-${tp}`, kind: "link", entryIdx: sp.level, entryMode: `삼분할${sp.level}`, stopMode: sm, tpPct: tp, status: "unfilled" };
-          const fill = scanFill(sig.path1m, from, from + P.linkFillWindowMin * MIN, sp.entry, "limit");
+          const fill = scanFill(sig.path1m, from + (P.latencyMin ?? 0) * MIN, from + P.linkFillWindowMin * MIN, sp.entry, "limit");
           if (!fill) { out.push({ ...base, note: `${P.linkFillWindowMin}분 안에 체결 안 됨` }); continue; }
           const fixed = roundPrice(fill.px * (1 - P.fixedSlPct / 100));
           const stop =
@@ -765,15 +777,28 @@ export interface VariantRow {
   avgMaePct: number | null;
   avgRiskPct: number | null;
   avgHoldMin: number | null;
+  /** [v0.67.0] 스트레스 후 신호당 기대값 — 체결 건마다 추가 비용(스프레드·슬리피지 가정)을 뺀 값. 이게 플러스여야 현실에서 버틸 여지가 있다. */
+  stressExpectancy: number | null;
+  /** [v0.67.0] 체결 건 중 최악의 순손익(%) — 평균에 가려진 "한 번의 큰 손실"을 보여 준다. */
+  worstNetPct: number | null;
+  /** [v0.67.0] 진입 시각 순으로 이어 붙인 누적 순손익 곡선의 최대 낙폭(%p). */
+  maxDrawdownPct: number | null;
 }
 
 const mean = (a: number[]) => (a.length ? r2(a.reduce((s, x) => s + x, 0) / a.length) : null);
 
-function aggregateTrades(key: string, trades: SimTrade[], attempts: number): VariantRow {
+function aggregateTrades(key: string, trades: SimTrade[], attempts: number, stressPct = 0): VariantRow {
   const t0 = trades[0];
   const filled = trades.filter((t) => t.fillPx != null);
   const closed = filled.filter((t) => t.status !== "open");
   const nets = closed.map((t) => t.netPct as number);
+  // 진입 시각 순 누적 곡선의 최대 낙폭
+  let eq = 0, peak = 0, mdd = 0;
+  for (const t of [...closed].sort((a, b) => (a.entryT ?? 0) - (b.entryT ?? 0))) {
+    eq += t.netPct as number;
+    if (eq > peak) peak = eq;
+    if (peak - eq > mdd) mdd = peak - eq;
+  }
   const wins = nets.filter((x) => x > 0);
   const losses = nets.filter((x) => x <= 0);
   const gp = wins.reduce((s, x) => s + x, 0);
@@ -802,6 +827,9 @@ function aggregateTrades(key: string, trades: SimTrade[], attempts: number): Var
     avgMaePct: mean(closed.map((t) => t.maePct ?? 0)),
     avgRiskPct: mean(filled.map((t) => t.riskPct ?? 0)),
     avgHoldMin: mean(closed.map((t) => t.holdMin ?? 0)),
+    stressExpectancy: attempts > 0 ? r2((total - stressPct * closed.length) / attempts) : null,
+    worstNetPct: nets.length ? r2(Math.min(...nets)) : null,
+    maxDrawdownPct: closed.length ? r2(mdd) : null,
   };
 }
 
@@ -818,7 +846,7 @@ export function summarizeVariants(signals: LabSignal[], f: LabFilter = {}, P: La
       attempts.set(t.key, (attempts.get(t.key) ?? 0) + 1);
     }
   }
-  return [...groups.entries()].map(([k, v]) => aggregateTrades(k, v, attempts.get(k) ?? 0));
+  return [...groups.entries()].map(([k, v]) => aggregateTrades(k, v, attempts.get(k) ?? 0, P.stressPct ?? 0));
 }
 
 export interface BreakdownRow {
@@ -854,6 +882,8 @@ export function breakdownBy(signals: LabSignal[], key: string, dim: BreakdownDim
   };
   for (const s of signals) {
     if (!passFilter(s, f)) continue;
+    // 거래량 순위는 "발견 당시" 순위여야 의미가 있다 — 백필 신호의 순위는 오늘 순위라 선택 편향(미래 정보)이므로 제외.
+    if (dim === "rank" && s.backfilled) continue;
     const t = simulateSignal(s, P).find((x) => x.key === key);
     if (!t || t.fillPx == null || t.status === "open") continue;
     const b = bucket(s);
