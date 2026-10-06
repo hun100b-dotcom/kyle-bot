@@ -11,6 +11,7 @@ import { DateTime } from "luxon";
 import type { LabApi } from "./useLab";
 import { DEFAULT_REF_KEY } from "./useLab";
 import { LAB_ENTRY_LABEL, LAB_STOP_LABEL, LAB_TP_LIST, type LabEntryMode, type LabStopMode } from "../lib/lab";
+import { GuideButton, GuideModal, useGuide } from "./LabGuide"; // [v0.66.0] 애니메이션 가이드
 
 const kst = (ms: number | null | undefined, fmt = "MM-dd HH:mm") => (ms == null ? "—" : DateTime.fromMillis(ms).setZone("Asia/Seoul").toFormat(fmt));
 const num = (v: number | null | undefined, d = 2, suffix = "") => (v == null || !Number.isFinite(v) ? "—" : `${v.toFixed(d)}${suffix}`);
@@ -47,6 +48,7 @@ function LabNotice({ lab }: { lab: LabApi }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function LabLiveTab({ lab }: { lab: LabApi }) {
+  const guide = useGuide("live");
   const s = lab.summary;
   const st = s?.status;
   const [form, setForm] = useState({ rankCount: "60", dojiBodyMaxPct: "15", bodyMinPct: "60", volRatioMin: "1.5", minRangePct: "0.5" });
@@ -90,7 +92,10 @@ export function LabLiveTab({ lab }: { lab: LabApi }) {
   return (
     <main className="grid">
       <section className="card wide">
-        <h2>🔬 신호 기록 모드 <span className="hint">(주문 없음 · 읽기 전용 연구)</span></h2>
+        <div className="rs-title">
+          <h2>🔬 신호 기록 모드 <span className="hint">(주문 없음 · 읽기 전용 연구)</span></h2>
+          <GuideButton onClick={guide.show} />
+        </div>
         <p className="hint">
           카일이 제안한 "도지 → 연속 양봉 돌파 → 4번째 고점 → 삼분할 연계" 전략을 <b>실제 시장에서 주문 없이</b> 돌려 봅니다.
           5분마다(이 앱이 켜져 있는 동안) 토스 거래량 순위 상위 종목을 훑어 패턴을 찾고, 찾을 때마다 <b>가상 매수 → 로직대로 가상 매매 → 결과</b>까지
@@ -113,7 +118,7 @@ export function LabLiveTab({ lab }: { lab: LabApi }) {
           </div>
         )}
 
-        <div className="form-row">
+        <div className="form-row" data-guide="live-toggle">
           <button className={st?.enabled ? "btn btn-stop" : "btn btn-start"} disabled={lab.busy || !st} onClick={() => void lab.saveSettings({ enabled: !st?.enabled })}>
             {st?.enabled ? "신호 기록 끄기" : "신호 기록 켜기"}
           </button>
@@ -125,7 +130,7 @@ export function LabLiveTab({ lab }: { lab: LabApi }) {
         </div>
 
         <h3>탐색 설정</h3>
-        <div className="form-row">
+        <div className="form-row" data-guide="live-settings">
           <label>거래량 순위 몇 위까지 탐색
             <input type="text" inputMode="numeric" value={form.rankCount} onChange={(e) => { setForm({ ...form, rankCount: e.target.value }); setDirty(true); }} />
           </label>
@@ -167,7 +172,7 @@ export function LabLiveTab({ lab }: { lab: LabApi }) {
             </p>
 
             <h3>신호 깔때기 <span className="hint">(어느 단계에서 많이 떨어지는가)</span></h3>
-            <div className="lab-funnel">
+            <div className="lab-funnel" data-guide="live-funnel">
               {steps.map(([label, n, note]) => (
                 <div key={label} className="lab-funnel-row">
                   <span className="lab-funnel-label">{label}</span>
@@ -199,7 +204,7 @@ export function LabLiveTab({ lab }: { lab: LabApi }) {
         {!lab.isMirror && (
           <>
             <h3>데이터 내보내기·초기화</h3>
-            <div className="form-row">
+            <div className="form-row" data-guide="live-export">
               <button className="mini" onClick={() => void lab.download("signals-csv")}>📄 신호 로우 CSV</button>
               <button className="mini" onClick={() => void lab.download("trades-csv")}>📄 가상 매매 CSV(신호×변형)</button>
               <button className="mini" onClick={() => void lab.download("json")}>🗂 원본 JSON(전체 로우+1분봉 경로)</button>
@@ -215,6 +220,7 @@ export function LabLiveTab({ lab }: { lab: LabApi }) {
           </>
         )}
       </section>
+      <GuideModal tab="live" open={guide.open} onClose={guide.close} />
     </main>
   );
 }
@@ -314,6 +320,7 @@ function parseKey(key: string): { em: LabEntryMode; sm: LabStopMode; tp: string 
 }
 
 export function LabSignalsTab({ lab }: { lab: LabApi }) {
+  const guide = useGuide("signals");
   const s = lab.summary;
   const [sel, setSel] = useState<string | null>(null);
   const [detail, setDetail] = useState<{ signal: LabSignalFull; trades: LabTrade[] } | null>(null);
@@ -348,7 +355,10 @@ export function LabSignalsTab({ lab }: { lab: LabApi }) {
   return (
     <main className="grid">
       <section className="card wide">
-        <h2>🧾 신호 로우 <span className="hint">(찾은 신호를 한 건씩, 가상 매매 결과까지)</span></h2>
+        <div className="rs-title">
+          <h2>🧾 신호 로우 <span className="hint">(찾은 신호를 한 건씩, 가상 매매 결과까지)</span></h2>
+          <GuideButton onClick={guide.show} />
+        </div>
         <p className="hint">
           한 줄 = 패턴이 인정된 신호 한 건(2번째 캔들 마감 시점). 아래 "기준 변형"으로 가상 매매했을 때의 결과를 줄마다 보여 줍니다.
           줄을 누르면 그 신호의 <b>캔들 차트와 모든 변형(최대 약 100가지)의 개별 결과</b>가 열립니다.
@@ -360,7 +370,7 @@ export function LabSignalsTab({ lab }: { lab: LabApi }) {
           <label className="radio"><input type="checkbox" checked={!!lab.filter.includeThin} onChange={(e) => lab.setFilter({ ...lab.filter, includeThin: e.target.checked })} /> 05~17시(얇은 시세) 포함</label>
           <label className="radio"><input type="checkbox" checked={lab.filter.includeBackfilled !== false} onChange={(e) => lab.setFilter({ ...lab.filter, includeBackfilled: e.target.checked })} /> 백필(늦게 발견) 포함</label>
         </div>
-        <div className="form-row lab-filters">
+        <div className="form-row lab-filters" data-guide="signals-ref">
           <span className="hint">기준 변형 →</span>
           <label>매수
             <select value={ref.em} onChange={(e) => setRef({ em: e.target.value as LabEntryMode })}>
@@ -381,7 +391,7 @@ export function LabSignalsTab({ lab }: { lab: LabApi }) {
 
         {s && s.signals.length === 0 && <p className="hint">아직 기록된 신호가 없습니다. [신호기록 현황]에서 기록을 켜고 "지금 스캔"을 눌러 보세요.</p>}
         {s && s.signals.length > 0 && (
-          <div className="lab-scroll">
+          <div className="lab-scroll" data-guide="signals-table">
             <table className="result-table screen-table lab-table">
               <thead>
                 <tr>
@@ -465,6 +475,7 @@ export function LabSignalsTab({ lab }: { lab: LabApi }) {
           </div>
         )}
       </section>
+      <GuideModal tab="signals" open={guide.open} onClose={guide.close} />
     </main>
   );
 }
@@ -479,6 +490,7 @@ const DIM_LABEL: Record<LabBreakdownDim, string> = {
 };
 
 export function LabCompareTab({ lab }: { lab: LabApi }) {
+  const guide = useGuide("compare");
   const s = lab.summary;
   const [kind, setKind] = useState<CompareKind>("c1");
   const [tp, setTp] = useState("1.5");
@@ -532,7 +544,10 @@ export function LabCompareTab({ lab }: { lab: LabApi }) {
   return (
     <main className="grid">
       <section className="card wide">
-        <h2>⚖️ 전략 비교·연계 <span className="hint">(어떤 매수 방식·손절·익절이 나은가 — 로우에서 계산한 실제 숫자)</span></h2>
+        <div className="rs-title">
+          <h2>⚖️ 전략 비교·연계 <span className="hint">(어떤 매수 방식·손절·익절이 나은가 — 로우에서 계산한 실제 숫자)</span></h2>
+          <GuideButton onClick={guide.show} />
+        </div>
         <p className="hint">
           같은 신호들을 변형별로 가상 매매한 결과를 비교합니다. <b>기대값</b> = 신호 하나당 평균 순손익(%)이며, 미체결은 0으로 칩니다 — 체결이 잘 안 되는 방식은
           승률이 높아 보여도 기대값이 낮게 나오므로 "정말 쓸 만한가"를 가장 정직하게 보여 주는 숫자예요.
@@ -573,7 +588,7 @@ export function LabCompareTab({ lab }: { lab: LabApi }) {
                     </select>
                   </label>
                 </div>
-                <div className="lab-scroll">
+                <div className="lab-scroll" data-guide="compare-matrix">
                   <table className="result-table lab-matrix">
                     <thead>
                       <tr><th>매수 ＼ 손절</th>{STOP_MODES.map((m) => <th key={m}>{m}. {LAB_STOP_LABEL[m]}</th>)}</tr>
@@ -592,7 +607,7 @@ export function LabCompareTab({ lab }: { lab: LabApi }) {
             )}
 
             <h3>전체 변형 순위 <span className="hint">(기대값 순 · 행을 누르면 아래에 상세)</span></h3>
-            <div className="lab-scroll">
+            <div className="lab-scroll" data-guide="compare-table">
               <table className="result-table lab-table">
                 <thead>
                   <tr><th>변형</th><th>시도</th><th>체결</th><th>체결률</th><th>승률</th><th>평균 순손익</th><th>손익비</th><th>신호당 기대값</th><th>평균 손절폭</th><th>평균 최대역행</th><th>평균 보유</th></tr>
@@ -650,7 +665,7 @@ export function LabCompareTab({ lab }: { lab: LabApi }) {
             )}
 
             <h3>🔗 캔들 → 삼분할 연계</h3>
-            <div className="lab-cards">
+            <div className="lab-cards" data-guide="compare-link">
               <div className="lab-card"><b>{s.linkage.runsWithBlock}</b><span>4번째 캔들까지 간(고점 차단) 신호</span></div>
               <div className="lab-card"><b>{s.linkage.linked}</b><span>그중 삼분할 패턴이 이어진 수</span></div>
               <div className="lab-card"><b>{num(s.linkage.linkRate, 0, "%")}</b><span>연계율</span></div>
@@ -695,6 +710,7 @@ export function LabCompareTab({ lab }: { lab: LabApi }) {
           </>
         )}
       </section>
+      <GuideModal tab="compare" open={guide.open} onClose={guide.close} />
     </main>
   );
 }

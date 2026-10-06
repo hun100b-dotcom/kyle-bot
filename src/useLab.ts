@@ -73,7 +73,7 @@ export function useLab(isWebApp: boolean, pcLab: LabMirror | null, active: boole
   const summary: LabSummary | null = useMemo(() => (isWebApp ? (pcLab ? mirrorToSummary(pcLab) : null) : local), [isWebApp, pcLab, local]);
 
   const saveSettings = useCallback(
-    async (input: { enabled?: boolean; rankCount?: number; dojiBodyMaxPct?: number; bodyMinPct?: number; volRatioMin?: number }) => {
+    async (input: { enabled?: boolean; rankCount?: number; dojiBodyMaxPct?: number; bodyMinPct?: number; volRatioMin?: number; minRangePct?: number }) => {
       setBusy(true);
       try {
         if (isWebApp) {

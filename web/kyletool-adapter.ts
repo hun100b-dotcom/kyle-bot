@@ -229,6 +229,7 @@ export function installKyleTool(): ToolEngine {
     getLabBreakdown: (key: string, dim: Parameters<typeof e.getLabBreakdown>[1], filter?: Parameters<typeof e.getLabBreakdown>[2]) => Promise.resolve(e.getLabBreakdown(key, dim, filter)),
     getLabCombined: (candleKey: string, linkKey: string, filter?: Parameters<typeof e.getLabCombined>[2]) => Promise.resolve(e.getLabCombined(candleKey, linkKey, filter)),
     exportLab: (kind: Parameters<typeof e.exportLab>[0]) => Promise.resolve(e.exportLab(kind)),
+    verifyLab: (sample?: number) => e.verifyLab(sample),
     placeSell: (spec: Parameters<ToolEngine["placeSell"]>[0]) => e.placeSell(spec),
     openOrders: () => e.openOrders(),
     conditionals: () => e.conditionals(),

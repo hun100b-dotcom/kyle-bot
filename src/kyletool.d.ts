@@ -949,6 +949,12 @@ interface KyletoolBridge {
   getLabBreakdown?(key: string, dim: LabBreakdownDim, filter?: LabQueryFilter): Promise<LabBreakdownRow[]>;
   getLabCombined?(candleKey: string, linkKey: string, filter?: LabQueryFilter): Promise<LabCombined>;
   exportLab?(kind: "signals-csv" | "trades-csv" | "json"): Promise<{ filename: string; text: string }>;
+  /** [v0.66.0] 데이터 검증: 저장된 로우 재계산 + 토스 실데이터 대조(표본). */
+  verifyLab?(sample?: number): Promise<{
+    at: number;
+    local: import("../lib/lab-verdict").LocalVerify;
+    toss: { requested: number; matched: number; rows: import("../lib/lab-verdict").TossCompareRow[]; error: string | null } | null;
+  }>;
   rationales(): Promise<TradeRationale[]>;
   // [v0.4.0] 삼분할 타점 기록(여러 종목 동시 운용)
   splitsList(): Promise<SavedSplit[]>;

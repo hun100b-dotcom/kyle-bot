@@ -84,6 +84,7 @@ contextBridge.exposeInMainWorld("kyletool", {
   getLabBreakdown: (key, dim, filter) => ipcRenderer.invoke("tool:lab:breakdown", key, dim, filter),
   getLabCombined: (candleKey, linkKey, filter) => ipcRenderer.invoke("tool:lab:combined", candleKey, linkKey, filter),
   exportLab: (kind) => ipcRenderer.invoke("tool:lab:export", kind),
+  verifyLab: (sample) => ipcRenderer.invoke("tool:lab:verify", sample),
 
   // 주문 현황
   // [v0.2.10] 주문 근거(기법 스냅샷) 목록 / 보유 포지션 손익

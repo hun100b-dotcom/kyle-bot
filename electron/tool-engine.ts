@@ -69,6 +69,7 @@ import {
   type BreakdownRow,
   type CombinedResult,
 } from "../lib/lab"; // [v0.65.0] 매매연구소(신호 기록 모드)
+import { verifyLocal, compareWithFresh, type LocalVerify, type TossCompareRow } from "../lib/lab-verdict"; // [v0.66.0] 데이터 검증
 import { fetchWithTimeout, netStats } from "../lib/fetch-timeout"; // [v0.61.5 — ③ 전수조사 "높음-1"] Supabase REST 호출도 토스처럼 타임아웃을 건다
 import {
   getPrice,
@@ -4871,6 +4872,45 @@ export class ToolEngine extends EventEmitter {
     if (kind === "signals-csv") return { filename: `capri-lab-signals-${stamp}.csv`, text: signalsToCsv(this.labSignals) };
     if (kind === "trades-csv") return { filename: `capri-lab-trades-${stamp}.csv`, text: tradesToCsv(this.labSignals, this.labParams()) };
     return { filename: `capri-lab-raw-${stamp}.json`, text: JSON.stringify({ exportedAt: new Date().toISOString(), params: this.labParams(), attempts: this.labAttempts, signals: this.labSignals }) };
+  }
+
+  /**
+   * [v0.66.0 — 오너 요청 "갑자기 데이터가 엄청 나왔는데 실제 데이터가 맞는지 검증"] 두 단계 검증:
+   *   ① local: 저장된 로우를 다시 계산해 규칙과 맞는지(연속성·몸통·거래량·가격 정합성·최신성·경로·연계 상한).
+   *   ② toss : 표본 신호의 신호 봉을 토스에서 **지금 다시 받아** 저장된 값과 비교(캐시를 거치지 않는 새 요청).
+   *   읽기 전용(시세 조회만). 토스 대조는 연결이 없거나 오류여도 ①은 항상 돌려준다.
+   */
+  async verifyLab(sample = 8): Promise<{ at: number; local: LocalVerify; toss: { requested: number; matched: number; rows: TossCompareRow[]; error: string | null } | null }> {
+    const local = verifyLocal(this.labSignals, this.labParams());
+    let toss: { requested: number; matched: number; rows: TossCompareRow[]; error: string | null } | null = null;
+    try {
+      await this.prepareBackend();
+      // 표본: 최근 신호 위주(토스 1분봉은 최근 약 하루 반만 받을 수 있다), 종목이 겹치지 않게
+      const pick: LabSignal[] = [];
+      const seen = new Set<string>();
+      for (const s of [...this.labSignals].sort((a, b) => b.c2T - a.c2T)) {
+        if (Date.now() - s.c2T > 30 * 3600_000) continue;
+        if (seen.has(s.symbol)) continue;
+        seen.add(s.symbol);
+        pick.push(s);
+        if (pick.length >= Math.max(1, Math.min(20, sample))) break;
+      }
+      const rows: TossCompareRow[] = [];
+      for (const s of pick) {
+        try {
+          const one = await getCandles1mPaged(s.symbol, 2400, 14); // 캐시를 거치지 않는 새 요청
+          const fresh5m = aggregate1mTo5m(one);
+          rows.push(compareWithFresh(s, fresh5m));
+        } catch (e) {
+          rows.push({ id: s.id, symbol: s.symbol, c2T: s.c2T, status: "missing" });
+          void e;
+        }
+      }
+      toss = { requested: pick.length, matched: rows.filter((r) => r.status === "match").length, rows, error: pick.length === 0 ? "최근 30시간 안의 신호가 없어 대조할 표본이 없습니다." : null };
+    } catch (e) {
+      toss = { requested: 0, matched: 0, rows: [], error: String(e).replace(/^Error:\s*/, "") };
+    }
+    return { at: Date.now(), local, toss };
   }
 
   /** 폰 미러용 가벼운 요약(상위 변형 + 최근 신호). */
