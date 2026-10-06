@@ -44,6 +44,31 @@ import {
   excursion,
   type EntryMetrics,
 } from "../lib/defense"; // [v0.63.0] 방어 전략(이격도·기울기·변동성 필터, EMA 기준 손절, 재진입 금지, 연속 손절 중지)
+import {
+  LAB_PARAMS_DEFAULT,
+  buildSeries,
+  detectRuns,
+  buildSignal,
+  updateSignal,
+  simulateSignal,
+  summarizeVariants,
+  summarizeLinkage,
+  breakdownBy,
+  buildFunnel,
+  combinedScenario,
+  signalsToCsv,
+  tradesToCsv,
+  type LabSignal,
+  type LabParams,
+  type LabFilter,
+  type VariantRow,
+  type LinkageSummary,
+  type Funnel,
+  type SimTrade,
+  type BreakdownDim,
+  type BreakdownRow,
+  type CombinedResult,
+} from "../lib/lab"; // [v0.65.0] 매매연구소(신호 기록 모드)
 import { fetchWithTimeout, netStats } from "../lib/fetch-timeout"; // [v0.61.5 — ③ 전수조사 "높음-1"] Supabase REST 호출도 토스처럼 타임아웃을 건다
 import {
   getPrice,
@@ -1042,6 +1067,75 @@ export interface AutoTradeHistoryEntry {
 // 엔진 본체
 // -----------------------------------------------------------------------------
 
+// -----------------------------------------------------------------------------
+// [v0.65.0] 매매연구소 화면·브리지용 타입
+// -----------------------------------------------------------------------------
+export interface LabStatus {
+  enabled: boolean;
+  rankCount: number;
+  dojiBodyMaxPct: number;
+  bodyMinPct: number;
+  volRatioMin: number;
+  scanning: boolean;
+  lastTickAtMs: number | null;
+  lastTickDurMs: number | null;
+  lastScanned: number;
+  lastError: string | null;
+  lastSkip: string | null;
+  startedAtMs: number | null;
+  nextTickAtMs: number | null;
+  totalSignals: number;
+  params: LabParams;
+}
+export interface LabQueryFilter {
+  includeIneligible?: boolean;
+  includeThin?: boolean;
+  includeBackfilled?: boolean;
+  session?: string;
+  refKey?: string;
+}
+export interface LabSignalRow {
+  id: string;
+  symbol: string;
+  rank: number;
+  session: string;
+  thinHours: boolean;
+  backfilled: boolean;
+  eligible: boolean;
+  c2T: number;
+  dojiT: number;
+  volRatio2: number | null;
+  body2: number;
+  secondQualified: boolean;
+  c4Block: boolean | null;
+  emaGapPct: number | null;
+  atrPct: number | null;
+  price: number;
+  linked: boolean;
+  complete: boolean;
+  ref: { key: string; status: string; netPct: number | null; fillPx: number | null; exitPx: number | null; note: string | null } | null;
+}
+export interface LabSummary {
+  updatedAtMs: number;
+  status: LabStatus;
+  funnel: Funnel;
+  linkage: LinkageSummary;
+  variants: VariantRow[];
+  signals: LabSignalRow[];
+  refKey: string;
+  counts: { total: number; eligible: number; complete: number; open: number };
+}
+export interface LabMirror {
+  updatedAtMs: number;
+  status: LabStatus;
+  funnel: Funnel;
+  linkage: LinkageSummary;
+  topVariants: VariantRow[];
+  signals: LabSignalRow[];
+  counts: { total: number; eligible: number; complete: number; open: number };
+  refKey: string;
+}
+
 export class ToolEngine extends EventEmitter {
   private envPath: string;
   private journalPath: string;
@@ -1361,6 +1455,7 @@ export class ToolEngine extends EventEmitter {
     this.autoTradeHistoryPath = join(userDataDir, "kylebot-auto-history.json"); // [v0.30.0] 자동매매기록
     this.autoPositionsPath = join(userDataDir, "kylebot-auto-positions.json"); // [v0.30.1] 감시 중 포지션(긴급수정)
     this.autoRunsPath = join(userDataDir, "kylebot-auto-runs.json"); // [v0.62.1] 자동매매 실행 기록(리포트 원본)
+    this.labPath = join(userDataDir, "kylebot-lab.json"); // [v0.65.0] 매매연구소 신호 로우
     this.loadEnv();
     // [개발 검증용] E2E 등 자동 검증은 절대 실서버를 건드리면 안 되므로 연습 모드 강제.
     if (opts?.forceMock) this.mode = "mock";
@@ -1383,6 +1478,9 @@ export class ToolEngine extends EventEmitter {
     this.loadAutoTradeHistory(); // [v0.30.0] 자동매매기록
     this.loadAutoPositions(); // [v0.30.1] 감시 중 포지션(긴급수정 — 재시작해도 이어받기)
     this.loadAutoRuns(); // [v0.62.1] 자동매매 실행 기록
+    this.loadLab(); // [v0.65.0] 매매연구소 신호 로우
+    // 신호 기록 모드는 주문을 내지 않는 읽기 전용이라 켜 둔 상태를 재시작해도 유지한다(테스트용 forceMock은 자동 시작 안 함).
+    if (this.labEnabled && !opts?.forceMock) this.startLabTimer();
   }
 
   // --------------------------------------------------------------------------
@@ -1435,6 +1533,16 @@ export class ToolEngine extends EventEmitter {
     // [v0.61.8] 저장된 진입 타점 분할(1~2) 복원.
     const ael = Number(process.env.AUTO_ENTRY_LEVEL);
     if (ael === 1 || ael === 2) this.autoTradeEntryLevel = ael;
+    // [v0.65.0] 매매연구소 설정 복원
+    if (process.env.LAB_ENABLED === "true") this.labEnabled = true;
+    const lrc = Number(process.env.LAB_RANK_COUNT);
+    if (Number.isFinite(lrc) && lrc >= 10) this.labRankCount = Math.min(200, Math.round(lrc));
+    const ldb = Number(process.env.LAB_DOJI_BODY_MAX);
+    if (Number.isFinite(ldb) && ldb > 0) this.labDojiBodyMax = ldb;
+    const lbm = Number(process.env.LAB_BODY_MIN);
+    if (Number.isFinite(lbm) && lbm > 0) this.labBodyMin = lbm;
+    const lvm = Number(process.env.LAB_VOL_MIN);
+    if (Number.isFinite(lvm) && lvm > 0) this.labVolMin = lvm;
     // [v0.63.0] 방어 전략 설정 복원
     if (process.env.AUTO_SL_MODE === "ema" || process.env.AUTO_SL_MODE === "fixed") this.autoTradeSlMode = process.env.AUTO_SL_MODE;
     const aesb = Number(process.env.AUTO_EMA_STOP_BUFFER_PCT);
@@ -1925,6 +2033,11 @@ export class ToolEngine extends EventEmitter {
       `AUTO_MAX_INVEST_PCT=${this.autoTradeMaxInvestPct}`,
       `AUTO_WATCH_MINUTES=${this.autoTradeWatchMinutes}`, // [v0.42.0] 장기간 미체결 자동취소 기준(분)
       `AUTO_ENTRY_LEVEL=${this.autoTradeEntryLevel}`, // [v0.61.8] 진입 타점 분할(1~2)
+      `LAB_ENABLED=${this.labEnabled}`, // [v0.65.0] 매매연구소
+      `LAB_RANK_COUNT=${this.labRankCount}`,
+      `LAB_DOJI_BODY_MAX=${this.labDojiBodyMax}`,
+      `LAB_BODY_MIN=${this.labBodyMin}`,
+      `LAB_VOL_MIN=${this.labVolMin}`,
       `AUTO_SL_MODE=${this.autoTradeSlMode}`, // [v0.63.0] 방어 전략
       `AUTO_EMA_STOP_BUFFER_PCT=${this.autoTradeEmaStopBufferPct}`,
       `AUTO_REENTRY_BLOCK_ENABLED=${this.autoTradeReentryBlockEnabled}`,
@@ -4365,6 +4478,382 @@ export class ToolEngine extends EventEmitter {
     this.persistAutoRuns();
   }
 
+  // ==========================================================================
+  // [v0.65.0] 매매연구소 — 신호 기록 모드 (주문 없음, 읽기 전용)
+  //   오너·카일 합의: "연속 상승 캔들 매매기법"을 실매매에 붙이기 전에, 실제 스크리닝 → 가상 매수 →
+  //   로직대로 가상 매매 → 현황까지 전부 **로우 데이터**로 쌓고, 그 로우에서 통계를 낸다.
+  //   · 5분마다(앱이 켜져 있는 동안) 토스 거래량 순위 상위 N종목을 훑어 패턴(도지→양봉 연속)을 찾는다.
+  //   · 찾은 신호는 "로우"(신호 당시 캔들·지표 + 이후 1분봉 경로)만 저장한다. 가상 매매 결과는
+  //     저장하지 않고 로우에서 매번 다시 계산한다(lib/lab.ts — 체결 가정을 바꿔도 과거 데이터가 유효).
+  //   · 이 기능은 어떤 주문 API도 부르지 않는다(시세·캔들 조회만).
+  // ==========================================================================
+
+  private labPath = "";
+  private labSignals: LabSignal[] = [];
+  private labAttempts: Record<string, number> = {};
+  private labEnabled = false;
+  private labRankCount = 60; //     거래량 순위 몇 위까지 탐색(10~200)
+  private labDojiBodyMax = 15; //   도지 몸통 비율 상한(%)
+  private labBodyMin = 60; //       신호 캔들 몸통 비율 하한(%)
+  private labVolMin = 1.5; //       신호 캔들 거래량 배수(직전 5개 평균 대비)
+  private labTimer: ReturnType<typeof setInterval> | null = null;
+  private labBusy = false;
+  private labLastTickAtMs: number | null = null;
+  private labLastTickDurMs: number | null = null;
+  private labLastError: string | null = null;
+  private labLastSkip: string | null = null;
+  private labLastScanned = 0;
+  private labStartedAtMs: number | null = null;
+  private labVersion = 0; //        데이터가 바뀔 때마다 증가 — 요약 캐시 무효화용
+  private labMemo = new Map<string, { version: number; value: unknown }>();
+  private static readonly LAB_MAX_SIGNALS = 500;
+  private static readonly LAB_MAX_ATTEMPTS = 20000;
+  private static readonly LAB_INTERVAL_MS = 5 * 60_000;
+
+  /** 1분봉 공용 캐시(2분) — 자동매매 스캔과 매매연구소가 같은 종목을 번갈아 조회해도 토스 요청은 한 번만 나간다. */
+  private candleCache = new Map<string, { atMs: number; candles: Awaited<ReturnType<typeof getCandles1mPaged>> }>();
+  private async getCandles1mCached(symbol: string, ttlMs = 120_000): Promise<Awaited<ReturnType<typeof getCandles1mPaged>>> {
+    const hit = this.candleCache.get(symbol);
+    if (hit && Date.now() - hit.atMs < ttlMs) return hit.candles;
+    const candles = await getCandles1mPaged(symbol, 1100);
+    this.candleCache.set(symbol, { atMs: Date.now(), candles });
+    if (this.candleCache.size > 400) {
+      const oldest = [...this.candleCache.entries()].sort((a, b) => a[1].atMs - b[1].atMs)[0];
+      if (oldest) this.candleCache.delete(oldest[0]);
+    }
+    return candles;
+  }
+
+  private labParams(): LabParams {
+    return { ...LAB_PARAMS_DEFAULT, dojiBodyMaxPct: this.labDojiBodyMax, bodyMinPct: this.labBodyMin, volRatioMin: this.labVolMin };
+  }
+
+  private loadLab(): void {
+    try {
+      if (!existsSync(this.labPath)) return;
+      const d = JSON.parse(readFileSync(this.labPath, "utf8")) as { signals?: LabSignal[]; attempts?: Record<string, number>; startedAtMs?: number | null };
+      this.labSignals = Array.isArray(d.signals) ? d.signals : [];
+      this.labAttempts = d.attempts && typeof d.attempts === "object" ? d.attempts : {};
+      this.labStartedAtMs = d.startedAtMs ?? null;
+    } catch {
+      this.labSignals = [];
+      this.labAttempts = {};
+    }
+  }
+
+  private persistLab(): void {
+    try {
+      const tmp = this.labPath + ".tmp";
+      writeFileSync(tmp, JSON.stringify({ v: 1, startedAtMs: this.labStartedAtMs, attempts: this.labAttempts, signals: this.labSignals }), "utf8");
+      renameSync(tmp, this.labPath);
+    } catch {
+      /* 기록 실패는 무시 — 연구용 데이터라 매매와 무관 */
+    }
+  }
+
+  private startLabTimer(): void {
+    if (this.labTimer) return;
+    if (this.labStartedAtMs == null) this.labStartedAtMs = Date.now();
+    void this.labScanOnce();
+    this.labTimer = setInterval(() => void this.labScanOnce(), ToolEngine.LAB_INTERVAL_MS);
+  }
+
+  private stopLabTimer(): void {
+    if (this.labTimer) clearInterval(this.labTimer);
+    this.labTimer = null;
+  }
+
+  /** 연구소 설정 저장 + 켜짐/꺼짐. 값은 범위로 보정한다. */
+  saveLabSettings(input: { enabled?: boolean; rankCount?: number; dojiBodyMaxPct?: number; bodyMinPct?: number; volRatioMin?: number }): LabStatus {
+    if (typeof input.rankCount === "number" && Number.isFinite(input.rankCount)) this.labRankCount = Math.round(Math.min(200, Math.max(10, input.rankCount)));
+    if (typeof input.dojiBodyMaxPct === "number" && Number.isFinite(input.dojiBodyMaxPct)) this.labDojiBodyMax = Math.round(Math.min(30, Math.max(5, input.dojiBodyMaxPct)) * 10) / 10;
+    if (typeof input.bodyMinPct === "number" && Number.isFinite(input.bodyMinPct)) this.labBodyMin = Math.round(Math.min(90, Math.max(40, input.bodyMinPct)) * 10) / 10;
+    if (typeof input.volRatioMin === "number" && Number.isFinite(input.volRatioMin)) this.labVolMin = Math.round(Math.min(5, Math.max(1, input.volRatioMin)) * 100) / 100;
+    if (typeof input.enabled === "boolean") {
+      this.labEnabled = input.enabled;
+      if (input.enabled) this.startLabTimer();
+      else this.stopLabTimer();
+    }
+    this.persistEnv();
+    this.addJournal({
+      kind: "info",
+      symbol: "-",
+      summary:
+        `🔬 매매연구소 설정 — 신호 기록 ${this.labEnabled ? "ON" : "OFF"} · 거래량 순위 ${this.labRankCount}위까지 · ` +
+        `도지 몸통 <${this.labDojiBodyMax}% · 신호 몸통 ≥${this.labBodyMin}% · 거래량 ≥직전5평균×${this.labVolMin}`,
+      category: "시스템",
+    });
+    this.labVersion++;
+    void this.pushLiveState(true);
+    return this.getLabStatus();
+  }
+
+  getLabStatus(): LabStatus {
+    return {
+      enabled: this.labEnabled,
+      rankCount: this.labRankCount,
+      dojiBodyMaxPct: this.labDojiBodyMax,
+      bodyMinPct: this.labBodyMin,
+      volRatioMin: this.labVolMin,
+      scanning: this.labBusy,
+      lastTickAtMs: this.labLastTickAtMs,
+      lastTickDurMs: this.labLastTickDurMs,
+      lastScanned: this.labLastScanned,
+      lastError: this.labLastError,
+      lastSkip: this.labLastSkip,
+      startedAtMs: this.labStartedAtMs,
+      nextTickAtMs: this.labEnabled && this.labLastTickAtMs != null ? this.labLastTickAtMs - (this.labLastTickDurMs ?? 0) + ToolEngine.LAB_INTERVAL_MS : null,
+      totalSignals: this.labSignals.length,
+      params: this.labParams(),
+    };
+  }
+
+  /** "지금 스캔" — 켜짐 여부와 무관하게 한 번 훑는다(첫 실행에는 지금 데이터에 남아 있는 과거 약 18시간 분량을 백필한다). */
+  async labScanNow(): Promise<LabStatus> {
+    await this.labScanOnce();
+    return this.getLabStatus();
+  }
+
+  /** 모든 연구소 데이터 삭제(복구 불가 — 화면에서 확인 후에만 호출). */
+  labReset(): LabStatus {
+    this.labSignals = [];
+    this.labAttempts = {};
+    this.labStartedAtMs = this.labEnabled ? Date.now() : null;
+    this.persistLab();
+    this.labVersion++;
+    void this.pushLiveState(true);
+    return this.getLabStatus();
+  }
+
+  private async labScanOnce(): Promise<void> {
+    if (this.labBusy) return;
+    this.labBusy = true;
+    const t0 = Date.now();
+    this.labLastError = null;
+    this.labLastSkip = null;
+    try {
+      const pause = this.getSystemPauseStatus();
+      if (pause.paused) {
+        this.labLastSkip = pause.reason ?? "일시정지 구간";
+        return;
+      }
+      await this.prepareBackend();
+      const ranked = await getRankings(this.labRankCount);
+      let rankings = ranked;
+      if (this.autoScanExcludeEtf) {
+        try {
+          const metas = await getStocks(ranked.map((r) => r.symbol));
+          const bySym = new Map(metas.map((m) => [m.symbol, m]));
+          rankings = ranked.filter((r) => {
+            const m = bySym.get(r.symbol);
+            return !m || m.securityType === "STOCK";
+          });
+        } catch {
+          /* 메타 조회 실패 → 필터 생략 */
+        }
+      }
+      const nowMs = Date.now();
+      let scanned = 0;
+      for (const rk of rankings) {
+        try {
+          await this.labProcessSymbol(rk.symbol, rk.rank, Number.isFinite(rk.lastPrice) ? rk.lastPrice : null, nowMs);
+          scanned++;
+        } catch {
+          /* 종목 하나의 실패가 전체를 멈추지 않게 */
+        }
+      }
+      this.labLastScanned = scanned;
+      this.labTrim();
+      this.persistLab();
+      this.labVersion++;
+    } catch (e) {
+      this.labLastError = String(e).replace(/^Error:\s*/, "");
+    } finally {
+      this.labBusy = false;
+      this.labLastTickAtMs = Date.now();
+      this.labLastTickDurMs = Date.now() - t0;
+      void this.pushLiveState(true);
+    }
+  }
+
+  private async labProcessSymbol(symbol: string, rank: number, lastPrice: number | null, nowMs: number): Promise<void> {
+    const oneMin = await this.getCandles1mCached(symbol);
+    const raw5m: Candle[] = dropIncompleteBucket(aggregate1mTo5m(oneMin), nowMs);
+    if (raw5m.length < 210) return; // EMA200 + 여유
+    const P = this.labParams();
+    const series = buildSeries(raw5m, 200);
+    const runs = detectRuns(series.ha, series.emaS, P);
+
+    for (const run of runs) {
+      const dojiT = series.ha[run.dojiIdx].time;
+      const id = `${symbol}:${dojiT}`;
+      const stage = run.stage === 3 && run.volOk2 ? 4 : run.stage; // 4 = 인정 신호(몸통+거래량)
+      if ((this.labAttempts[id] ?? -1) < stage) this.labAttempts[id] = stage;
+      if (run.stage < 3) continue;
+
+      const idx = this.labSignals.findIndex((s) => s.id === id);
+      const existing = idx >= 0 ? this.labSignals[idx] : null;
+      if (existing?.complete) continue; // 끝난 신호는 고정(더 이상 건드리지 않음)
+
+      const c2T = series.ha[run.dojiIdx + 2].time;
+      const c2Close = series.raw[run.dojiIdx + 2].close;
+      // 가격대: 자동매매 스캔과 같은 가격대($1~9 기본)에 든 종목만 기록(쓸데없는 데이터 배제)
+      if (!(c2Close >= this.autoScanPriceMin && c2Close <= this.autoScanPriceMax)) continue;
+
+      const dtC2 = DateTime.fromMillis(c2T).setZone("Asia/Seoul");
+      const sessionStart = getSessionStart(dtC2);
+      const link = {
+        sessionStartMs: sessionStart ? sessionStart.toMillis() : c2T - 8 * 3600_000,
+        bodyRatio: this.autoScanBodyRatio,
+        wickMin: this.autoScanDojiWickMinRatio,
+        maxAgeMin: this.autoScanDojiMaxAgeEnabled ? this.autoScanDojiMaxAgeMinutes : Number.POSITIVE_INFINITY,
+        maxGapMin: this.autoScanDojiMaxGapEnabled ? this.autoScanDojiMaxGapMinutes : Number.POSITIVE_INFINITY,
+        tpPct: this.defaultTpPct,
+        slPct: this.defaultSlPct,
+        emaPeriod: this.autoScanEmaPeriod,
+      };
+      const built = buildSignal({
+        symbol,
+        rank,
+        run,
+        series,
+        oneMin,
+        nowMs,
+        session: getSession(dtC2.plus({ minutes: 5 })),
+        thinHours: isInDailyPauseWindow(dtC2, ToolEngine.SYSTEM_PAUSE_START_HOUR, ToolEngine.SYSTEM_PAUSE_END_HOUR),
+        link,
+        P,
+      });
+      // 처음 발견한 시각·순위·실시간 여부는 보존한다.
+      const next: LabSignal = existing ? { ...built, detectedAtMs: existing.detectedAtMs, backfilled: existing.backfilled, rank: existing.rank } : built;
+      if (idx >= 0) this.labSignals[idx] = next;
+      else this.labSignals.push(next);
+    }
+    void lastPrice;
+  }
+
+  /** 상한을 넘으면 오래된(이미 끝난) 신호부터 버린다. attempts도 상한 관리. */
+  private labTrim(): void {
+    if (this.labSignals.length > ToolEngine.LAB_MAX_SIGNALS) {
+      this.labSignals.sort((a, b) => a.c2T - b.c2T);
+      const drop = this.labSignals.length - ToolEngine.LAB_MAX_SIGNALS;
+      this.labSignals = this.labSignals.slice(drop);
+    }
+    const keys = Object.keys(this.labAttempts);
+    if (keys.length > ToolEngine.LAB_MAX_ATTEMPTS) {
+      for (const k of keys.slice(0, keys.length - ToolEngine.LAB_MAX_ATTEMPTS)) delete this.labAttempts[k];
+    }
+  }
+
+  private labFilterFrom(f?: LabQueryFilter): LabFilter {
+    return {
+      includeIneligible: !!f?.includeIneligible,
+      includeThin: !!f?.includeThin,
+      includeBackfilled: f?.includeBackfilled !== false,
+      session: f?.session || undefined,
+    };
+  }
+
+  private labMemoGet<T>(key: string, build: () => T): T {
+    const hit = this.labMemo.get(key);
+    if (hit && hit.version === this.labVersion) return hit.value as T;
+    const value = build();
+    this.labMemo.set(key, { version: this.labVersion, value });
+    if (this.labMemo.size > 60) this.labMemo.delete(this.labMemo.keys().next().value as string);
+    return value;
+  }
+
+  /** 화면용 요약: 깔때기·변형 성적표·연계 요약·신호 목록(가벼운 행). 기준 변형(refKey)의 결과를 행마다 붙인다. */
+  getLabSummary(f?: LabQueryFilter): LabSummary {
+    const filter = this.labFilterFrom(f);
+    const refKey = f?.refKey || "DD-1.5-e1";
+    return this.labMemoGet(`sum|${JSON.stringify(filter)}|${refKey}`, () => {
+      const P = this.labParams();
+      const pool = this.labSignals.filter((s) => (filter.includeThin || !s.thinHours) && (filter.includeBackfilled !== false || !s.backfilled));
+      const rows: LabSignalRow[] = [...this.labSignals]
+        .sort((a, b) => b.c2T - a.c2T)
+        .slice(0, 300)
+        .map((s) => {
+          const t = simulateSignal(s, P).find((x) => x.key === refKey) ?? null;
+          return {
+            id: s.id,
+            symbol: s.symbol,
+            rank: s.rank,
+            session: s.session,
+            thinHours: s.thinHours,
+            backfilled: s.backfilled,
+            eligible: s.eligible,
+            c2T: s.c2T,
+            dojiT: s.dojiT,
+            volRatio2: s.volRatio2,
+            body2: s.body2,
+            secondQualified: s.second?.qualified ?? false,
+            c4Block: s.c4 ? s.c4.block : null,
+            emaGapPct: s.metrics.emaGapPct,
+            atrPct: s.metrics.atrPct,
+            price: s.metrics.price,
+            linked: s.linkage != null,
+            complete: s.complete,
+            ref: t ? { key: t.key, status: t.status, netPct: t.netPct ?? null, fillPx: t.fillPx ?? null, exitPx: t.exitPx ?? null, note: t.note ?? null } : null,
+          };
+        });
+      return {
+        updatedAtMs: Date.now(),
+        status: this.getLabStatus(),
+        funnel: buildFunnel(this.labAttempts, pool),
+        linkage: summarizeLinkage(this.labSignals, filter),
+        variants: summarizeVariants(this.labSignals, filter, P),
+        signals: rows,
+        refKey,
+        counts: {
+          total: this.labSignals.length,
+          eligible: this.labSignals.filter((s) => s.eligible).length,
+          complete: this.labSignals.filter((s) => s.complete).length,
+          open: this.labSignals.filter((s) => !s.complete).length,
+        },
+      } satisfies LabSummary;
+    });
+  }
+
+  /** 신호 한 건의 전체 로우 + 모든 변형 결과(상세 보기용). */
+  getLabSignal(id: string): { signal: LabSignal; trades: SimTrade[] } | null {
+    const s = this.labSignals.find((x) => x.id === id);
+    return s ? { signal: s, trades: simulateSignal(s, this.labParams()) } : null;
+  }
+
+  getLabBreakdown(key: string, dim: BreakdownDim, f?: LabQueryFilter): BreakdownRow[] {
+    const filter = this.labFilterFrom(f);
+    return this.labMemoGet(`bd|${key}|${dim}|${JSON.stringify(filter)}`, () => breakdownBy(this.labSignals, key, dim, filter, this.labParams()));
+  }
+
+  getLabCombined(candleKey: string, linkKey: string, f?: LabQueryFilter): CombinedResult {
+    const filter = this.labFilterFrom(f);
+    return this.labMemoGet(`cb|${candleKey}|${linkKey}|${JSON.stringify(filter)}`, () => combinedScenario(this.labSignals, candleKey, linkKey, filter, this.labParams()));
+  }
+
+  /** 내보내기: 신호 로우 CSV / 가상 매매 CSV(신호×변형) / 원본 JSON(전체 로우). */
+  exportLab(kind: "signals-csv" | "trades-csv" | "json"): { filename: string; text: string } {
+    const stamp = DateTime.now().setZone("Asia/Seoul").toFormat("yyyyMMdd-HHmm");
+    if (kind === "signals-csv") return { filename: `capri-lab-signals-${stamp}.csv`, text: signalsToCsv(this.labSignals) };
+    if (kind === "trades-csv") return { filename: `capri-lab-trades-${stamp}.csv`, text: tradesToCsv(this.labSignals, this.labParams()) };
+    return { filename: `capri-lab-raw-${stamp}.json`, text: JSON.stringify({ exportedAt: new Date().toISOString(), params: this.labParams(), attempts: this.labAttempts, signals: this.labSignals }) };
+  }
+
+  /** 폰 미러용 가벼운 요약(상위 변형 + 최근 신호). */
+  private labMirror(): LabMirror | null {
+    try {
+      if (!this.labEnabled && this.labSignals.length === 0) return null;
+      const s = this.getLabSummary({});
+      const top = s.variants
+        .filter((v) => v.filled >= 3 && v.kind === "candle" && v.entryIdx === 1)
+        .sort((a, b) => (b.expectancyPerSignal ?? -999) - (a.expectancyPerSignal ?? -999))
+        .slice(0, 12);
+      return { updatedAtMs: s.updatedAtMs, status: s.status, funnel: s.funnel, linkage: s.linkage, topVariants: top, signals: s.signals.slice(0, 40), counts: s.counts, refKey: s.refKey };
+    } catch {
+      return null;
+    }
+  }
+
   /** 최근 실행 N건의 리포트(최신순). 지금 실행 중인 건 "진행 중" 리포트로 포함된다. */
   private buildRecentReports(n: number): AutoReport[] {
     try {
@@ -4854,6 +5343,7 @@ export class ToolEngine extends EventEmitter {
         killSwitch: this.killSwitch,
         scanProgress: this.scanProgressForMirror,
         reports: this.buildRecentReports(5), // [v0.62.1] 폰도 자동매매 리포트를 볼 수 있게
+        lab: this.labMirror(), // [v0.65.0] 폰도 매매연구소 요약을 볼 수 있게
       };
       const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_live_state?on_conflict=user_id,kind`, {
         method: "POST",
@@ -4895,23 +5385,24 @@ export class ToolEngine extends EventEmitter {
     killSwitch: boolean | null;
     scanProgress: LiveScanProgress | null;
     reports: AutoReport[];
+    lab: LabMirror | null;
     updatedAtMs: number | null;
     message?: string;
   }> {
     const token = await this.ensureAccessToken();
-    if (!token) return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, reports: [], updatedAtMs: null, message: "먼저 로그인하세요." };
+    if (!token) return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, reports: [], lab: null, updatedAtMs: null, message: "먼저 로그인하세요." };
     try {
       const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_live_state?kind=eq.snapshot&select=payload,updated_at`, {
         headers: this.authRestHeaders(token),
       }, 10_000, "capri_live_state");
       if (!res.ok)
-        return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, reports: [], updatedAtMs: null, message: `조회 실패(HTTP ${res.status}).` };
+        return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, reports: [], lab: null, updatedAtMs: null, message: `조회 실패(HTTP ${res.status}).` };
       const rows = (await res.json()) as Array<{
-        payload: { status?: AutoTradeStatus; journal?: JournalEntry[]; killSwitch?: boolean; scanProgress?: LiveScanProgress | null; reports?: AutoReport[] };
+        payload: { status?: AutoTradeStatus; journal?: JournalEntry[]; killSwitch?: boolean; scanProgress?: LiveScanProgress | null; reports?: AutoReport[]; lab?: LabMirror };
         updated_at: string;
       }>;
       if (!rows[0])
-        return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, reports: [], updatedAtMs: null, message: "PC가 아직 상태를 올린 적이 없습니다." };
+        return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, reports: [], lab: null, updatedAtMs: null, message: "PC가 아직 상태를 올린 적이 없습니다." };
       return {
         ok: true,
         status: rows[0].payload.status ?? null,
@@ -4919,10 +5410,11 @@ export class ToolEngine extends EventEmitter {
         killSwitch: rows[0].payload.killSwitch ?? null,
         scanProgress: rows[0].payload.scanProgress ?? null,
         reports: rows[0].payload.reports ?? [],
+        lab: rows[0].payload.lab ?? null,
         updatedAtMs: new Date(rows[0].updated_at).getTime(),
       };
     } catch (e) {
-      return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, reports: [], updatedAtMs: null, message: e instanceof Error ? e.message : String(e) };
+      return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, reports: [], lab: null, updatedAtMs: null, message: e instanceof Error ? e.message : String(e) };
     }
   }
 
@@ -5233,6 +5725,9 @@ export class ToolEngine extends EventEmitter {
         return { ok: true, status: this.stopAutoTrade() };
       case "saveAutoTradeSettings":
         return { ok: true, settings: await this.saveAutoTradeSettings(payload as Parameters<ToolEngine["saveAutoTradeSettings"]>[0]) };
+      case "saveLabSettings":
+        // [v0.65.0] 매매연구소(신호 기록 모드)는 주문을 내지 않는 읽기 전용이라 폰에서 켜고 꺼도 안전하다.
+        return { ok: true, status: this.saveLabSettings(payload as Parameters<ToolEngine["saveLabSettings"]>[0]) };
       case "saveAutoScanSettings":
         // [v0.61.1 — ③ 전수조사에서 발견한 치명 버그 수정] 폰이 "스크리닝 기준" 탭에서
         //   저장해도 예전엔 이 명령 자체가 화이트리스트에 없어 폰의 로컬(의미 없는) 엔진에만
@@ -6003,7 +6498,7 @@ export class ToolEngine extends EventEmitter {
           //   199개가 되어 **멀쩡한 종목이 '데이터 부족'으로 튕기는** 일이 생긴다.
           //   (지금 시각이 5분 경계인지에 따라 됐다 안 됐다 해서 발견하기 어려웠다)
           //   그래서 여유분을 더 받는다.
-          const oneMin = await getCandles1mPaged(rk.symbol, 1100);
+          const oneMin = await this.getCandles1mCached(rk.symbol); // [v0.65.0] 자동매매 스캔·매매연구소가 같은 1분봉을 2분간 공유(API 부하 절감)
           // [v0.6.2] 형성 중(미완성)인 마지막 5분봉은 판정에서 제외한다(완성된 봉만 사용).
           //   진행 중 봉으로 판정하면 봉 마감 후 음↔양이 뒤집혀 오판정이 난다(특히 HA).
           const raw5m: Candle[] = dropIncompleteBucket(aggregate1mTo5m(oneMin), now.toMillis());

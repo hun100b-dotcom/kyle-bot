@@ -74,6 +74,16 @@ contextBridge.exposeInMainWorld("kyletool", {
   autoScanNow: () => ipcRenderer.invoke("tool:autoTrade:scanNow"),
   autoTradeHistory: () => ipcRenderer.invoke("tool:autoTrade:history"),
   getAutoReports: () => ipcRenderer.invoke("tool:autoTrade:reports"), // [v0.62.1] 자동매매 리포트
+  // [v0.65.0] 매매연구소(신호 기록 모드)
+  getLabStatus: () => ipcRenderer.invoke("tool:lab:status"),
+  saveLabSettings: (input) => ipcRenderer.invoke("tool:lab:save", input),
+  labScanNow: () => ipcRenderer.invoke("tool:lab:scanNow"),
+  labReset: () => ipcRenderer.invoke("tool:lab:reset"),
+  getLabSummary: (filter) => ipcRenderer.invoke("tool:lab:summary", filter),
+  getLabSignal: (id) => ipcRenderer.invoke("tool:lab:signal", id),
+  getLabBreakdown: (key, dim, filter) => ipcRenderer.invoke("tool:lab:breakdown", key, dim, filter),
+  getLabCombined: (candleKey, linkKey, filter) => ipcRenderer.invoke("tool:lab:combined", candleKey, linkKey, filter),
+  exportLab: (kind) => ipcRenderer.invoke("tool:lab:export", kind),
 
   // 주문 현황
   // [v0.2.10] 주문 근거(기법 스냅샷) 목록 / 보유 포지션 손익

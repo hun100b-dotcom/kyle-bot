@@ -563,6 +563,16 @@ function registerIpc(e: ToolEngine): void {
   // [v0.30.0] 자동매매기록 — 자동매매가 낸 매매의 전체 생애주기 로그(읽기 전용)
   ipcMain.handle("tool:autoTrade:history", () => e.getAutoTradeHistory());
   ipcMain.handle("tool:autoTrade:reports", () => e.getAutoReports()); // [v0.62.1] 자동매매 리포트
+  // [v0.65.0] 매매연구소(신호 기록 모드)
+  ipcMain.handle("tool:lab:status", () => e.getLabStatus());
+  ipcMain.handle("tool:lab:save", (_ev, input) => e.saveLabSettings(input));
+  ipcMain.handle("tool:lab:scanNow", () => e.labScanNow());
+  ipcMain.handle("tool:lab:reset", () => e.labReset());
+  ipcMain.handle("tool:lab:summary", (_ev, filter) => e.getLabSummary(filter));
+  ipcMain.handle("tool:lab:signal", (_ev, id) => e.getLabSignal(id));
+  ipcMain.handle("tool:lab:breakdown", (_ev, key, dim, filter) => e.getLabBreakdown(key, dim, filter));
+  ipcMain.handle("tool:lab:combined", (_ev, candleKey, linkKey, filter) => e.getLabCombined(candleKey, linkKey, filter));
+  ipcMain.handle("tool:lab:export", (_ev, kind) => e.exportLab(kind));
   // [v0.2.10] 매매 근거 목록 / 보유 포지션(손익 포함) — 둘 다 읽기 전용이라 안전하다.
   ipcMain.handle("tool:rationales", () => e.getRationales());
   // [v0.4.0] 삼분할 타점 기록(여러 종목 동시 운용) — 저장/조회/삭제/진입완료 체크

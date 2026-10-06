@@ -480,6 +480,65 @@ interface ScreenEvidence {
   };
   gapFromHighMinutes: number | null; // [v0.62.1] 최고점→도지 간격(분)
 }
+/** [v0.65.0] 매매연구소 화면용 타입(electron/tool-engine.ts · lib/lab.ts와 같은 모양의 복제). */
+interface LabParamsT {
+  dojiBodyMaxPct: number; bodyMinPct: number; volRatioMin: number; volLookback: number; fillWindowMin: number;
+  linkFillWindowMin: number; horizonMin: number; feeRoundTripPct: number; fixedSlPct: number; emaBufferPct: number;
+}
+interface LabStatus {
+  enabled: boolean; rankCount: number; dojiBodyMaxPct: number; bodyMinPct: number; volRatioMin: number; scanning: boolean;
+  lastTickAtMs: number | null; lastTickDurMs: number | null; lastScanned: number; lastError: string | null; lastSkip: string | null;
+  startedAtMs: number | null; nextTickAtMs: number | null; totalSignals: number; params: LabParamsT;
+}
+interface LabQueryFilter { includeIneligible?: boolean; includeThin?: boolean; includeBackfilled?: boolean; session?: string; refKey?: string }
+interface LabSignalRow {
+  id: string; symbol: string; rank: number; session: string; thinHours: boolean; backfilled: boolean; eligible: boolean;
+  c2T: number; dojiT: number; volRatio2: number | null; body2: number; secondQualified: boolean; c4Block: boolean | null;
+  emaGapPct: number | null; atrPct: number | null; price: number; linked: boolean; complete: boolean;
+  ref: { key: string; status: string; netPct: number | null; fillPx: number | null; exitPx: number | null; note: string | null } | null;
+}
+interface LabFunnel { dojis: number; c1: number; c2Bull: number; c2Body: number; eligible: number; second: number; block4: number; linked: number }
+interface LabLinkageSummary { runsWithBlock: number; linked: number; linkRate: number | null; avgGapMin: number | null; avgEmaGapPct: number | null; linkedAnyEligible: number }
+interface LabVariantRow {
+  key: string; kind: "candle" | "link"; entryIdx: number; entryMode: string; stopMode: string; tpPct: number; signals: number; filled: number;
+  fillRate: number | null; closed: number; wins: number; losses: number; winRate: number | null; avgNetPct: number | null; avgWinPct: number | null;
+  avgLossPct: number | null; profitFactor: number | null; expectancyPerSignal: number | null; totalNetPct: number; avgMaePct: number | null;
+  avgRiskPct: number | null; avgHoldMin: number | null;
+}
+interface LabCounts { total: number; eligible: number; complete: number; open: number }
+interface LabSummary {
+  updatedAtMs: number; status: LabStatus; funnel: LabFunnel; linkage: LabLinkageSummary; variants: LabVariantRow[]; signals: LabSignalRow[];
+  refKey: string; counts: LabCounts;
+}
+interface LabMirror {
+  updatedAtMs: number; status: LabStatus; funnel: LabFunnel; linkage: LabLinkageSummary; topVariants: LabVariantRow[]; signals: LabSignalRow[];
+  counts: LabCounts; refKey: string;
+}
+interface LabBar5 { t: number; o: number; h: number; l: number; c: number; v: number; ho: number; hh: number; hl: number; hc: number; e: number | null }
+interface LabSignalFull {
+  id: string; symbol: string; rank: number; detectedAtMs: number; backfilled: boolean; thinHours: boolean; session: string; eligible: boolean;
+  dojiT: number; c2T: number; volRatio2: number | null; body2: number;
+  second: { t: number; qualified: boolean; body: number; volRatio: number | null } | null;
+  c4: { t: number; block: boolean } | null; runEndT: number;
+  metrics: { price: number; ema: number | null; emaGapPct: number | null; lowVsEmaPct: number | null; dojiEmaDistPct: number | null; dojiBodyPct: number; atrPct: number | null; emaSlopePct: number | null; runRangePct: number | null };
+  bars: LabBar5[];
+  path1m: Array<[number, number, number, number, number, number]>;
+  linkage: { confirmT: number; dojiT: number; highT: number; highPx: number; prevClose: number; ema: number; emaGapPct: number; splits: Array<{ level: number; entry: number; tp: number; sl: number }> } | null;
+  linkageDone: boolean; complete: boolean;
+}
+interface LabTrade {
+  key: string; kind: "candle" | "link"; entryIdx: number; entryMode: string; stopMode: string; tpPct: number;
+  status: "unfilled" | "skipped" | "win" | "loss" | "time" | "horizon" | "open"; note?: string;
+  entryT?: number; fillPx?: number; stopPx?: number; tpPx?: number; riskPct?: number; exitT?: number; exitPx?: number; exitReason?: string;
+  grossPct?: number; netPct?: number; maePct?: number; mfePct?: number; holdMin?: number;
+}
+type LabBreakdownDim = "session" | "hour" | "rank" | "volRatio" | "emaGap" | "atr" | "price" | "runRange";
+interface LabBreakdownRow { label: string; n: number; winRate: number | null; avgNetPct: number | null; totalNetPct: number }
+interface LabCombined {
+  n: number; candleOnlyAvg: number | null; linkOnlyAvg: number | null; combinedAvg: number | null; combinedTotal: number;
+  skippedByLoss: number; skippedByOverlap: number;
+}
+
 /** [v0.62.1] 자동매매 리포트 — lib/auto-report.ts의 AutoReport와 같은 모양(화면 표시용 복제). */
 interface AutoReport {
   runId: string;
@@ -877,6 +936,16 @@ interface KyletoolBridge {
   autoTradeHistory(): Promise<AutoTradeHistoryEntry[]>;
   /** [v0.62.1] 자동매매 리포트(최근 실행 최대 10건, 최신순). 폰은 PC가 올린 미러에서 읽는다. */
   getAutoReports?(): Promise<{ ok: boolean; reports: AutoReport[]; source: "local" | "pc"; message?: string }>;
+  // [v0.65.0] 매매연구소(신호 기록 모드) — 주문 없는 읽기 전용 연구 기능
+  getLabStatus?(): Promise<LabStatus>;
+  saveLabSettings?(input: { enabled?: boolean; rankCount?: number; dojiBodyMaxPct?: number; bodyMinPct?: number; volRatioMin?: number }): Promise<LabStatus>;
+  labScanNow?(): Promise<LabStatus>;
+  labReset?(): Promise<LabStatus>;
+  getLabSummary?(filter?: LabQueryFilter): Promise<LabSummary>;
+  getLabSignal?(id: string): Promise<{ signal: LabSignalFull; trades: LabTrade[] } | null>;
+  getLabBreakdown?(key: string, dim: LabBreakdownDim, filter?: LabQueryFilter): Promise<LabBreakdownRow[]>;
+  getLabCombined?(candleKey: string, linkKey: string, filter?: LabQueryFilter): Promise<LabCombined>;
+  exportLab?(kind: "signals-csv" | "trades-csv" | "json"): Promise<{ filename: string; text: string }>;
   rationales(): Promise<TradeRationale[]>;
   // [v0.4.0] 삼분할 타점 기록(여러 종목 동시 운용)
   splitsList(): Promise<SavedSplit[]>;
@@ -963,6 +1032,8 @@ interface KyletoolBridge {
    *  기존 방식(autoStateSyncPull 등)으로 대체한다. */
   getLiveState?(): Promise<{
     ok: boolean;
+    /** [v0.65.0] PC의 매매연구소 요약(폰 표시용). 옛 PC·기록 없음이면 null/없음. */
+    lab?: LabMirror | null;
     status: AutoTradeStatus | null;
     journal: JournalEntry[];
     /** [v0.61.2] PC의 실제 비상 정지(킬 스위치) 상태. 없으면(옛 버전 PC) null. */

@@ -219,6 +219,16 @@ export function installKyleTool(): ToolEngine {
     autoScanNow: () => e.autoScanNow(),
     autoTradeHistory: () => Promise.resolve(e.getAutoTradeHistory()),
     getAutoReports: () => e.getAutoReports(), // [v0.62.1] 폰은 로컬 기록이 없어 PC가 올린 미러에서 읽는다
+    // [v0.65.0] 매매연구소 — 폰의 로컬 엔진에는 데이터가 없으므로 화면은 PC가 올린 미러(getLiveState().lab)를 보고, 켜기/끄기만 원격 명령으로 보낸다.
+    getLabStatus: () => Promise.resolve(e.getLabStatus()),
+    saveLabSettings: (input: Parameters<typeof e.saveLabSettings>[0]) => Promise.resolve(e.saveLabSettings(input)),
+    labScanNow: () => e.labScanNow(),
+    labReset: () => Promise.resolve(e.labReset()),
+    getLabSummary: (filter?: Parameters<typeof e.getLabSummary>[0]) => Promise.resolve(e.getLabSummary(filter)),
+    getLabSignal: (id: string) => Promise.resolve(e.getLabSignal(id)),
+    getLabBreakdown: (key: string, dim: Parameters<typeof e.getLabBreakdown>[1], filter?: Parameters<typeof e.getLabBreakdown>[2]) => Promise.resolve(e.getLabBreakdown(key, dim, filter)),
+    getLabCombined: (candleKey: string, linkKey: string, filter?: Parameters<typeof e.getLabCombined>[2]) => Promise.resolve(e.getLabCombined(candleKey, linkKey, filter)),
+    exportLab: (kind: Parameters<typeof e.exportLab>[0]) => Promise.resolve(e.exportLab(kind)),
     placeSell: (spec: Parameters<ToolEngine["placeSell"]>[0]) => e.placeSell(spec),
     openOrders: () => e.openOrders(),
     conditionals: () => e.conditionals(),
