@@ -484,15 +484,17 @@ interface ScreenEvidence {
 interface LabParamsT {
   dojiBodyMaxPct: number; bodyMinPct: number; volRatioMin: number; volLookback: number; fillWindowMin: number;
   linkFillWindowMin: number; horizonMin: number; feeRoundTripPct: number; fixedSlPct: number; emaBufferPct: number;
+  minRangePct: number; maxSignalAgeHours: number; maxEmaSpanDays: number;
 }
 interface LabStatus {
-  enabled: boolean; rankCount: number; dojiBodyMaxPct: number; bodyMinPct: number; volRatioMin: number; scanning: boolean;
+  enabled: boolean; rankCount: number; dojiBodyMaxPct: number; bodyMinPct: number; volRatioMin: number; minRangePct: number; note: string | null; scanning: boolean;
   lastTickAtMs: number | null; lastTickDurMs: number | null; lastScanned: number; lastError: string | null; lastSkip: string | null;
   startedAtMs: number | null; nextTickAtMs: number | null; totalSignals: number; params: LabParamsT;
 }
 interface LabQueryFilter { includeIneligible?: boolean; includeThin?: boolean; includeBackfilled?: boolean; session?: string; refKey?: string }
 interface LabSignalRow {
   id: string; symbol: string; rank: number; session: string; thinHours: boolean; backfilled: boolean; eligible: boolean;
+  whyIneligible: "volume" | "range" | "both" | null; rangePct2: number | null;
   c2T: number; dojiT: number; volRatio2: number | null; body2: number; secondQualified: boolean; c4Block: boolean | null;
   emaGapPct: number | null; atrPct: number | null; price: number; linked: boolean; complete: boolean;
   ref: { key: string; status: string; netPct: number | null; fillPx: number | null; exitPx: number | null; note: string | null } | null;
@@ -517,6 +519,7 @@ interface LabMirror {
 interface LabBar5 { t: number; o: number; h: number; l: number; c: number; v: number; ho: number; hh: number; hl: number; hc: number; e: number | null }
 interface LabSignalFull {
   id: string; symbol: string; rank: number; detectedAtMs: number; backfilled: boolean; thinHours: boolean; session: string; eligible: boolean;
+  rangePct2?: number | null; whyIneligible?: "volume" | "range" | "both" | null;
   dojiT: number; c2T: number; volRatio2: number | null; body2: number;
   second: { t: number; qualified: boolean; body: number; volRatio: number | null } | null;
   c4: { t: number; block: boolean } | null; runEndT: number;
@@ -938,7 +941,7 @@ interface KyletoolBridge {
   getAutoReports?(): Promise<{ ok: boolean; reports: AutoReport[]; source: "local" | "pc"; message?: string }>;
   // [v0.65.0] 매매연구소(신호 기록 모드) — 주문 없는 읽기 전용 연구 기능
   getLabStatus?(): Promise<LabStatus>;
-  saveLabSettings?(input: { enabled?: boolean; rankCount?: number; dojiBodyMaxPct?: number; bodyMinPct?: number; volRatioMin?: number }): Promise<LabStatus>;
+  saveLabSettings?(input: { enabled?: boolean; rankCount?: number; dojiBodyMaxPct?: number; bodyMinPct?: number; volRatioMin?: number; minRangePct?: number }): Promise<LabStatus>;
   labScanNow?(): Promise<LabStatus>;
   labReset?(): Promise<LabStatus>;
   getLabSummary?(filter?: LabQueryFilter): Promise<LabSummary>;

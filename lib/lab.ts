@@ -39,6 +39,11 @@ export interface LabParams {
   feeRoundTripPct: number; // 왕복 수수료 추정(%) — 0.2
   fixedSlPct: number; //      고정 손절 비율(%) — 10(현재 기본값)
   emaBufferPct: number; //    EMA 기준 손절의 EMA 아래 여유(%) — 1.5
+  /** [v0.65.1 데이터 검증에서 발견] 몸통 "비율"은 호가 1~2틱짜리 초소형 봉에서도 100%가 나온다 — 신호 봉의
+   *  (고가−저가)÷종가가 이 %보다 작으면 의미 있는 돌파가 아니라 호가 잡음이라 "인정 신호"에서 뺀다(0=끔). */
+  minRangePct: number;
+  maxSignalAgeHours: number; // 이보다 오래된 패턴은 무시(거래가 드문 종목의 몇 주 전 봉 방지) — 72
+  maxEmaSpanDays: number; //    EMA200을 만든 봉 200개가 이 일수보다 넓게 퍼져 있으면(거래 드문 종목) 그 EMA는 믿지 않음 — 5
 }
 
 export const LAB_PARAMS_DEFAULT: LabParams = {
@@ -52,6 +57,9 @@ export const LAB_PARAMS_DEFAULT: LabParams = {
   feeRoundTripPct: 0.2,
   fixedSlPct: 10,
   emaBufferPct: 1.5,
+  minRangePct: 0.5,
+  maxSignalAgeHours: 72,
+  maxEmaSpanDays: 5,
 };
 
 /** 익절 목표(%) — 오너 지정 "1.3~2%" 범위를 3점으로 비교한다. */
@@ -93,6 +101,11 @@ export function emaSeries(values: number[], period: number): (number | null)[] {
   return out;
 }
 
+/** 봉 크기(%) = (고가−저가) ÷ 종가 × 100. */
+export function rangePct(c: Candle): number {
+  return c.close > 0 ? ((c.high - c.low) / c.close) * 100 : 0;
+}
+
 /** 몸통 비율(%) = |종가−시가| ÷ (고가−저가) × 100. 범위가 0이면 0. */
 export function bodyPct(c: Candle): number {
   const range = c.high - c.low;
@@ -106,6 +119,8 @@ const r4 = (n: number) => Math.round(n * 10000) / 10000;
 /** 거래량 배수 = 이 봉 거래량 ÷ 직전 lookback개 평균(자기 자신 제외). 평균이 0이거나 봉이 모자라면 null. */
 export function volRatioAt(ha: Candle[], idx: number, lookback: number): number | null {
   if (idx < lookback) return null;
+  // 봉이 빠진 구간(거래 없음·장 사이 공백)을 끼고 평균을 내면 "직전 5개"가 아니므로 계산하지 않는다.
+  for (let i = idx - lookback; i < idx; i++) if (ha[i + 1].time - ha[i].time !== FIVE) return null;
   let sum = 0;
   for (let i = idx - lookback; i < idx; i++) sum += ha[i].volume;
   const avg = sum / lookback;
@@ -124,6 +139,7 @@ export interface DetectedRun {
   dojiIdx: number;
   stage: 0 | 1 | 2 | 3;
   volOk2: boolean | null; //  2번째 캔들 거래량 조건 충족 여부(stage 3 이상에서만 의미)
+  rangeOk2: boolean | null; // [v0.65.1] 2번째 캔들 크기(고저폭 %)가 최소 기준 이상인지
   c3: { idx: number; bull: boolean; bodyOk: boolean; volOk: boolean; qualified: boolean } | null;
   c4: { idx: number; block: boolean } | null; // 4번째 캔들(양봉이면 block=고점 차단)
   endIdx: number; //          패턴이 마지막으로 관여한 캔들 인덱스
@@ -142,42 +158,51 @@ export interface DetectedRun {
  *     · 모든 캔들 종가는 200 EMA 위여야 한다(깨지면 거기서 종료).
  *   신호가 성립한 패턴 구간(도지~endIdx) 안에서는 새 도지 출발을 겹쳐 세지 않는다.
  */
-export function detectRuns(ha: Candle[], emaS: (number | null)[], P: LabParams = LAB_PARAMS_DEFAULT): DetectedRun[] {
+export function detectRuns(ha: Candle[], emaS: (number | null)[], P: LabParams = LAB_PARAMS_DEFAULT, nowMs?: number): DetectedRun[] {
   const runs: DetectedRun[] = [];
   const n = ha.length;
   let blockedUntil = -1;
   const above = (i: number) => emaS[i] != null && ha[i].close > (emaS[i] as number);
+  /** 두 봉이 정확히 이웃(5분 간격)인가 — 거래가 없어 봉이 빠졌거나 장 사이 공백이면 "연속"이 아니다. */
+  const adj = (a: number, b: number) => b < n && ha[b].time - ha[a].time === FIVE;
+  const minRange = P.minRangePct ?? 0;
+  const rangeOk = (i: number) => minRange <= 0 || rangePct(ha[i]) >= minRange;
+  const maxAgeMs = (P.maxSignalAgeHours ?? Infinity) * 3600_000;
+  const maxSpanMs = (P.maxEmaSpanDays ?? Infinity) * 86_400_000;
 
   for (let i = 0; i < n; i++) {
     if (i <= blockedUntil) continue;
     const d = ha[i];
     if (!(d.high - d.low > 0) || bodyPct(d) >= P.dojiBodyMaxPct || !above(i)) continue;
-    const run: DetectedRun = { dojiIdx: i, stage: 0, volOk2: null, c3: null, c4: null, endIdx: i };
+    if (nowMs != null && d.time < nowMs - maxAgeMs) continue; // 너무 오래된 패턴(거래 드문 종목의 옛 봉) 제외
+    if (i >= 199 && d.time - ha[i - 199].time > maxSpanMs) continue; // EMA200을 만든 봉이 며칠~몇 주에 흩어져 있으면 믿지 않음
+    const run: DetectedRun = { dojiIdx: i, stage: 0, volOk2: null, rangeOk2: null, c3: null, c4: null, endIdx: i };
 
     const i1 = i + 1;
-    if (i1 < n && isBull(ha[i1]) && above(i1)) {
+    if (adj(i, i1) && isBull(ha[i1]) && above(i1)) {
       run.stage = 1;
       run.endIdx = i1;
       const i2 = i + 2;
-      if (i2 < n && isBull(ha[i2]) && above(i2)) {
+      if (adj(i1, i2) && isBull(ha[i2]) && above(i2)) {
         run.stage = 2;
         run.endIdx = i2;
         if (bodyPct(ha[i2]) >= P.bodyMinPct) {
           run.stage = 3;
           const vr2 = volRatioAt(ha, i2, P.volLookback);
           run.volOk2 = vr2 != null && vr2 >= P.volRatioMin;
-          if (run.volOk2) {
+          run.rangeOk2 = rangeOk(i2);
+          if (run.volOk2 && run.rangeOk2) {
             const i3 = i + 3;
-            if (i3 < n) {
+            if (adj(i2, i3)) {
               const bull3 = isBull(ha[i3]) && above(i3);
               const bodyOk3 = bodyPct(ha[i3]) >= P.bodyMinPct;
               const vr3 = volRatioAt(ha, i3, P.volLookback);
               const volOk3 = vr3 != null && vr3 >= P.volRatioMin;
-              run.c3 = { idx: i3, bull: bull3, bodyOk: bodyOk3, volOk: volOk3, qualified: bull3 && bodyOk3 && volOk3 };
+              run.c3 = { idx: i3, bull: bull3, bodyOk: bodyOk3, volOk: volOk3 && rangeOk(i3), qualified: bull3 && bodyOk3 && volOk3 && rangeOk(i3) };
               run.endIdx = i3;
               if (run.c3.qualified) {
                 const i4 = i + 4;
-                if (i4 < n) {
+                if (adj(i3, i4)) {
                   run.c4 = { idx: i4, block: isBull(ha[i4]) && above(i4) };
                   run.endIdx = i4;
                 }
@@ -226,7 +251,9 @@ export interface LabSignal {
   backfilled: boolean; //        신호 봉 마감보다 10분 넘게 늦게 발견(앱을 껐거나 백필) — 실시간성 구분용
   thinHours: boolean; //         05:00~17:00 KST(시세가 얇은 휴무 시간대)에 발생
   session: string; //            day/pre/regular/after/closed
-  eligible: boolean; //          2번째 캔들이 몸통·거래량 모두 충족(실투입 인정 신호)
+  eligible: boolean; //          2번째 캔들이 몸통·거래량·봉 크기 모두 충족(실투입 인정 신호)
+  rangePct2?: number | null; //  [v0.65.1] 2번째 캔들 크기(고저폭 ÷ 종가 %)
+  whyIneligible?: "volume" | "range" | "both" | null; // [v0.65.1] 비인정 사유
   dojiT: number;
   c2T: number;
   volRatio2: number | null;
@@ -280,10 +307,12 @@ export function findLinkage(
   runEndIdx: number,
   c2Idx: number,
   o: LinkageOpts,
+  maxConfirmMs: number = Infinity, // [v0.65.1] 탐색 상한 — 상승 구간 끝 + 관찰 시간. (없으면 며칠 뒤 패턴까지 "연계"로 잡혀 연계율이 부풀었다)
 ): LabLinkage | null {
   const closes = ha.map((c) => c.close);
   const emaS = emaSeries(closes, o.emaPeriod);
   for (let idx = runEndIdx + 1; idx < ha.length; idx++) {
+    if (ha[idx].time > maxConfirmMs) break;
     const nowMs = ha[idx].time + FIVE; // 이 봉이 마감된 시각
     const pat = scanSessionPattern(ha.slice(0, idx + 1), o.sessionStartMs, o.bodyRatio, o.wickMin, nowMs, o.maxAgeMin, true, o.maxGapMin);
     if (pat.status !== "confirmed" || pat.highTime == null || pat.sessionHigh == null || !pat.dojiCandle) continue;
@@ -360,10 +389,13 @@ export function updateSignal(sig: LabSignal, ctx: UpdateCtx): LabSignal {
   let linkage = sig.linkage;
   let linkageDone = sig.linkageDone;
   const searchEndMs = sig.runEndT + FIVE + P.horizonMin * MIN;
-  if (!linkage && !linkageDone && runEndIdx >= 0) {
-    linkage = findLinkage(ha, raw, runEndIdx, c2Idx, ctx.link);
-    if (linkage) linkageDone = true;
-    else if (ctx.nowMs >= searchEndMs) linkageDone = true;
+  if (!linkage && !linkageDone) {
+    if (runEndIdx < 0) linkageDone = true; // 상승 구간 끝 봉을 시리즈에서 못 찾음 — 더 찾을 수 없다
+    else {
+      linkage = findLinkage(ha, raw, runEndIdx, c2Idx, ctx.link, searchEndMs);
+      if (linkage) linkageDone = true;
+      else if (ctx.nowMs >= searchEndMs) linkageDone = true;
+    }
   }
 
   const next: LabSignal = { ...sig, linkage, linkageDone };
@@ -425,7 +457,9 @@ export function buildSignal(a: {
     backfilled: a.nowMs - c2Close > 10 * MIN,
     thinHours: a.thinHours,
     session: a.session,
-    eligible: r.volOk2 === true,
+    eligible: r.volOk2 === true && r.rangeOk2 === true,
+    rangePct2: r2(rangePct(ha[i2])),
+    whyIneligible: r.volOk2 && r.rangeOk2 ? null : !r.volOk2 && !r.rangeOk2 ? "both" : !r.volOk2 ? "volume" : "range",
     dojiT: ha[r.dojiIdx].time,
     c2T: ha[i2].time,
     volRatio2: vr2 != null ? r2(vr2) : null,
@@ -942,14 +976,14 @@ const csvCell = (v: unknown) => {
 /** 신호 로우 CSV: 신호당 1행(핵심 로우 필드). */
 export function signalsToCsv(signals: LabSignal[]): string {
   const h = [
-    "id", "symbol", "rank", "session", "thinHours", "backfilled", "eligible", "dojiT", "c2T", "volRatio2", "body2",
+    "id", "symbol", "rank", "session", "thinHours", "backfilled", "eligible", "whyIneligible", "rangePct2", "dojiT", "c2T", "volRatio2", "body2",
     "second_t", "second_qualified", "second_body", "second_volRatio", "c4_t", "c4_block", "runEndT",
     "price", "ema", "emaGapPct", "lowVsEmaPct", "dojiEmaDistPct", "dojiBodyPct", "atrPct", "emaSlopePct", "runRangePct",
     "linked", "link_confirmT", "link_emaGapPct", "complete",
   ];
   const rows = signals.map((s) =>
     [
-      s.id, s.symbol, s.rank, s.session, s.thinHours, s.backfilled, s.eligible, s.dojiT, s.c2T, s.volRatio2, s.body2,
+      s.id, s.symbol, s.rank, s.session, s.thinHours, s.backfilled, s.eligible, s.whyIneligible, s.rangePct2, s.dojiT, s.c2T, s.volRatio2, s.body2,
       s.second?.t, s.second?.qualified, s.second?.body, s.second?.volRatio, s.c4?.t, s.c4?.block, s.runEndT,
       s.metrics.price, s.metrics.ema, s.metrics.emaGapPct, s.metrics.lowVsEmaPct, s.metrics.dojiEmaDistPct, s.metrics.dojiBodyPct,
       s.metrics.atrPct, s.metrics.emaSlopePct, s.metrics.runRangePct,

@@ -200,3 +200,38 @@ describe("[v0.65.0] 엔진 — 설정·스캔·요약·내보내기", () => {
     }
   }, 30_000);
 });
+
+describe("[v0.65.1] 규칙 오류가 섞인 1판(v1) 데이터는 폐기하고 새로 쌓는다", () => {
+  it("v1 파일을 열면 신호가 비워지고 안내가 뜨며, 파일은 v2로 다시 저장된다", async () => {
+    const { writeFileSync } = await import("node:fs");
+    const dir = mkdtempSync(join(tmpdir(), "kyle-lab-"));
+    try {
+      writeFileSync(join(dir, "kylebot-lab.json"), JSON.stringify({ v: 1, startedAtMs: 1, attempts: { a: 3 }, signals: [{ id: "X:1" }, { id: "Y:2" }] }), "utf8");
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const st = eng.getLabStatus();
+      expect(st.totalSignals).toBe(0);
+      expect(st.note).toContain("폐기");
+      expect(st.note).toContain("2건");
+      const saved = JSON.parse(readFileSync(join(dir, "kylebot-lab.json"), "utf8")) as { v: number; signals: unknown[] };
+      expect(saved.v).toBe(2);
+      expect(saved.signals).toHaveLength(0);
+      // 같은 폴더를 다시 열면(이미 v2) 안내가 반복되지 않는다
+      expect(new ToolEngine(dir, { forceMock: true }).getLabStatus().note).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("최소 봉 크기 설정은 0~5로 보정되고 저장·복원된다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-lab-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      expect(eng.getLabStatus().minRangePct).toBe(0.5);
+      expect(eng.saveLabSettings({ minRangePct: 99 }).minRangePct).toBe(5);
+      expect(eng.saveLabSettings({ minRangePct: 0 }).minRangePct).toBe(0);
+      expect(new ToolEngine(dir, { forceMock: true }).getLabStatus().minRangePct).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

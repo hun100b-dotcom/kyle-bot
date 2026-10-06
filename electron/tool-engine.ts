@@ -1076,6 +1076,8 @@ export interface LabStatus {
   dojiBodyMaxPct: number;
   bodyMinPct: number;
   volRatioMin: number;
+  minRangePct: number;
+  note: string | null;
   scanning: boolean;
   lastTickAtMs: number | null;
   lastTickDurMs: number | null;
@@ -1102,6 +1104,8 @@ export interface LabSignalRow {
   thinHours: boolean;
   backfilled: boolean;
   eligible: boolean;
+  whyIneligible: "volume" | "range" | "both" | null;
+  rangePct2: number | null;
   c2T: number;
   dojiT: number;
   volRatio2: number | null;
@@ -1543,6 +1547,8 @@ export class ToolEngine extends EventEmitter {
     if (Number.isFinite(lbm) && lbm > 0) this.labBodyMin = lbm;
     const lvm = Number(process.env.LAB_VOL_MIN);
     if (Number.isFinite(lvm) && lvm > 0) this.labVolMin = lvm;
+    const lmr = Number(process.env.LAB_MIN_RANGE_PCT);
+    if (process.env.LAB_MIN_RANGE_PCT !== undefined && process.env.LAB_MIN_RANGE_PCT !== "" && Number.isFinite(lmr) && lmr >= 0) this.labMinRangePct = lmr;
     // [v0.63.0] 방어 전략 설정 복원
     if (process.env.AUTO_SL_MODE === "ema" || process.env.AUTO_SL_MODE === "fixed") this.autoTradeSlMode = process.env.AUTO_SL_MODE;
     const aesb = Number(process.env.AUTO_EMA_STOP_BUFFER_PCT);
@@ -2038,6 +2044,7 @@ export class ToolEngine extends EventEmitter {
       `LAB_DOJI_BODY_MAX=${this.labDojiBodyMax}`,
       `LAB_BODY_MIN=${this.labBodyMin}`,
       `LAB_VOL_MIN=${this.labVolMin}`,
+      `LAB_MIN_RANGE_PCT=${this.labMinRangePct}`,
       `AUTO_SL_MODE=${this.autoTradeSlMode}`, // [v0.63.0] 방어 전략
       `AUTO_EMA_STOP_BUFFER_PCT=${this.autoTradeEmaStopBufferPct}`,
       `AUTO_REENTRY_BLOCK_ENABLED=${this.autoTradeReentryBlockEnabled}`,
@@ -4496,6 +4503,9 @@ export class ToolEngine extends EventEmitter {
   private labDojiBodyMax = 15; //   도지 몸통 비율 상한(%)
   private labBodyMin = 60; //       신호 캔들 몸통 비율 하한(%)
   private labVolMin = 1.5; //       신호 캔들 거래량 배수(직전 5개 평균 대비)
+  private labMinRangePct = 0.5; //   [v0.65.1] 신호 캔들 최소 크기(고저폭 ÷ 종가 %) — 1~2틱짜리 초소형 봉의 "몸통 100%" 잡음 제거(0=끔)
+  private labNote: string | null = null; // 화면에 한 번 보여 줄 안내(예: 규칙 오류로 옛 데이터 폐기)
+  private static readonly LAB_SCHEMA = 2;
   private labTimer: ReturnType<typeof setInterval> | null = null;
   private labBusy = false;
   private labLastTickAtMs: number | null = null;
@@ -4527,13 +4537,24 @@ export class ToolEngine extends EventEmitter {
   }
 
   private labParams(): LabParams {
-    return { ...LAB_PARAMS_DEFAULT, dojiBodyMaxPct: this.labDojiBodyMax, bodyMinPct: this.labBodyMin, volRatioMin: this.labVolMin };
+    return { ...LAB_PARAMS_DEFAULT, dojiBodyMaxPct: this.labDojiBodyMax, bodyMinPct: this.labBodyMin, volRatioMin: this.labVolMin, minRangePct: this.labMinRangePct };
   }
 
   private loadLab(): void {
     try {
       if (!existsSync(this.labPath)) return;
-      const d = JSON.parse(readFileSync(this.labPath, "utf8")) as { signals?: LabSignal[]; attempts?: Record<string, number>; startedAtMs?: number | null };
+      const d = JSON.parse(readFileSync(this.labPath, "utf8")) as { v?: number; signals?: LabSignal[]; attempts?: Record<string, number>; startedAtMs?: number | null };
+      // [v0.65.1] 1판(v1) 데이터는 규칙 오류(연속이 아닌 봉을 이어 붙임·몇 주 전 봉·1틱짜리 초소형 봉·무한정 연계 탐색)로
+      //   부풀려져 있어 신뢰할 수 없다 — 폐기하고 새 규칙으로 다시 쌓는다(로우는 새로 받아 오므로 백필로 금방 채워진다).
+      if ((d.v ?? 1) < ToolEngine.LAB_SCHEMA) {
+        const n = Array.isArray(d.signals) ? d.signals.length : 0;
+        this.labNote = `v0.65.1 검증 정정: 이전 규칙의 기록 ${n}건은 오류(연속 아닌 봉 연결·몇 주 전 봉·1틱짜리 초소형 봉·무한정 연계 탐색)가 섞여 있어 폐기하고 새 규칙으로 다시 쌓습니다.`;
+        this.labSignals = [];
+        this.labAttempts = {};
+        this.labStartedAtMs = d.startedAtMs ?? null;
+        this.persistLab();
+        return;
+      }
       this.labSignals = Array.isArray(d.signals) ? d.signals : [];
       this.labAttempts = d.attempts && typeof d.attempts === "object" ? d.attempts : {};
       this.labStartedAtMs = d.startedAtMs ?? null;
@@ -4546,7 +4567,7 @@ export class ToolEngine extends EventEmitter {
   private persistLab(): void {
     try {
       const tmp = this.labPath + ".tmp";
-      writeFileSync(tmp, JSON.stringify({ v: 1, startedAtMs: this.labStartedAtMs, attempts: this.labAttempts, signals: this.labSignals }), "utf8");
+      writeFileSync(tmp, JSON.stringify({ v: ToolEngine.LAB_SCHEMA, startedAtMs: this.labStartedAtMs, attempts: this.labAttempts, signals: this.labSignals }), "utf8");
       renameSync(tmp, this.labPath);
     } catch {
       /* 기록 실패는 무시 — 연구용 데이터라 매매와 무관 */
@@ -4566,7 +4587,8 @@ export class ToolEngine extends EventEmitter {
   }
 
   /** 연구소 설정 저장 + 켜짐/꺼짐. 값은 범위로 보정한다. */
-  saveLabSettings(input: { enabled?: boolean; rankCount?: number; dojiBodyMaxPct?: number; bodyMinPct?: number; volRatioMin?: number }): LabStatus {
+  saveLabSettings(input: { enabled?: boolean; rankCount?: number; dojiBodyMaxPct?: number; bodyMinPct?: number; volRatioMin?: number; minRangePct?: number }): LabStatus {
+    if (typeof input.minRangePct === "number" && Number.isFinite(input.minRangePct)) this.labMinRangePct = Math.round(Math.min(5, Math.max(0, input.minRangePct)) * 100) / 100;
     if (typeof input.rankCount === "number" && Number.isFinite(input.rankCount)) this.labRankCount = Math.round(Math.min(200, Math.max(10, input.rankCount)));
     if (typeof input.dojiBodyMaxPct === "number" && Number.isFinite(input.dojiBodyMaxPct)) this.labDojiBodyMax = Math.round(Math.min(30, Math.max(5, input.dojiBodyMaxPct)) * 10) / 10;
     if (typeof input.bodyMinPct === "number" && Number.isFinite(input.bodyMinPct)) this.labBodyMin = Math.round(Math.min(90, Math.max(40, input.bodyMinPct)) * 10) / 10;
@@ -4582,7 +4604,7 @@ export class ToolEngine extends EventEmitter {
       symbol: "-",
       summary:
         `🔬 매매연구소 설정 — 신호 기록 ${this.labEnabled ? "ON" : "OFF"} · 거래량 순위 ${this.labRankCount}위까지 · ` +
-        `도지 몸통 <${this.labDojiBodyMax}% · 신호 몸통 ≥${this.labBodyMin}% · 거래량 ≥직전5평균×${this.labVolMin}`,
+        `도지 몸통 <${this.labDojiBodyMax}% · 신호 몸통 ≥${this.labBodyMin}% · 거래량 ≥직전5평균×${this.labVolMin} · 최소 봉 크기 ${this.labMinRangePct}%`,
       category: "시스템",
     });
     this.labVersion++;
@@ -4597,6 +4619,8 @@ export class ToolEngine extends EventEmitter {
       dojiBodyMaxPct: this.labDojiBodyMax,
       bodyMinPct: this.labBodyMin,
       volRatioMin: this.labVolMin,
+      minRangePct: this.labMinRangePct,
+      note: this.labNote,
       scanning: this.labBusy,
       lastTickAtMs: this.labLastTickAtMs,
       lastTickDurMs: this.labLastTickDurMs,
@@ -4688,12 +4712,12 @@ export class ToolEngine extends EventEmitter {
     if (raw5m.length < 210) return; // EMA200 + 여유
     const P = this.labParams();
     const series = buildSeries(raw5m, 200);
-    const runs = detectRuns(series.ha, series.emaS, P);
+    const runs = detectRuns(series.ha, series.emaS, P, nowMs);
 
     for (const run of runs) {
       const dojiT = series.ha[run.dojiIdx].time;
       const id = `${symbol}:${dojiT}`;
-      const stage = run.stage === 3 && run.volOk2 ? 4 : run.stage; // 4 = 인정 신호(몸통+거래량)
+      const stage = run.stage === 3 && run.volOk2 && run.rangeOk2 ? 4 : run.stage; // 4 = 인정 신호(몸통+거래량+봉 크기)
       if ((this.labAttempts[id] ?? -1) < stage) this.labAttempts[id] = stage;
       if (run.stage < 3) continue;
 
@@ -4790,6 +4814,8 @@ export class ToolEngine extends EventEmitter {
             thinHours: s.thinHours,
             backfilled: s.backfilled,
             eligible: s.eligible,
+            whyIneligible: s.whyIneligible ?? null,
+            rangePct2: s.rangePct2 ?? null,
             c2T: s.c2T,
             dojiT: s.dojiT,
             volRatio2: s.volRatio2,

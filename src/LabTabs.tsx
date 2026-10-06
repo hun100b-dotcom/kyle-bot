@@ -49,13 +49,13 @@ function LabNotice({ lab }: { lab: LabApi }) {
 export function LabLiveTab({ lab }: { lab: LabApi }) {
   const s = lab.summary;
   const st = s?.status;
-  const [form, setForm] = useState({ rankCount: "60", dojiBodyMaxPct: "15", bodyMinPct: "60", volRatioMin: "1.5" });
+  const [form, setForm] = useState({ rankCount: "60", dojiBodyMaxPct: "15", bodyMinPct: "60", volRatioMin: "1.5", minRangePct: "0.5" });
   const [dirty, setDirty] = useState(false);
 
   // 저장된 값으로 입력칸을 맞춘다(사용자가 고치는 중이면 덮어쓰지 않음)
   useEffect(() => {
     if (!st || dirty) return;
-    setForm({ rankCount: String(st.rankCount), dojiBodyMaxPct: String(st.dojiBodyMaxPct), bodyMinPct: String(st.bodyMinPct), volRatioMin: String(st.volRatioMin) });
+    setForm({ rankCount: String(st.rankCount), dojiBodyMaxPct: String(st.dojiBodyMaxPct), bodyMinPct: String(st.bodyMinPct), volRatioMin: String(st.volRatioMin), minRangePct: String(st.minRangePct ?? 0.5) });
   }, [st, dirty]);
 
   const save = () => {
@@ -63,11 +63,12 @@ export function LabLiveTab({ lab }: { lab: LabApi }) {
     const dojiBodyMaxPct = Number(form.dojiBodyMaxPct);
     const bodyMinPct = Number(form.bodyMinPct);
     const volRatioMin = Number(form.volRatioMin);
-    if (![rankCount, dojiBodyMaxPct, bodyMinPct, volRatioMin].every((v) => Number.isFinite(v) && v > 0)) {
-      lab.setMsg("⚠️ 네 칸 모두 0보다 큰 숫자로 입력하세요.");
+    const minRangePct = Number(form.minRangePct);
+    if (![rankCount, dojiBodyMaxPct, bodyMinPct, volRatioMin].every((v) => Number.isFinite(v) && v > 0) || !Number.isFinite(minRangePct) || minRangePct < 0) {
+      lab.setMsg("⚠️ 앞의 네 칸은 0보다 큰 숫자, 최소 봉 크기는 0 이상 숫자로 입력하세요.");
       return;
     }
-    void lab.saveSettings({ rankCount, dojiBodyMaxPct, bodyMinPct, volRatioMin });
+    void lab.saveSettings({ rankCount, dojiBodyMaxPct, bodyMinPct, volRatioMin, minRangePct });
     setDirty(false);
   };
 
@@ -97,6 +98,7 @@ export function LabLiveTab({ lab }: { lab: LabApi }) {
         </p>
         <LabNotice lab={lab} />
 
+        {st?.note && <p className="lab-note">ℹ️ {st.note}</p>}
         {st && (
           <div className="lab-status">
             <span className={`lab-pill ${st.enabled ? "on" : "off"}`}>{st.enabled ? "🟢 기록 중" : "⚪ 꺼짐"}</span>
@@ -136,10 +138,14 @@ export function LabLiveTab({ lab }: { lab: LabApi }) {
           <label>거래량 배수(직전 5개 평균 대비)
             <input type="text" inputMode="decimal" value={form.volRatioMin} onChange={(e) => { setForm({ ...form, volRatioMin: e.target.value }); setDirty(true); }} />
           </label>
+          <label>최소 봉 크기(%, 0=끔)
+            <input type="text" inputMode="decimal" value={form.minRangePct} onChange={(e) => { setForm({ ...form, minRangePct: e.target.value }); setDirty(true); }} />
+          </label>
           <button className="btn btn-start" disabled={lab.busy || !dirty} onClick={save}>설정 저장</button>
         </div>
         <p className="hint small">
-          거래량 순위: 10~200위(기본 60). 도지 몸통 5~30%(기본 15), 신호 몸통 40~90%(기본 60), 거래량 배수 1~5배(기본 1.5 = 150%).
+          거래량 순위: 10~200위(기본 60). 도지 몸통 5~30%(기본 15), 신호 몸통 40~90%(기본 60), 거래량 배수 1~5배(기본 1.5 = 150%),
+          최소 봉 크기 0~5%(기본 0.5 — 호가 1~2틱짜리 초소형 봉은 몸통 "비율"이 100%여도 의미 있는 돌파가 아니라서 뺍니다).
           가격대는 [스크리닝 기준]의 가격대($1~9 기본)를 그대로 씁니다. 기준은 신호가 기록될 때의 값으로 판정되며, 나중에 바꿔도 이미 쌓인 로우는 그대로입니다.
         </p>
 
@@ -178,7 +184,8 @@ export function LabLiveTab({ lab }: { lab: LabApi }) {
         <details className="lab-rules">
           <summary>📐 기록 규칙·가상 체결 가정 보기 (이 숫자들이 어떻게 만들어지는지)</summary>
           <ul>
-            <li><b>패턴</b>: 도지(몸통 &lt; 기준, 색 무관, 200 EMA 위) → 1번째 양봉(관망) → 2번째 양봉(몸통 ≥ 기준 + 거래량 ≥ 직전 5개 평균 × 배수) = <b>1차 신호</b> → 3번째도 같은 조건이면 <b>2차 신호</b> → 4번째 양봉이면 <b>단기 고점(진입 금지)</b>. 중간에 음봉·도지가 끼거나 조건이 모자라면 그 자리에서 패턴 종료.</li>
+            <li><b>패턴</b>: 도지(몸통 &lt; 기준, 색 무관, 200 EMA 위) → 1번째 양봉(관망) → 2번째 양봉(몸통 ≥ 기준 + 거래량 ≥ 직전 5개 평균 × 배수 + 봉 크기 ≥ 최소) = <b>1차 신호</b> → 3번째도 같은 조건이면 <b>2차 신호</b> → 4번째 양봉이면 <b>단기 고점(진입 금지)</b>. 중간에 음봉·도지가 끼거나 조건이 모자라면 그 자리에서 패턴 종료.</li>
+            <li><b>데이터 정직성 규칙</b>: 봉은 반드시 <b>5분 간격으로 이어진 것</b>만 연속으로 인정(거래가 없어 봉이 빠졌거나 장 사이 공백이면 연속 아님) · 72시간 넘은 패턴 무시 · EMA200을 만든 봉 200개가 5일보다 넓게 퍼져 있으면(거래가 드문 종목) 그 종목은 제외 · 거래량 평균도 이어진 직전 5개 봉일 때만 계산.</li>
             <li><b>캔들 종류</b>: 몸통·도지·거래량 판정은 하이킨아시, 가격(체결·손절·익절)은 실제 5분·1분봉.</li>
             <li><b>가상 매수 4가지</b>를 동시에 계산: A 신호봉 저가+3틱 지정가 / B 신호봉 종가 지정가 / C 신호봉 고가 돌파(+1틱) 시 진입 / D 신호봉 몸통 50% 되돌림 지정가. 신호봉 마감 후 15분 안에 체결 안 되면 미체결.</li>
             <li><b>손절 4가지</b>: A 고정 −10% / B EMA200 아래 1.5% / C 신호봉 저가 −1틱 / D C와 B 중 높은 쪽. <b>익절 3가지</b>: +1.3% / +1.5% / +2.0%. 4번째 양봉(고점 차단)이 확정되면 남은 물량은 그 봉 마감 때 시가로 정리.</li>
@@ -378,7 +385,7 @@ export function LabSignalsTab({ lab }: { lab: LabApi }) {
             <table className="result-table screen-table lab-table">
               <thead>
                 <tr>
-                  <th>신호 시각(KST)</th><th>종목</th><th>순위</th><th>세션</th><th>몸통</th><th>거래량배수</th><th>EMA 이격</th><th>ATR</th>
+                  <th>신호 시각(KST)</th><th>종목</th><th>순위</th><th>세션</th><th>몸통</th><th>봉 크기</th><th>거래량배수</th><th>EMA 이격</th><th>ATR</th>
                   <th>2차</th><th>4번째</th><th>삼분할</th><th>기준 변형 결과</th><th>상태</th>
                 </tr>
               </thead>
@@ -390,7 +397,8 @@ export function LabSignalsTab({ lab }: { lab: LabApi }) {
                     <td>{r.rank}</td>
                     <td>{SESSION_KO[r.session] ?? r.session}</td>
                     <td>{num(r.body2, 0, "%")}</td>
-                    <td className={r.eligible ? "" : "pnl-down"}>{num(r.volRatio2, 1, "×")}{!r.eligible && " ✗"}</td>
+                    <td className={r.whyIneligible === "range" || r.whyIneligible === "both" ? "pnl-down" : ""}>{num(r.rangePct2, 2, "%")}{(r.whyIneligible === "range" || r.whyIneligible === "both") && " ✗"}</td>
+                    <td className={r.whyIneligible === "volume" || r.whyIneligible === "both" ? "pnl-down" : ""}>{num(r.volRatio2, 1, "×")}{(r.whyIneligible === "volume" || r.whyIneligible === "both") && " ✗"}</td>
                     <td>{num(r.emaGapPct, 1, "%")}</td>
                     <td>{num(r.atrPct, 1, "%")}</td>
                     <td>{r.secondQualified ? "✔" : "—"}</td>

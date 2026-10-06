@@ -363,3 +363,76 @@ describe("[v0.65.0] 집계(summarizeVariants·breakdownBy·funnel·linkage·comb
     expect(LAB_PARAMS_DEFAULT.volLookback).toBe(5);
   });
 });
+
+// =============================================================================
+// [v0.65.1] 실데이터 검증에서 발견된 오류의 재발 방지 테스트
+//   (오너의 실제 기록 파일 분석: 인정 신호 15건 중 9건이 호가 1~2틱짜리 초소형 봉, 몇 주 전 봉, 연속 아닌 봉 연결,
+//    삼분할 연계가 며칠 뒤 패턴까지 무한정 탐색되어 70건 중 47건이 "연계" → 전부 규칙 오류)
+// =============================================================================
+describe("[v0.65.1] 데이터 정직성 규칙 — 연속성·최신성·최소 봉 크기·연계 탐색 상한", () => {
+  const doji = k(6, 10.0, 10.2, 9.8, 10.02, 1000);
+  const c1 = k(7, 10.02, 10.15, 10.0, 10.12, 1000);
+  const c2 = k(8, 10.12, 10.62, 10.1, 10.55, 3000);
+  const c3 = k(9, 10.55, 11.05, 10.5, 10.95, 3000);
+  const good = () => [...base(), doji, c1, c2, c3];
+
+  it("봉이 빠져 이웃이 아니면(5분 간격이 아님) 연속으로 보지 않는다", () => {
+    const ha = good();
+    ha[8] = { ...ha[8], time: ha[8].time + FIVE }; // 2번째 봉이 5분 늦게(그 사이 봉 하나 없음)
+    const run = detectRuns(ha, flatEma(ha.length)).find((x) => x.dojiIdx === 6)!;
+    expect(run.stage).toBe(1); // 1번째까지만 이어지고 2번째와는 끊김
+  });
+
+  it("거래량 평균 구간에 빠진 봉이 있으면 배수를 계산하지 않는다(null → 비인정)", () => {
+    const ha = good();
+    ha[3] = { ...ha[3], time: ha[3].time + 2 * MIN }; // 직전 5개 안에 간격이 어긋난 봉
+    const run = detectRuns(ha, flatEma(ha.length)).find((x) => x.dojiIdx === 6)!;
+    expect(run.stage).toBe(3);
+    expect(run.volOk2).toBe(false);
+  });
+
+  it("봉 크기(고저폭÷종가)가 최소 기준 미만이면 몸통 비율이 100%여도 비인정(rangeOk2=false)", () => {
+    // 가격 10 근처에서 고저폭 0.01(=0.1%) — 호가 1틱짜리 "몸통 100%" 봉
+    const tiny = k(8, 10.1, 10.11, 10.1, 10.11, 3000);
+    const ha = [...base(), doji, c1, tiny, c3];
+    const run = detectRuns(ha, flatEma(ha.length)).find((x) => x.dojiIdx === 6)!;
+    expect(run.stage).toBe(3);
+    expect(run.rangeOk2).toBe(false);
+    expect(run.c3).toBeNull(); // 비인정이면 3번째를 보지 않는다
+    // 기준을 끄면(0) 통과
+    const off = detectRuns(ha, flatEma(ha.length), { ...LAB_PARAMS_DEFAULT, minRangePct: 0 }).find((x) => x.dojiIdx === 6)!;
+    expect(off.rangeOk2).toBe(true);
+  });
+
+  it("너무 오래된 패턴(72시간 초과)은 무시한다 — 거래 드문 종목의 몇 주 전 봉 방지", () => {
+    const ha = good();
+    const now = ha[ha.length - 1].time + 80 * 3600_000;
+    expect(detectRuns(ha, flatEma(ha.length), LAB_PARAMS_DEFAULT, now).find((x) => x.dojiIdx === 6)).toBeUndefined();
+    const recent = ha[ha.length - 1].time + 3600_000;
+    expect(detectRuns(ha, flatEma(ha.length), LAB_PARAMS_DEFAULT, recent).find((x) => x.dojiIdx === 6)?.stage).toBe(3);
+  });
+
+  it("EMA200을 만든 봉 200개가 5일보다 넓게 퍼져 있으면(거래 드문 종목) 그 EMA 기반 패턴은 제외", () => {
+    const n = 260;
+    const ha: Candle[] = [];
+    for (let i = 0; i < n; i++) ha.push({ time: T0 + i * 3 * 3600_000, open: 10, high: 10.1, low: 9.9, close: 10.02, volume: 1000 }); // 3시간 간격(희소)
+    const emaAll = new Array(n).fill(9) as number[];
+    const runs = detectRuns(ha, emaAll);
+    expect(runs.filter((r) => r.dojiIdx >= 199)).toHaveLength(0);
+  });
+
+  it("삼분할 연계 탐색은 상한(상승 끝+관찰시간) 이후의 패턴을 연계로 잡지 않는다", () => {
+    const c: Candle[] = [
+      ...base(),
+      k(6, 10.0, 10.2, 9.8, 10.02),
+      k(7, 10.02, 10.15, 10.0, 10.12),
+      k(8, 10.12, 10.62, 10.1, 10.55, 3000),
+      k(9, 10.55, 11.05, 10.5, 10.95, 3000),
+      k(10, 10.95, 11.0, 10.6, 10.93, 1500),
+      k(11, 10.9, 10.92, 10.6, 10.7, 1500),
+    ];
+    const o = { sessionStartMs: T0 - 1, bodyRatio: 0.3, wickMin: 0.1, maxAgeMin: 40, maxGapMin: 30, tpPct: 2, slPct: 10, emaPeriod: 5 };
+    expect(findLinkage(c, c, 8, 8, o, c[11].time)).not.toBeNull(); // 상한이 확정 봉을 포함하면 잡힘
+    expect(findLinkage(c, c, 8, 8, o, c[10].time)).toBeNull(); //      상한이 그 앞에서 끊기면 못 잡음
+  });
+});
