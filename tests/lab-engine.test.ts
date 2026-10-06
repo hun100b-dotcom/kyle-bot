@@ -85,7 +85,7 @@ describe("[v0.65.0] 엔진 — 설정·스캔·요약·내보내기", () => {
       const eng = new ToolEngine(dir, { forceMock: true });
       const s0 = eng.getLabStatus();
       expect(s0.enabled).toBe(false);
-      expect(s0.rankCount).toBe(60);
+      expect(s0.rankCount).toBe(120); // v0.68.0: 기본 120위(스캔당 요청이 종목당 1회로 줄어 넓힘)
       expect(s0.dojiBodyMaxPct).toBe(15);
       expect(s0.bodyMinPct).toBe(60);
       expect(s0.volRatioMin).toBe(1.5);
@@ -132,14 +132,14 @@ describe("[v0.65.0] 엔진 — 설정·스캔·요약·내보내기", () => {
       const eng = new ToolEngine(dir, { forceMock: true });
       const { oneMin, tEnd } = craft();
       type Internals = {
-        getCandles1mCached: (s: string) => Promise<Candle[]>;
+        labFetch1m: (s: string, deep?: boolean) => Promise<Candle[]>;
         labProcessSymbol: (s: string, rank: number, price: number | null, nowMs: number) => Promise<void>;
         persistLab: () => void;
         labTrim: () => void;
         labVersion: number;
       };
       const x = eng as unknown as Internals;
-      x.getCandles1mCached = async () => oneMin;
+      x.labFetch1m = async () => oneMin;
       await x.labProcessSymbol("SYNT", 7, 5.9, tEnd + 90 * MIN);
       x.labVersion++;
       const sum = eng.getLabSummary();
@@ -189,10 +189,10 @@ describe("[v0.65.0] 엔진 — 설정·스캔·요약·내보내기", () => {
       eng.saveAutoScanSettings({ priceMin: 20, priceMax: 30 });
       const { oneMin, tEnd } = craft(); // 합성 가격 ≈ 5달러
       const x = eng as unknown as {
-        getCandles1mCached: (s: string) => Promise<Candle[]>;
+        labFetch1m: (s: string, deep?: boolean) => Promise<Candle[]>;
         labProcessSymbol: (s: string, rank: number, price: number | null, nowMs: number) => Promise<void>;
       };
-      x.getCandles1mCached = async () => oneMin;
+      x.labFetch1m = async () => oneMin;
       await x.labProcessSymbol("OUT", 1, 5.9, tEnd + 90 * MIN);
       expect(eng.getLabStatus().totalSignals).toBe(0);
     } finally {
@@ -234,4 +234,48 @@ describe("[v0.65.1] 규칙 오류가 섞인 1판(v1) 데이터는 폐기하고 �
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+describe("[v0.68.0] 연구소 1분봉 저장소 — 처음엔 통으로, 이후엔 새 분만 이어 붙인다", () => {
+  it("저장된 봉 뒤에 새로 생긴 분만 합쳐지고(중복 없음·오름차순), 오래된 봉은 보존된다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-lab-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      type I = { labStore: Map<string, { candles: Candle[]; deep: boolean }>; labFetch1m: (s: string, d: boolean) => Promise<Candle[]>; prepareBackend: () => Promise<void> };
+      const x = eng as unknown as I;
+      await x.prepareBackend();
+      const nowMin = Math.floor(Date.now() / 60_000) * 60_000;
+      // 이미 받아 둔 과거 봉(깊은 조회를 마친 상태) — 마지막 봉이 10분 전
+      const old: Candle[] = Array.from({ length: 300 }, (_, i) => ({ time: nowMin - (310 - i) * 60_000, open: 5, high: 5.1, low: 4.9, close: 5, volume: 100 }));
+      x.labStore.set("AAPL", { candles: old, deep: true });
+      const merged = await x.labFetch1m("AAPL", true);
+      const times = merged.map((c) => c.time);
+      expect(new Set(times).size).toBe(times.length); // 중복 없음
+      expect([...times].sort((a, b) => a - b)).toEqual(times); // 오름차순
+      expect(times[0]).toBe(old[0].time); // 오래된 봉 보존
+      expect(merged.length).toBeGreaterThan(old.length); // 새 분이 붙음
+      expect(x.labStore.get("AAPL")?.deep).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("스캔을 마치면 누적 스캔 횟수·활성 시간이 늘고 파일에 저장된다(수집 속도 계산용)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-lab-"));
+    try {
+      freezeKst(2026, 7, 16, 23, 0);
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.saveLabSettings({ rankCount: 10 });
+      expect(eng.getLabStatus().collect.scans).toBe(0);
+      await eng.labScanNow();
+      const c = eng.getLabStatus().collect;
+      expect(c.scans).toBe(1);
+      expect(c.activeHours).toBeGreaterThanOrEqual(0);
+      const saved = JSON.parse(readFileSync(join(dir, "kylebot-lab.json"), "utf8")) as { scans: number };
+      expect(saved.scans).toBe(1);
+      expect(new ToolEngine(dir, { forceMock: true }).getLabStatus().collect.scans).toBe(1); // 재시작 후 복원
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
 });

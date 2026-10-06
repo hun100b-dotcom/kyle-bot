@@ -1320,6 +1320,11 @@ body:has(.update-banner) .topbar {
 .rs-vbar.bad { border-color: var(--red); background: rgba(255, 107, 129, 0.10); animation: rs-blink 1.6s ease-in-out infinite; }
 .rs-vbar.none { background: var(--panel2); }
 .rs-vbar span { color: var(--muted); font-size: 12px; }
+.rs-collect { display: flex; flex-direction: column; gap: 4px; padding: 10px 14px; border-radius: var(--r-sm); border: 1px solid var(--border-strong); margin: 8px 0; font-size: 13px; line-height: 1.6; }
+.rs-collect.ok { border-color: var(--green); background: rgba(61, 220, 151, 0.05); }
+.rs-collect.pause { border-color: var(--amber); background: rgba(247, 185, 85, 0.07); }
+.rs-collect span { color: var(--muted); font-size: 12px; }
+.rs-collect b { color: var(--text); }
 .rs-checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; }
 .rs-check { background: var(--panel2); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 12px 14px; animation: rs-rise 0.5s ease both; }
 .rs-check p { margin: 8px 0 0; font-size: 12.5px; line-height: 1.65; color: var(--muted); }

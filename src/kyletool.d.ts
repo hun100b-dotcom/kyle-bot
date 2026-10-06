@@ -490,6 +490,7 @@ interface LabStatus {
   enabled: boolean; rankCount: number; dojiBodyMaxPct: number; bodyMinPct: number; volRatioMin: number; minRangePct: number; note: string | null; scanning: boolean;
   verify: { localAt: number | null; localOk: boolean | null; localFailed: string[]; tossAt: number | null; tossRequested: number; tossMatched: number };
   feePct: number | null;
+  collect: { scans: number; activeHours: number; paused: boolean; pauseReason: string | null; resumesAtMs: number | null };
   lastTickAtMs: number | null; lastTickDurMs: number | null; lastScanned: number; lastError: string | null; lastSkip: string | null;
   startedAtMs: number | null; nextTickAtMs: number | null; totalSignals: number; params: LabParamsT;
 }

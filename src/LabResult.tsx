@@ -8,6 +8,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { DateTime } from "luxon";
 import type { LabApi } from "./useLab";
 import type { DimVerdict, Verdict, Confidence, Assessment, Gate } from "../lib/lab-verdict";
+type LabFunnel = LabSummary["funnel"];
 import { GuideButton, GuideModal, useGuide } from "./LabGuide";
 
 const kst = (ms: number | null | undefined, fmt = "MM-dd HH:mm") => (ms == null ? "—" : DateTime.fromMillis(ms).setZone("Asia/Seoul").toFormat(fmt));
@@ -81,6 +82,40 @@ function DimBlock({ title, hint, v }: { title: string; hint: string; v: DimVerdi
         );
       })}
       <p className="rs-note">{v.note}</p>
+    </div>
+  );
+}
+
+/** 수집 현황 띠 — "지금 업데이트되고 있는 건가?"에 바로 답한다(휴무 시간대엔 왜 안 늘어나는지, 속도는 어떤지). */
+function CollectBar({ st, a, funnel }: { st: LabStatus; a: Assessment | null; funnel: LabFunnel }) {
+  const c = st.collect;
+  const pace = a?.pace;
+  let head: string;
+  let tone: "ok" | "pause" | "off";
+  if (!st.enabled) { head = "⚪ 신호 기록이 꺼져 있습니다 — [신호기록 현황]에서 켜세요."; tone = "off"; }
+  else if (c.paused) { head = `⏸ 지금은 수집 휴무 시간입니다 — ${c.pauseReason ?? "휴무"}. ${c.resumesAtMs ? `${kst(c.resumesAtMs, "MM-dd HH:mm")}에 자동으로 다시 시작합니다.` : ""} 이 시간엔 신호가 늘지 않는 게 정상입니다.`; tone = "pause"; }
+  else { head = `🟢 수집 중 — 마지막 스캔 ${st.lastTickAtMs ? kst(st.lastTickAtMs, "HH:mm:ss") : "—"}${st.lastTickDurMs != null ? ` (${Math.round(st.lastTickDurMs / 1000)}초, ${st.lastScanned}종목)` : ""}${st.nextTickAtMs ? ` · 다음 스캔 약 ${kst(st.nextTickAtMs, "HH:mm")}` : ""}`; tone = "ok"; }
+  const rate = funnel.dojis > 0 ? ((funnel.eligible / funnel.dojis) * 100).toFixed(2) : null;
+  return (
+    <div className={`rs-collect ${tone}`} data-guide="result-collect">
+      <b>{head}</b>
+      <span>
+        지금까지 스캔 {c.scans}회 · 수집 활성 시간 {c.activeHours}시간
+        {st.lastSkip && !c.paused ? ` · ⏸ ${st.lastSkip}` : ""}
+        {rate != null && <> · 이 패턴은 원래 드뭅니다: 도지 {funnel.dojis.toLocaleString()}번 중 인정 신호 {funnel.eligible}번({rate}%)</>}
+      </span>
+      {pace && pace.formedSinceStart > 0 && (
+        <span>
+          기록 시작 뒤에 형성된 신호 {pace.formedSinceStart}건 중 <b>실시간 포착 {pace.caughtRealtime}건</b>, 나머지 {pace.lateDiscovered}건은 그 시점엔 거래량 순위권 밖이었다가 나중에 올라온 종목이라 "늦게 발견(백필)"로 분류했습니다(이런 종목은 실제 봇이 그때 볼 수 없었으므로 결론에서 제외).
+        </span>
+      )}
+      {pace && (
+        <span>
+          실시간 인정 신호 <b>{a?.counts.realtimeEligible ?? 0}</b> / 목표 {pace.target}건 ·{" "}
+          {pace.perHour != null ? <>현재 속도 활성 1시간당 <b>{pace.perHour}</b>건 → 목표까지 {pace.etaDays != null ? <>약 <b>{pace.etaDays >= 1 ? `${Math.round(pace.etaDays)}일` : "1일 미만"}</b> (하루 활성 12시간 기준)</> : "계산 불가(아직 0건)"}</> : "활성 1시간 이상 쌓이면 속도를 계산합니다"}
+          {pace.etaDays != null && pace.etaDays > 14 && " · 💡 [신호기록 현황]에서 거래량 순위를 120~200위로 늘리면 속도가 2~3배로 빨라집니다(이제 스캔당 요청이 종목당 1회라 부담이 작아요)."}
+        </span>
+      )}
     </div>
   );
 }
@@ -275,6 +310,7 @@ export function LabResultTab({ lab, initialAssessment }: { lab: LabApi; initialA
         {scope === "all" && !mirror && (
           <p className="lab-note">⚠️ 백필 신호는 "오늘 거래량이 많은 종목"만 골라 과거를 본 것이라 선택 편향이 있어 성과가 좋게 나오기 쉽습니다. 결론은 실시간 신호로 내려야 합니다.</p>
         )}
+        <CollectBar st={s.status} a={assess} funnel={s.funnel} />
         <VerifyBar s={s.status.verify} />
         <GradeBanner v={verdict} />
 

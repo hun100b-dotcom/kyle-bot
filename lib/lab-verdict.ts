@@ -253,14 +253,18 @@ export function verifyLocal(signals: LabSignal[], P: LabParams = LAB_PARAMS_DEFA
 
     if (i2 >= 0) {
       const b2 = s.bars[i2];
-      // ② 몸통
-      mark("body", Math.abs(bodyPct(haOf(b2)) - s.body2) < 0.5, s.id);
-      // ③ 거래량
+      // ② 몸통 — 저장된 가격은 소수 4자리로 반올림돼 있어, 고저폭이 호가 몇 틱뿐인 봉은 비율이 크게 흔들린다.
+      //    그 반올림 오차만큼은 허용한다(허용폭 = 0.5%p + 반올림 오차 ÷ 고저폭). v0.66.0에는 이 허용이 없어 오탐이 났다.
+      const hr = b2.hh - b2.hl;
+      const tol = 0.5 + (hr > 0 ? (0.0002 / hr) * 100 : 100);
+      mark("body", Math.abs(bodyPct(haOf(b2)) - s.body2) <= tol, s.id);
+      // ③ 거래량 — 직전 5개 봉이 이어지지 않아 계산 불가(null)였던 신호는 "다시 계산해도 불가(null)"여야 일치다.
       if (i2 >= P.volLookback) {
         const ha = s.bars.slice(i2 - P.volLookback, i2 + 1).map(haOf);
         const vr = volRatioAt(ha, P.volLookback, P.volLookback);
-        mark("vol", vr != null && s.volRatio2 != null && Math.abs(vr - s.volRatio2) < 0.05, s.id);
-      } else mark("vol", false, s.id);
+        if (s.volRatio2 == null) mark("vol", vr == null, s.id);
+        else mark("vol", vr != null && Math.abs(vr - s.volRatio2) < 0.05, s.id);
+      } else mark("vol", s.volRatio2 == null, s.id);
     } else {
       mark("body", false, s.id);
       mark("vol", false, s.id);
@@ -285,7 +289,7 @@ export function verifyLocal(signals: LabSignal[], P: LabParams = LAB_PARAMS_DEFA
 
     // ⑧ 경로
     const p = s.path1m;
-    const startOk = p.length === 0 || p[0][0] - (s.c2T + FIVE) <= 10 * 60_000;
+    const startOk = p.length === 0 || p[0][0] - (s.c2T + FIVE) <= 30 * 60_000; // 신호 직후 몇 분간 거래가 없는 종목도 있다(그 구간은 단지 미체결로 계산됨)
     let order = true;
     for (let i = 1; i < p.length; i++) if (p[i][0] <= p[i - 1][0]) order = false;
     const priceOk = p.every((c) => c[2] >= Math.max(c[1], c[4]) && c[3] <= Math.min(c[1], c[4]) && c[3] > 0);
@@ -400,6 +404,12 @@ export interface Assessment {
   concentration: Concentration;
   latency: { n: number; medianMin: number | null; p90Min: number | null; assumedMin: number };
   ruleVersions: number;
+  /** [v0.68.0] 수집 속도 — "실시간 인정 신호 100건까지 얼마나 걸리나"를 현재 속도로 환산 */
+  pace: {
+    activeHours: number; scans: number; perHour: number | null; etaDays: number | null; target: number;
+    /** 기록을 시작한 뒤에 형성된 신호(인정 여부 무관) 중 실시간 포착 수와 늦게 발견된 수 — 늦게 발견된 건 "그 시점엔 거래량 순위권 밖이었다가 나중에 올라온" 종목이라 선택 편향이 있다 */
+    formedSinceStart: number; caughtRealtime: number; lateDiscovered: number;
+  };
   gates: Gate[];
   gatesPassed: number;
   readiness: "no" | "close" | "ready";
@@ -504,7 +514,7 @@ export const GATE_THRESHOLDS = {
 export function buildAssessment(
   signals: LabSignal[],
   P: LabParams,
-  opts: { realtimeOnly: boolean; minFilled?: number; nowMs?: number; verify?: VerifyState | null },
+  opts: { realtimeOnly: boolean; minFilled?: number; nowMs?: number; verify?: VerifyState | null; collect?: { activeMs: number; scans: number; startedAtMs?: number | null } | null },
 ): Assessment {
   const nowMs = opts.nowMs ?? Date.now();
   const minFilled = opts.minFilled ?? 5;
@@ -537,6 +547,24 @@ export function buildAssessment(
   // ⑤ 지연: 실시간 신호의 (발견 시각 − 신호 봉 마감) 실측
   const lat = signals.filter((s) => !s.backfilled).map((s) => (s.detectedAtMs - (s.c2T + FIVE)) / 60_000).filter((x) => Number.isFinite(x) && x >= 0).sort((a, b) => a - b);
   const latency = { n: lat.length, medianMin: percentile(lat, 0.5) != null ? r2(percentile(lat, 0.5) as number) : null, p90Min: percentile(lat, 0.9) != null ? r2(percentile(lat, 0.9) as number) : null, assumedMin: P.latencyMin ?? 0 };
+
+  // 수집 속도(활성 시간당 실시간 인정 신호) → 목표까지 예상 기간. 활성 시간은 하루 약 12시간(17:00~05:00 KST).
+  const activeHours = (opts.collect?.activeMs ?? 0) / 3_600_000;
+  const perHour = activeHours >= 1 ? r2(counts.realtimeEligible / activeHours) : null;
+  const remaining = Math.max(0, GATE_THRESHOLDS.realtimeEligible - counts.realtimeEligible);
+  const pace = {
+    activeHours: r2(activeHours),
+    scans: opts.collect?.scans ?? 0,
+    perHour,
+    etaDays: perHour != null && perHour > 0 ? r2(remaining / (perHour * 12)) : null,
+    target: GATE_THRESHOLDS.realtimeEligible,
+    ...(() => {
+      const st = opts.collect?.startedAtMs;
+      const formed = st != null ? signals.filter((s) => s.c2T >= st) : [];
+      const caught = formed.filter((s) => !s.backfilled).length;
+      return { formedSinceStart: formed.length, caughtRealtime: caught, lateDiscovered: formed.length - caught };
+    })(),
+  };
 
   // ⑥ 규칙 일관성
   const ruleVersions = new Set(signals.filter((s) => s.rule).map((s) => JSON.stringify(s.rule))).size;
@@ -574,7 +602,7 @@ export function buildAssessment(
     .sort((a, b) => (b.expectancyPerSignal ?? -999) - (a.expectancyPerSignal ?? -999))
     .slice(0, 12);
 
-  return { scope: opts.realtimeOnly ? "realtime" : "all", asOf: nowMs, counts, verdict, ci, holdout, stress, concentration, latency, ruleVersions, gates, gatesPassed: passed, readiness, readinessText, topVariants };
+  return { scope: opts.realtimeOnly ? "realtime" : "all", asOf: nowMs, counts, verdict, ci, holdout, stress, concentration, latency, ruleVersions, pace, gates, gatesPassed: passed, readiness, readinessText, topVariants };
 }
 
 function sgnPct(v: number | null | undefined): string {

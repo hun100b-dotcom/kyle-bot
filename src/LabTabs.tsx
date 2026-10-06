@@ -51,7 +51,7 @@ export function LabLiveTab({ lab }: { lab: LabApi }) {
   const guide = useGuide("live");
   const s = lab.summary;
   const st = s?.status;
-  const [form, setForm] = useState({ rankCount: "60", dojiBodyMaxPct: "15", bodyMinPct: "60", volRatioMin: "1.5", minRangePct: "0.5" });
+  const [form, setForm] = useState({ rankCount: "120", dojiBodyMaxPct: "15", bodyMinPct: "60", volRatioMin: "1.5", minRangePct: "0.5" });
   const [dirty, setDirty] = useState(false);
 
   // 저장된 값으로 입력칸을 맞춘다(사용자가 고치는 중이면 덮어쓰지 않음)
@@ -114,6 +114,7 @@ export function LabLiveTab({ lab }: { lab: LabApi }) {
               {st.enabled && st.nextTickAtMs && ` · 다음 스캔 약 ${kst(st.nextTickAtMs, "HH:mm")}`}
             </span>
             {st.lastSkip && <span className="hint">⏸ 건너뜀: {st.lastSkip}</span>}
+            <span className="hint">누적 스캔 {st.collect?.scans ?? 0}회 · 활성 {st.collect?.activeHours ?? 0}시간{st.collect?.paused ? ` · ⏸ 휴무 중${st.collect.resumesAtMs ? `(${kst(st.collect.resumesAtMs, "HH:mm")} 재개)` : ""}` : ""}</span>
             {st.lastError && <span className="err">⚠️ {st.lastError}</span>}
           </div>
         )}

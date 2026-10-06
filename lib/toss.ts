@@ -671,6 +671,23 @@ export async function getCandles1mPaged(symbol: string, minCount = 1000, maxPage
   return out;
 }
 
+/**
+ * [v0.68.0] getCandles1mLatest — 가장 최근 1분봉 한 페이지(기본 200개)만 가볍게 받는다(요청 1회).
+ *   매매연구소가 이미 가진 과거 1분봉 뒤에 "새로 생긴 분"만 이어 붙일 때 쓴다(종목당 6회 → 1회로 줄여 요청 한도 절약).
+ *   반환: 시각 오름차순 숫자 봉 배열.
+ */
+export async function getCandles1mLatest(symbol: string, count = 200): Promise<CandleNum[]> {
+  const res = await getCandles(symbol, "1m", count);
+  const out: CandleNum[] = [];
+  for (const c of res?.candles ?? []) {
+    const time = Date.parse(c.timestamp);
+    if (!Number.isFinite(time)) continue;
+    out.push({ time, open: Number(c.openPrice), high: Number(c.highPrice), low: Number(c.lowPrice), close: Number(c.closePrice), volume: Number(c.volume) });
+  }
+  out.sort((a, b) => a.time - b.time);
+  return out;
+}
+
 /** 종목 메타(스크리너 ETF 배제용). 실스펙 /api/v1/stocks 응답 필드. */
 export interface StockMeta {
   symbol: string;

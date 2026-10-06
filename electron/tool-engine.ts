@@ -78,6 +78,7 @@ import {
   getRankings,
   getStocks,
   getCandles1mPaged,
+  getCandles1mLatest,
   getAccounts,
   getBuyingPower,
   getSellable,
@@ -1083,6 +1084,8 @@ export interface LabStatus {
   /** [v0.67.0] 자동 검증 상태(스캔마다 로우 재계산, 1시간마다 토스 대조) */
   verify: { localAt: number | null; localOk: boolean | null; localFailed: string[]; tossAt: number | null; tossRequested: number; tossMatched: number };
   feePct: number | null;
+  /** [v0.68.0] 수집 현황 — 실제로 돈 스캔 횟수·누적 활성 시간, 지금 휴무(05~17시) 중인지와 재개 시각 */
+  collect: { scans: number; activeHours: number; paused: boolean; pauseReason: string | null; resumesAtMs: number | null };
   scanning: boolean;
   lastTickAtMs: number | null;
   lastTickDurMs: number | null;
@@ -4505,12 +4508,17 @@ export class ToolEngine extends EventEmitter {
   private labSignals: LabSignal[] = [];
   private labAttempts: Record<string, number> = {};
   private labEnabled = false;
-  private labRankCount = 60; //     거래량 순위 몇 위까지 탐색(10~200)
+  private labRankCount = 120; //    거래량 순위 몇 위까지 탐색(10~200) — v0.68.0부터 스캔당 요청이 종목당 1회라 기본을 120으로 넓힘(이미 저장된 값은 유지)
   private labDojiBodyMax = 15; //   도지 몸통 비율 상한(%)
   private labBodyMin = 60; //       신호 캔들 몸통 비율 하한(%)
   private labVolMin = 1.5; //       신호 캔들 거래량 배수(직전 5개 평균 대비)
   private labMinRangePct = 0.5; //   [v0.65.1] 신호 캔들 최소 크기(고저폭 ÷ 종가 %) — 1~2틱짜리 초소형 봉의 "몸통 100%" 잡음 제거(0=끔)
   private labNote: string | null = null; // 화면에 한 번 보여 줄 안내(예: 규칙 오류로 옛 데이터 폐기)
+  /** [v0.68.0] 매매연구소 전용 1분봉 저장소 — 처음 한 번만 깊게 받고, 이후엔 "새로 생긴 분"만 1회 요청으로 이어 붙인다. */
+  private labStore = new Map<string, { candles: Candle[]; deep: boolean }>();
+  private labScanCount = 0; //       실제로 돈 스캔 횟수(휴무·양보로 건너뛴 것 제외)
+  private labActiveMs = 0; //        스캔이 돈 누적 활성 시간(수집 속도 계산용)
+  private labLastScanEndMs: number | null = null;
   private labGen = 0; //            [v0.67.0] 초기화 세대 — 스캔 도중 초기화하면 진행 중이던 스캔이 옛 데이터를 다시 쓰지 못하게
   private labFeePct: number | null = null; // 왕복 수수료 추정(%) — 토스 수수료율 조회가 되면 그 값
   private labLocalVerify: LocalVerify | null = null;
@@ -4577,6 +4585,8 @@ export class ToolEngine extends EventEmitter {
         this.persistLab();
         return;
       }
+      this.labScanCount = Number((d as { scans?: number }).scans) || 0;
+      this.labActiveMs = Number((d as { activeMs?: number }).activeMs) || 0;
       this.labSignals = Array.isArray(d.signals) ? d.signals : [];
       this.labAttempts = d.attempts && typeof d.attempts === "object" ? d.attempts : {};
       this.labStartedAtMs = d.startedAtMs ?? null;
@@ -4589,7 +4599,7 @@ export class ToolEngine extends EventEmitter {
   private persistLab(): void {
     try {
       const tmp = this.labPath + ".tmp";
-      writeFileSync(tmp, JSON.stringify({ v: ToolEngine.LAB_SCHEMA, startedAtMs: this.labStartedAtMs, attempts: this.labAttempts, signals: this.labSignals }), "utf8");
+      writeFileSync(tmp, JSON.stringify({ v: ToolEngine.LAB_SCHEMA, scans: this.labScanCount, activeMs: this.labActiveMs, startedAtMs: this.labStartedAtMs, attempts: this.labAttempts, signals: this.labSignals }), "utf8");
       renameSync(tmp, this.labPath);
     } catch {
       /* 기록 실패는 무시 — 연구용 데이터라 매매와 무관 */
@@ -4658,6 +4668,10 @@ export class ToolEngine extends EventEmitter {
         tossMatched: this.labTossVerify?.matched ?? 0,
       },
       feePct: this.labFeePct,
+      collect: (() => {
+        const p = this.getSystemPauseStatus();
+        return { scans: this.labScanCount, activeHours: Math.round((this.labActiveMs / 3_600_000) * 100) / 100, paused: p.paused, pauseReason: p.reason, resumesAtMs: p.resumesAtMs };
+      })(),
       scanning: this.labBusy,
       lastTickAtMs: this.labLastTickAtMs,
       lastTickDurMs: this.labLastTickDurMs,
@@ -4747,6 +4761,9 @@ export class ToolEngine extends EventEmitter {
       }
       if (gen !== this.labGen) return;
       this.labLastScanned = scanned;
+      this.labScanCount++;
+      this.labActiveMs += Math.min(Date.now() - (this.labLastScanEndMs ?? Date.now() - ToolEngine.LAB_INTERVAL_MS), 6 * 60_000);
+      this.labLastScanEndMs = Date.now();
       this.labFinalizeStale(nowMs);
       this.labTrim();
       this.persistLab();
@@ -4760,6 +4777,39 @@ export class ToolEngine extends EventEmitter {
       this.labLastTickDurMs = Date.now() - t0;
       void this.pushLiveState(true);
     }
+  }
+
+  /**
+   * [v0.68.0] 연구소 전용 1분봉 조회 — 종목당 처음 한 번만 깊게(2400개) 받고, 이후엔 가장 최근 200개(요청 1회)만 받아 이어 붙인다.
+   *   예전엔 스캔마다 종목당 6회 요청이라 순위를 넓히기 어려웠다(60종목=360회/5분). 이제 60종목=60회, 200종목=200회(약 40초).
+   *   앱이 오래 멈췄다 돌아와 마지막 봉이 150분보다 오래됐으면(최근 200개로는 공백을 못 메움) 다시 통으로 받는다.
+   *   자동매매 스캔이 쓰는 공용 캐시(getCandles1mCached)는 건드리지 않는다 — 실주문 경로라 연구소 변경의 영향을 받으면 안 된다.
+   */
+  private async labFetch1m(symbol: string, allowDeep: boolean): Promise<Candle[]> {
+    const ent = this.labStore.get(symbol);
+    const last = ent && ent.candles.length ? ent.candles[ent.candles.length - 1].time : 0;
+    const needFull = !ent || (allowDeep && !ent.deep) || Date.now() - last > 150 * 60_000;
+    if (needFull) {
+      const deep = allowDeep;
+      const candles = deep ? await getCandles1mPaged(symbol, 2400, 14) : await getCandles1mPaged(symbol, 1100);
+      this.labStore.set(symbol, { candles, deep: deep || (ent?.deep ?? false) });
+      this.labTrimStore();
+      return candles;
+    }
+    const fresh = await getCandles1mLatest(symbol, 200);
+    const m = new Map<number, Candle>();
+    for (const c of ent!.candles) m.set(c.time, c);
+    for (const c of fresh) m.set(c.time, c); // 같은 분이면 새 값으로(진행 중이던 분이 확정됨)
+    const merged = [...m.values()].sort((a, b) => a.time - b.time).slice(-2600);
+    this.labStore.set(symbol, { candles: merged, deep: ent!.deep });
+    return merged;
+  }
+
+  /** 저장소가 너무 커지지 않게(종목 수가 많이 바뀌어도) 오래 안 쓴 종목부터 비운다. */
+  private labTrimStore(): void {
+    if (this.labStore.size <= 400) return;
+    const oldest = [...this.labStore.entries()].sort((a, b) => (a[1].candles.at(-1)?.time ?? 0) - (b[1].candles.at(-1)?.time ?? 0))[0];
+    if (oldest) this.labStore.delete(oldest[0]);
   }
 
   /** [v0.67.0] 갱신이 끊긴(시리즈에서 사라진) 미완료 신호를 정리한다 — 필요한 관찰 구간이 지났으면 그대로 마감한다(영원히 "진행 중"으로 남지 않게). */
@@ -4800,9 +4850,7 @@ export class ToolEngine extends EventEmitter {
   private async labProcessSymbol(symbol: string, rank: number, lastPrice: number | null, nowMs: number, gen: number = this.labGen, allowDeep = true): Promise<void> {
     // EMA200은 5분봉 200개(1분봉 1000개)가 있어야 시작되므로 보통 받는 1100개로는 최근 약 3시간만 패턴을 찾을 수 있다.
     //   그래서 종목마다 처음 한 번은 더 깊게(2400개) 받아 과거 신호를 백필하고, 그 뒤엔 공용 캐시(1100개)로 가볍게 이어간다.
-    const deep = allowDeep && !this.labDeepDone.has(symbol);
-    const oneMin = await this.getCandles1mCached(symbol, 120_000, deep ? 2400 : 1100);
-    if (deep) this.labDeepDone.add(symbol);
+    const oneMin = await this.labFetch1m(symbol, allowDeep);
     const raw5m: Candle[] = dropIncompleteBucket(aggregate1mTo5m(oneMin), nowMs);
     if (raw5m.length < 210) return; // EMA200 + 여유
     const P = this.labParams();
@@ -5023,11 +5071,12 @@ export class ToolEngine extends EventEmitter {
    *   realtimeOnly=true(기본, 권장): 신호 봉이 마감된 직후 실시간으로 발견한 신호만으로 결론(백필은 오늘 거래량 상위 종목만 골라 본 선택 편향이 있다).
    */
   getLabAssessment(realtimeOnly = true): Assessment {
-    const key = `as|${realtimeOnly}|${this.labLocalVerifyAt ?? 0}|${this.labTossVerify?.at ?? 0}`;
+    const key = `as|${realtimeOnly}|${this.labLocalVerifyAt ?? 0}|${this.labTossVerify?.at ?? 0}|${this.labScanCount}`;
     return this.labMemoGet(key, () =>
       buildAssessment(this.labSignals, this.labParams(), {
         realtimeOnly,
         nowMs: Date.now(),
+        collect: { activeMs: this.labActiveMs, scans: this.labScanCount, startedAtMs: this.labStartedAtMs },
         verify: {
           localOk: this.labLocalVerify ? this.labLocalVerify.allOk : null,
           localAt: this.labLocalVerifyAt,

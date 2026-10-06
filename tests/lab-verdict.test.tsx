@@ -163,7 +163,7 @@ function fakeLab(sigs: LabSignal[], mirror = false): LabApi {
   const variants = summarizeVariants(sigs);
   const summary = {
     updatedAtMs: T0,
-    status: { enabled: true, rankCount: 60, dojiBodyMaxPct: 15, bodyMinPct: 60, volRatioMin: 1.5, minRangePct: 0.5, note: "테스트 안내", verify: { localAt: T0, localOk: true, localFailed: [], tossAt: T0, tossRequested: 3, tossMatched: 3 }, feePct: null, scanning: false, lastTickAtMs: T0, lastTickDurMs: 1000, lastScanned: 10, lastError: null, lastSkip: null, startedAtMs: T0, nextTickAtMs: T0 + FIVE, totalSignals: sigs.length, params: {} },
+    status: { enabled: true, rankCount: 60, dojiBodyMaxPct: 15, bodyMinPct: 60, volRatioMin: 1.5, minRangePct: 0.5, note: "테스트 안내", verify: { localAt: T0, localOk: true, localFailed: [], tossAt: T0, tossRequested: 3, tossMatched: 3 }, feePct: null, collect: { scans: 12, activeHours: 1, paused: false, pauseReason: null, resumesAtMs: null }, scanning: false, lastTickAtMs: T0, lastTickDurMs: 1000, lastScanned: 10, lastError: null, lastSkip: null, startedAtMs: T0, nextTickAtMs: T0 + FIVE, totalSignals: sigs.length, params: {} },
     funnel: buildFunnel({ a: 0, b: 1, c: 3, d: 4 }, sigs),
     linkage: summarizeLinkage(sigs),
     variants,
@@ -449,5 +449,44 @@ describe("[v0.67.0] 엔진 운영 안전 — 자동 검증·양보·초기화 �
       rmSync(dir, { recursive: true, force: true });
       clear();
     }
+  });
+});
+
+// =============================================================================
+// [v0.68.0] 오너 화면의 "데이터 검증 경고"는 검증기 자체의 오탐이었다 — 실제 저장 파일에서 재현해 고친 것을 고정
+// =============================================================================
+describe("[v0.68.0] 검증기 오탐 수정(실제 데이터에서 발견) + 수집 속도 계산", () => {
+  it("직전 5개 봉이 이어지지 않아 거래량 배수가 null로 저장된 신호는 다시 계산해도 null이면 '일치'다", () => {
+    const s = sig("NULLVOL:1", win, { volRatio2: null, eligible: false, whyIneligible: "volume" });
+    // 직전 봉 간격을 어긋나게 해 재계산도 null이 되게 한다
+    s.bars = s.bars.map((b, i) => (i === 3 ? { ...b, t: b.t + 2 * MIN } : b));
+    const r = verifyLocal([s], undefined, T0 + 30 * FIVE);
+    expect(r.checks.find((c) => c.id === "vol")?.failed).toBe(0);
+  });
+
+  it("고저폭이 호가 몇 틱뿐인 봉은 소수 4자리 반올림 때문에 몸통 비율이 흔들려도 허용한다(그러나 큰 차이는 여전히 실패)", () => {
+    const s = sig("TICK:1", win);
+    s.bars = s.bars.map((b, i) => (i === 8 ? { ...b, ho: 2.25, hh: 2.2503, hl: 2.2497, hc: 2.2499 } : b));
+    // 실제 비율 = |2.2499-2.25| / 0.0006 = 16.7% — 기록값 17.5%(반올림 전 값이었다고 가정)와 차이 0.8%p는 반올림 오차 범위
+    expect(verifyLocal([{ ...s, body2: 17.5 }], undefined, T0 + 30 * FIVE).checks.find((c) => c.id === "body")?.failed).toBe(0);
+    expect(verifyLocal([{ ...s, body2: 60 }], undefined, T0 + 30 * FIVE).checks.find((c) => c.id === "body")?.failed).toBe(1);
+  });
+
+  it("신호 직후 거래가 20분 뒤에 재개되는 종목은 경로 시작 지연 허용(30분 이내)", () => {
+    const delayed = win.map((p) => [p[0] + 20 * MIN, p[1], p[2], p[3], p[4], p[5]] as [number, number, number, number, number, number]);
+    expect(verifyLocal([sig("DLY:1", delayed)], undefined, T0 + 60 * FIVE).checks.find((c) => c.id === "path")?.failed).toBe(0);
+    const tooLate = win.map((p) => [p[0] + 45 * MIN, p[1], p[2], p[3], p[4], p[5]] as [number, number, number, number, number, number]);
+    expect(verifyLocal([sig("DLY:2", tooLate)], undefined, T0 + 90 * FIVE).checks.find((c) => c.id === "path")?.failed).toBe(1);
+  });
+
+  it("수집 속도: 활성 시간당 실시간 인정 신호 → 목표 100건까지 예상 일수(하루 활성 12시간)", () => {
+    const rt = Array.from({ length: 4 }, (_, i) => sig(`P${i}:${i}`, win));
+    const a = buildAssessment(rt, LAB_PARAMS_DEFAULT, { realtimeOnly: true, nowMs: T0 + 61 * FIVE, collect: { activeMs: 8 * 3_600_000, scans: 96 } });
+    expect(a.pace.activeHours).toBe(8);
+    expect(a.pace.perHour).toBe(0.5);
+    expect(a.pace.etaDays).toBe(16); // (100−4) ÷ (0.5×12)
+    expect(a.pace.scans).toBe(96);
+    const none = buildAssessment(rt, LAB_PARAMS_DEFAULT, { realtimeOnly: true, nowMs: T0 + 61 * FIVE, collect: { activeMs: 1_000, scans: 1 } });
+    expect(none.pace.perHour).toBeNull(); // 활성 1시간 미만이면 속도 계산 안 함
   });
 });
