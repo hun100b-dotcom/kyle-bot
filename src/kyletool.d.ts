@@ -412,6 +412,16 @@ interface TradeCycle {
   entryStrength?: number | null;
   exitStrength?: number | null; // [v0.22.0] 청산 시 체결강도
 }
+/** [v0.64.0] 자동매매기록 한 건을 토스 실제 체결과 대조한 결과. */
+interface HistoryReconcileResult {
+  status: "matched" | "mismatch" | "enriched" | "not_found" | "not_applicable";
+  realBuyPrice?: number;
+  realSellPrice?: number;
+  realQty?: number;
+  realPnlUsd?: number;
+  realPnlPct?: number;
+  realSellAtMs?: number;
+}
 interface TradeBucket { n: number; winRate: number | null; avgPct: number | null; }
 interface TradeSymbolStat { symbol: string; n: number; wins: number; winRate: number | null; totalPnl: number; avgPct: number; }
 interface TradeInsights {
@@ -900,6 +910,8 @@ interface KyletoolBridge {
   todayReport(): Promise<DailyReport>;
   report(kind: PeriodKind, picked?: string): Promise<DailyReport>;
   tradeAnalysis(): Promise<{ cycles: TradeCycle[]; insights: TradeInsights; source: "live" | "cache" | "none" }>; // [v0.19.0]
+  /** [v0.64.0] 자동매매기록을 토스 실제 체결과 대조("자동매매기록" 탭 "🔄 토스 체결과 대조" 버튼). */
+  reconcileAutoHistory(): Promise<{ results: Record<string, HistoryReconcileResult>; source: "live" | "cache" | "none" }>;
   /** [v0.10.0→v0.24.0] 매매 이력 동기화(로그인 비밀번호로 암호화, 로그인 시 자동 호출됨) */
   tradeSyncPush(): Promise<{ ok: boolean; message: string; count?: number }>;
   tradeSyncPull(): Promise<{ ok: boolean; message: string; count?: number }>;

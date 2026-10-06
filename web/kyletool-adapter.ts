@@ -263,6 +263,7 @@ export function installKyleTool(): ToolEngine {
     todayReport: () => Promise.resolve(e.todayReport()), // [v0.9.1] 오늘의 매매 리포트
     report: (kind: Parameters<ToolEngine["report"]>[0], picked?: string) => Promise.resolve(e.report(kind, picked)),
     tradeAnalysis: () => Promise.resolve(e.tradeAnalysis()), // [v0.19.0] 매매 사이클 분석
+    reconcileAutoHistory: () => Promise.resolve(e.reconcileAutoHistory()), // [v0.64.0] 토스 실제 체결과 대조
     // [v0.10.0→v0.24.0] 매매 이력 동기화 — 로그인 비밀번호로 암호화, 로그인 시 자동 호출됨
     tradeSyncPush: () => e.syncPushTrades(),
     tradeSyncPull: () => e.syncPullTrades(),

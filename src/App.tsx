@@ -996,6 +996,12 @@ function App() {
   // [v0.30.0] "자동매매기록" 탭 — 자동매매가 낸 매매 전체 이력(영속 로그).
   const [autoHistory, setAutoHistory] = useState<AutoTradeHistoryEntry[]>([]);
   const [autoHistoryBusy, setAutoHistoryBusy] = useState(false);
+  // [v0.64.0] 자동매매기록을 토스 실제 체결과 대조한 결과(id → 결과). 탭을 열 때는 안 불러오고
+  //   "🔄 토스 체결과 대조" 버튼을 눌러야만 조회한다(매번 자동으로 부르면 토스 요청이 불필요하게
+  //   늘어난다 — report()/tradeAnalysis()도 같은 원칙으로 버튼 눌러야만 동작).
+  const [historyReconcile, setHistoryReconcile] = useState<Record<string, HistoryReconcileResult>>({});
+  const [historyReconcileBusy, setHistoryReconcileBusy] = useState(false);
+  const [historyReconcileMsg, setHistoryReconcileMsg] = useState<string | null>(null);
   // [v0.41.0 — 오너 요청] "지금 감시 중" 포지션을 직접 취소하는 버튼의 진행 상태(포지션 키 단위).
   const [autoCancelBusyKey, setAutoCancelBusyKey] = useState<string | null>(null);
   // [v0.60.0 긴급 수정 — 오너 실사용 보고: "취소 버튼을 눌러도 반응이 없다"] 원인 규명: 이
@@ -1164,6 +1170,37 @@ function App() {
       setAutoHistory(await window.kyletool.autoTradeHistory());
     } finally {
       setAutoHistoryBusy(false);
+    }
+  }
+
+  /**
+   * [v0.64.0 — 오너 실사용 보고 "매매기록 탭들이 실제 매매기록과 완벽하게 일치하지 않는다,
+   *   토스데이터와 완벽연계해"] "자동매매기록" 탭의 각 줄을 토스 실제 체결(📊 매매 리포트
+   *   탭과 같은 출처 — 토스 '종료된 주문')과 대조한다. report()처럼 토스 연결이 있는 기기
+   *   (PC, 또는 QR 중계가 연결된 폰)에서만 의미가 있다 — 웹(중계 없음)에서는 이 버튼 자체를
+   *   숨긴다(canReconcileLive, 아래 JSX 참고).
+   */
+  async function reconcileHistory() {
+    setHistoryReconcileBusy(true);
+    setHistoryReconcileMsg(null);
+    try {
+      const { results, source } = await window.kyletool.reconcileAutoHistory();
+      setHistoryReconcile(results);
+      const n = Object.keys(results).length;
+      const mismatches = Object.values(results).filter((r) => r.status === "mismatch").length;
+      const enriched = Object.values(results).filter((r) => r.status === "enriched").length;
+      if (source === "none") {
+        setHistoryReconcileMsg("대조할 토스 체결 내역이 없습니다(연결 안 됨 + 저장된 기록도 없음).");
+      } else {
+        setHistoryReconcileMsg(
+          `${n}건 대조 완료(${source === "live" ? "방금 토스에서 확인" : "저장된 기록 기준"})` +
+            `${mismatches > 0 ? ` — ⚠️ 불일치 ${mismatches}건` : ""}${enriched > 0 ? ` — 🆕 새로 확인된 손익 ${enriched}건` : ""}`,
+        );
+      }
+    } catch (e) {
+      setHistoryReconcileMsg(`대조 실패: ${String(e)}`);
+    } finally {
+      setHistoryReconcileBusy(false);
     }
   }
   // [v0.2.8] 조건주문 편집 창 — 계산값에 묶이지 않고 오너가 직접 고칠 수 있게 한다.
@@ -5209,7 +5246,14 @@ ${msg}
               <button className="mini" disabled={autoHistoryBusy} onClick={() => void loadAutoHistory()}>
                 {autoHistoryBusy ? "불러오는 중…" : "↻ 새로고침"}
               </button>
+              {/* [v0.64.0] 웹(토스 중계 없음)에서는 숨김 — 대조할 방법 자체가 없다. */}
+              {canReconcileLive && (
+                <button className="mini" disabled={historyReconcileBusy} onClick={() => void reconcileHistory()}>
+                  {historyReconcileBusy ? "토스와 대조 중…" : "🔄 토스 체결과 대조"}
+                </button>
+              )}
             </div>
+            {historyReconcileMsg && <p className="hint">{historyReconcileMsg}</p>}
 
             {autoHistory.length === 0 ? (
               <div className="result-empty hint">
@@ -5219,7 +5263,11 @@ ${msg}
               const closed = autoHistory.filter((h) => h.status === "closed_win" || h.status === "closed_loss");
               const wins = closed.filter((h) => h.status === "closed_win");
               const winRate = closed.length ? (wins.length / closed.length) * 100 : null;
-              const realizedUsd = closed.reduce((sum, h) => sum + (h.pnlUsd ?? 0), 0);
+              // [v0.64.0] "🔄 토스 체결과 대조"로 실제 체결 손익을 확인한 건은 그 값을 우선
+              //   쓴다(기록값보다 더 정확하므로) — 아직 대조 안 했거나 토스에서 못 찾은 건은
+              //   기존처럼 기록값(h.pnlUsd) 그대로 쓴다(추측하지 않는다).
+              const reconciledUsd = closed.some((h) => historyReconcile[h.id]?.realPnlUsd != null);
+              const realizedUsd = closed.reduce((sum, h) => sum + (historyReconcile[h.id]?.realPnlUsd ?? h.pnlUsd ?? 0), 0);
               const cancelled = autoHistory.filter((h) => h.status === "cancelled" || h.status === "closed_manual" || h.status === "oco_failed").length;
               const dryrun = autoHistory.filter((h) => h.status === "dryrun").length;
               return (
@@ -5239,13 +5287,16 @@ ${msg}
                     <div className={`sum-card ${pnlClass(closed.length ? realizedUsd : null)}`}>
                       <span className="sum-k">누적 실현손익</span>
                       <b className="sum-v">{closed.length ? `${realizedUsd >= 0 ? "+" : ""}$${realizedUsd.toFixed(2)}` : "—"}</b>
-                      <span className="sum-sub">익절/손절로 청산된 것만 합산(취소·드라이런 제외)</span>
+                      <span className="sum-sub">
+                        익절/손절로 청산된 것만 합산(취소·드라이런 제외)
+                        {reconciledUsd && " · 🔄 토스 확인된 건은 실제 체결가 기준"}
+                      </span>
                     </div>
                   </div>
 
                   <table className="result-table screen-table">
                     <thead>
-                      <tr><th>진입시각</th><th>종목</th><th>진입가→청산가</th><th>수량</th><th>손익</th><th>상태</th><th>사유</th><th>진입 당시 설정</th><th>측정(이격·변동성·최대역행/순행·슬리피지)</th></tr>
+                      <tr><th>진입시각</th><th>종목</th><th>진입가→청산가</th><th>수량</th><th>손익</th><th>상태</th><th>토스 대조</th><th>사유</th><th>진입 당시 설정</th><th>측정(이격·변동성·최대역행/순행·슬리피지)</th></tr>
                     </thead>
                     <tbody>
                       {autoHistory.map((h) => (
@@ -5260,6 +5311,27 @@ ${msg}
                               : "—"}
                           </td>
                           <td>{AUTO_HIST_STATUS_LABEL[h.status]}</td>
+                          {/* [v0.64.0] "🔄 토스 체결과 대조"를 눌러야만 채워진다(안 눌렀으면 "—"). */}
+                          <td className="hint small">
+                            {(() => {
+                              const r = historyReconcile[h.id];
+                              if (!r || r.status === "not_applicable") return "—";
+                              if (r.status === "matched") return <span className="evid-chip pass">✅ 일치</span>;
+                              if (r.status === "enriched")
+                                return (
+                                  <span className="evid-chip pass" title={`토스 체결: $${r.realPnlUsd?.toFixed(2)} (${r.realPnlPct?.toFixed(2)}%)`}>
+                                    🆕 확인됨: {r.realPnlUsd != null ? `${r.realPnlUsd >= 0 ? "+" : ""}$${r.realPnlUsd.toFixed(2)}` : "—"}
+                                  </span>
+                                );
+                              if (r.status === "mismatch")
+                                return (
+                                  <span className="evid-chip fail" title={`기록 $${h.pnlUsd?.toFixed(2)} vs 토스 $${r.realPnlUsd?.toFixed(2)}`}>
+                                    ⚠️ 불일치: 토스 {r.realPnlUsd != null ? `${r.realPnlUsd >= 0 ? "+" : ""}$${r.realPnlUsd.toFixed(2)}` : "—"}
+                                  </span>
+                                );
+                              return <span className="hint">❓ 토스에서 못 찾음</span>; // not_found
+                            })()}
+                          </td>
                           <td className="hint">{h.note}</td>
                           {/* [v0.45.0 — 오너 요청 "각자 어떤 기준으로 진행했는지도 연구 데이터에"]
                               이 매매가 실제로 어떤 설정으로 들어갔는지 한눈에. 이 필드가 생기기

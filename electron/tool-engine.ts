@@ -26,6 +26,7 @@ import { encryptSecret, decryptSecret, encryptJson, decryptJson } from "../lib/k
 import { classifyTicks, strengthFromTicks, strengthFromVolumes, updateStrengthWindow, isWindowCapped, analyzeStrengthSeries, type Side, type StrengthSignals, type WindowBufferEntry } from "../lib/strength";
 import { buildReport, buildReportFromRealized, makePeriod, type DailyReport, type PeriodKind } from "../lib/report"; // [v0.9.1] 매매 리포트
 import { matchFifo, mergeFills, coveredSince, shouldReuseCache, type Fill, type RealizedTrade } from "../lib/fills"; // [v0.9.6] 토스 실제 체결내역으로 손익 계산 (+v0.10.1 기간 커버리지 헬퍼)
+import { reconcileHistoryEntry, enteredAtMsFromId, type HistoryReconcileResult } from "../lib/history-reconcile"; // [v0.64.0] 자동매매기록을 토스 실제 체결과 대조
 import { buildCycles, analyzeTrades, type TradeCycle, type TradeInsights } from "../lib/trade-analysis"; // [v0.19.0] 매매 사이클 자동추적·분석
 import { toSyncPayload, isSyncPayload, type TradeSyncPayload } from "../lib/trade-sync";
 import { toAutoStateSyncPayload, isAutoStateSyncPayload, mergeAutoHistory, derivePositionsFromHistory, type AutoStateSyncPayload } from "../lib/auto-state-sync"; // [v0.31.0] 자동매매 기록 기기 간 동기화
@@ -5726,6 +5727,49 @@ export class ToolEngine extends EventEmitter {
     const cycles = buildCycles(realizedSorted, enrich); // 이미 최신순 정렬됨
     const insights = analyzeTrades(cycles);
     return { cycles, insights, source };
+  }
+
+  /**
+   * [v0.64.0 — 오너 실사용 보고 "매매기록 탭들이 실제 매매기록과 완벽하게 일치하지 않는다"]
+   *   "자동매매기록"·"📑 자동매매 리포트"·"매매연구" 탭은 엔진이 사건(체결 확인·조건주문
+   *   등록·발동)마다 스스로 적어 두는 부기(autoTradeHistory)를 보여준다 — "📊 매매 리포트"
+   *   탭처럼 토스 '종료된 주문'에서 매번 다시 계산하는 게 아니다. 그래서 체결 확인을
+   *   놓치거나(앱 재시작), 조건주문이 토스에서 사라지거나(v0.60.2), 보호주문 등록이
+   *   실패하거나(v0.57.0/v0.62.0) 하면 이 부기가 실제 계좌 상태와 어긋날 수 있는데, 부기는
+   *   자기 기록만 보므로 스스로는 어긋난 걸 알아챌 방법이 없다.
+   *
+   *   이 메서드는 report()/tradeAnalysis()와 똑같은 방식으로 토스 '종료된 주문'을 모아
+   *   (collectFills+matchFifo) 실제 체결 매칭 결과를 만든 뒤, autoTradeHistory의 각 기록을
+   *   lib/history-reconcile.ts(순수 함수)로 대조한다. 읽기 전용(주문 발사 없음) — 기존 기록을
+   *   덮어쓰지 않고, 대조 결과만 별도로 돌려준다(화면이 "✅ 일치/⚠️ 불일치/❓ 확인 안 됨"
+   *   배지로 보여준다). 연결이 없으면(모의/웹) 빈 결과를 돌려준다 — 확인 못 한 걸 "일치"로
+   *   거짓 보고하지 않는다.
+   */
+  async reconcileAutoHistory(): Promise<{ results: Record<string, HistoryReconcileResult>; source: "live" | "cache" | "none" }> {
+    let source: "live" | "cache" | "none" = "cache";
+    if (this.mode === "live") {
+      try {
+        const need = Date.now() - 75 * 86_400_000; // report()/tradeAnalysis()와 같은 바닥(캐시 공유)
+        const { fills, fetched } = await this.collectFills(need);
+        this.absorbFills(fills);
+        source = fetched ? "live" : "cache";
+      } catch {
+        /* 연결 없으면 저장본으로 */
+      }
+    }
+    if (source !== "live" && this.authPassword) {
+      try { await this.syncPullTrades(); } catch { /* 실패해도 저장본으로 */ }
+    }
+    if (this.savedFills.length === 0) source = "none";
+    const realized = matchFifo(this.savedFills, this.lastAvgCost);
+
+    const results: Record<string, HistoryReconcileResult> = {};
+    for (const h of this.autoTradeHistory) {
+      const enteredAtMs = enteredAtMsFromId(h.id);
+      if (enteredAtMs == null) continue; // 형식이 깨진 옛 기록은 건너뜀(대조 불가)
+      results[h.id] = reconcileHistoryEntry({ id: h.id, symbol: h.symbol, enteredAtMs, status: h.status, pnlUsd: h.pnlUsd, pnlPct: h.pnlPct }, realized);
+    }
+    return { results, source };
   }
 
   /**
