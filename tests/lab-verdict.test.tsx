@@ -178,7 +178,7 @@ describe("[v0.66.0] 결과 요약 화면·가이드 렌더링", () => {
   it("결과 요약: 신호등·결론·KPI·항목별 막대·연계 흐름·답변판·다음 할 일·검증이 나온다", () => {
     const sigs45 = manySignals(45);
     const html = renderToString(<LabResultTab lab={fakeLab(sigs45)} initialAssessment={buildAssessment(sigs45, LAB_PARAMS_DEFAULT, { realtimeOnly: false, nowMs: T0 + 90 * FIVE })} />);
-    for (const t of ["결과 요약", "허점 점검", "실매매 전환 게이트", "자동 검증", "참고용", "지금의 결론", "누적 신호", "매수 방식", "손절 방식", "익절 목표", "삼분할 이어짐", "카일 질문 답변판", "다음에 할 일", "데이터 검증 실행", "테스트 안내", "❓ 가이드"]) {
+    for (const t of ["결과 요약", "실시간 포착", "백필 포함", "허점 점검", "실매매 전환 게이트", "자동 검증", "참고용", "지금의 결론", "누적 신호", "매수 방식", "손절 방식", "익절 목표", "삼분할 이어짐", "카일 질문 답변판", "다음에 할 일", "데이터 검증 실행", "테스트 안내", "❓ 가이드"]) {
       expect(html).toContain(t);
     }
     expect(html).toContain("data-guide=\"result-grade\"");

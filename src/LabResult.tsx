@@ -213,19 +213,37 @@ function GatePanel({ a }: { a: Assessment }) {
   );
 }
 
-function GradeBanner({ v }: { v: Verdict }) {
-  const pct = Math.min(100, (v.eligible / 100) * 100);
+function GradeBanner({ v, a }: { v: Verdict; a: Assessment | null }) {
+  // 신호등은 "실시간으로 포착한 인정 신호" 기준이다. 백필(늦게 발견)은 선택 편향이 있어 신호등엔 안 쓰지만,
+  //   진행 상황이 안 보이면 답답하므로 게이지에 "백필 포함" 층을 연하게 같이 보여 준다.
+  const rt = a ? a.counts.realtimeEligible : v.eligible;
+  const all = a ? a.counts.allEligible : v.eligible;
+  const w = (n: number) => (n <= 0 ? 0 : Math.max(1.5, Math.min(100, n)));
   const [on, setOn] = useState(false);
   useEffect(() => { const id = requestAnimationFrame(() => setOn(true)); return () => cancelAnimationFrame(id); }, []);
+  const rtCls = v.grade === "green" ? "g" : v.grade === "yellow" ? "y" : "r";
   return (
     <div className={`rs-grade ${v.grade}`} data-guide="result-grade">
       <div className="rs-grade-title">{v.gradeTitle}</div>
-      <div className="rs-gauge" title={`인정 신호 ${v.eligible}건 / 목표 100건`}>
-        <i style={{ width: on ? `${pct}%` : "0%" }} />
-        <u style={{ left: "30%" }}>30</u>
-        <u style={{ left: "100%" }}>100</u>
+      <div className="rs-gauge2" title={`실시간 ${rt}건 · 백필 포함 ${all}건 / 목표 100건`}>
+        <i className="all" style={{ width: on ? `${w(all)}%` : "0%" }} />
+        <i className={`rt ${rtCls}`} style={{ width: on ? `${w(rt)}%` : "0%" }} />
+        <u style={{ left: "30%" }}>30건</u>
+        <u style={{ left: "100%" }}>100건</u>
       </div>
-      <ul>{v.gradeReasons.map((r) => <li key={r}>{r}</li>)}</ul>
+      <div className="rs-gauge-legend">
+        <span><i className={`dot ${rtCls}`} /> <b>실시간 포착 {rt}건</b> (신호등 기준)</span>
+        <span><i className="dot all" /> 백필 포함 {all}건 (참고용)</span>
+      </div>
+      <ul>
+        {v.gradeReasons.map((r) => <li key={r}>{r}</li>)}
+        {a && a.scope === "realtime" && a.counts.backfilledEligible > 0 && (
+          <li>백필 인정 신호 {a.counts.backfilledEligible}건은 "오늘 거래량 상위 종목만 골라 과거를 본" 선택 편향이 있어 신호등엔 세지 않습니다(위 연한 막대로만 표시).</li>
+        )}
+        {a && v.grade === "red" && a.pace.perHour != null && a.pace.etaDays != null && (
+          <li>🕒 지금 속도로 🟡(30건)까지 약 {Math.max(1, Math.round(Math.max(0, 30 - rt) / (a.pace.perHour * 12)))}일, 🟢(100건)까지 약 {Math.round(a.pace.etaDays)}일 — 수집은 하루 약 12시간(17~05시)만 돌아서 천천히 찹니다.</li>
+        )}
+      </ul>
     </div>
   );
 }
@@ -312,7 +330,7 @@ export function LabResultTab({ lab, initialAssessment }: { lab: LabApi; initialA
         )}
         <CollectBar st={s.status} a={assess} funnel={s.funnel} />
         <VerifyBar s={s.status.verify} />
-        <GradeBanner v={verdict} />
+        <GradeBanner v={verdict} a={assess} />
 
         <div className="rs-headline" data-guide="result-headline">
           <span className="rs-headline-tag">지금의 결론</span>

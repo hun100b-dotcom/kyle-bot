@@ -279,3 +279,31 @@ describe("[v0.68.0] 연구소 1분봉 저장소 — 처음엔 통으로, 이후�
     }
   }, 60_000);
 });
+
+describe("[v0.68.1] 옛 기본값(60위)으로 저장된 거래량 순위는 한 번만 120위로 올린다", () => {
+  it("옛 기본값 그대로면 120으로 올리고 안내, 이미 올렸거나(플래그) 직접 바꾼 값은 건드리지 않는다", async () => {
+    const { writeFileSync } = await import("node:fs");
+    const clean = () => { for (const k of Object.keys(process.env)) if (k.startsWith("LAB_") || k.startsWith("AUTO_SCAN_")) delete process.env[k]; };
+    const dir1 = mkdtempSync(join(tmpdir(), "kyle-lab-"));
+    const dir2 = mkdtempSync(join(tmpdir(), "kyle-lab-"));
+    const dir3 = mkdtempSync(join(tmpdir(), "kyle-lab-"));
+    try {
+      clean();
+      writeFileSync(join(dir1, ".env"), "LAB_RANK_COUNT=60\n", "utf8");
+      const a = new ToolEngine(dir1, { forceMock: true }).getLabStatus();
+      expect(a.rankCount).toBe(120);
+      expect(a.note).toContain("120위");
+      clean();
+      writeFileSync(join(dir2, ".env"), "LAB_RANK_COUNT=60\nLAB_RANK_MIGRATED=1\n", "utf8"); // 이미 한 번 처리됨(그 뒤 오너가 60으로 되돌린 경우)
+      expect(new ToolEngine(dir2, { forceMock: true }).getLabStatus().rankCount).toBe(60);
+      clean();
+      writeFileSync(join(dir3, ".env"), "LAB_RANK_COUNT=80\n", "utf8"); // 직접 바꾼 값
+      const c = new ToolEngine(dir3, { forceMock: true }).getLabStatus();
+      expect(c.rankCount).toBe(80);
+      expect(c.note).toBeNull();
+    } finally {
+      for (const d of [dir1, dir2, dir3]) rmSync(d, { recursive: true, force: true });
+      clean();
+    }
+  });
+});

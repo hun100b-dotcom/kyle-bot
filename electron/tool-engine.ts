@@ -1470,6 +1470,16 @@ export class ToolEngine extends EventEmitter {
     this.autoRunsPath = join(userDataDir, "kylebot-auto-runs.json"); // [v0.62.1] 자동매매 실행 기록(리포트 원본)
     this.labPath = join(userDataDir, "kylebot-lab.json"); // [v0.65.0] 매매연구소 신호 로우
     this.loadEnv();
+    // [v0.68.1] 거래량 순위 기본값이 60→120으로 바뀌었는데, 이미 저장돼 있던 값(옛 기본값 60)은 그대로 남아 오너 화면의 수집이 계속 느렸다.
+    //   "옛 기본값 그대로(60)"인 경우에만 한 번 120으로 올리고 화면에 알린다(직접 다른 값으로 바꾼 사람은 건드리지 않음).
+    if (process.env.LAB_RANK_MIGRATED !== "1") {
+      if (this.labRankCount === 60) {
+        this.labRankCount = 120;
+        this.labNote = "거래량 순위를 옛 기본값 60위에서 120위로 한 번 넓혔습니다(수집 속도를 높이기 위해). 원하지 않으면 [신호기록 현황]에서 다시 바꾸세요.";
+      }
+      this.labRankMigrated = true;
+      this.persistEnv();
+    }
     // [개발 검증용] E2E 등 자동 검증은 절대 실서버를 건드리면 안 되므로 연습 모드 강제.
     if (opts?.forceMock) this.mode = "mock";
     // [v0.45.0] 테스트 엔진은 시스템 휴무 시간대(05:00~17:00 KST) 기능을 항상 꺼진 채로
@@ -2050,6 +2060,7 @@ export class ToolEngine extends EventEmitter {
       `AUTO_ENTRY_LEVEL=${this.autoTradeEntryLevel}`, // [v0.61.8] 진입 타점 분할(1~2)
       `LAB_ENABLED=${this.labEnabled}`, // [v0.65.0] 매매연구소
       `LAB_RANK_COUNT=${this.labRankCount}`,
+      `LAB_RANK_MIGRATED=${this.labRankMigrated || process.env.LAB_RANK_MIGRATED === "1" ? "1" : "0"}`,
       `LAB_DOJI_BODY_MAX=${this.labDojiBodyMax}`,
       `LAB_BODY_MIN=${this.labBodyMin}`,
       `LAB_VOL_MIN=${this.labVolMin}`,
@@ -4508,6 +4519,7 @@ export class ToolEngine extends EventEmitter {
   private labSignals: LabSignal[] = [];
   private labAttempts: Record<string, number> = {};
   private labEnabled = false;
+  private labRankMigrated = false;
   private labRankCount = 120; //    거래량 순위 몇 위까지 탐색(10~200) — v0.68.0부터 스캔당 요청이 종목당 1회라 기본을 120으로 넓힘(이미 저장된 값은 유지)
   private labDojiBodyMax = 15; //   도지 몸통 비율 상한(%)
   private labBodyMin = 60; //       신호 캔들 몸통 비율 하한(%)
