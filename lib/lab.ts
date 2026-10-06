@@ -369,7 +369,7 @@ export function updateSignal(sig: LabSignal, ctx: UpdateCtx): LabSignal {
   const next: LabSignal = { ...sig, linkage, linkageDone };
   // 5분봉 창: 도지 6봉 전 ~ (도지 + 4 + 관찰시간/5 + 여유)
   const from = Math.max(0, dojiIdx - 6);
-  const to = Math.min(ha.length, dojiIdx + 5 + Math.ceil((P.horizonMin * 2 + 30) / 5));
+  const to = Math.min(ha.length, dojiIdx + 6 + Math.ceil((P.horizonMin + 30) / 5)); // 상승 구간 + 연계 탐색 시간(≈관찰 시간)까지
   next.bars = [];
   for (let i = from; i < to; i++) {
     next.bars.push({
@@ -511,16 +511,17 @@ interface ExitArgs {
   tpPx: number;
   timeExitMs: number | null; //  4번째 캔들 확정 시 잔량 정리 시각(null이면 없음)
   endMs: number; //              관찰 종료 시각
+  final: boolean; //             true면 데이터가 이미 끝난 신호(complete) — 경로 끝에서 정리한다(장 마감 등으로 관찰 시간을 못 채운 경우)
 }
 
 function scanExit(a: ExitArgs): Pick<SimTrade, "status" | "exitT" | "exitPx" | "exitReason" | "maePct" | "mfePct"> {
-  const { path, fillIdx, fillPx, stopPx, tpPx, timeExitMs, endMs } = a;
+  const { path, fillIdx, fillPx, stopPx, tpPx, timeExitMs, endMs, final } = a;
   const tick = getTick(tpPx);
   let low = Infinity;
   let high = -Infinity;
   let lastIdx = fillIdx;
   for (let j = fillIdx; j < path.length; j++) {
-    const [t, o, h, l, c] = path[j];
+    const [t, o, h, l] = path[j];
     if (t >= endMs) break;
     lastIdx = j;
     low = Math.min(low, l);
@@ -542,13 +543,13 @@ function scanExit(a: ExitArgs): Pick<SimTrade, "status" | "exitT" | "exitPx" | "
   }
   // 관찰 종료: 마지막 봉 종가로 정리(데이터가 아직 horizon까지 안 왔으면 "open")
   const lastBar = path[lastIdx];
-  const closedByTime = lastBar[0] + MIN >= endMs;
+  const closedByTime = lastBar[0] + MIN >= endMs || final;
   const px = lastBar[4];
   return {
     status: closedByTime ? "horizon" : "open",
     exitT: lastBar[0] + MIN,
     exitPx: px,
-    exitReason: closedByTime ? "관찰 시간 종료(종가 정리)" : "진행 중(미실현)",
+    exitReason: closedByTime ? (lastBar[0] + MIN >= endMs ? "관찰 시간 종료(종가 정리)" : "장 종료·데이터 끝(종가 정리)") : "진행 중(미실현)",
     maePct: r2((Math.min(low, px) / fillPx - 1) * 100),
     mfePct: r2((Math.max(high === -Infinity ? fillPx : high, px) / fillPx - 1) * 100),
   };
@@ -626,7 +627,7 @@ export function simulateSignal(sig: LabSignal, P: LabParams = LAB_PARAMS_DEFAULT
               t1 = { ...t1, status: "skipped", note: "손절선이 진입가 이상(계산 불가)" };
             } else {
               const tpPx = roundPrice(fill.px * (1 + tp / 100));
-              const ex = scanExit({ path: sig.path1m, fillIdx: fill.i, fillPx: fill.px, stopPx: stop, tpPx, timeExitMs, endMs: endCap(sig.path1m[fill.i][0]) });
+              const ex = scanExit({ path: sig.path1m, fillIdx: fill.i, fillPx: fill.px, stopPx: stop, tpPx, timeExitMs, endMs: endCap(sig.path1m[fill.i][0]), final: sig.complete });
               t1 = finishTrade({ ...t1, stopPx: stop, tpPx, riskPct: r2((1 - stop / fill.px) * 100) }, fill.px, ex, P, sig.path1m[fill.i][0]);
             }
           }
@@ -649,7 +650,7 @@ export function simulateSignal(sig: LabSignal, P: LabParams = LAB_PARAMS_DEFAULT
               if (stop == null) t2 = { ...t2, status: "skipped", note: "손절선이 진입가 이상(계산 불가)" };
               else {
                 const tpPx = roundPrice(fill.px * (1 + tp / 100));
-                const ex = scanExit({ path: sig.path1m, fillIdx: fill.i, fillPx: fill.px, stopPx: stop, tpPx, timeExitMs, endMs: endCap(sig.path1m[fill.i][0]) });
+                const ex = scanExit({ path: sig.path1m, fillIdx: fill.i, fillPx: fill.px, stopPx: stop, tpPx, timeExitMs, endMs: endCap(sig.path1m[fill.i][0]), final: sig.complete });
                 t2 = finishTrade({ ...t2, stopPx: stop, tpPx, riskPct: r2((1 - stop / fill.px) * 100) }, fill.px, ex, P, sig.path1m[fill.i][0]);
               }
             }
@@ -677,7 +678,7 @@ export function simulateSignal(sig: LabSignal, P: LabParams = LAB_PARAMS_DEFAULT
               : structuralStopPrice(fill.px, lk.ema, P.emaBufferPct, fixed);
           if (stop == null || !(stop < fill.px)) { out.push({ ...base, status: "skipped", note: "손절선이 진입가 이상(계산 불가)" }); continue; }
           const tpPx = roundPrice(fill.px * (1 + tp / 100));
-          const ex = scanExit({ path: sig.path1m, fillIdx: fill.i, fillPx: fill.px, stopPx: roundPrice(stop), tpPx, timeExitMs: null, endMs: sig.path1m[fill.i][0] + P.horizonMin * MIN });
+          const ex = scanExit({ path: sig.path1m, fillIdx: fill.i, fillPx: fill.px, stopPx: roundPrice(stop), tpPx, timeExitMs: null, endMs: sig.path1m[fill.i][0] + P.horizonMin * MIN, final: sig.complete });
           out.push(finishTrade({ ...base, stopPx: roundPrice(stop), tpPx, riskPct: r2((1 - roundPrice(stop) / fill.px) * 100) }, fill.px, ex, P, sig.path1m[fill.i][0]));
         }
       }

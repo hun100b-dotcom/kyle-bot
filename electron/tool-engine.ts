@@ -4511,12 +4511,14 @@ export class ToolEngine extends EventEmitter {
   private static readonly LAB_INTERVAL_MS = 5 * 60_000;
 
   /** 1분봉 공용 캐시(2분) — 자동매매 스캔과 매매연구소가 같은 종목을 번갈아 조회해도 토스 요청은 한 번만 나간다. */
-  private candleCache = new Map<string, { atMs: number; candles: Awaited<ReturnType<typeof getCandles1mPaged>> }>();
-  private async getCandles1mCached(symbol: string, ttlMs = 120_000): Promise<Awaited<ReturnType<typeof getCandles1mPaged>>> {
+  private candleCache = new Map<string, { atMs: number; want: number; candles: Awaited<ReturnType<typeof getCandles1mPaged>> }>();
+  /** 매매연구소가 종목마다 "처음 한 번만" 깊게(약 2400개 = 영업시간 기준 하루 반 이상) 받아 과거 신호를 백필한 종목. */
+  private labDeepDone = new Set<string>();
+  private async getCandles1mCached(symbol: string, ttlMs = 120_000, want = 1100): Promise<Awaited<ReturnType<typeof getCandles1mPaged>>> {
     const hit = this.candleCache.get(symbol);
-    if (hit && Date.now() - hit.atMs < ttlMs) return hit.candles;
-    const candles = await getCandles1mPaged(symbol, 1100);
-    this.candleCache.set(symbol, { atMs: Date.now(), candles });
+    if (hit && Date.now() - hit.atMs < ttlMs && hit.want >= want) return hit.candles;
+    const candles = want > 1100 ? await getCandles1mPaged(symbol, want, 14) : await getCandles1mPaged(symbol, want);
+    this.candleCache.set(symbol, { atMs: Date.now(), want, candles });
     if (this.candleCache.size > 400) {
       const oldest = [...this.candleCache.entries()].sort((a, b) => a[1].atMs - b[1].atMs)[0];
       if (oldest) this.candleCache.delete(oldest[0]);
@@ -4677,7 +4679,11 @@ export class ToolEngine extends EventEmitter {
   }
 
   private async labProcessSymbol(symbol: string, rank: number, lastPrice: number | null, nowMs: number): Promise<void> {
-    const oneMin = await this.getCandles1mCached(symbol);
+    // EMA200은 5분봉 200개(1분봉 1000개)가 있어야 시작되므로 보통 받는 1100개로는 최근 약 3시간만 패턴을 찾을 수 있다.
+    //   그래서 종목마다 처음 한 번은 더 깊게(2400개) 받아 과거 신호를 백필하고, 그 뒤엔 공용 캐시(1100개)로 가볍게 이어간다.
+    const deep = !this.labDeepDone.has(symbol);
+    const oneMin = await this.getCandles1mCached(symbol, 120_000, deep ? 2400 : 1100);
+    if (deep) this.labDeepDone.add(symbol);
     const raw5m: Candle[] = dropIncompleteBucket(aggregate1mTo5m(oneMin), nowMs);
     if (raw5m.length < 210) return; // EMA200 + 여유
     const P = this.labParams();
@@ -4767,7 +4773,8 @@ export class ToolEngine extends EventEmitter {
   getLabSummary(f?: LabQueryFilter): LabSummary {
     const filter = this.labFilterFrom(f);
     const refKey = f?.refKey || "DD-1.5-e1";
-    return this.labMemoGet(`sum|${JSON.stringify(filter)}|${refKey}`, () => {
+    // 무거운 계산(변형 성적표 등)은 데이터 버전별로 캐시하고, 상태(스캔 중 여부 등)는 매번 새로 붙인다.
+    const memo = this.labMemoGet(`sum|${JSON.stringify(filter)}|${refKey}`, () => {
       const P = this.labParams();
       const pool = this.labSignals.filter((s) => (filter.includeThin || !s.thinHours) && (filter.includeBackfilled !== false || !s.backfilled));
       const rows: LabSignalRow[] = [...this.labSignals]
@@ -4813,6 +4820,7 @@ export class ToolEngine extends EventEmitter {
         },
       } satisfies LabSummary;
     });
+    return { ...memo, status: this.getLabStatus() };
   }
 
   /** 신호 한 건의 전체 로우 + 모든 변형 결과(상세 보기용). */

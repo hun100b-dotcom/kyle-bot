@@ -17,6 +17,8 @@ import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import "./App.css";
 import TodayReport from "./TodayReport"; // [v0.9.1] 오늘의 매매 리포트 화면
 import { useTabOrder } from "./useTabOrder"; // [v0.9.2] 탭 순서 드래그로 변경
+import { useLab } from "./useLab"; //                         [v0.65.0] 매매연구소 상태
+import { LabLiveTab, LabSignalsTab, LabCompareTab } from "./LabTabs"; // [v0.65.0] 매매연구소 화면
 import { restoreInputsFromSaved } from "../lib/split-restore"; // [v0.9.3] 옛 기록도 계산기로 불러오기
 import { reportToMarkdown, reportAiPrompt, fmtDuration } from "../lib/auto-report"; // [v0.62.1] 자동매매 리포트 표시·복사
 import { getSession } from "../lib/session"; // [v0.48.1] 자동 스크리너 탭에 "지금 세션" 켜짐/꺼짐을 바로 보여주기 위함
@@ -38,24 +40,26 @@ import { summarizeAutoHistory, summarizeGroupHistory, summarizeByCriteria, autoH
 //   묻혀 있었다. 오너 요청("그룹원 관리 탭을 통해 승인·수기등록·근황 파악, 채팅까지")에 따라
 //   독립 탭으로 빼고, 그룹원 근황 현황판·채팅을 새로 추가했다. 같은 이유로 "기록"(journal, 예전엔
 //   설정 하위)도 "서버 로그"로 이름을 바꿔 독립 탭으로 뺐다(카테고리 토글 필터 추가, 아래 참고).
-const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "autoControl", "autoScan", "screenCriteria", "autoHistory", "autoReport", "research", "orders", "groupManage", "changelog", "journal", "settings"] as const;
+const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "autoControl", "autoScan", "screenCriteria", "autoHistory", "autoReport", "research", "labLive", "labSignals", "labCompare", "orders", "groupManage", "changelog", "journal", "settings"] as const;
 type TabId = (typeof ALL_TABS)[number];
 
 /** [v0.27.0] 상단 1단 — 매매방식·성격으로 묶은 그룹. 그룹 버튼을 누르면 하위 탭(2단)이 펼쳐진다. */
-type TopGroupId = "manual" | "auto" | "status" | "settings";
-const TOP_GROUP_LABEL: Record<TopGroupId, string> = { manual: "메뉴얼", auto: "🤖 자동매매", status: "현황", settings: "설정" };
+type TopGroupId = "manual" | "auto" | "lab" | "status" | "settings";
+const TOP_GROUP_LABEL: Record<TopGroupId, string> = { manual: "메뉴얼", auto: "🤖 자동매매", lab: "🔬 매매연구소", status: "현황", settings: "설정" };
 /** 그룹 순서(드래그로 바뀔 수 있는 기본값) + 그룹별 하위 탭 목록(이 순서로 서브탭이 뜬다). */
 const GROUP_CHILDREN: Record<TopGroupId, TabId[]> = {
   manual: ["calc", "screener", "splits"],
-  auto: ["autoControl", "autoScan", "screenCriteria", "autoHistory", "autoReport", "research"],
+  auto: ["autoControl", "autoScan", "screenCriteria", "autoHistory", "autoReport"],
+  // [v0.65.0 — 오너 지시] 매매연구는 자동매매 하위 탭에서 대분류로 올려 비중을 높이고, 신호 기록 모드 탭들을 같은 그룹에 신설
+  lab: ["research", "labLive", "labSignals", "labCompare"],
   status: ["report", "strength", "orders", "groupManage", "changelog", "journal"],
   settings: ["settings"],
 };
-const TOP_GROUPS: TopGroupId[] = ["manual", "auto", "status", "settings"];
+const TOP_GROUPS: TopGroupId[] = ["manual", "auto", "lab", "status", "settings"];
 /** 리프 탭 → 소속 그룹(역방향 조회용). */
 const TAB_GROUP: Record<TabId, TopGroupId> = {
   calc: "manual", screener: "manual", splits: "manual",
-  autoControl: "auto", autoScan: "auto", screenCriteria: "auto", autoHistory: "auto", autoReport: "auto", research: "auto",
+  autoControl: "auto", autoScan: "auto", screenCriteria: "auto", autoHistory: "auto", autoReport: "auto", research: "lab", labLive: "lab", labSignals: "lab", labCompare: "lab",
   report: "status", strength: "status", orders: "status", groupManage: "status", changelog: "status", journal: "status",
   settings: "settings",
 };
@@ -72,6 +76,9 @@ const TAB_LABEL: Record<TabId, string> = {
   screenCriteria: "스크리닝 기준",
   autoHistory: "자동매매기록",
   autoReport: "📑 자동매매 리포트",
+  labLive: "🔬 신호기록 현황",
+  labSignals: "🧾 신호 로우",
+  labCompare: "⚖️ 전략 비교·연계",
   research: "매매연구",
   orders: "주문 현황",
   groupManage: "👥 그룹원 관리",
@@ -744,6 +751,11 @@ function App() {
   const [tabL, setTabL] = useState<TabId>("calc"); //   왼쪽 패널 탭
   const [tabR, setTabR] = useState<TabId>("strength"); // 오른쪽 패널 탭(기본: 신호 보며 매매)
   const showTwoCol = twoCol && isWide;
+  // [v0.65.0] 매매연구소 탭이 화면에 떠 있을 때만(1컬럼은 현재 탭, 2컬럼은 좌/우 패널) 15초 자동 갱신을 돌린다.
+  const [pcLab, setPcLab] = useState<LabMirror | null>(null); // [v0.65.0] PC의 매매연구소 요약(폰 표시용)
+  const labTabIds: TabId[] = ["labLive", "labSignals", "labCompare"];
+  const labActive = labTabIds.some((t) => (showTwoCol ? tabL === t || tabR === t : tab === t));
+  const lab = useLab(isWebApp, pcLab, labActive);
   const [openEvid, setOpenEvid] = useState<Set<string>>(new Set()); // 근거 펼친 종목들
   // [v0.25.0] 탐색 결과 종목의 차트 — 펼친 종목 집합 + 심볼별 캐시(재클릭 시 재조회 방지) + 로딩/에러.
   const [openChart, setOpenChart] = useState<Set<string>>(new Set());
@@ -916,6 +928,7 @@ function App() {
       if (r.journal.length > 0) setJournal(r.journal);
       if (r.killSwitch != null) setPcKillSwitch(r.killSwitch);
       setPcScanProgress(r.scanProgress); // [v0.61.4] null도 의미 있다(= PC가 아직 한 번도 안 돈 것)
+      setPcLab(r.lab ?? null); //          [v0.65.0]
       return r.status;
     }
     return null;
@@ -5377,6 +5390,10 @@ ${msg}
           위 탭과 같은 원본 데이터)을 lib/auto-research.ts의 순수 함수 summarizeAutoHistory로
           집계해 승률·종목별/시간대별 성적을 보여준다(오너 개인 계정 데이터 기준, 기기 로컬 계산 —
           다른 사용자 데이터는 전혀 안 섞임). */}
+      {paneTab === "labLive" && <LabLiveTab lab={lab} />}
+      {paneTab === "labSignals" && <LabSignalsTab lab={lab} />}
+      {paneTab === "labCompare" && <LabCompareTab lab={lab} />}
+
       {paneTab === "research" && (
         <main className="grid">
           <section className="card wide">

@@ -1164,3 +1164,59 @@ body:has(.update-banner) .topbar {
 /* 원본 데이터 표는 컬럼이 많아(13개+) 카드 폭을 넘기 쉬우므로, 데스크톱에서도 가로 스크롤을 허용 */
 .raw-table-scroll { overflow-x: auto; max-width: 100%; }
 .raw-table { white-space: nowrap; }
+
+/* ===== [v0.65.0] 🔬 매매연구소 ===== */
+.err { color: var(--red); }
+.lab-status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 10px 0; }
+.lab-pill { border-radius: var(--r-pill); padding: 4px 12px; font-size: 13px; font-weight: 700; border: 1px solid var(--border-strong); background: var(--panel2); }
+.lab-pill.on { color: var(--green); border-color: var(--green); }
+.lab-pill.busy { color: var(--amber); border-color: var(--amber); }
+.lab-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 8px 0 12px; }
+.lab-card { background: var(--panel2); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 12px 14px; display: flex; flex-direction: column; gap: 4px; }
+.lab-card b { font-size: 22px; color: var(--text); }
+.lab-card span { color: var(--muted); font-size: 12px; line-height: 1.4; }
+.lab-funnel { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
+.lab-funnel-row { display: grid; grid-template-columns: minmax(180px, 1.2fr) minmax(120px, 2fr) 48px minmax(0, 1.4fr); align-items: center; gap: 10px; font-size: 13px; }
+.lab-funnel-label { color: var(--text); }
+.lab-funnel-bar { height: 12px; background: var(--panel2); border-radius: 6px; overflow: hidden; }
+.lab-funnel-bar i { display: block; height: 100%; background: linear-gradient(90deg, #2563eb, #3b82f6); border-radius: 6px; }
+.lab-funnel-n { text-align: right; color: var(--text); }
+.lab-rules { margin: 14px 0; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--panel2); padding: 8px 14px; }
+.lab-rules summary { cursor: pointer; font-weight: 700; color: var(--text); padding: 4px 0; }
+.lab-rules ul { margin: 8px 0 4px 18px; padding: 0; line-height: 1.7; font-size: 13px; color: var(--muted); }
+.lab-rules li { margin: 4px 0; }
+.lab-rules b { color: var(--text); }
+.lab-scroll { overflow-x: auto; max-width: 100%; }
+.lab-table td, .lab-table th { white-space: nowrap; }
+.lab-table tr.lab-sel td, td.lab-sel { background: rgba(76, 130, 251, 0.18); }
+.lab-table tr.lab-dim td { opacity: 0.55; }
+.lab-tag { margin-left: 6px; font-size: 10px; padding: 1px 6px; border-radius: 8px; background: var(--surface3); color: var(--muted); }
+.lab-filters { align-items: center; gap: 14px; flex-wrap: wrap; }
+.lab-detail { margin-top: 18px; padding: 14px; border: 1px solid var(--blue); border-radius: var(--r-sm); background: var(--panel2); }
+.lab-chart { width: 100%; height: auto; background: var(--bg); border-radius: 8px; border: 1px solid var(--border); }
+.lab-chart .lab-grid { stroke: rgba(255, 255, 255, 0.07); stroke-width: 1; }
+.lab-chart .lab-axis { fill: var(--muted); font-size: 10px; }
+.lab-chart .lab-ema { stroke: var(--amber); stroke-width: 1.4; opacity: 0.9; }
+.lab-chart .lab-up line { stroke: var(--green); }
+.lab-chart .lab-up rect { fill: var(--green); }
+.lab-chart .lab-dn line { stroke: var(--red); }
+.lab-chart .lab-dn rect { fill: var(--red); }
+.lab-chart .lab-marker { fill: var(--text); font-size: 11px; font-weight: 700; }
+.lab-chart .lab-run-bg { fill: rgba(255, 255, 255, 0.05); }
+.lab-chart .lab-link-line { stroke: var(--blue); stroke-dasharray: 3 3; }
+.lab-chart .lab-line-entry { stroke: var(--blue); stroke-dasharray: 5 3; }
+.lab-chart .lab-line-stop { stroke: var(--red); stroke-dasharray: 5 3; }
+.lab-chart .lab-line-tp { stroke: var(--green); stroke-dasharray: 5 3; }
+.lab-chart .lab-fill { fill: var(--blue); }
+.lab-chart .lab-exit { fill: var(--text); stroke: var(--bg); }
+.lab-matrix th { text-align: left; white-space: nowrap; }
+.lab-matrix .lab-cell { cursor: pointer; text-align: center; min-width: 120px; }
+.lab-matrix .lab-cell small { display: block; color: var(--muted); font-size: 11px; }
+.lab-matrix .lab-cell.weak { opacity: 0.5; }
+.lab-matrix .lab-cell.pos-bg { background: rgba(61, 220, 151, 0.10); }
+.lab-matrix .lab-cell.neg-bg { background: rgba(255, 107, 129, 0.10); }
+.lab-best { margin: 10px 0 14px; padding: 12px 14px; border: 1px solid var(--green); border-radius: var(--r-sm); background: rgba(61, 220, 151, 0.07); line-height: 1.6; }
+@media (max-width: 720px) {
+  .lab-funnel-row { grid-template-columns: 1fr 48px; }
+  .lab-funnel-bar, .lab-funnel-row .hint { grid-column: 1 / -1; }
+}

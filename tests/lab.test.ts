@@ -214,7 +214,11 @@ describe("[v0.65.0] 가상 체결 시뮬레이션(simulateSignal) — 보수적 
     const rows: Array<[number, number, number, number, number]> = [[0, 10.5, 10.55, 10.46, 10.5]];
     for (let m = 1; m <= 200; m++) rows.push([m, 10.5, 10.55, 10.45, 10.5]);
     expect(find(simulateSignal(sig({ path1m: path(rows) })), "BC-1.5-e1").status).toBe("horizon");
-    expect(find(simulateSignal(sig({ path1m: path(rows.slice(0, 30)) })), "BC-1.5-e1").status).toBe("open");
+    expect(find(simulateSignal(sig({ path1m: path(rows.slice(0, 30)), complete: false })), "BC-1.5-e1").status).toBe("open");
+    // 이미 끝난(complete) 신호인데 데이터가 일찍 끊겼다면(장 마감) 경로 끝에서 정리한다
+    const ended = find(simulateSignal(sig({ path1m: path(rows.slice(0, 30)), complete: true })), "BC-1.5-e1");
+    expect(ended.status).toBe("horizon");
+    expect(ended.exitReason).toContain("장 종료");
   });
 
   it("2차 진입(3번째 캔들): 1차가 보유 중이고 수익권일 때만, 아니면 skipped", () => {
