@@ -10,6 +10,7 @@ import type { LabApi } from "./useLab";
 import type { DimVerdict, Verdict, Confidence, Assessment, Gate } from "../lib/lab-verdict";
 type LabFunnel = LabSummary["funnel"];
 import { GuideButton, GuideModal, useGuide } from "./LabGuide";
+import { LabFreshBar } from "./LabTabs";
 
 const kst = (ms: number | null | undefined, fmt = "MM-dd HH:mm") => (ms == null ? "—" : DateTime.fromMillis(ms).setZone("Asia/Seoul").toFormat(fmt));
 const num = (v: number | null | undefined, d = 2, suffix = "") => (v == null || !Number.isFinite(v) ? "—" : `${v.toFixed(d)}${suffix}`);
@@ -328,6 +329,7 @@ export function LabResultTab({ lab, initialAssessment }: { lab: LabApi; initialA
         {scope === "all" && !mirror && (
           <p className="lab-note">⚠️ 백필 신호는 "오늘 거래량이 많은 종목"만 골라 과거를 본 것이라 선택 편향이 있어 성과가 좋게 나오기 쉽습니다. 결론은 실시간 신호로 내려야 합니다.</p>
         )}
+        <LabFreshBar lab={lab} />
         <CollectBar st={s.status} a={assess} funnel={s.funnel} />
         <VerifyBar s={s.status.verify} />
         <GradeBanner v={verdict} a={assess} />
@@ -345,6 +347,18 @@ export function LabResultTab({ lab, initialAssessment }: { lab: LabApi; initialA
           <div className="rs-kpi"><b><CountUp value={b?.fillRate ?? null} decimals={0} suffix="%" /></b><span>1위 조합 체결률</span></div>
           <div className="rs-kpi"><b><CountUp value={linkBlock.linkRate} decimals={0} suffix="%" /></b><span>삼분할 연계율</span></div>
         </div>
+
+        <details className="rs-legend" open>
+          <summary>📖 이 화면의 % 는 무엇인가요? (계좌 수익률이 아닙니다)</summary>
+          <ul>
+            <li><b>신호당 기대값(%)</b> — 이 전략으로 <b>신호가 한 번 나올 때마다 평균적으로 남는 순손익률</b>입니다. 진입가 대비 %, 수수료를 뺀 값, 체결 안 된 신호는 0으로 계산. 예) +0.30% = 신호 100번이면 평균적으로 합계 +30%p(종목당 투입금 기준) — <u>내 계좌 전체 수익률이 아니라 "한 번의 가상 매매"의 평균</u>입니다.</li>
+            <li><b>승률(%)</b> — 체결되어 끝난 가상 매매 중 이익으로 끝난 비율. 승률이 높아도 손실 한 번이 크면 기대값은 마이너스일 수 있어요.</li>
+            <li><b>체결률(%)</b> — 신호가 나왔을 때 그 가상 매수 주문이 실제로 체결된 비율(지정가가 안 닿으면 미체결).</li>
+            <li><b>연계율(%)</b> — 4번째 캔들에서 고점으로 끝난 신호 중, 이후 삼분할 패턴(고점→도지→음봉)이 이어진 비율.</li>
+            <li><b>막대 길이(%)</b> — 선택지별 신호당 기대값. 오른쪽(초록) = 평균적으로 이득, 왼쪽(빨강) = 손해.</li>
+            <li>가상 결과는 모두 <b>주문 없이</b> 과거·실시간 가격으로 계산한 연구용 숫자입니다.</li>
+          </ul>
+        </details>
 
         {b && (
           <div className="rs-best">

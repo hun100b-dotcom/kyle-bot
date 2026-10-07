@@ -1336,6 +1336,8 @@ body:has(.update-banner) .topbar {
 .rs-collect.pause { border-color: var(--amber); background: rgba(247, 185, 85, 0.07); }
 .rs-collect span { color: var(--muted); font-size: 12px; }
 .rs-collect b { color: var(--text); }
+.unprot-banner { margin: 0 0 14px; padding: 12px 16px; border-radius: var(--r-sm); border: 1px solid var(--red); background: rgba(255, 107, 129, 0.10); line-height: 1.7; animation: rs-blink 1.6s ease-in-out infinite; }
+.unprot-banner ul { margin: 6px 0 4px 18px; padding: 0; font-size: 13px; }
 .rs-checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; }
 .rs-check { background: var(--panel2); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 12px 14px; animation: rs-rise 0.5s ease both; }
 .rs-check p { margin: 8px 0 0; font-size: 12.5px; line-height: 1.65; color: var(--muted); }
@@ -1360,3 +1362,16 @@ body:has(.update-banner) .topbar {
 .rs-ready .lab-rules ol { margin: 8px 0 4px 18px; padding: 0; line-height: 1.7; font-size: 13px; color: var(--muted); }
 @keyframes rs-blink { 0%, 100% { box-shadow: 0 0 0 0 rgba(255, 107, 129, 0.0); } 50% { box-shadow: 0 0 0 6px rgba(255, 107, 129, 0.18); } }
 @media (prefers-reduced-motion: reduce) { .rs-vbar.bad, .rs-check { animation: none; } .rs-ci u, .rs-ci s { transition: none; } }
+
+/* [v0.69.0] 데이터 신선도 띠 + 숫자 읽는 법 */
+.lab-fresh { display: flex; flex-direction: column; gap: 3px; padding: 10px 14px; border-radius: var(--r-sm); border: 1px solid var(--border-strong); margin: 8px 0 12px; font-size: 13px; line-height: 1.6; }
+.lab-fresh.ok { border-color: var(--green); background: rgba(61, 220, 151, 0.05); }
+.lab-fresh.pause { border-color: var(--amber); background: rgba(247, 185, 85, 0.07); }
+.lab-fresh.bad { border-color: var(--red); background: rgba(255, 107, 129, 0.09); }
+.lab-fresh.off { background: var(--panel2); }
+.lab-fresh span { color: var(--muted); font-size: 12px; }
+.lab-fresh b { color: var(--text); }
+.rs-legend { margin: 10px 0; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--panel2); padding: 8px 14px; }
+.rs-legend summary { cursor: pointer; font-weight: 700; padding: 4px 0; }
+.rs-legend ul { margin: 6px 0 4px 18px; padding: 0; font-size: 12.5px; line-height: 1.75; color: var(--muted); }
+.rs-legend b { color: var(--text); }

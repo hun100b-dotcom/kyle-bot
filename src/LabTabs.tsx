@@ -26,6 +26,65 @@ const TP_LIST: number[] = [...LAB_TP_LIST];
 const ENTRY_MODES = Object.keys(LAB_ENTRY_LABEL) as LabEntryMode[];
 const STOP_MODES = Object.keys(LAB_STOP_LABEL) as LabStopMode[];
 
+const ago = (ms: number): string => {
+  const m = Math.max(0, Math.round(ms / 60_000));
+  if (m < 1) return "방금";
+  if (m < 90) return `${m}분 전`;
+  const h = m / 60;
+  return h < 48 ? `${h.toFixed(1)}시간 전` : `${Math.round(h / 24)}일 전`;
+};
+
+/**
+ * [v0.69.0 — 오너 요청 "신호 로우 마지막이 04시인데 실시간이 맞나? 모든 탭이 실시간 데이터인지 의심 없이 확인할 곳"]
+ *   연구소 모든 탭 맨 위에 붙는 "데이터 신선도" 띠. 지금 시각·마지막 스캔·가장 최근 신호의 시각을 나란히 보여 주고,
+ *   "새 신호가 없는 이유"(휴무 시간 / 기록 꺼짐 / 스캔 멈춤 / 패턴이 드묾)를 직접 말해 준다 — 오래된 데이터를 실시간처럼 보여 주지 않는다.
+ */
+export function LabFreshBar({ lab }: { lab: LabApi }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const id = setInterval(() => setNow(Date.now()), 30_000); return () => clearInterval(id); }, []);
+  const s = lab.summary;
+  if (!s) return null;
+  const st = s.status;
+  const sigs = s.signals;
+  const latest = sigs.length ? Math.max(...sigs.map((r) => r.c2T)) + 5 * 60_000 : null; // 신호 봉 마감 시각
+  const rt = sigs.filter((r) => !r.backfilled).length;
+  const lastScanAge = st.lastTickAtMs != null ? now - st.lastTickAtMs : null;
+  let tone: "ok" | "pause" | "off" | "bad";
+  let head: string;
+  let why: string;
+  if (!st.enabled) {
+    tone = "off"; head = "⚪ 기록 꺼짐 — 새 데이터가 쌓이지 않습니다";
+    why = "아래 데이터는 마지막으로 기록을 켜 둔 시점까지의 것입니다. [신호기록 현황]에서 켜면 이어서 쌓입니다.";
+  } else if (st.collect?.paused) {
+    tone = "pause"; head = "⏸ 지금은 수집 휴무 시간 — 정상입니다";
+    why = `${st.collect.pauseReason ?? "휴무 시간대"}에는 시세가 얇아 일부러 수집을 쉽니다${st.collect.resumesAtMs ? ` (${kst(st.collect.resumesAtMs, "MM-dd HH:mm")} 재개)` : ""}. 그래서 마지막 신호가 그 이전 시각인 게 맞습니다.`;
+  } else if (lastScanAge != null && lastScanAge > 15 * 60_000) {
+    tone = "bad"; head = `⚠️ 스캔이 ${ago(lastScanAge)}부터 없습니다`;
+    why = "이 앱이 꺼져 있었거나(수집은 앱이 켜져 있는 동안만) 스캔이 멈췄을 수 있습니다. 앱을 켜 두고 [지금 스캔]을 눌러 보세요. 아래 데이터는 그 시점까지의 것입니다.";
+  } else if (st.scanning || lastScanAge == null) {
+    tone = "ok"; head = "🟢 수집 중"; why = lastScanAge == null ? "첫 스캔을 기다리는 중입니다." : "지금 스캔이 진행 중입니다.";
+  } else {
+    tone = "ok"; head = "✅ 실시간으로 수집 중";
+    why = latest != null && now - latest > 2 * 3600_000
+      ? "마지막 신호가 오래된 건 이 패턴이 드물어서입니다(스캔은 정상 — 최근 신호가 없을 뿐). 도지·양봉 연속·거래량 조건을 모두 채우는 경우가 하루 몇 번뿐입니다."
+      : "스캔이 5분마다 정상적으로 돌고 있습니다.";
+  }
+  return (
+    <div className={`lab-fresh ${tone}`} data-guide="lab-fresh">
+      <b>{head}</b>
+      <span>
+        🕒 지금 {kst(now, "MM-dd HH:mm")} · 마지막 스캔 {st.lastTickAtMs ? `${kst(st.lastTickAtMs, "HH:mm:ss")} (${ago(lastScanAge ?? 0)})` : "—"} ·
+        가장 최근 신호 {latest ? `${kst(latest, "MM-dd HH:mm")} 마감 (${ago(now - latest)})` : "—"}
+      </span>
+      <span>{why}</span>
+      <span>
+        표시 중인 신호 {sigs.length}건 중 <b>실시간 포착 {rt}건</b> · 늦게 발견(백필) {sigs.length - rt}건 —
+        "실시간"은 신호 봉이 마감된 뒤 10분 안에 발견한 신호만이고, 나머지는 행마다 <u>백필</u> 표시가 붙습니다(과거 데이터에서 규칙대로 찾은 것).
+      </span>
+    </div>
+  );
+}
+
 /** 연구소 화면 공통 머리말: 데이터가 없을 때/폰 미러일 때 안내. */
 function LabNotice({ lab }: { lab: LabApi }) {
   const s = lab.summary;
@@ -101,6 +160,7 @@ export function LabLiveTab({ lab }: { lab: LabApi }) {
           5분마다(이 앱이 켜져 있는 동안) 토스 거래량 순위 상위 종목을 훑어 패턴을 찾고, 찾을 때마다 <b>가상 매수 → 로직대로 가상 매매 → 결과</b>까지
           전부 <b>로우 데이터</b>로 쌓습니다. 이 데이터로 매수 방식·손절·익절을 실제 숫자로 정한 뒤에야 실매수에 연결합니다.
         </p>
+        <LabFreshBar lab={lab} />
         <LabNotice lab={lab} />
 
         {st?.note && <p className="lab-note">ℹ️ {st.note}</p>}
@@ -150,7 +210,7 @@ export function LabLiveTab({ lab }: { lab: LabApi }) {
           <button className="btn btn-start" disabled={lab.busy || !dirty} onClick={save}>설정 저장</button>
         </div>
         <p className="hint small">
-          거래량 순위: 10~200위(기본 60). 도지 몸통 5~30%(기본 15), 신호 몸통 40~90%(기본 60), 거래량 배수 1~5배(기본 1.5 = 150%),
+          거래량 순위: 10~200위(기본 120). 도지 몸통 5~30%(기본 15), 신호 몸통 40~90%(기본 60), 거래량 배수 1~5배(기본 1.5 = 150%),
           최소 봉 크기 0~5%(기본 0.5 — 호가 1~2틱짜리 초소형 봉은 몸통 "비율"이 100%여도 의미 있는 돌파가 아니라서 뺍니다).
           가격대는 [스크리닝 기준]의 가격대($1~9 기본)를 그대로 씁니다. 기준은 신호가 기록될 때의 값으로 판정되며, 나중에 바꿔도 이미 쌓인 로우는 그대로입니다.
         </p>
@@ -364,6 +424,7 @@ export function LabSignalsTab({ lab }: { lab: LabApi }) {
           한 줄 = 패턴이 인정된 신호 한 건(2번째 캔들 마감 시점). 아래 "기준 변형"으로 가상 매매했을 때의 결과를 줄마다 보여 줍니다.
           줄을 누르면 그 신호의 <b>캔들 차트와 모든 변형(최대 약 100가지)의 개별 결과</b>가 열립니다.
         </p>
+        <LabFreshBar lab={lab} />
         <LabNotice lab={lab} />
 
         <div className="form-row lab-filters">
@@ -553,6 +614,7 @@ export function LabCompareTab({ lab }: { lab: LabApi }) {
           같은 신호들을 변형별로 가상 매매한 결과를 비교합니다. <b>기대값</b> = 신호 하나당 평균 순손익(%)이며, 미체결은 0으로 칩니다 — 체결이 잘 안 되는 방식은
           승률이 높아 보여도 기대값이 낮게 나오므로 "정말 쓸 만한가"를 가장 정직하게 보여 주는 숫자예요.
         </p>
+        <LabFreshBar lab={lab} />
         <LabNotice lab={lab} />
 
         {s && (

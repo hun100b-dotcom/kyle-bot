@@ -956,8 +956,30 @@ export interface AutoPosition {
 }
 
 /** 자동매매 화면 현황판에 보여줄 요약. */
+/**
+ * [v0.69.0 긴급 — 카일 실사용 보고: "매도(익절·손절) 주문이 자동으로 안 들어가는 종목이 있어 수동으로 매도했다"]
+ *   체결은 됐는데 보호주문(OCO) 등록이 실패하면(WETO: 매도 가능 수량 부족 422 / QTEX: 감시가 0 400 / AIB 등) 예전엔
+ *   포지션을 추적에서 지우고 "직접 확인 필요"만 남긴 채 끝났다 — 주식은 계좌에 그대로 있는데 봇은 더 이상 쳐다보지 않았다.
+ *   이제 그런 종목은 "보호 대기(unprotected)" 목록에 올라 **보호가 걸릴 때까지 봇이 계속 다시 시도**한다.
+ */
+export interface UnprotectedPos {
+  symbol: string;
+  entry: number;
+  tp: number;
+  sl: number;
+  quantity: number; //    등록 당시 수량(실제 복구는 항상 실계좌 보유 수량 기준)
+  enteredAtMs: number;
+  reason: string;
+  sinceMs: number;
+  attempts: number;
+  lastAttemptMs: number | null;
+  lastError: string | null;
+}
+
 export interface AutoTradeStatus {
   enabled: boolean;
+  /** [v0.69.0] 보호주문이 없어 봇이 복구를 시도 중인 보유 종목(없으면 빈 배열). */
+  unprotected: UnprotectedPos[];
   positions: AutoPosition[];
   realizedPnlUsd: number;
   maxPositions: number;
@@ -1324,6 +1346,15 @@ export class ToolEngine extends EventEmitter {
   private autoTradeTickPromise: Promise<void> | null = null;
   private autoTradeRealizedPnlUsd = 0; // 이번 자동매매 실행 동안 누적 실현손익(달러, 손실이면 음수)
   private autoTradePositions: AutoPosition[] = []; // 지금 자동매매로 감시·보유 중인 포지션(파일로 영속)
+  /** [v0.69.0] 보호주문 없이 남은 보유 종목 — 가드가 보호가 걸리거나 팔릴 때까지 반복 시도(파일로 영속, 재시작해도 이어감). */
+  private autoUnprotected: UnprotectedPos[] = [];
+  private guardTimer: ReturnType<typeof setTimeout> | null = null;
+  private guardBusy = false;
+  /** 조건주문이 토스에서 사라졌는데 실계좌엔 주식이 남은 경우(WHLR·NAUT)에도 자동으로 다시 보호할지(기본 켬). */
+  private autoReprotectVanished = true;
+  /** [테스트 전용] 보호 시장가 매도 재시도 간격. 실사용 기본 2초/4초/8초. */
+  private marketSellRetryDelaysMs: number[] = [2000, 4000, 8000];
+  private guardIntervalMs = 30_000;
   /** [v0.60.0] reconcileAutoPositions가 포지션별 조건주문 조회 연속 실패 횟수를 세는 곳
    *  (메모리만 — 재시작하면 0부터 다시 센다, 굳이 파일로 남길 값은 아니다). */
   private reconcileFailCounts: Map<string, number> = new Map();
@@ -1502,6 +1533,8 @@ export class ToolEngine extends EventEmitter {
     this.loadAutoPositions(); // [v0.30.1] 감시 중 포지션(긴급수정 — 재시작해도 이어받기)
     this.loadAutoRuns(); // [v0.62.1] 자동매매 실행 기록
     this.loadLab(); // [v0.65.0] 매매연구소 신호 로우
+    // [v0.69.0] 재시작 전에 보호 못 받던 종목이 남아 있으면 30초 뒤부터 가드가 이어서 처리한다.
+    if (this.autoUnprotected.length > 0 && !opts?.forceMock) this.scheduleGuard(30_000);
     // 신호 기록 모드는 주문을 내지 않는 읽기 전용이라 켜 둔 상태를 재시작해도 유지한다(테스트용 forceMock은 자동 시작 안 함).
     if (this.labEnabled && !opts?.forceMock) this.startLabTimer();
   }
@@ -1574,6 +1607,8 @@ export class ToolEngine extends EventEmitter {
     if (Number.isFinite(aesb) && aesb >= 0) this.autoTradeEmaStopBufferPct = aesb;
     if (process.env.AUTO_REENTRY_BLOCK_ENABLED === "false") this.autoTradeReentryBlockEnabled = false;
     else if (process.env.AUTO_REENTRY_BLOCK_ENABLED === "true") this.autoTradeReentryBlockEnabled = true;
+    if (process.env.AUTO_REPROTECT_VANISHED === "false") this.autoReprotectVanished = false;
+    else if (process.env.AUTO_REPROTECT_VANISHED === "true") this.autoReprotectVanished = true;
     const alsl = Number(process.env.AUTO_LOSS_STREAK_LIMIT);
     if (process.env.AUTO_LOSS_STREAK_LIMIT && Number.isFinite(alsl) && alsl >= 0) this.autoTradeLossStreakLimit = Math.round(alsl);
     // [v0.61.9] 마지막으로 읽은 업데이트 내역 버전 복원(이 기기 전용 — 재시작해도 팝업 중복 안 뜨게).
@@ -1664,6 +1699,7 @@ export class ToolEngine extends EventEmitter {
       autoTradeEmaStopBufferPct: this.autoTradeEmaStopBufferPct,
       autoTradeReentryBlockEnabled: this.autoTradeReentryBlockEnabled,
       autoTradeLossStreakLimit: this.autoTradeLossStreakLimit,
+      autoTradeReprotectVanished: this.autoReprotectVanished, // [v0.69.0]
       autoTradeEnabled: this.autoTradeEnabled,
       systemPauseEnabled: this.systemPauseEnabled, // [v0.44.0] 시스템 휴무 시간대(05:00~17:00 KST) 기능
       // [v0.28.0] 자동매매 스크리너 조건(4개)
@@ -1721,7 +1757,9 @@ export class ToolEngine extends EventEmitter {
     emaStopBufferPct?: number;
     reentryBlockEnabled?: boolean;
     lossStreakLimit?: number;
+    reprotectVanished?: boolean; // [v0.69.0] 보호주문이 사라진 보유 종목 자동 재보호
   }) {
+    if (typeof input.reprotectVanished === "boolean") this.autoReprotectVanished = input.reprotectVanished;
     if (input.slMode === "fixed" || input.slMode === "ema") this.autoTradeSlMode = input.slMode;
     if (typeof input.emaStopBufferPct === "number" && Number.isFinite(input.emaStopBufferPct) && input.emaStopBufferPct >= 0) {
       this.autoTradeEmaStopBufferPct = Math.min(10, input.emaStopBufferPct); // 0~10%
@@ -2069,6 +2107,7 @@ export class ToolEngine extends EventEmitter {
       `AUTO_EMA_STOP_BUFFER_PCT=${this.autoTradeEmaStopBufferPct}`,
       `AUTO_REENTRY_BLOCK_ENABLED=${this.autoTradeReentryBlockEnabled}`,
       `AUTO_LOSS_STREAK_LIMIT=${this.autoTradeLossStreakLimit}`,
+      `AUTO_REPROTECT_VANISHED=${this.autoReprotectVanished}`, // [v0.69.0]
       `LAST_SEEN_CHANGELOG=${this.lastSeenChangelogVersion ?? ""}`, // [v0.61.9] 이 기기가 마지막으로 읽은 업데이트 내역 버전
       `SYSTEM_PAUSE_ENABLED=${this.systemPauseEnabled ? "true" : "false"}`, // [v0.44.0] 시스템 휴무 시간대 기능
       // --- [v0.28.0] 자동매매 스크리너 조건(4개) ---
@@ -3742,7 +3781,25 @@ export class ToolEngine extends EventEmitter {
       //   현재가(cur)를 손익 계산의 기준으로 쓴다. 변동성 큰 저가주 특성상 실제 체결가와
       //   몇 센트 차이가 날 수 있다는 점을 기록에 정직하게 남긴다(아래 note 참고) — "정확한
       //   체결가"가 아니라 "판단 시점의 추정 기준가"임을 숨기지 않는다.
-      await this.placeSell({ symbol, quantity, orderType: "MARKET" });
+      // [v0.69.0] 한 번 실패하면 포기하던 것을 재시도로 바꾼다 — WETO 실사례는 "매도 가능 수량 부족(422)"으로 이 시장가 매도가
+      //   실패하자 그대로 무보호 상태로 끝났다. 실제 매도 가능 수량을 확인해 그만큼만(전량 아니면 가드가 나머지를 이어서) 판다.
+      let soldAll = false;
+      let lastSellErr: unknown = null;
+      for (let attempt = 0; attempt <= this.marketSellRetryDelaysMs.length; attempt++) {
+        if (attempt > 0) await new Promise((r) => setTimeout(r, this.marketSellRetryDelaysMs[attempt - 1]));
+        try {
+          const sq = await this.sellableQty(symbol).catch(() => null);
+          const qty = sq != null && Number.isFinite(sq) ? Math.min(quantity, Math.floor(sq)) : quantity;
+          if (qty <= 0) { lastSellErr = new Error("매도 가능 수량이 아직 0입니다(체결 직후 반영 대기)"); continue; }
+          await this.placeSell({ symbol, quantity: qty, orderType: "MARKET" });
+          soldAll = qty >= quantity;
+          if (!soldAll) { lastSellErr = new Error(`일부(${qty}/${quantity}주)만 매도 가능 — 나머지는 가드가 이어서 처리`); }
+          break;
+        } catch (e) {
+          lastSellErr = e;
+        }
+      }
+      if (!soldAll) throw lastSellErr instanceof Error ? lastSellErr : new Error(String(lastSellErr ?? "시장가 매도 실패"));
       this.addJournal({
         kind: "info",
         symbol,
@@ -5301,7 +5358,9 @@ export class ToolEngine extends EventEmitter {
         lastScan?: ScreenRun | null;
         lastCycleAt?: string | null;
         lastCycleAtMs?: number | null;
+        unprotected?: UnprotectedPos[];
       };
+      this.autoUnprotected = Array.isArray(raw.unprotected) ? raw.unprotected : [];
       this.autoTradePositions = Array.isArray(raw.positions) ? raw.positions : [];
       this.autoTradeUsedKeys = new Set(Array.isArray(raw.usedKeys) ? raw.usedKeys : []);
       this.autoTradeLastScan = raw.lastScan ?? null;
@@ -5326,6 +5385,7 @@ export class ToolEngine extends EventEmitter {
         lastScan: this.autoTradeLastScan,
         lastCycleAt: this.autoTradeLastCycleAt,
         lastCycleAtMs: this.autoTradeLastCycleAtMs,
+        unprotected: this.autoUnprotected,
       };
       const tmp = this.autoPositionsPath + ".tmp";
       writeFileSync(tmp, JSON.stringify(payload, null, 2), "utf8");
@@ -6758,6 +6818,15 @@ export class ToolEngine extends EventEmitter {
           //   199개가 되어 **멀쩡한 종목이 '데이터 부족'으로 튕기는** 일이 생긴다.
           //   (지금 시각이 5분 경계인지에 따라 됐다 안 됐다 해서 발견하기 어려웠다)
           //   그래서 여유분을 더 받는다.
+          // [v0.69.0 — 오너 질문 "오늘 매매가 1건뿐인데 기준이 빡세졌나?"] 실제 스캔 기록을 보니 상위 54종목 중 36개가 가격대(~9) 밖이었다
+          //   (거래량 순위 상위는 고가 종목이 많다). 어차피 탈락할 종목의 캔들을 종목당 6번씩 받느라 스캔 종목 수를 못 늘렸다 — 순위 목록에 있는
+          //   현재가가 가격대에서 10% 이상 벗어난 종목은 캔들 조회 없이 "가격대 밖"으로 바로 처리한다(경계 근처는 그대로 정밀 판정). 그만큼 스캔
+          //   종목 수를 크게 늘려도(예: 150~200) 요청 부담이 거의 늘지 않는다. 판정 결과는 예전과 동일(가격대 밖 → none).
+          if (Number.isFinite(rk.lastPrice) && (rk.lastPrice < priceMin * 0.9 || rk.lastPrice > priceMax * 1.1)) {
+            results.push({ ...this.insufficientResult(rk, 0, 0, priceMin, priceMax), status: "none", note: "가격대 밖(캔들 조회 생략)" });
+            done++;
+            continue;
+          }
           const oneMin = await this.getCandles1mCached(rk.symbol); // [v0.65.0] 자동매매 스캔·매매연구소가 같은 1분봉을 2분간 공유(API 부하 절감)
           // [v0.6.2] 형성 중(미완성)인 마지막 5분봉은 판정에서 제외한다(완성된 봉만 사용).
           //   진행 중 봉으로 판정하면 봉 마감 후 음↔양이 뒤집혀 오판정이 난다(특히 HA).
@@ -7140,6 +7209,7 @@ export class ToolEngine extends EventEmitter {
   getAutoTradeStatus(): AutoTradeStatus {
     return {
       enabled: this.autoTradeEnabled,
+      unprotected: this.autoUnprotected.map((u) => ({ ...u })),
       positions: this.autoTradePositions.map((p) => ({ ...p })),
       realizedPnlUsd: Math.round(this.autoTradeRealizedPnlUsd * 100) / 100,
       maxPositions: this.autoTradeMaxPositions,
@@ -7379,6 +7449,9 @@ export class ToolEngine extends EventEmitter {
       exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
       note: finalNote,
     });
+    // [v0.69.0] WHLR·NAUT 실사례 — 진입 6분 뒤 조건주문이 토스에서 사라졌는데 주식은 그대로. 경고만 하고 끝내지 않고 다시 보호한다.
+    //   (기존 경고·기록을 모두 남긴 뒤에 가드 목록에 올린다)
+    if (stillHeld && this.autoReprotectVanished) this.registerUnprotected(pos, "조건주문이 토스에서 사라졌는데 실계좌에 주식이 남아 있음");
   }
 
   /**
@@ -7535,6 +7608,10 @@ export class ToolEngine extends EventEmitter {
           });
         } else {
           // OCO 등록 자체가 실패 — registerOcoForFilled가 이미 상세 사유를 저널에 남겼다.
+          //   [v0.69.0] 자리만 비우고 끝내지 않고, 가드가 계속 보호를 시도하도록 목록에 올린다.
+          this.registerUnprotected(pos, `재시작 후 보호주문 등록 실패: ${result.status === "oco_failed" ? result.error : ""}`);
+          if (idx !== -1) this.autoTradePositions.splice(idx, 1);
+          this.saveAutoPositions();
           this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
             status: "oco_failed", exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
             note: `재시작 후 재확인 — 체결은 됐지만 보호주문 등록 실패, 직접 확인 필요: ${result.status === "oco_failed" ? result.error : ""}`,
@@ -7556,6 +7633,128 @@ export class ToolEngine extends EventEmitter {
         });
       }
       // pending/partial/unknown이면 다음 사이클(최대 5분 뒤)에 다시 확인한다.
+    }
+  }
+
+  // ==========================================================================
+  // [v0.69.0 긴급] 보호 가드 — "체결됐는데 익절·손절 주문이 안 걸린 종목"을 봇이 끝까지 책임진다
+  //   [원인 분석 — 그룹 기록 실사례]
+  //     · WETO(카일, 10-07): 체결 후 가격이 감시가 밖이라 즉시 시장가 매도를 시도했으나 "매도 가능 수량 부족(422)" → 1회 실패로 포기.
+  //     · QTEX(카일, 10-06): OCO 등록이 "감시 가격은 0으로 설정할 수 없습니다(400)"로 거부 → 포기.
+  //     · WHLR·NAUT(카일): 진입 6분 뒤 조건주문이 토스에서 사라졌는데 주식은 82·87주 그대로 → 경고만 남기고 추적 종료.
+  //     · AIB 등 "자동 취소 시도 실패".
+  //     공통 결함: 실패하면 포지션을 추적에서 지우고 사람에게 떠넘겼다(주식은 무보호로 계좌에 남음).
+  //   [수정] 실패한 종목을 autoUnprotected에 올리고, 30초마다(그리고 5분 사이클마다) 아래 순서로 보호가 걸릴 때까지 반복한다:
+  //     ① 실계좌 보유 수량 확인(0이면 이미 팔린 것 → 종료) ② 이미 걸린 조건주문이 있으면 보호 확인 → 종료
+  //     ③ 실제 매도 가능 수량만큼으로 OCO 재등록(현재가가 감시가 안일 때) / 밴드 밖이면 시장가 매도.
+  //   자동매매 켜짐 여부와 무관하게 돈다(이미 가진 주식을 지키는 일이므로).
+  // ==========================================================================
+  private registerUnprotected(pos: AutoPosition, reason: string): void {
+    const sym = pos.symbol.toUpperCase();
+    if (this.autoUnprotected.some((u) => u.symbol === sym)) return;
+    this.autoUnprotected.push({
+      symbol: sym, entry: pos.entry, tp: pos.tp, sl: pos.sl, quantity: pos.quantity, enteredAtMs: pos.enteredAtMs,
+      reason, sinceMs: Date.now(), attempts: 0, lastAttemptMs: null, lastError: null,
+    });
+    this.saveAutoPositions();
+    this.addJournal({
+      kind: "info", symbol: sym,
+      summary: `🛡 ${sym}: 보호주문이 없는 채로 보유 중입니다(${reason}) — 봇이 보호가 걸릴 때까지 계속 다시 시도합니다.`,
+      notify: true, notifyTitle: `🛡 보호 복구 시작: ${sym}`,
+    });
+    this.scheduleGuard(3000);
+  }
+
+  private scheduleGuard(delayMs: number): void {
+    if (this.guardTimer || this.autoUnprotected.length === 0) return;
+    this.guardTimer = setTimeout(() => { this.guardTimer = null; void this.runGuard(); }, delayMs);
+  }
+
+  /** 한 번의 가드 점검. 남은 종목이 있으면 다음 점검을 예약한다. */
+  async runGuard(): Promise<void> {
+    if (this.guardBusy || this.autoUnprotected.length === 0) return;
+    this.guardBusy = true;
+    try {
+      if (this.isDryRun()) return; // 드라이런엔 실제 보유가 없다
+      await this.prepareBackend();
+      const held = new Map<string, number>();
+      try {
+        const h = (await getHoldings()) as Record<string, unknown>;
+        for (const it of (h?.items as Array<Record<string, unknown>>) ?? []) {
+          const q = Number(it.quantity);
+          if (Number.isFinite(q)) held.set(String(it.symbol ?? "").toUpperCase(), q);
+        }
+      } catch {
+        return; // 보유를 확인할 수 없으면 아무것도 하지 않는다(눈 감고 팔지 않음) — 다음 점검에서 재시도
+      }
+      let open: ConditionalOrderResponse[] | null = null;
+      try { open = await listConditionalOrders("OPEN"); } catch { open = null; }
+
+      for (const u of [...this.autoUnprotected]) {
+        const done = (why: string, hist?: Partial<AutoTradeHistoryEntry>) => {
+          this.autoUnprotected = this.autoUnprotected.filter((x) => x.symbol !== u.symbol);
+          this.saveAutoPositions();
+          this.addJournal({ kind: "info", symbol: u.symbol, summary: `🛡 ${u.symbol} 보호 확인 — ${why}` });
+          if (hist) this.updateAutoTradeHistory(u.symbol, u.entry, u.enteredAtMs, hist);
+        };
+        const qtyHeld = held.get(u.symbol) ?? 0;
+        if (qtyHeld <= 0) { done("보유 수량이 없습니다(이미 매도됨)"); continue; }
+        if (open && open.some((o) => String(o.symbol ?? "").toUpperCase() === u.symbol)) { done("토스에 익절/손절 조건주문이 걸려 있습니다"); continue; }
+
+        u.attempts++;
+        u.lastAttemptMs = Date.now();
+        try {
+          const sq = await this.sellableQty(u.symbol).catch(() => null);
+          const qty = Math.floor(sq != null && Number.isFinite(sq) ? Math.min(qtyHeld, sq) : qtyHeld);
+          if (qty <= 0) throw new Error("매도 가능 수량이 아직 0입니다(체결·정산 반영 대기)");
+          const { price: cur } = await getPrice(u.symbol);
+          // QTEX 실사례("감시 가격은 0으로 설정할 수 없습니다") — 기록된 감시가가 비정상(0 이하·역전)이면 진입가 기준 기본 익절/손절로 다시 계산한다.
+          let tp = u.tp;
+          let sl = u.sl;
+          if (!(tp > 0 && sl > 0 && tp > sl)) {
+            tp = roundPrice(u.entry * (1 + this.defaultTpPct / 100));
+            sl = roundPrice(u.entry * (1 - this.defaultSlPct / 100));
+            if (!(tp > 0 && sl > 0 && tp > sl)) throw new Error(`감시가를 계산할 수 없습니다(진입가 ${u.entry})`);
+          }
+          if (isWithinOcoBand(cur, tp, sl)) {
+            const j = await this.placeOco({
+              symbol: u.symbol, quantity: qty, tpTrigger: tp, tpPrice: tp, slTrigger: sl, slPrice: roundPrice(sl * 0.99),
+              expireDate: this.autoTradeExpireDate(),
+              rationale: { technique: "split3", source: "auto", level: 1, entry: u.entry, tp, sl, priceAtOrder: null },
+            });
+            const id = (j.detail as { conditionalOrderId?: string } | undefined)?.conditionalOrderId;
+            if (!id) throw new Error("조건주문 번호를 확인할 수 없습니다.");
+            // 다시 정상 추적(active)으로 올려 익절/손절 발동을 이어서 감시한다.
+            this.autoTradePositions.push({ symbol: u.symbol, entry: u.entry, tp, sl, quantity: qty, enteredAtMs: u.enteredAtMs, status: "active", conditionalOrderId: id });
+            done(`익절/손절 조건주문을 다시 등록했습니다(${qty}주)`, { status: "active", exitedAt: null, conditionalOrderId: id, note: "보호 가드가 익절/손절 조건주문을 복구 등록함" });
+          } else {
+            // 가격이 이미 감시가 밖 — 조건주문을 걸 수 없으니 지금 시장가로 정리한다.
+            await this.placeSell({ symbol: u.symbol, quantity: qty, orderType: "MARKET" });
+            const pnlUsd = (cur - u.entry) * qty;
+            this.autoTradeRealizedPnlUsd += pnlUsd;
+            done(`가격($${cur})이 감시가 밖이라 시장가로 매도했습니다(${qty}주)`, {
+              status: pnlUsd >= 0 ? "closed_win" : "closed_loss", exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
+              exitPrice: cur, pnlUsd: Math.round(pnlUsd * 100) / 100, pnlPct: Math.round(((cur - u.entry) / u.entry) * 10000) / 100,
+              note: "보호 가드가 시장가로 정리함(체결가는 매도 직전 조회한 추정가)",
+            });
+          }
+        } catch (e) {
+          u.lastError = String(e).replace(/^Error:\s*/, "");
+          this.saveAutoPositions();
+          // 알림은 1·5·20·50번째 실패에만(도배 방지)
+          if ([1, 5, 20, 50].includes(u.attempts)) {
+            this.addJournal({
+              kind: "info", symbol: u.symbol,
+              summary: `🚨 ${u.symbol} 보호 복구 ${u.attempts}번째 시도 실패: ${u.lastError} — 계속 시도합니다. 급하면 토스 앱에서 직접 익절/손절을 걸어 주세요.`,
+              notify: true, notifyTitle: `🚨 보호 복구 실패(${u.attempts}회): ${u.symbol}`,
+            });
+          }
+        }
+      }
+    } finally {
+      this.guardBusy = false;
+      if (this.autoUnprotected.length > 0) this.scheduleGuard(this.guardIntervalMs);
+      void this.pushLiveState(true);
     }
   }
 
@@ -7589,7 +7788,13 @@ export class ToolEngine extends EventEmitter {
       //   에서는 이미 빠졌으니 그 경로가 "재시작 후 복구"와 똑같이 집어 준다).
     } else {
       // 타임아웃/취소/실패/OCO등록실패 → 이 자리를 비운다(다음 사이클에 다시 채워질 수 있음).
+      const droppedPos = this.autoTradePositions[idx];
       this.autoTradePositions.splice(idx, 1);
+      // [v0.69.0 긴급] 체결은 됐는데 보호주문이 안 걸린 채 끝난 경우 — 자리만 비우고 잊어버리면 주식이 무보호로 남는다.
+      //   가드 목록에 올려 보호가 걸릴 때까지 계속 다시 시도한다.
+      if (res.status === "oco_failed" || res.status === "timeout") {
+        if (res.status === "oco_failed") this.registerUnprotected(droppedPos, `보호주문 등록 실패: ${res.error}`);
+      }
       this.saveAutoPositions();
       const closedAt = DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss");
       if (res.status === "cancelled_by_timeout") {
@@ -8163,6 +8368,7 @@ export class ToolEngine extends EventEmitter {
       }
     } finally {
       this.autoTradeTickBusy = false;
+      if (this.autoUnprotected.length > 0) this.scheduleGuard(1000); // [v0.69.0] 5분 사이클마다 보호 대기 종목을 한 번 더 확인
       this.touchAutoRun(); // [v0.62.1] 마지막 활동 시각·오류 카운터·보유 포지션을 실행 기록에 반영(파일 저장 포함)
       // [v0.61.4] 사이클마다 최신 스캔·사이클 시각을 파일에도 반영한다(재시작해도 살아남게 —
       //   positions만 영속화돼 있고 lastScan은 메모리 전용이던 게 "재시작 직후 폰 화면이

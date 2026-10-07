@@ -132,6 +132,7 @@ interface ToolSettings {
   autoTradeEmaStopBufferPct?: number;
   autoTradeReentryBlockEnabled?: boolean;
   autoTradeLossStreakLimit?: number;
+  autoTradeReprotectVanished?: boolean; // [v0.69.0]
   autoTradeEnabled: boolean;
   /** [v0.44.0] 시스템 휴무 시간대(매일 05:00~17:00 KST — 스크리닝·주문·자동매매 전부 정지) 기능
    *  켜짐 여부. 다른 자동매매 토글과 달리 이건 재시작해도 유지된다(안전장치). */
@@ -180,8 +181,14 @@ interface AutoPosition {
 }
 
 /** [v0.26.0] 자동매매 현황판. */
+/** [v0.69.0] 보호주문 없이 남은 보유 종목 — 봇이 보호가 걸릴 때까지 반복 시도 중 */
+interface UnprotectedPos {
+  symbol: string; entry: number; tp: number; sl: number; quantity: number; enteredAtMs: number;
+  reason: string; sinceMs: number; attempts: number; lastAttemptMs: number | null; lastError: string | null;
+}
 interface AutoTradeStatus {
   enabled: boolean;
+  unprotected?: UnprotectedPos[];
   positions: AutoPosition[];
   realizedPnlUsd: number;
   maxPositions: number;
@@ -906,6 +913,7 @@ interface KyletoolBridge {
     emaStopBufferPct?: number;
     reentryBlockEnabled?: boolean;
     lossStreakLimit?: number;
+    reprotectVanished?: boolean; // [v0.69.0] 보호주문이 사라진 보유 종목 자동 재보호
   }): Promise<ToolSettings>;
   /** [v0.44.0] 지금 "시스템 휴무 시간대(또는 휴장)"인지 + 왜 + 언제 재개되는지. */
   getSystemPauseStatus(): Promise<{ paused: boolean; reason: string | null; resumesAtMs: number | null }>;

@@ -907,7 +907,7 @@ function App() {
   //   반면 이건 "둘 중 하나 고르는" 선택지라 모양이 달라 섞으면 폼 렌더 로직이 지저분해진다.
   const [autoEntryLevel, setAutoEntryLevel] = useState<1 | 2>(1);
   // [v0.63.0] 방어 전략 — 손절 방식·EMA 아래 여유%·손절 종목 당일 재진입 금지·연속 손절 자동중지
-  const [defenseForm, setDefenseForm] = useState({ slMode: "fixed" as "fixed" | "ema", emaStopBufferPct: "1.5", reentryBlockEnabled: true, lossStreakLimit: "3" });
+  const [defenseForm, setDefenseForm] = useState({ slMode: "fixed" as "fixed" | "ema", emaStopBufferPct: "1.5", reentryBlockEnabled: true, lossStreakLimit: "3", reprotectVanished: true });
   const [autoStatus, setAutoStatus] = useState<AutoTradeStatus | null>(null);
   const [autoBusy, setAutoBusy] = useState(false);
   // [v0.61.0] 상태 미러(capri_live_state) — PC가 마지막으로 올린 시각(ms). canReconcileLive가
@@ -1295,6 +1295,7 @@ function App() {
         emaStopBufferPct: String(s.autoTradeEmaStopBufferPct ?? 1.5),
         reentryBlockEnabled: s.autoTradeReentryBlockEnabled ?? true,
         lossStreakLimit: String(s.autoTradeLossStreakLimit ?? 3),
+        reprotectVanished: s.autoTradeReprotectVanished ?? true,
       });
       // [v0.28.0] 저장된 자동매매 스크리너 조건을 입력칸 초기값으로.
       setAutoScanForm({
@@ -2676,7 +2677,7 @@ ${msg}
       setTimeout(() => setSavedMsg(""), 4000);
       return;
     }
-    const defense = { slMode: defenseForm.slMode, emaStopBufferPct, reentryBlockEnabled: defenseForm.reentryBlockEnabled, lossStreakLimit };
+    const defense = { slMode: defenseForm.slMode, emaStopBufferPct, reentryBlockEnabled: defenseForm.reentryBlockEnabled, lossStreakLimit, reprotectVanished: defenseForm.reprotectVanished };
     if (
       maxPositions === null || maxPositions <= 0 ||
       maxLossPct === null || maxLossPct <= 0 ||
@@ -4288,6 +4289,21 @@ ${msg}
       {paneTab === "autoControl" && (
         <main className="grid">
           <section className="card wide">
+            {/* [v0.69.0 긴급] 보호주문 없는 보유 종목 경보 — 봇이 보호가 걸릴 때까지 계속 시도 중인 종목을 숨기지 않고 보여 준다 */}
+            {(autoStatus?.unprotected?.length ?? 0) > 0 && (
+              <div className="unprot-banner" role="alert">
+                <b>🚨 보호주문(익절·손절)이 없는 보유 종목 {autoStatus!.unprotected!.length}개 — 봇이 보호가 걸릴 때까지 계속 시도 중입니다</b>
+                <ul>
+                  {autoStatus!.unprotected!.map((u) => (
+                    <li key={u.symbol}>
+                      <b>{u.symbol}</b> · {u.reason} · 시도 {u.attempts}회{u.lastError ? ` · 마지막 실패: ${u.lastError}` : ""}
+                      <span className="hint small"> (진입 ${u.entry} → 익절 ${u.tp} / 손절 ${u.sl})</span>
+                    </li>
+                  ))}
+                </ul>
+                <span className="hint small">급하면 토스 앱에서 직접 익절/손절을 걸어도 됩니다 — 봇은 조건주문이 걸린 걸 확인하면 자동으로 멈춥니다.</span>
+              </div>
+            )}
             <h2>🤖 자동매매</h2>
             <p className="hint">
               5분마다 스스로 탐색해 <b>합격 종목을 삼분할 '1분할' 타점으로 자동 매수</b>하고, 체결되면 익절·손절까지
@@ -4374,6 +4390,11 @@ ${msg}
                   <input type="checkbox" checked={defenseForm.reentryBlockEnabled}
                     onChange={(e) => setDefenseForm({ ...defenseForm, reentryBlockEnabled: e.target.checked })} />
                   🛡 손절된 종목은 그날 재진입 금지
+                </label>
+                <label className="radio" title="체결 후 익절·손절 주문이 안 걸렸거나, 걸었던 조건주문이 토스에서 사라졌는데 주식이 계좌에 남아 있으면 봇이 다시 보호주문을 걸거나 정리합니다. (등록 실패한 경우는 이 설정과 무관하게 항상 복구)">
+                  <input type="checkbox" checked={defenseForm.reprotectVanished}
+                    onChange={(e) => setDefenseForm({ ...defenseForm, reprotectVanished: e.target.checked })} />
+                  🛡 조건주문이 사라진 보유 종목 자동 재보호
                 </label>
                 <label>🛡 연속 손절 시 자동 중지 (회, 0=끔)
                   <input type="text" inputMode="numeric" value={defenseForm.lossStreakLimit}

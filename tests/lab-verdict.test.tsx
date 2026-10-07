@@ -490,3 +490,53 @@ describe("[v0.68.0] 검증기 오탐 수정(실제 데이터에서 발견) + 수
     expect(none.pace.perHour).toBeNull(); // 활성 1시간 미만이면 속도 계산 안 함
   });
 });
+
+// =============================================================================
+// [v0.69.0] 데이터 신선도 띠(모든 연구소 탭) + % 설명
+// =============================================================================
+import { LabFreshBar, LabLiveTab, LabSignalsTab } from "../src/LabTabs";
+
+describe("[v0.69.0] 데이터 신선도 띠 — 오래된 데이터를 실시간처럼 보여 주지 않는다", () => {
+  const labWith = (patch: Record<string, unknown>) => {
+    const lab = fakeLab(manySignals(3));
+    const st = (lab.summary as unknown as { status: Record<string, unknown> }).status;
+    Object.assign(st, patch);
+    return lab;
+  };
+
+  it("기록이 꺼져 있으면 '새 데이터가 쌓이지 않습니다'", () => {
+    expect(renderToString(<LabFreshBar lab={labWith({ enabled: false })} />)).toContain("기록 꺼짐");
+  });
+
+  it("휴무 시간이면 정상임을 말하고 재개 시각을 보여 준다", () => {
+    const html = renderToString(<LabFreshBar lab={labWith({ enabled: true, collect: { scans: 5, activeHours: 1, paused: true, pauseReason: "지정된 휴무 시간대(05:00~17:00 KST)", resumesAtMs: Date.now() + 3600_000 } })} />);
+    expect(html).toContain("수집 휴무 시간");
+    expect(html).toContain("재개");
+  });
+
+  it("켜져 있고 휴무도 아닌데 마지막 스캔이 15분 넘게 없으면 경고(앱 꺼짐·멈춤 가능)", () => {
+    const html = renderToString(<LabFreshBar lab={labWith({ enabled: true, scanning: false, lastTickAtMs: Date.now() - 3 * 3600_000, collect: { scans: 5, activeHours: 1, paused: false, pauseReason: null, resumesAtMs: null } })} />);
+    expect(html).toContain("스캔이");
+    expect(html).toContain("앱이 꺼져 있었거나");
+  });
+
+  it("정상 수집 중이면 ✅, 그리고 실시간 포착/백필 건수와 '실시간' 정의를 항상 밝힌다", () => {
+    const html = renderToString(<LabFreshBar lab={labWith({ enabled: true, scanning: false, lastTickAtMs: Date.now() - 2 * 60_000, collect: { scans: 5, activeHours: 1, paused: false, pauseReason: null, resumesAtMs: null } })} />);
+    expect(html).toContain("실시간으로 수집 중");
+    expect(html).toContain("실시간 포착");
+    expect(html).toContain("10분 안에 발견");
+  });
+
+  it("연구소 세 탭과 결과 요약 모두에 신선도 띠가 붙고, 결과 요약엔 % 설명이 있다", () => {
+    const lab = fakeLab(manySignals(3));
+    expect(renderToString(<LabLiveTab lab={lab} />)).toContain("lab-fresh");
+    for (const el of [<LabLiveTab key="a" lab={lab} />, <LabSignalsTab key="b" lab={lab} />]) {
+      expect(renderToString(el)).toContain("lab-fresh");
+    }
+    const sigs = manySignals(10);
+    const html = renderToString(<LabResultTab lab={fakeLab(sigs)} initialAssessment={buildAssessment(sigs, LAB_PARAMS_DEFAULT, { realtimeOnly: false, nowMs: T0 + 90 * FIVE })} />);
+    expect(html).toContain("lab-fresh");
+    expect(html).toContain("계좌 수익률이 아닙니다");
+    expect(html).toContain("신호당 기대값(%)");
+  });
+});
