@@ -3860,6 +3860,17 @@ export class ToolEngine extends EventEmitter {
         return this.registerOcoForFilled(symbol, o.filled_qty && o.filled_qty > 0 ? o.filled_qty : spec.quantity, spec);
       }
       if (o.status === "cancelled" || o.status === "failed") {
+        // [v0.69.1 긴급] 일부만 체결된 채로 취소(킬스위치·[주문현황]에서 직접 취소·토스의 잔량 취소)되면 그 체결분은 계좌에 남는다 —
+        //   예전엔 이 경우도 "그냥 취소됨"으로 끝내 체결분이 보호 없이 방치됐다. 체결된 수량만큼은 반드시 OCO로 보호한다.
+        const partFilled = o.filled_qty ?? 0;
+        if (partFilled > 0) {
+          this.addJournal({
+            kind: "info", symbol,
+            summary: `진입 주문이 일부(${partFilled}주)만 체결된 채 ${o.status === "cancelled" ? "취소" : "실패"}됐습니다 — 체결된 ${partFilled}주는 보호를 위해 익절/손절을 겁니다.`,
+            notify: true, notifyTitle: `🛡 부분체결 보호: ${symbol}`,
+          });
+          return this.registerOcoForFilled(symbol, partFilled, spec);
+        }
         this.addJournal({
           kind: "info", symbol, summary: `진입 주문이 ${o.status === "cancelled" ? "취소" : "실패"}돼 자동 감시를 멈췄습니다.`,
           notify: true, notifyTitle: `${o.status === "cancelled" ? "취소됨" : "⚠️ 실패"}: ${symbol}`,
@@ -7343,7 +7354,10 @@ export class ToolEngine extends EventEmitter {
         try {
           const o = await getOrder(triggeredOrderId);
           if (o.avg_filled_price != null && o.avg_filled_price > 0) exitFillPrice = o.avg_filled_price;
-          else if (o.status !== "filled") exitOrderUnfilled = true;
+          // [v0.69.1 긴급] 예전엔 "체결가가 조금이라도 있으면 전량 청산"으로 봤다 — CUPR 실사례(10-02): 손절 지정가가 1주만 체결되고
+          //   나머지 23주는 37분 뒤에야 같은 가격에 체결됐는데, 앱은 발동 직후 "손절 완료"로 기록하고 끝냈다(그 사이 23주는 매도 대기 상태로 방치).
+          //   이제 전량 체결(filled)이 아니면 모두 "미체결 잔량 있음"으로 취급한다.
+          if (o.status !== "filled") exitOrderUnfilled = true;
         } catch {
           /* 조회 실패 — 목표가로 계산(예전 동작) */
         }
@@ -7361,6 +7375,13 @@ export class ToolEngine extends EventEmitter {
           notify: true,
           notifyTitle: `🚨 매도 미체결: ${pos.symbol}`,
         });
+        // [v0.69.1 긴급] 손절 쪽만: 지정가가 안 닿는 채 방치하면 급락이 계속될 때 손절이 영영 안 된다. 걸려 있는 낡은 손절 지정가를 거두고(주식이
+        //   매도 대기로 묶여 있으면 새 주문이 "매도 가능 수량 부족"으로 막히므로) 보호 가드에 넘긴다 — 가드는 가격이 아직 손절선 아래면 시장가로 정리하고,
+        //   손절선 위로 되돌아왔으면 조건주문(익절/손절)을 다시 건다. 익절 쪽 미체결은 그대로 둔다(가격이 돌아오면 체결되는 정상 대기).
+        if (secondTriggered && triggeredOrderId && !this.isDryRun()) {
+          try { await cancelOrder(triggeredOrderId); } catch { /* 이미 끝났거나 취소 불가 — 가드가 보유 수량을 직접 확인한다 */ }
+          this.registerUnprotected(pos, "손절 조건이 발동됐지만 매도 주문이 전량 체결되지 않음 — 남은 수량을 정리");
+        }
       }
       const exitPrice = exitFillPrice ?? targetPrice;
       const slippagePct = exitFillPrice != null ? Math.round((exitFillPrice / targetPrice - 1) * 10000) / 100 : null;
@@ -7451,7 +7472,10 @@ export class ToolEngine extends EventEmitter {
     });
     // [v0.69.0] WHLR·NAUT 실사례 — 진입 6분 뒤 조건주문이 토스에서 사라졌는데 주식은 그대로. 경고만 하고 끝내지 않고 다시 보호한다.
     //   (기존 경고·기록을 모두 남긴 뒤에 가드 목록에 올린다)
-    if (stillHeld && this.autoReprotectVanished) this.registerUnprotected(pos, "조건주문이 토스에서 사라졌는데 실계좌에 주식이 남아 있음");
+    //   [v0.69.1] stillHeld===null(실계좌 재확인 실패)을 "괜찮음"으로 넘기지 않는다 — 가드가 자기 점검 때 보유를 다시 확인해 0이면 스스로 종료한다.
+    if (stillHeld !== false && this.autoReprotectVanished) {
+      this.registerUnprotected(pos, stillHeld ? "조건주문이 토스에서 사라졌는데 실계좌에 주식이 남아 있음" : "조건주문이 사라졌고 실계좌 보유 여부를 확인하지 못함(가드가 재확인)");
+    }
   }
 
   /**
@@ -7565,7 +7589,7 @@ export class ToolEngine extends EventEmitter {
       } catch {
         continue; // 조회 실패는 다음 사이클에 재시도
       }
-      if (o.status === "filled") {
+      if (o.status === "filled" || ((o.status === "cancelled" || o.status === "failed") && (o.filled_qty ?? 0) > 0)) {
         const qty = o.filled_qty && o.filled_qty > 0 ? o.filled_qty : pos.quantity;
         const result = await this.registerOcoForFilled(pos.symbol, qty, {
           tpTrigger: pos.tp,
@@ -7665,9 +7689,55 @@ export class ToolEngine extends EventEmitter {
     this.scheduleGuard(3000);
   }
 
+  /**
+   * [v0.69.1 긴급 — 오너 지시 "매도 주문 안 거는 문제 전수 확인"] 보호 가드 입구가 몇 개 있어도(OCO 실패·조건주문 소멸…) 예상 못 한 틈이
+   *   생기면 또 새어 나간다. 그래서 경로와 무관하게 "결과"를 직접 대조하는 독립 감사를 둔다:
+   *     실계좌 보유 종목 중 ① 최근 3일 안에 이 봇이 진입한 기록이 있고 ② 지금 추적 중(감시·보호·가드 대기)이 아니며
+   *     ③ 토스에 살아 있는 조건주문(OPEN)이 하나도 없는 종목 → 가드 대기 목록에 올린다.
+   *   [안전장치] 봇이 산 적 없는 종목(수동 보유)은 절대 건드리지 않는다. 확인(보유·조건주문 조회)이 하나라도 실패하면 아무것도 안 한다.
+   *   "조건주문이 사라진 보유 종목 자동 재보호" 설정을 끄면 이 감사도 함께 꺼진다(사람이 직접 보호를 풀어 둔 경우를 존중).
+   */
+  async auditUnprotectedHoldings(): Promise<number> {
+    if (!this.autoReprotectVanished || this.isDryRun()) return 0;
+    let held: Array<[string, number]>;
+    let openSyms: Set<string>;
+    try {
+      const h = (await getHoldings()) as Record<string, unknown>;
+      held = [];
+      for (const it of (h?.items as Array<Record<string, unknown>>) ?? []) {
+        const q = Number(it.quantity);
+        const sym = String(it.symbol ?? "").toUpperCase();
+        if (sym && Number.isFinite(q) && q > 0) held.push([sym, q]);
+      }
+      const open = await listConditionalOrders("OPEN");
+      openSyms = new Set(open.map((o) => String(o.symbol ?? "").toUpperCase()));
+    } catch {
+      return 0; // 확인 못 하면 손대지 않는다
+    }
+    const tracked = new Set<string>([...this.autoTradePositions.map((p) => p.symbol.toUpperCase()), ...this.autoUnprotected.map((u) => u.symbol)]);
+    const cutoff = Date.now() - 3 * 24 * 3600_000;
+    let added = 0;
+    for (const [sym, qty] of held) {
+      if (tracked.has(sym) || openSyms.has(sym)) continue;
+      const mine = this.autoTradeHistory
+        .filter((e) => e.symbol.toUpperCase() === sym && Number(e.id.split("@")[2]) >= cutoff && e.status !== "dryrun")
+        .sort((a, b) => Number(b.id.split("@")[2]) - Number(a.id.split("@")[2]))[0];
+      if (!mine) continue; // 봇이 산 적 없는 종목 — 수동 보유는 건드리지 않는다
+      if (mine.status === "closed_win" || mine.status === "closed_loss") continue; // 정상 청산 기록이 있으면 그 이후 새로 산 게 아닌 한 대상 아님
+      this.registerUnprotected(
+        { symbol: sym, entry: mine.entry, tp: mine.tp, sl: mine.sl, quantity: qty, enteredAtMs: Number(mine.id.split("@")[2]), status: "active", conditionalOrderId: null },
+        "감사: 실계좌에 보유 중인데 익절/손절 조건주문이 없음",
+      );
+      added++;
+    }
+    return added;
+  }
+
   private scheduleGuard(delayMs: number): void {
     if (this.guardTimer || this.autoUnprotected.length === 0) return;
-    this.guardTimer = setTimeout(() => { this.guardTimer = null; void this.runGuard(); }, delayMs);
+    // [v0.69.1] 점검 도중 예외(저장 실패 등)가 처리되지 않은 프라미스 거부로 새어 앱/테스트를 흔들지 않게 막고, 타이머가 프로세스 종료를 붙잡지 않게 한다.
+    this.guardTimer = setTimeout(() => { this.guardTimer = null; void this.runGuard().catch(() => {}); }, delayMs);
+    (this.guardTimer as unknown as { unref?: () => void }).unref?.();
   }
 
   /** 한 번의 가드 점검. 남은 종목이 있으면 다음 점검을 예약한다. */
@@ -7780,7 +7850,9 @@ export class ToolEngine extends EventEmitter {
         notify: true,
         notifyTitle: `🛡 보호주문 등록: ${symbol}`,
       });
-    } else if (res.status === "still_pending") {
+    } else if (res.status === "still_pending" || res.status === "timeout") {
+      // [v0.69.1 긴급] "timeout"(자동 취소 요청 자체가 실패 — AIB 실사례)도 같은 취급: 주문이 토스에 살아 있어 나중에 체결될 수 있는데,
+      //   예전엔 여기서 포지션을 지워 체결돼도 아무도 보호주문을 안 걸었다. 감시를 유지하면 reconcileAutoPositions(5분)가 이어받는다.
       // [v0.52.0] 취소가 아직 실제로 반영 안 된 상태(ALDX 실사례) — 절대 자리를 비우지 않는다.
       //   watchAndBracket 안에서 이미 저널·알림을 남겼으니 여기서는 아무것도 더 안 하고,
       //   포지션을 "watching" 그대로 둬서 다음 reconcileAutoPositions(5분 뒤)의
@@ -7792,9 +7864,7 @@ export class ToolEngine extends EventEmitter {
       this.autoTradePositions.splice(idx, 1);
       // [v0.69.0 긴급] 체결은 됐는데 보호주문이 안 걸린 채 끝난 경우 — 자리만 비우고 잊어버리면 주식이 무보호로 남는다.
       //   가드 목록에 올려 보호가 걸릴 때까지 계속 다시 시도한다.
-      if (res.status === "oco_failed" || res.status === "timeout") {
-        if (res.status === "oco_failed") this.registerUnprotected(droppedPos, `보호주문 등록 실패: ${res.error}`);
-      }
+      if (res.status === "oco_failed") this.registerUnprotected(droppedPos, `보호주문 등록 실패: ${res.error}`);
       this.saveAutoPositions();
       const closedAt = DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss");
       if (res.status === "cancelled_by_timeout") {
@@ -7832,11 +7902,6 @@ export class ToolEngine extends EventEmitter {
       } else if (res.status === "oco_failed") {
         this.updateAutoTradeHistory(symbol, entry, enteredAtMs, {
           status: "oco_failed", exitedAt: closedAt, note: `체결됐지만 보호주문 등록 실패 — 직접 확인 필요: ${res.error}`,
-        });
-      } else if (res.status === "timeout") {
-        // cancelOnTimeout이 켜져 있었는데도(자동매매 경로) 취소 API 호출 자체가 실패한 드문 경우.
-        this.updateAutoTradeHistory(symbol, entry, enteredAtMs, {
-          status: "oco_failed", exitedAt: closedAt, note: "자동 취소 시도 실패 — [주문현황]에서 직접 확인 필요",
         });
       } else {
         // "failed"(주문 자체가 거부됨) — 사람이 취소한 건 아니지만 CANCELED와 성격이 같아(손익 미확정) closed_manual로 묶는다.
@@ -7924,6 +7989,7 @@ export class ToolEngine extends EventEmitter {
     try {
       await this.prepareBackend();
       await this.reconcileAutoPositions(); // ①빈자리 먼저 확인(같은 사이클 안에 채우기 위해) — 일시정지 중에도 계속
+      await this.auditUnprotectedHoldings().catch(() => 0); // [v0.69.1] 경로와 무관하게 "보유인데 보호 없음"을 결과로 직접 대조
 
       // [v0.44.0] 시스템 휴무 시간대(또는 휴장)면 신규 스캔·진입을 전부 건너뛴다. 기존에 이미
       //   체결된(익절/손절 등록된) 포지션은 위 reconcileAutoPositions가 계속 감시하므로 그대로 둔다
