@@ -21,6 +21,7 @@ import { useLab } from "./useLab"; //                         [v0.65.0] 매매�
 import { LabLiveTab, LabSignalsTab, LabCompareTab } from "./LabTabs"; // [v0.65.0] 매매연구소 화면
 import { LabResultTab } from "./LabResult"; //                         [v0.66.0] 결과 요약
 import { restoreInputsFromSaved } from "../lib/split-restore"; // [v0.9.3] 옛 기록도 계산기로 불러오기
+import { calcSplit3Level } from "../lib/calc"; // [v0.69.6] 후보별 계획 타점(1·1.5·2분할) 표시
 import { reportToMarkdown, reportAiPrompt, fmtDuration } from "../lib/auto-report"; // [v0.62.1] 자동매매 리포트 표시·복사
 import { getSession } from "../lib/session"; // [v0.48.1] 자동 스크리너 탭에 "지금 세션" 켜짐/꺼짐을 바로 보여주기 위함
 import { DateTime } from "luxon";
@@ -4759,6 +4760,25 @@ ${msg}
                                   )}
                                 </td>
                               </tr>
+                              {/* [v0.69.6] 이 후보의 계획 타점을 1·1.5·2분할 전부 보여 주고, 지금 설정으로 실제 주문이 나갈 자리를 표시한다(검증용) */}
+                              {r.status === "confirmed" && r.prevClose != null && r.ema200 != null && r.prevClose > r.ema200 && settings && (() => {
+                                const tp = settings.defaultTpPct, sl = settings.defaultSlPct;
+                                const sel = settings.autoTradeEntryLevel;
+                                const lv = ([1, 1.5, 2] as const).map((l) => ({ l, e: calcSplit3Level(r.prevClose as number, r.ema200 as number, tp, sl, l).entry }));
+                                return (
+                                  <tr className="evid-row">
+                                    <td colSpan={5}>
+                                      <p className="hint small" style={{ margin: 0 }}>
+                                        계획 타점(전봉종가 ${r.prevClose} · EMA200 ${Math.round((r.ema200 as number) * 10000) / 10000}):{" "}
+                                        {lv.map((x, i) => (
+                                          <span key={x.l}>{i > 0 ? " · " : ""}{x.l === sel ? <b className="ok">▶ {x.l}분할 ${x.e}</b> : <>{x.l}분할 ${x.e}</>}</span>
+                                        ))}
+                                        {" "}— 실제 주문은 ▶ 표시된 타점으로 나갑니다.
+                                      </p>
+                                    </td>
+                                  </tr>
+                                );
+                              })()}
                               {r.warrantWarning && (
                                 <tr className="evid-row">
                                   <td colSpan={5}><p className="hint danger" style={{ margin: 0 }}>{r.warrantWarning}</p></td>

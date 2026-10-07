@@ -42,3 +42,38 @@ describe("자동매매 설정 — 진입 타점 1.5 저장", () => {
     }
   });
 });
+
+describe("자동매매 한 사이클(실제 autoTradeTick) — 진입 타점별 실제 주문가", () => {
+  async function runWith(level: 1 | 1.5 | 2): Promise<number> {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-lvl-e2e-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.saveAutoTradeSettings({ maxPositions: 3, entryLevel: level });
+      const x = eng as unknown as { scanScreener: () => Promise<unknown>; autoTradeEnabled: boolean; autoTradeTick: () => Promise<void> };
+      x.scanScreener = async () => ({
+        scannedAt: "10-08 01:00:00", total: 1, priceMin: 1, priceMax: 9999, excludedEtf: 0,
+        results: [{
+          rank: 1, symbol: "TSLA", price: 2.5, ema200: 2.0144, prevClose: 2.62, cloudTop: 1.9,
+          priceInBand: true, aboveEma: true, aboveCloud: true, status: "confirmed", sessionHigh: 2.7, proximityPct: -3, n1m: 300, n5m: 60, evidence: null,
+        }],
+      });
+      await eng.mockSetPrice("TSLA", 2.45); // 진입가들(2.41/2.31/2.21)보다 위 → 지정가가 안 닿아 미체결로 남음
+      x.autoTradeEnabled = true;
+      await x.autoTradeTick();
+      const pos = eng.getAutoTradeStatus().positions.find((p) => p.symbol === "TSLA");
+      expect(pos).toBeDefined();
+      return pos!.entry;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("같은 시장 상황에서 1분할 > 1.5분할 > 2분할 순서로 실제 매수 지정가가 잡힌다(1.5가 2분할보다 낮아지지 않는다)", async () => {
+    const e1 = await runWith(1);
+    const e15 = await runWith(1.5);
+    const e2 = await runWith(2);
+    expect([e1, e15, e2]).toEqual([2.41, 2.31, 2.21]);
+    expect(e15).toBeGreaterThan(e2);
+    expect(e15).toBeLessThan(e1);
+  }, 60_000);
+});
