@@ -21,7 +21,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, renameSy
 import { join } from "node:path";
 import { DateTime } from "luxon";
 import { getSession, getSessionStart, getMarketStatus, isOrderFrozen, isInDailyPauseWindow, type Session } from "../lib/session";
-import { calcSplit3, calcOrderbook, calcCandle, roundPrice, getTick, type SplitOrder } from "../lib/calc";
+import { calcSplit3, calcSplit3Level, calcOrderbook, calcCandle, roundPrice, getTick, type SplitOrder } from "../lib/calc";
 import { encryptSecret, decryptSecret, encryptJson, decryptJson } from "../lib/keysync"; // [v0.8.0] 키 기기 간 동기화(클라이언트 암호화) + [v0.10.0] 매매 이력용
 import { classifyTicks, strengthFromTicks, strengthFromVolumes, updateStrengthWindow, isWindowCapped, analyzeStrengthSeries, type Side, type StrengthSignals, type WindowBufferEntry } from "../lib/strength";
 import { buildReport, buildReportFromRealized, makePeriod, type DailyReport, type PeriodKind } from "../lib/report"; // [v0.9.1] 매매 리포트
@@ -1090,7 +1090,7 @@ export interface AutoTradeHistoryEntry {
     /** [v0.61.8] 진입 당시 선택돼 있던 타점 분할(1~2) — 연구탭에서 "몇 분할로 들어갔을 때
      *  성적이 어땠는지" 비교할 수 있게. 이 필드가 생기기 전 기록은 undefined(=당시엔 늘
      *  1분할 고정이었으므로 해석 시 1로 간주해도 된다). */
-    entryLevel?: 1 | 2;
+    entryLevel?: 1 | 1.5 | 2;
     // [v0.63.0] 방어 전략 설정(옛 기록엔 없음)
     emaMinGapEnabled?: boolean;
     emaMinGapPct?: number;
@@ -1289,7 +1289,7 @@ export class ToolEngine extends EventEmitter {
    *  뺐다 — 삼분할 매매기법상 3분할은 "마지막 보루" 성격이라 자동 매수 대상으로 쓰기엔
    *  더 신중한 사람 판단이 필요하다는 게 오너 기존 설계 의도(자동매매는 1분할만 쓴다는
    *  원래 결정)와 결이 맞다. */
-  private autoTradeEntryLevel: 1 | 2 = 1;
+  private autoTradeEntryLevel: 1 | 1.5 | 2 = 1;
   // [v0.63.0] 방어 전략 — 매매 리스크 설정
   private autoTradeSlMode: "fixed" | "ema" = "fixed"; // ① 손절 방식: 고정 %(기존) / EMA 기준(구조적 손절)
   private autoTradeEmaStopBufferPct = 1.5; //            EMA 기준 손절일 때 EMA 아래 여유(%)
@@ -1612,7 +1612,7 @@ export class ToolEngine extends EventEmitter {
     if (Number.isFinite(awm) && awm > 0) this.autoTradeWatchMinutes = Math.round(awm);
     // [v0.61.8] 저장된 진입 타점 분할(1~2) 복원.
     const ael = Number(process.env.AUTO_ENTRY_LEVEL);
-    if (ael === 1 || ael === 2) this.autoTradeEntryLevel = ael;
+    if (ael === 1 || ael === 1.5 || ael === 2) this.autoTradeEntryLevel = ael;
     // [v0.65.0] 매매연구소 설정 복원
     if (process.env.LAB_ENABLED === "true") this.labEnabled = true;
     const lrc = Number(process.env.LAB_RANK_COUNT);
@@ -1776,7 +1776,7 @@ export class ToolEngine extends EventEmitter {
     maxLossPct?: number;
     maxInvestPct?: number;
     watchMinutes?: number; // [v0.42.0] 장기간 미체결 자동취소 기준(분) — 여기서 함께 저장
-    entryLevel?: 1 | 2; // [v0.61.8] 진입 타점 분할(1~2) — 여기서 함께 저장
+    entryLevel?: 1 | 1.5 | 2; // [v0.61.8] 진입 타점 분할(1~2) — 여기서 함께 저장
     slMode?: "fixed" | "ema"; // [v0.63.0] 방어 전략
     emaStopBufferPct?: number;
     reentryBlockEnabled?: boolean;
@@ -1806,7 +1806,7 @@ export class ToolEngine extends EventEmitter {
       // "자동 취소 안 함"과 다를 바 없어 의미가 퇴색된다).
       this.autoTradeWatchMinutes = Math.round(Math.min(60, Math.max(1, input.watchMinutes)));
     }
-    if (input.entryLevel === 1 || input.entryLevel === 2) {
+    if (input.entryLevel === 1 || input.entryLevel === 1.5 || input.entryLevel === 2) {
       this.autoTradeEntryLevel = input.entryLevel;
     }
     this.persistEnv();
@@ -8448,7 +8448,7 @@ export class ToolEngine extends EventEmitter {
           //   타점만 쓴다(설정 탭 "진입 타점" — 공장값 1분할, 가장 얕게 눌렸을 때). 변수명은
           //   과거 "항상 1분할"이던 시절 이름을 그대로 쓰지만, 실제로는 autoTradeEntryLevel이
           //   가리키는 분할이다(아래 전부 이 변수를 통해서만 타점가를 쓴다).
-          level1 = calcSplit3(cand.prevClose, cand.ema200, this.defaultTpPct, this.defaultSlPct).splits[this.autoTradeEntryLevel - 1];
+          level1 = calcSplit3Level(cand.prevClose, cand.ema200, this.defaultTpPct, this.defaultSlPct, this.autoTradeEntryLevel);
         } catch {
           this.autoTradeSkipReasons[cand.symbol] =
             `${this.autoTradeEntryLevel}분할 진입 조건 불성립(전봉종가가 EMA200 이하) — 삼분할 매매기법상 지금은 진입 대상이 아닙니다.`;

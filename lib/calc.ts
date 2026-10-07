@@ -139,6 +139,23 @@ export function calcSplit3(
   //           이 정책 처리는 실주문 어댑터 단계에서 결정합니다.
 }
 
+/**
+ * calcSplit3Level — 삼분할 타점 중 "하나"만 계산한다. [v0.69.5 — 오너 지시 "1타점과 2타점의 사잇값인 1.5타점을 신설"]
+ *   level 1   = 전봉종가 − gap/3        (얕은 눌림)
+ *   level 1.5 = 전봉종가 − gap/2        (1타점과 2타점의 정확히 가운데: (gap/3 + 2gap/3) / 2)
+ *   level 2   = 전봉종가 − gap×2/3      (깊은 눌림)
+ *   gap = 전봉종가 − EMA200. 익절/손절은 calcSplit3와 같은 규칙(진입가 기준 %, 틱 절삭).
+ *   gap ≤ 0이면 calcSplit3처럼 던진다(진입 대상 아님).
+ */
+export function calcSplit3Level(baseClose: number, ema200: number, tpPct: number, slPct: number, level: 1 | 1.5 | 2): SplitOrder {
+  const { splits } = calcSplit3(baseClose, ema200, tpPct, slPct); // gap<=0 검증 포함
+  if (level === 1) return splits[0];
+  if (level === 2) return splits[1];
+  const gap = baseClose - ema200;
+  const entry = roundPrice(baseClose - gap / 2);
+  return { level: 1.5, entry, ...calcTpSl(entry, tpPct, slPct) };
+}
+
 /** 단일 진입(호가창/캔들) 주문을 표현하는 타입 */
 export interface SingleOrder {
   /** 진입가 */

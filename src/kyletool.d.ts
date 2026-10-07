@@ -126,7 +126,7 @@ interface ToolSettings {
   autoTradeWatchMinutes: number;
   /** [v0.61.8] 삼분할 매매기법의 몇 분할 타점을 자동매매 매수가로 쓸지(1~2). 공장값 1(가장
    *  얕은 눌림). 2를 고르면 더 깊이 눌렸을 때만 사는 보수적 진입(체결 자체는 덜 될 수 있음). */
-  autoTradeEntryLevel: 1 | 2;
+  autoTradeEntryLevel: 1 | 1.5 | 2;
   /** [v0.63.0] 방어 전략 — 손절 방식(고정 % / EMA 기준), EMA 아래 여유%, 손절 종목 당일 재진입 금지, 연속 손절 자동중지 횟수(0=끔). 옛 PC면 없을 수 있음. */
   autoTradeSlMode?: "fixed" | "ema";
   autoTradeEmaStopBufferPct?: number;
@@ -265,7 +265,7 @@ interface AutoTradeHistoryEntry {
     maxLossPct: number;
     maxInvestPct: number;
     watchMinutes: number;
-    entryLevel?: 1 | 2;
+    entryLevel?: 1 | 1.5 | 2;
     emaMinGapEnabled?: boolean; // [v0.63.0]
     emaMinGapPct?: number;
     emaSlopeEnabled?: boolean;
@@ -909,7 +909,7 @@ interface KyletoolBridge {
     maxInvestPct?: number;
     watchMinutes?: number;
     /** [v0.61.8] 진입 타점 분할(1~2). */
-    entryLevel?: 1 | 2;
+    entryLevel?: 1 | 1.5 | 2;
     /** [v0.63.0] 방어 전략 */
     slMode?: "fixed" | "ema";
     emaStopBufferPct?: number;

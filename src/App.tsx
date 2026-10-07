@@ -894,7 +894,7 @@ function App() {
   // [v0.61.8 — 오너 지시 "1타점으로 잡을지 2타점으로 잡을지 설정할 수 있도록"] 자동매매 진입
   //   타점 분할(1~2). 위 autoForm과 별도 상태로 둔 이유: 저게 전부 "숫자 입력칸(문자열)"인
   //   반면 이건 "둘 중 하나 고르는" 선택지라 모양이 달라 섞으면 폼 렌더 로직이 지저분해진다.
-  const [autoEntryLevel, setAutoEntryLevel] = useState<1 | 2>(1);
+  const [autoEntryLevel, setAutoEntryLevel] = useState<1 | 1.5 | 2>(1);
   // [v0.63.0] 방어 전략 — 손절 방식·EMA 아래 여유%·손절 종목 당일 재진입 금지·연속 손절 자동중지
   const [defenseForm, setDefenseForm] = useState({ slMode: "fixed" as "fixed" | "ema", emaStopBufferPct: "1.5", reentryBlockEnabled: true, lossStreakLimit: "3", reprotectVanished: true });
   const [autoStatus, setAutoStatus] = useState<AutoTradeStatus | null>(null);
@@ -1292,7 +1292,7 @@ function App() {
         maxInvestPct: String(s.autoTradeMaxInvestPct ?? 30),
         watchMinutes: String(s.autoTradeWatchMinutes ?? 10),
       });
-      setAutoEntryLevel(s.autoTradeEntryLevel === 2 ? 2 : 1); // [v0.61.8]
+      setAutoEntryLevel(s.autoTradeEntryLevel === 2 ? 2 : s.autoTradeEntryLevel === 1.5 ? 1.5 : 1); // [v0.61.8]
       setDefenseForm({
         slMode: s.autoTradeSlMode === "ema" ? "ema" : "fixed",
         emaStopBufferPct: String(s.autoTradeEmaStopBufferPct ?? 1.5),
@@ -4361,8 +4361,9 @@ ${msg}
                 </label>
                 {/* [v0.61.8 — 오너 지시 "1타점으로 잡을지 2타점으로 잡을지 설정"] */}
                 <label>진입 타점 (삼분할 몇 분할 가격에 자동 매수할지)
-                  <select value={autoEntryLevel} onChange={(e) => setAutoEntryLevel(Number(e.target.value) === 2 ? 2 : 1)}>
+                  <select value={autoEntryLevel} onChange={(e) => setAutoEntryLevel(Number(e.target.value) === 2 ? 2 : Number(e.target.value) === 1.5 ? 1.5 : 1)}>
                     <option value={1}>1분할(얕은 눌림 — 공장값)</option>
+                    <option value={1.5}>1.5분할(1분할과 2분할의 한가운데 — 전봉종가에서 EMA200까지 거리의 절반만큼 눌렸을 때)</option>
                     <option value={2}>2분할(더 깊이 눌렸을 때만 — 보수적)</option>
                   </select>
                 </label>
