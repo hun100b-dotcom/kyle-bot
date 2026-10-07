@@ -183,12 +183,14 @@ interface AutoPosition {
 /** [v0.26.0] 자동매매 현황판. */
 /** [v0.69.0] 보호주문 없이 남은 보유 종목 — 봇이 보호가 걸릴 때까지 반복 시도 중 */
 interface UnprotectedPos {
+  fillPrice?: number | null;
   symbol: string; entry: number; tp: number; sl: number; quantity: number; enteredAtMs: number;
   reason: string; sinceMs: number; attempts: number; lastAttemptMs: number | null; lastError: string | null;
 }
 interface AutoTradeStatus {
   enabled: boolean;
   unprotected?: UnprotectedPos[];
+  orderBlocks?: Array<{ ts: string; symbol: string; kind: string; reasons: string[] }>; // [v0.69.2] 주문 전 검증에서 막힌 주문
   positions: AutoPosition[];
   realizedPnlUsd: number;
   maxPositions: number;

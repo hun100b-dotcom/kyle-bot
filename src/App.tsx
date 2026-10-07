@@ -4290,6 +4290,20 @@ ${msg}
         <main className="grid">
           <section className="card wide">
             {/* [v0.69.0 긴급] 보호주문 없는 보유 종목 경보 — 봇이 보호가 걸릴 때까지 계속 시도 중인 종목을 숨기지 않고 보여 준다 */}
+            {/* [v0.69.2] 주문 전 검증 관문이 막은 주문 — 조용히 넘어가지 않고 붉게 보여 준다 */}
+            {(autoStatus?.orderBlocks?.length ?? 0) > 0 && (
+              <div className="unprot-banner" role="alert">
+                <b>🚫 주문 검증에서 막힌 주문 {autoStatus!.orderBlocks!.length}건 — 설정값과 계산된 주문 가격이 어긋나 보내지 않았습니다</b>
+                <ul>
+                  {autoStatus!.orderBlocks!.map((b, i) => (
+                    <li key={i}>
+                      <b>{b.symbol}</b> · {b.kind} · {b.ts} — {b.reasons.join(" / ")}
+                    </li>
+                  ))}
+                </ul>
+                <span className="hint small">설정(익절%·손절%)을 확인해 주세요. 손절%는 100 미만이어야 합니다.</span>
+              </div>
+            )}
             {(autoStatus?.unprotected?.length ?? 0) > 0 && (
               <div className="unprot-banner" role="alert">
                 <b>🚨 보호주문(익절·손절)이 없는 보유 종목 {autoStatus!.unprotected!.length}개 — 봇이 보호가 걸릴 때까지 계속 시도 중입니다</b>

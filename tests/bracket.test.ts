@@ -77,7 +77,7 @@ describe("매수+익절+손절 동시 주문(브라켓) — v0.25.0", () => {
       const timeoutPromise = waitForJournal(eng, (e) => e.kind === "info" && e.summary.includes("자동 감시를 멈췄습니다"));
       await eng.placeBracket({
         symbol: "AAPL",
-        price: 1.0,
+        price: 1.9, // [v0.69.2] 검증 관문: 손절<진입<익절 이어야 함 — 현재가(2.05)보다 낮아 여전히 체결되지 않는다
         quantity: 1,
         tpTrigger: 2.5,
         tpPrice: 2.5,
@@ -108,7 +108,7 @@ describe("매수+익절+손절 동시 주문(브라켓) — v0.25.0", () => {
       const timeoutPromise = waitForJournal(eng, (e) => e.kind === "info" && e.summary.includes("자동 감시를 멈췄습니다"), 4000);
       await eng.placeBracket({
         symbol: "AAPL",
-        price: 1.0,
+        price: 1.9, // [v0.69.2] 검증 관문: 손절<진입<익절 이어야 함 — 현재가(2.05)보다 낮아 여전히 체결되지 않는다
         quantity: 1,
         tpTrigger: 2.5,
         tpPrice: 2.5,
@@ -165,7 +165,7 @@ describe("매수+익절+손절 동시 주문(브라켓) — v0.25.0", () => {
       const cancelledPromise = waitForJournal(eng, (e) => e.kind === "info" && e.summary.includes("자동 취소했습니다"));
       const entry = await eng.placeBracket({
         symbol: "AAPL",
-        price: 1.0,
+        price: 1.9, // [v0.69.2] 검증 관문: 손절<진입<익절 이어야 함 — 현재가(2.05)보다 낮아 여전히 체결되지 않는다
         quantity: 1,
         tpTrigger: 2.5,
         tpPrice: 2.5,
@@ -205,7 +205,7 @@ describe("매수+익절+손절 동시 주문(브라켓) — v0.25.0", () => {
       const pendingPromise = waitForJournal(eng, (e) => e.kind === "info" && e.summary.includes("감시를 계속 유지"));
       const entry = await eng.placeBracket({
         symbol: "AAPL",
-        price: 1.0,
+        price: 1.9, // [v0.69.2] 검증 관문: 손절<진입<익절 이어야 함 — 현재가(2.05)보다 낮아 여전히 체결되지 않는다
         quantity: 1,
         tpTrigger: 2.5,
         tpPrice: 2.5,
@@ -242,7 +242,7 @@ describe("매수+익절+손절 동시 주문(브라켓) — v0.25.0", () => {
       const cancelledPromise = waitForJournal(eng, (e) => e.kind === "info" && e.summary.includes("취소돼 자동 감시를 멈췄습니다"));
       const entry = await eng.placeBracket({
         symbol: "AAPL",
-        price: 1.0, // 체결 안 되게(대기 상태 유지)
+        price: 1.9, // [v0.69.2] 검증 관문: 손절<진입<익절 이어야 함 — 현재가(2.05)보다 낮아 여전히 체결되지 않는다 // 체결 안 되게(대기 상태 유지)
         quantity: 1,
         tpTrigger: 2.5,
         tpPrice: 2.5,
@@ -317,12 +317,14 @@ describe("[v0.57.0 긴급 수정] registerOcoForFilled — 체결 후 보호주�
       (eng as unknown as EngineInternals).ocoRetryDelaysMs = [20, 20, 20];
       // 현재가를 미리 익절 감시가(2.5)보다 높은 2.6으로 올려 둔다 — 매수 진입가(2.65)는
       // 그보다 더 위라 즉시 체결되지만, 체결된 순간부터 이미 "감시가 사이" 조건이 깨져 있다.
-      await eng.mockSetPrice("AAPL", 2.6);
+      // [v0.69.2] 검증 관문이 진입가(2.45)<익절(2.5)을 요구하므로, "체결 뒤 가격이 튀는 상황"은 첫 OCO 시도를 목 서버가 거부하게 하고
+      //   placeBracket 직후 가격을 올려 재현한다(재시도 직전 사전 확인이 이미 올라간 가격을 본다).
+      (eng as unknown as { mock: { state: { conditionalOrderAlwaysRejectBand: boolean } } }).mock.state.conditionalOrderAlwaysRejectBand = true;
 
       const protectedPromise = waitForJournal(eng, (e) => e.kind === "info" && e.summary.includes("즉시 시장가로 매도해 포지션을 정리했습니다"));
       await eng.placeBracket({
         symbol: "AAPL",
-        price: 2.65,
+        price: 2.45,
         quantity: 1,
         tpTrigger: 2.5,
         tpPrice: 2.5,
@@ -332,6 +334,7 @@ describe("[v0.57.0 긴급 수정] registerOcoForFilled — 체결 후 보호주�
         watchMinutes: 1,
         pollMs: 20,
       });
+      await eng.mockSetPrice("AAPL", 2.6);
       const info = await protectedPromise;
       expect(info.summary).toContain("익절 감시가($2.5) 이상으로 이미 올라");
 
@@ -350,12 +353,14 @@ describe("[v0.57.0 긴급 수정] registerOcoForFilled — 체결 후 보호주�
       await eng.quote("AAPL");
       (eng as unknown as EngineInternals).ocoRetryDelaysMs = [20, 20, 20];
       // 현재가를 손절 감시가(1.8)보다 낮은 1.5로 내려 둔다.
-      await eng.mockSetPrice("AAPL", 1.5);
+      // [v0.69.2] 위 ②-익절 테스트와 같은 방식: 진입가(1.85)는 손절(1.8)보다 위로 두고, 체결 직후 가격을 내려 재현한다.
+      await eng.mockSetPrice("AAPL", 1.85);
+      (eng as unknown as { mock: { state: { conditionalOrderAlwaysRejectBand: boolean } } }).mock.state.conditionalOrderAlwaysRejectBand = true;
 
       const protectedPromise = waitForJournal(eng, (e) => e.kind === "info" && e.summary.includes("즉시 시장가로 매도해 포지션을 정리했습니다"));
       await eng.placeBracket({
         symbol: "AAPL",
-        price: 1.6, // 현재가(1.5)보다 위 → 즉시 체결
+        price: 1.85, // 현재가(1.85)와 같아 즉시 체결
         quantity: 1,
         tpTrigger: 2.5,
         tpPrice: 2.5,
@@ -365,6 +370,7 @@ describe("[v0.57.0 긴급 수정] registerOcoForFilled — 체결 후 보호주�
         watchMinutes: 1,
         pollMs: 20,
       });
+      await eng.mockSetPrice("AAPL", 1.5);
       const info = await protectedPromise;
       expect(info.summary).toContain("손절 감시가($1.8) 이하로 이미 내려가");
 

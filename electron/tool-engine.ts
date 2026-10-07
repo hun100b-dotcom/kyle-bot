@@ -103,6 +103,7 @@ import {
 } from "../lib/toss";
 import { createMockTossServer } from "../mocks/toss-mock";
 import { canAutoEnter, isLossLimitBreached, type AutoTradeLimits } from "../lib/auto-risk";
+import { checkBracketPrices, checkPercentSettings, checkSimpleOrder, type SanityExpect } from "../lib/order-sanity"; // [v0.69.2] 주문 전 정합성 검사
 import { guessWarrantTickers } from "../lib/warrant"; // [v0.36.0] 워런트 의심 종목 코멘트용
 
 // -----------------------------------------------------------------------------
@@ -884,6 +885,19 @@ export interface BracketSpec {
    *  사람이 지켜보다 판단할 여지를 유지). 자동매매 경로만 true로 켜서, 장시간 안 팔리는 주문이
    *  다음 스크리닝 후보에게 자리를 내주도록 한다(오너 요청 2026-09-25: "장시간 미체결 대책"). */
   cancelOnTimeout?: boolean;
+  /** [v0.69.2] 자동매매 진입이 따르는 설정(익절%·손절%·손절 방식). 있으면 (a) 주문 전 검증 관문이 "계산된 가격 = 설정대로인가"를 대조하고
+   *  (b) 체결가가 주문가와 다르면 익절/손절을 **실제 체결가 기준으로 다시 계산**해 건다(SXTC 실사고: 주문 $2.41, 체결 $2.22 → 익절 +10.4%). */
+  autoPlan?: AutoPlan;
+  /** [v0.69.3] 매수 주문이 토스에 접수된 **즉시**(그 뒤 어떤 처리보다 먼저) 주문번호를 알려 준다 — 호출부가 곧바로 기록해
+   *  "주문은 나갔는데 번호를 못 적어 둔 채 앱이 꺼지거나 오류가 나서 주문만 토스에 남는" 틈을 없앤다. */
+  onOrderCreated?: (tossOrderId: string) => void;
+}
+
+/** [v0.69.2] 자동매매의 익절/손절 설정 스냅샷. */
+export interface AutoPlan {
+  tpPct: number;
+  slPct: number;
+  slMode: "fixed" | "ema";
 }
 
 /**
@@ -892,7 +906,7 @@ export interface BracketSpec {
  *   (수동 버튼 경로는 이 값을 여전히 기다리지 않는다 — placeBracket 참고.)
  */
 export type WatchAndBracketResult =
-  | { status: "oco_registered"; conditionalOrderId: string }
+  | { status: "oco_registered"; conditionalOrderId: string; tp?: number; sl?: number; fillPrice?: number | null }
   | { status: "oco_failed"; error: string }
   /** [v0.54.0 긴급 수정 — 오너 보고 "장시간 미체결 취소 시간 반영이 제대로 안 됨"]
    *  폴링 도중(아직 우리 감시 마감 전) 토스가 이미 "취소됨"/"실패"로 응답하면 여기로 온다 —
@@ -939,6 +953,8 @@ export interface AutoPosition {
   quantity: number;
   enteredAtMs: number;
   status: "watching" | "active";
+  /** [v0.69.2] 실제 평균 체결가(주문가 entry와 다를 수 있다). 익절/손절 기준·손익 계산에 우선 사용. */
+  fillPrice?: number | null;
   /** OCO 등록 성공 후 채워짐(watching→active 전환 시). 이 번호로 발동 여부를 재조회한다. */
   conditionalOrderId: string | null;
   /** [v0.30.1] 매수(진입) 주문의 토스 주문번호 — watching 상태에서 앱이 재시작돼도(예: PC 껐다 켬,
@@ -965,6 +981,8 @@ export interface AutoPosition {
 export interface UnprotectedPos {
   symbol: string;
   entry: number;
+  /** [v0.69.2] 실제 평균 체결가(있으면 보호 가격 계산·손익의 기준). */
+  fillPrice?: number | null;
   tp: number;
   sl: number;
   quantity: number; //    등록 당시 수량(실제 복구는 항상 실계좌 보유 수량 기준)
@@ -980,6 +998,8 @@ export interface AutoTradeStatus {
   enabled: boolean;
   /** [v0.69.0] 보호주문이 없어 봇이 복구를 시도 중인 보유 종목(없으면 빈 배열). */
   unprotected: UnprotectedPos[];
+  /** [v0.69.2] 주문 전 검증 관문에서 막힌 최근 주문(최대 10건) — 화면 붉은 경고용. */
+  orderBlocks: Array<{ ts: string; symbol: string; kind: string; reasons: string[] }>;
   positions: AutoPosition[];
   realizedPnlUsd: number;
   maxPositions: number;
@@ -1041,6 +1061,8 @@ export interface AutoTradeHistoryEntry {
    *  있어야 getOrder/getConditionalOrder로 실제 체결·발동 여부를 물어볼 수 있다). */
   conditionalOrderId?: string | null;
   buyOrderId?: string | null;
+  /** [v0.69.2] 실제 평균 체결가 — 주문가(entry)와 다르면 익절/손절은 이 값 기준으로 걸렸다. */
+  fillPrice?: number | null;
   /** [v0.45.0 — 오너 요청 "각 사용자가 어떤 기준으로 자동매매를 진행했는지도 연구 데이터에
    *  모이게"] 이 매매가 실제로 어떤 스크리닝·리스크 설정으로 진입됐는지의 스냅샷. 오너들이
    *  설정을 수시로 바꾸고(버전 이력은 안 남음) capri_group_trades는 이 기록을 그룹 전체가
@@ -3292,6 +3314,10 @@ export class ToolEngine extends EventEmitter {
   }): Promise<JournalEntry> {
     this.assertNotSystemPaused("신규 진입 주문"); // [v0.44.0]
     const symbol = spec.symbol.toUpperCase();
+    {
+      const problems = checkSimpleOrder({ quantity: spec.quantity, orderType: "LIMIT", price: spec.price }); // [v0.69.2] 주문 전 검증 관문
+      if (problems.length) this.blockOrder("매수", symbol, problems);
+    }
     const cur = await this.orderGate(symbol, [spec.price]);
     // [B4] 매수 가능 금액 초과면 여기서 막는다(실서버에서만 검사).
     await this.assertAffordable(spec.price, spec.quantity);
@@ -3355,8 +3381,18 @@ export class ToolEngine extends EventEmitter {
     expireDate: string; // YYYY-MM-DD
     /** [v0.2.10] 이 조건주문의 매매기법 근거(화면이 함께 보냄). 없어도 주문은 정상 진행. */
     rationale?: RationaleInput;
+    /** [v0.69.2] 기준(체결)가 — 있으면 익절>기준가>손절 방향을 검사한다. */
+    entry?: number | null;
+    /** [v0.69.2] 설정값 대조 — 있으면 가격이 설정 %대로 계산됐는지 검사한다(자동매매 경로). */
+    expect?: SanityExpect;
   }): Promise<JournalEntry> {
     const symbol = spec.symbol.toUpperCase();
+    // [v0.69.2] 주문 전 검증 관문(모든 조건주문의 단일 관문): 0·음수·방향 뒤집힘·설정과 불일치면 보내지 않는다.
+    {
+      const problems = checkBracketPrices({ quantity: spec.quantity, tpTrigger: spec.tpTrigger, tpPrice: spec.tpPrice, slTrigger: spec.slTrigger, slPrice: spec.slPrice, entry: spec.entry, expect: spec.expect });
+      if (spec.expect) problems.push(...checkPercentSettings(spec.expect.tpPct, spec.expect.slPct));
+      if (problems.length) this.blockOrder("익절/손절(OCO)", symbol, problems);
+    }
     const cur = await this.orderGate(symbol); // 익절/손절 감시가는 ±검사 대신 아래 OCO 규칙으로 검증
     // 스펙 규칙 사전 검증(서버 400 전에 친절한 한국어로)
     if (!isWithinOcoBand(cur, spec.tpTrigger, spec.slTrigger)) {
@@ -3454,6 +3490,17 @@ export class ToolEngine extends EventEmitter {
     //   `orderGate(symbol, [spec.price])`로 진입가를 검사받고 있었는데, 이 함수만 빠져 있던
     //   구멍이었다. 진입가·익절가 둘 다 넘겨 같은 보호를 받게 한다(켜져 있을 때만 실제로
     //   차단되며, 기본은 여전히 꺼짐 — 오너 결정 유지, 동작 변화 없음).
+    {
+      // [v0.69.2] 주문 전 검증 관문 — 0·음수, 익절가가 진입가 이하(방향 뒤집힘)는 보내지 않는다.
+      const problems = [...checkSimpleOrder({ quantity: spec.quantity, orderType: "LIMIT", price: spec.entryPrice })];
+      for (const [n, v] of [["진입 감시가", spec.entryTrigger], ["익절 감시가", spec.tpTrigger], ["익절 지정가", spec.tpPrice]] as Array<[string, number]>) {
+        if (!(Number.isFinite(v) && v > 0)) problems.push(`${n}가 0이거나 음수·비정상 값입니다(${v}).`);
+      }
+      if (Number.isFinite(spec.tpTrigger) && Number.isFinite(spec.entryTrigger) && spec.tpTrigger > 0 && spec.entryTrigger > 0 && !(spec.tpTrigger > spec.entryTrigger)) {
+        problems.push(`익절 감시가($${spec.tpTrigger})가 진입가($${spec.entryTrigger})보다 높지 않습니다.`);
+      }
+      if (problems.length) this.blockOrder("진입+익절(OTO)", symbol, problems);
+    }
     const cur = await this.orderGate(symbol, [spec.entryPrice, spec.tpPrice]);
     // [막지 않는다] 통상 진입가는 현재가 이하, 익절가는 진입가 위다. 어긋나도 전송하고 토스 판단에 맡긴다.
     if (!(spec.tpTrigger > spec.entryTrigger)) {
@@ -3581,6 +3628,18 @@ export class ToolEngine extends EventEmitter {
   private async placeBracketCore(spec: BracketSpec): Promise<{ entryJournal: JournalEntry; watchPromise: Promise<WatchAndBracketResult> | null }> {
     this.assertNotSystemPaused("신규 진입 주문"); // [v0.44.0] 수동 브라켓 주문 + 자동매매 진입 공용 경로
     const symbol = spec.symbol.toUpperCase();
+    // [v0.69.2] 주문 전 검증 관문 — 매수가 나가기 "전에" 익절/손절 계산이 정상인지 확인한다(체결 뒤에야 거절당해 무보호로 남는 일 방지).
+    {
+      const problems = [
+        ...checkSimpleOrder({ quantity: spec.quantity, orderType: "LIMIT", price: spec.price }),
+        ...checkBracketPrices({
+          quantity: spec.quantity, tpTrigger: spec.tpTrigger, tpPrice: spec.tpPrice, slTrigger: spec.slTrigger, slPrice: spec.slPrice, entry: spec.price,
+          expect: spec.autoPlan ? { basis: spec.price, tpPct: spec.autoPlan.tpPct, slPct: spec.autoPlan.slPct, slMode: spec.autoPlan.slMode } : undefined,
+        }),
+        ...(spec.autoPlan ? checkPercentSettings(spec.autoPlan.tpPct, spec.autoPlan.slPct) : []),
+      ];
+      if (problems.length) this.blockOrder("진입(매수+익절/손절)", symbol, problems);
+    }
     const cur = await this.orderGate(symbol, [spec.price]);
     await this.assertAffordable(spec.price, spec.quantity);
 
@@ -3628,6 +3687,7 @@ export class ToolEngine extends EventEmitter {
           `정상 진행합니다(주문번호 ${o.tossOrderId}).`,
       });
     }
+    try { spec.onOrderCreated?.(o.tossOrderId); } catch { /* 기록 실패가 주문 흐름을 막지 않는다(다음 사이클 복구가 이어받음) */ }
     this.saveRationale(spec.rationale, { clientOrderId, kind: "entry", symbol, quantity: spec.quantity, priceAtOrder: cur, dryRun: false, tossOrderId: o.tossOrderId });
     void this.recordEntry(symbol, spec.price, this.currentMode(), spec.quantity);
     const entryJournal = this.addJournal({
@@ -3658,6 +3718,57 @@ export class ToolEngine extends EventEmitter {
   private static readonly BRACKET_FAST_WINDOW_MS = 60_000; // "진입 직후"로 볼 구간(1분)
   private static readonly BRACKET_SLOW_POLL_MS = 5000; // 그 이후엔 5초 간격(API 부담 완화)
 
+  // ==========================================================================
+  // [v0.69.2 긴급] 주문 전 검증 관문(sanity gate) — 오너 지시 "계산된 주문 가격을 아무도 검증하지 않고 그대로 토스에 보낸다"
+  //   어긋나면 주문을 보내지 않고, 저널·디스코드(notify) + 화면 붉은 경고(orderBlocks)로 즉시 알린다. 조용히 넘어가지 않는다.
+  // ==========================================================================
+  private orderBlocks: Array<{ ts: string; symbol: string; kind: string; reasons: string[] }> = [];
+  private blockNotifiedAt = new Map<string, number>();
+
+  private blockOrder(kind: string, symbol: string, problems: string[]): never {
+    const ts = DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss");
+    this.orderBlocks.unshift({ ts, symbol, kind, reasons: problems });
+    this.orderBlocks = this.orderBlocks.slice(0, 10);
+    // 자동매매는 5분마다 같은 후보를 다시 시도하므로, 같은 사유는 30분에 한 번만 디스코드로 보낸다(화면 경고·저널은 항상 남김).
+    const key = `${symbol}|${kind}|${problems.join("|")}`;
+    const last = this.blockNotifiedAt.get(key) ?? 0;
+    const notify = Date.now() - last > 30 * 60_000;
+    if (notify) this.blockNotifiedAt.set(key, Date.now());
+    this.addJournal({
+      kind: "info",
+      symbol,
+      summary: `🚫 ${symbol} ${kind} 주문을 보내지 않았습니다 — 주문 검증 실패: ${problems.join(" / ")}`,
+      notify,
+      notifyTitle: `🚫 주문 차단(검증 실패): ${symbol}`,
+    });
+    void this.pushLiveState(true);
+    throw new Error(`주문 검증 실패 — ${problems.join(" / ")}`);
+  }
+
+  /** 지금 설정으로 만든 자동매매 익절/손절 계획(재시작 복구·가드처럼 주문 당시 계획을 모를 때 쓴다). */
+  private currentAutoPlan(): AutoPlan {
+    return { tpPct: this.defaultTpPct, slPct: this.defaultSlPct, slMode: this.autoTradeSlMode };
+  }
+
+  /**
+   * [v0.69.2] 체결가가 주문가와 한 틱 넘게 다르면 익절/손절을 체결가 기준(설정 %)으로 다시 계산한다.
+   *   EMA 기준 손절은 절대가라 그대로 두되, 체결가 아래이면서 고정 손절 한도보다 깊지 않을 때만 유지한다.
+   */
+  private rebaseToFill<S extends { price?: number; tpTrigger: number; tpPrice: number; slTrigger: number; slPrice: number }>(
+    spec: S,
+    plan: AutoPlan | undefined,
+    fillPrice: number | null | undefined,
+  ): { spec: S; basis: number | null; rebased: boolean } {
+    const planned = typeof spec.price === "number" ? spec.price : null;
+    if (!plan || !(typeof fillPrice === "number" && Number.isFinite(fillPrice) && fillPrice > 0)) return { spec, basis: planned, rebased: false };
+    if (planned != null && Math.abs(fillPrice - planned) <= getTick(planned) * 1.01) return { spec, basis: planned, rebased: false };
+    const tp = roundPrice(fillPrice * (1 + plan.tpPct / 100));
+    const fixedSl = roundPrice(fillPrice * (1 - plan.slPct / 100));
+    const keepStructural = plan.slMode === "ema" && spec.slTrigger < fillPrice && spec.slTrigger >= fixedSl;
+    const sl = keepStructural ? spec.slTrigger : fixedSl;
+    return { spec: { ...spec, tpTrigger: tp, tpPrice: tp, slTrigger: sl, slPrice: roundPrice(sl * 0.99) }, basis: fillPrice, rebased: true };
+  }
+
   /** [테스트 전용] registerOcoForFilled의 재시도 대기 시간. 실사용 기본값은 3초/5초/8초 —
    *  체결 직후 토스 내부 보유수량 원장이 아직 안 따라잡은 경우(insufficient-sellable-quantity
    *  실사례)가 몇 초 안에 스스로 풀리는지 지켜볼 여유를 준다. */
@@ -3685,8 +3796,26 @@ export class ToolEngine extends EventEmitter {
   private async registerOcoForFilled(
     symbol: string,
     quantity: number,
-    spec: { tpTrigger: number; tpPrice: number; slTrigger: number; slPrice: number; expireDate: string; rationale?: RationaleInput },
+    specIn: { price?: number; tpTrigger: number; tpPrice: number; slTrigger: number; slPrice: number; expireDate: string; rationale?: RationaleInput; autoPlan?: AutoPlan; strictPlan?: boolean },
+    fillPrice?: number | null,
   ): Promise<WatchAndBracketResult> {
+    // [v0.69.2 긴급 — SXTC 실사고] 주문가가 아니라 실제 체결가 기준으로 익절/손절을 건다(자동매매 진입만 — 수동 브라켓은 오너가 정한 가격 그대로).
+    const rb = this.rebaseToFill(specIn, specIn.autoPlan, fillPrice);
+    const spec = rb.spec;
+    const basis = rb.basis;
+    if (rb.rebased) {
+      this.addJournal({
+        kind: "info",
+        symbol,
+        summary:
+          `🔧 ${symbol} 실제 체결가 $${fillPrice}가 주문가 $${specIn.price}와 달라, 익절/손절을 체결가 기준으로 다시 계산했습니다 — ` +
+          `익절 $${specIn.tpTrigger}→$${spec.tpTrigger} (+${specIn.autoPlan?.tpPct}%) / 손절 $${specIn.slTrigger}→$${spec.slTrigger}.`,
+        notify: true,
+        notifyTitle: `🔧 체결가 기준 재계산: ${symbol}`,
+      });
+    }
+    const expect: SanityExpect | undefined =
+      specIn.autoPlan && basis != null && (rb.rebased || specIn.strictPlan !== false) ? { basis, tpPct: specIn.autoPlan.tpPct, slPct: specIn.autoPlan.slPct, slMode: specIn.autoPlan.slMode } : undefined;
     const maxAttempts = this.ocoRetryDelaysMs.length + 1;
     let lastError = "";
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -3711,15 +3840,18 @@ export class ToolEngine extends EventEmitter {
           slPrice: spec.slPrice,
           expireDate: spec.expireDate,
           rationale: spec.rationale,
+          entry: basis,
+          expect,
         });
         // [v0.26.0] 자동매매가 이 OCO를 추적할 수 있게 조건주문 번호를 결과로 돌려준다.
         const conditionalOrderId = (ocoJournal.detail as { conditionalOrderId?: string } | undefined)?.conditionalOrderId;
-        if (conditionalOrderId) return { status: "oco_registered", conditionalOrderId };
+        if (conditionalOrderId) return { status: "oco_registered", conditionalOrderId, tp: spec.tpTrigger, sl: spec.slTrigger, fillPrice: rb.rebased ? fillPrice : null };
         // 드라이런처럼 conditionalOrderId가 없는 경우(이론상 이 분기는 isDryRun()이 이미
         // placeBracketCore에서 걸러내 도달하지 않지만, 안전하게 실패로 취급한다).
         lastError = "조건주문 번호를 확인할 수 없습니다.";
       } catch (e) {
         lastError = String(e).replace(/^Error:\s*/, "");
+        if (lastError.startsWith("주문 검증 실패")) break; // 같은 값으로 다시 해도 같은 결과 — 재시도하지 않는다(이미 붉은 경고·알림이 나갔다)
       }
     }
     // [v0.62.0 긴급 — VEEA 실사례] 재시도를 전부 소진했는데 마지막 실패 사유가 "밴드 위반"이면,
@@ -3857,7 +3989,7 @@ export class ToolEngine extends EventEmitter {
         continue; // 조회 실패는 다음 폴링에서 재시도(막지 않음)
       }
       if (o.status === "filled") {
-        return this.registerOcoForFilled(symbol, o.filled_qty && o.filled_qty > 0 ? o.filled_qty : spec.quantity, spec);
+        return this.registerOcoForFilled(symbol, o.filled_qty && o.filled_qty > 0 ? o.filled_qty : spec.quantity, spec, o.avg_filled_price);
       }
       if (o.status === "cancelled" || o.status === "failed") {
         // [v0.69.1 긴급] 일부만 체결된 채로 취소(킬스위치·[주문현황]에서 직접 취소·토스의 잔량 취소)되면 그 체결분은 계좌에 남는다 —
@@ -3869,7 +4001,7 @@ export class ToolEngine extends EventEmitter {
             summary: `진입 주문이 일부(${partFilled}주)만 체결된 채 ${o.status === "cancelled" ? "취소" : "실패"}됐습니다 — 체결된 ${partFilled}주는 보호를 위해 익절/손절을 겁니다.`,
             notify: true, notifyTitle: `🛡 부분체결 보호: ${symbol}`,
           });
-          return this.registerOcoForFilled(symbol, partFilled, spec);
+          return this.registerOcoForFilled(symbol, partFilled, spec, o.avg_filled_price);
         }
         this.addJournal({
           kind: "info", symbol, summary: `진입 주문이 ${o.status === "cancelled" ? "취소" : "실패"}돼 자동 감시를 멈췄습니다.`,
@@ -3904,7 +4036,7 @@ export class ToolEngine extends EventEmitter {
       // 재조회 실패 — 마지막으로 알던 상태(lastOrder)로 대체 판단.
     }
     if (finalOrder?.status === "filled") {
-      return this.registerOcoForFilled(symbol, finalOrder.filled_qty && finalOrder.filled_qty > 0 ? finalOrder.filled_qty : spec.quantity, spec);
+      return this.registerOcoForFilled(symbol, finalOrder.filled_qty && finalOrder.filled_qty > 0 ? finalOrder.filled_qty : spec.quantity, spec, finalOrder.avg_filled_price);
     }
     let cancelResult: OrderResponse;
     try {
@@ -3929,7 +4061,7 @@ export class ToolEngine extends EventEmitter {
     //   자체를 진실로 삼아 분기한다 — 취소 전에 미리 봐둔 finalOrder/filledQty는 더 안 쓴다.
     if (cancelResult.status === "filled") {
       // 취소 요청이 도착하기 직전에 전량 체결까지 끝나버린 경우 — 보호 없이 두면 안 되므로 OCO.
-      return this.registerOcoForFilled(symbol, cancelResult.filled_qty && cancelResult.filled_qty > 0 ? cancelResult.filled_qty : spec.quantity, spec);
+      return this.registerOcoForFilled(symbol, cancelResult.filled_qty && cancelResult.filled_qty > 0 ? cancelResult.filled_qty : spec.quantity, spec, cancelResult.avg_filled_price);
     }
     if (cancelResult.status !== "cancelled" && cancelResult.status !== "failed") {
       // 취소 요청 자체는 받아들여졌지만(예외 없음) 아직 실제로 "취소됨"이 아니다 — 절대 여기서
@@ -3954,7 +4086,7 @@ export class ToolEngine extends EventEmitter {
         notify: true,
         notifyTitle: `⏱ 부분체결 취소: ${symbol}`,
       });
-      return this.registerOcoForFilled(symbol, filledQty, spec);
+      return this.registerOcoForFilled(symbol, filledQty, spec, cancelResult.avg_filled_price);
     }
     this.addJournal({
       kind: "info",
@@ -5370,6 +5502,8 @@ export class ToolEngine extends EventEmitter {
         lastCycleAt?: string | null;
         lastCycleAtMs?: number | null;
         unprotected?: UnprotectedPos[];
+  /** [v0.69.2] 주문 전 검증 관문에서 막힌 최근 주문(최대 10건) — 화면 붉은 경고용. */
+  orderBlocks?: Array<{ ts: string; symbol: string; kind: string; reasons: string[] }>;
       };
       this.autoUnprotected = Array.isArray(raw.unprotected) ? raw.unprotected : [];
       this.autoTradePositions = Array.isArray(raw.positions) ? raw.positions : [];
@@ -7221,6 +7355,7 @@ export class ToolEngine extends EventEmitter {
     return {
       enabled: this.autoTradeEnabled,
       unprotected: this.autoUnprotected.map((u) => ({ ...u })),
+      orderBlocks: this.orderBlocks.map((b) => ({ ...b })), // [v0.69.2] 주문 전 검증에서 막힌 주문(화면 붉은 경고)
       positions: this.autoTradePositions.map((p) => ({ ...p })),
       realizedPnlUsd: Math.round(this.autoTradeRealizedPnlUsd * 100) / 100,
       maxPositions: this.autoTradeMaxPositions,
@@ -7385,8 +7520,9 @@ export class ToolEngine extends EventEmitter {
       }
       const exitPrice = exitFillPrice ?? targetPrice;
       const slippagePct = exitFillPrice != null ? Math.round((exitFillPrice / targetPrice - 1) * 10000) / 100 : null;
-      const pnlUsd = (exitPrice - pos.entry) * pos.quantity;
-      const pnlPct = ((exitPrice - pos.entry) / pos.entry) * 100;
+      const costBasis = pos.fillPrice ?? pos.entry; // [v0.69.2] 실제 체결가가 있으면 그 기준으로 손익 계산
+      const pnlUsd = (exitPrice - costBasis) * pos.quantity;
+      const pnlPct = ((exitPrice - costBasis) / costBasis) * 100;
       this.autoTradeRealizedPnlUsd += pnlUsd;
       this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
       this.saveAutoPositions(); // [v0.30.1] 자리 비움을 즉시 파일에도 반영(재시작해도 정확)
@@ -7578,10 +7714,22 @@ export class ToolEngine extends EventEmitter {
     );
     for (const pos of orphanedWatching) {
       if (!pos.buyOrderId) {
-        // [v0.30.0 이전 기록처럼] 매수 주문번호가 없으면 체결 여부를 다시 물어볼 방법이 없다 —
-        //   최소한 한 번은 알려서 오너가 [주문현황]에서 직접 확인하게 한다(반복 알림 방지는
-        //   updateAutoTradeHistory의 note가 이미 같은 문구면 파일 쓰기만 반복될 뿐 큰 문제 없음).
-        continue;
+        // [v0.69.3] 주문번호를 못 적어 둔 포지션(접수 직후 앱이 꺼진 경우 등) — 예전엔 영원히 "감시 중"으로 남고 토스 주문은 방치됐다.
+        //   토스의 미체결 목록에서 같은 종목·같은 가격의 봇 매수 주문을 찾아 이어받고, 못 찾으면 감시 시간이 지난 뒤 정리한다.
+        const found = await this.findOpenAutoBuyOrder(pos).catch(() => null);
+        if (found) {
+          pos.buyOrderId = found;
+          this.saveAutoPositions();
+          this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, { buyOrderId: found });
+        } else if (Date.now() - pos.enteredAtMs > (this.autoTradeWatchMinutes + 5) * 60_000) {
+          await this.clearAutoPositionWithoutPnl(
+            pos,
+            `🤖 ${pos.symbol}: 매수 주문번호가 기록되지 않았고 토스 미체결 목록에도 없어 감시를 정리합니다.`,
+            "주문번호 미기록 + 토스 미체결 목록에 없음(체결·취소 여부 미확정) — 보유 여부는 실계좌로 재확인함",
+          );
+          continue;
+        }
+        if (!pos.buyOrderId) continue;
       }
       let o: OrderResponse;
       try {
@@ -7592,16 +7740,25 @@ export class ToolEngine extends EventEmitter {
       if (o.status === "filled" || ((o.status === "cancelled" || o.status === "failed") && (o.filled_qty ?? 0) > 0)) {
         const qty = o.filled_qty && o.filled_qty > 0 ? o.filled_qty : pos.quantity;
         const result = await this.registerOcoForFilled(pos.symbol, qty, {
+          price: pos.entry,
+          autoPlan: this.currentAutoPlan(),
+          strictPlan: false, // 재시작 복구: 저장된 가격이 그 뒤 바뀐 설정과 달라도 보호가 최우선 — 설정 일치 검사는 체결가 재계산이 일어났을 때만
           tpTrigger: pos.tp,
           tpPrice: pos.tp,
           slTrigger: pos.sl,
           slPrice: roundPrice(pos.sl * 0.99), // 신규 진입 경로(autoTradeTick)와 동일 규칙
           expireDate: this.autoTradeExpireDate(), // 재시작 시점 기준으로 새로 30일 계산
           rationale: { technique: "split3", source: "auto", level: 1, entry: pos.entry, tp: pos.tp, sl: pos.sl, priceAtOrder: null },
-        });
+        }, o.avg_filled_price);
         const idx = this.autoTradePositions.findIndex((p) => p === pos);
         if (result.status === "oco_registered") {
-          if (idx !== -1) this.autoTradePositions[idx] = { ...pos, status: "active", conditionalOrderId: result.conditionalOrderId };
+          if (idx !== -1) {
+            this.autoTradePositions[idx] = {
+              ...pos, status: "active", conditionalOrderId: result.conditionalOrderId,
+              ...(result.tp != null ? { tp: result.tp, sl: result.sl ?? pos.sl, fillPrice: result.fillPrice ?? null } : {}),
+            };
+          }
+          if (result.tp != null) this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, { tp: result.tp, sl: result.sl ?? pos.sl, fillPrice: result.fillPrice ?? null });
           this.saveAutoPositions();
           this.addJournal({
             kind: "info", symbol: pos.symbol,
@@ -7655,6 +7812,25 @@ export class ToolEngine extends EventEmitter {
           exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
           note: `재시작 후 재확인 — 매수 주문이 ${o.status === "cancelled" ? "취소" : "실패"}로 확인됨`,
         });
+      } else if (!this.isDryRun() && Date.now() - pos.enteredAtMs > (this.autoTradeWatchMinutes + 2) * 60_000) {
+        // [v0.69.3 긴급 — 오너 보고 "매수주문이 들어갔는데 봇 화면에선 사라지고 토스엔 취소 안 된 채 남아 있다(예전부터 종종)"]
+        //   원인 ①: 감시시간(미체결 자동취소)을 지키는 코드는 앱이 켜져 있는 동안의 빠른 감시(watchAndBracket) 안에만 있었다. 앱이 재시작되면(자동 업데이트
+        //   포함) 이 복구 경로가 이어받는데, 여기엔 "체결됐나/취소됐나" 확인만 있고 **시간이 지나면 취소하는 로직이 없어** 미체결 주문이 장 마감까지 남았다.
+        //   → 감시시간(+2분)이 지났는데 아직 안 끝났으면 여기서 취소를 요청한다(취소 결과는 다음 사이클 확인이 filled·부분체결·cancelled 별로 처리).
+        try {
+          await cancelOrder(pos.buyOrderId);
+          this.addJournal({
+            kind: "info", symbol: pos.symbol,
+            summary: `⏱ ${pos.symbol}: 감시시간(${this.autoTradeWatchMinutes}분)이 지나도 미체결인 매수 주문(앱 재시작 등으로 놓친 건)을 취소 요청했습니다 — 다음 확인 때 결과를 처리합니다.`,
+            notify: true, notifyTitle: `⏱ 미체결 주문 취소 요청: ${pos.symbol}`,
+          });
+        } catch (e) {
+          this.addJournal({
+            kind: "info", symbol: pos.symbol,
+            summary: `⚠️ ${pos.symbol} 감시시간이 지난 미체결 매수 주문의 취소 요청이 실패했습니다(${String(e).replace(/^Error:\s*/, "").slice(0, 100)}) — 다음 사이클에 다시 시도합니다. [주문현황]에서 직접 취소할 수도 있습니다.`,
+            notify: true, notifyTitle: `⚠️ 미체결 주문 취소 실패: ${pos.symbol}`,
+          });
+        }
       }
       // pending/partial/unknown이면 다음 사이클(최대 5분 뒤)에 다시 확인한다.
     }
@@ -7677,7 +7853,7 @@ export class ToolEngine extends EventEmitter {
     const sym = pos.symbol.toUpperCase();
     if (this.autoUnprotected.some((u) => u.symbol === sym)) return;
     this.autoUnprotected.push({
-      symbol: sym, entry: pos.entry, tp: pos.tp, sl: pos.sl, quantity: pos.quantity, enteredAtMs: pos.enteredAtMs,
+      symbol: sym, entry: pos.entry, tp: pos.tp, sl: pos.sl, quantity: pos.quantity, enteredAtMs: pos.enteredAtMs, fillPrice: pos.fillPrice ?? null,
       reason, sinceMs: Date.now(), attempts: 0, lastAttemptMs: null, lastError: null,
     });
     this.saveAutoPositions();
@@ -7687,6 +7863,56 @@ export class ToolEngine extends EventEmitter {
       notify: true, notifyTitle: `🛡 보호 복구 시작: ${sym}`,
     });
     this.scheduleGuard(3000);
+  }
+
+  /** 토스 미체결 목록에서 이 자동매매 포지션의 매수 주문(같은 종목·같은 지정가·봇이 낸 brk 주문)을 찾는다. */
+  private async findOpenAutoBuyOrder(pos: AutoPosition): Promise<string | null> {
+    const open = await this.openOrders();
+    const hit = open.find(
+      (o) =>
+        o.side === "BUY" &&
+        String(o.symbol ?? "").toUpperCase() === pos.symbol.toUpperCase() &&
+        String(o.clientOrderId ?? "").startsWith(`brk${pos.symbol.toUpperCase()}`) &&
+        Math.abs((o.price ?? 0) - pos.entry) < 1e-6,
+    );
+    return hit?.tossOrderId ?? null;
+  }
+
+  /**
+   * [v0.69.3] 독립 감사 — 봇이 낸 매수 주문이 토스에 미체결로 남아 있는데 봇이 더 이상 추적하지 않는 "고아 주문"을 찾아 취소한다.
+   *   봇의 주문임을 확인하는 법: 자동매매 기록(history)의 buyOrderId에 있는 번호(수동 브라켓 주문은 여기 없으므로 절대 건드리지 않는다).
+   *   추적 중(autoTradePositions에 같은 buyOrderId)이면 건드리지 않는다. 어떤 경로로 고아가 생겼든 5분 안에 정리된다.
+   */
+  async auditOrphanBuyOrders(): Promise<number> {
+    if (this.isDryRun() || this.killSwitch) return 0;
+    let open: OrderResponse[];
+    try {
+      open = await this.openOrders();
+    } catch {
+      return 0;
+    }
+    const autoIds = new Set(this.autoTradeHistory.map((h) => h.buyOrderId).filter((x): x is string => !!x));
+    const tracked = new Set(this.autoTradePositions.map((p) => p.buyOrderId).filter((x): x is string => !!x));
+    let cancelled = 0;
+    for (const o of open) {
+      if (o.side !== "BUY" || !autoIds.has(o.tossOrderId) || tracked.has(o.tossOrderId)) continue;
+      try {
+        await cancelOrder(o.tossOrderId);
+        cancelled++;
+        this.addJournal({
+          kind: "cancel", symbol: o.symbol ?? "-",
+          summary: `🧹 ${o.symbol ?? ""} 봇이 낸 매수 주문(${o.tossOrderId.slice(0, 8)}…)이 토스에 미체결로 남아 있는데 봇은 추적하지 않아 취소했습니다(고아 주문 정리).`,
+          notify: true, notifyTitle: `🧹 고아 주문 취소: ${o.symbol ?? ""}`,
+        });
+      } catch (e) {
+        this.addJournal({
+          kind: "info", symbol: o.symbol ?? "-",
+          summary: `⚠️ ${o.symbol ?? ""} 추적되지 않는 미체결 매수 주문의 취소가 실패했습니다(${String(e).replace(/^Error:\s*/, "").slice(0, 100)}) — [주문현황]에서 직접 취소해 주세요.`,
+          notify: true, notifyTitle: `⚠️ 고아 주문 취소 실패: ${o.symbol ?? ""}`,
+        });
+      }
+    }
+    return cancelled;
   }
 
   /**
@@ -7782,13 +8008,14 @@ export class ToolEngine extends EventEmitter {
           let tp = u.tp;
           let sl = u.sl;
           if (!(tp > 0 && sl > 0 && tp > sl)) {
-            tp = roundPrice(u.entry * (1 + this.defaultTpPct / 100));
-            sl = roundPrice(u.entry * (1 - this.defaultSlPct / 100));
+            tp = roundPrice((u.fillPrice ?? u.entry) * (1 + this.defaultTpPct / 100));
+            sl = roundPrice((u.fillPrice ?? u.entry) * (1 - this.defaultSlPct / 100));
             if (!(tp > 0 && sl > 0 && tp > sl)) throw new Error(`감시가를 계산할 수 없습니다(진입가 ${u.entry})`);
           }
           if (isWithinOcoBand(cur, tp, sl)) {
             const j = await this.placeOco({
               symbol: u.symbol, quantity: qty, tpTrigger: tp, tpPrice: tp, slTrigger: sl, slPrice: roundPrice(sl * 0.99),
+              entry: u.fillPrice ?? u.entry, // [v0.69.2] 방향 검사만(가드는 보호가 최우선이라 설정 일치 검사는 하지 않는다)
               expireDate: this.autoTradeExpireDate(),
               rationale: { technique: "split3", source: "auto", level: 1, entry: u.entry, tp, sl, priceAtOrder: null },
             });
@@ -7837,10 +8064,15 @@ export class ToolEngine extends EventEmitter {
     //   — reconcileAutoPositions의 재시작-복구 경로가 이미 끝난 걸 또 건드리지 않게(중복처리 방지).
     this.autoTradeActiveWatches.delete(`${symbol}@${entry}@${enteredAtMs}`);
     if (res.status === "oco_registered") {
-      this.autoTradePositions[idx] = { ...this.autoTradePositions[idx], status: "active", conditionalOrderId: res.conditionalOrderId };
+      this.autoTradePositions[idx] = {
+        ...this.autoTradePositions[idx], status: "active", conditionalOrderId: res.conditionalOrderId,
+        ...(res.tp != null ? { tp: res.tp, sl: res.sl ?? this.autoTradePositions[idx].sl, fillPrice: res.fillPrice ?? null } : {}),
+      };
       this.saveAutoPositions();
       this.updateAutoTradeHistory(symbol, entry, enteredAtMs, {
-        status: "active", note: "매수 체결 확인 — 익절/손절(조건주문) 등록됨", conditionalOrderId: res.conditionalOrderId,
+        status: "active", conditionalOrderId: res.conditionalOrderId,
+        note: res.fillPrice != null ? `매수 체결 확인(실제 체결가 $${res.fillPrice}) — 익절/손절을 체결가 기준으로 다시 계산해 등록됨` : "매수 체결 확인 — 익절/손절(조건주문) 등록됨",
+        ...(res.tp != null ? { tp: res.tp, sl: res.sl ?? this.autoTradePositions[idx].sl, fillPrice: res.fillPrice ?? null } : {}),
       });
       // [v0.32.0] 이 성공 경로는 그동안 저널에 한 줄도 안 남기고 있었다(실패 쪽만 남겼음) —
       //   "매수 체결 확인 → 보호주문 등록 완료"는 오너가 놓치면 안 되는 좋은 소식이라 추가한다.
@@ -7990,6 +8222,7 @@ export class ToolEngine extends EventEmitter {
       await this.prepareBackend();
       await this.reconcileAutoPositions(); // ①빈자리 먼저 확인(같은 사이클 안에 채우기 위해) — 일시정지 중에도 계속
       await this.auditUnprotectedHoldings().catch(() => 0); // [v0.69.1] 경로와 무관하게 "보유인데 보호 없음"을 결과로 직접 대조
+      await this.auditOrphanBuyOrders().catch(() => 0); // [v0.69.3] 봇이 낸 미체결 매수 주문이 추적에서 빠진 채 토스에 남는 고아 주문 정리
 
       // [v0.44.0] 시스템 휴무 시간대(또는 휴장)면 신규 스캔·진입을 전부 건너뛴다. 기존에 이미
       //   체결된(익절/손절 등록된) 포지션은 위 reconcileAutoPositions가 계속 감시하므로 그대로 둔다
@@ -8358,6 +8591,13 @@ export class ToolEngine extends EventEmitter {
             //  [v0.42.0] 하드코딩 상수 대신 오너가 설정 가능한 인스턴스 필드를 쓴다.
             watchMinutes: this.autoTradeWatchMinutes,
             cancelOnTimeout: true,
+            autoPlan: this.currentAutoPlan(), // [v0.69.2] 설정 대조 + 체결가 기준 재계산
+            onOrderCreated: (id) => {
+              // [v0.69.3] 주문 접수 즉시 번호를 포지션·기록 양쪽에 남긴다(예전엔 접수 뒤 여러 단계를 거친 다음에야 적었다).
+              posDraft.buyOrderId = id;
+              this.saveAutoPositions();
+              this.updateAutoTradeHistory(cand.symbol, level1.entry, posDraft.enteredAtMs, { buyOrderId: id });
+            },
             rationale: {
               technique: "split3",
               source: "auto", // [v0.30.0] 오너 요청 — 자동매매로 낸 주문임을 근거에도 남긴다
@@ -8402,6 +8642,18 @@ export class ToolEngine extends EventEmitter {
             });
           }
         } catch (e) {
+          if (posDraft.buyOrderId) {
+            // [v0.69.3] 주문은 이미 토스에 접수됐는데 그 뒤 처리에서 오류가 난 경우 — 예전엔 포지션을 지우고 "다음 사이클 재시도"로 넘겨
+            //   토스에 주문이 남은 채 중복 주문까지 나갈 수 있었다. 이제 포지션을 유지해(5분 재확인·시간초과 취소가 이어받음) 재시도하지 않는다.
+            this.autoTradeUsedKeys.add(usedKey);
+            this.addJournal({
+              kind: "info", symbol: cand.symbol,
+              summary: `⚠️ ${cand.symbol} 진입 주문은 토스에 접수됐지만 이후 처리 중 오류(${String(e).replace(/^Error:\s*/, "")})가 났습니다 — 주문은 계속 감시하며, 중복 주문하지 않습니다.`,
+              notify: true, notifyTitle: `⚠️ 진입 후 처리 오류: ${cand.symbol}`,
+            });
+            placed++;
+            continue;
+          }
           this.autoTradePositions = this.autoTradePositions.filter((p) => p !== posDraft);
           this.saveAutoPositions();
           const errMsg = String(e).replace(/^Error:\s*/, "");
@@ -8705,6 +8957,10 @@ export class ToolEngine extends EventEmitter {
   }): Promise<JournalEntry> {
     const symbol = spec.symbol.toUpperCase();
     if (this.killSwitch) throw new Error("킬 스위치가 켜져 있습니다.");
+    {
+      const problems = checkSimpleOrder({ quantity: spec.quantity, orderType: spec.orderType, price: spec.price }); // [v0.69.2] 주문 전 검증 관문
+      if (problems.length) this.blockOrder("매도", symbol, problems);
+    }
     await this.prepareBackend();
     this.assertAccountReady();
     const clientOrderId = makeClientOrderId(`sell${symbol}${DateTime.now().toFormat("HHmmss")}`, 1, "sell");
@@ -8756,9 +9012,14 @@ export class ToolEngine extends EventEmitter {
     this.journal.push(entry);
     if (this.journal.length > 1000) this.journal.shift();
     // 원자적 저장(임시 파일 → 교체): 쓰다 만 파일 방지
-    const tmp = this.journalPath + ".tmp";
-    writeFileSync(tmp, JSON.stringify(this.journal, null, 2), "utf8");
-    renameSync(tmp, this.journalPath);
+    // [v0.69.3] 저널 파일 저장 실패(디스크·폴더 문제)가 주문 감시 같은 핵심 흐름을 예외로 죽이지 않게 한다 — 메모리 저널과 알림은 그대로 동작.
+    try {
+      const tmp = this.journalPath + ".tmp";
+      writeFileSync(tmp, JSON.stringify(this.journal, null, 2), "utf8");
+      renameSync(tmp, this.journalPath);
+    } catch {
+      /* 저장만 건너뛴다 */
+    }
     this.emit("journal", entry);
     if (entry.notify) {
       const notifyEvent: NotifyEvent = {
