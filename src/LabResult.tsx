@@ -329,6 +329,15 @@ export function LabResultTab({ lab, initialAssessment }: { lab: LabApi; initialA
         {scope === "all" && !mirror && (
           <p className="lab-note">⚠️ 백필 신호는 "오늘 거래량이 많은 종목"만 골라 과거를 본 것이라 선택 편향이 있어 성과가 좋게 나오기 쉽습니다. 결론은 실시간 신호로 내려야 합니다.</p>
         )}
+        <details className="rs-legend" open={false}>
+          <summary>❓ 매매연구소는 무엇을 하나요? (한 번 읽어 보세요)</summary>
+          <ul>
+            <li><b>하는 일</b> — 이 앱이 켜져 있는 동안 <b>5분마다</b> 거래량 상위 종목(신호기록 현황의 "순위" 설정만큼)의 5분봉을 읽어서, 우리가 노리는 모양(도지 → 큰 양봉 …)이 나타난 순간을 <b>"신호"로 기록</b>합니다. 실제 주문은 <b>한 건도 내지 않습니다</b>(시세 조회만) — 자동매매·실계좌에 영향이 없습니다.</li>
+            <li><b>왜 쌓나</b> — 신호가 난 뒤의 1분봉을 이어 받아 "그때 이렇게 사고팔았다면?"을 <b>가상으로 계산</b>해 전략을 비교하려는 것입니다. 이 결과로 나중에 어떤 진입·손절 방식이 나은지 근거를 얻습니다.</li>
+            <li><b>실시간으로 쌓이나</b> — 네. 맨 위 초록 띠에 <b>마지막 스캔 시각</b>이 5분마다 갱신되면 수집 중입니다. 단, 시세가 얇은 <b>05~17시(한국시간)는 일부러 쉬고</b>, 이 모양은 원래 드물어서(도지 수천 번 중 인정 신호 몇십 번) 하루에 몇 건 정도만 생깁니다.</li>
+            <li><b>숫자 읽는 법</b> — "인정 신호"는 조건을 모두 충족한 신호입니다. 그중 <b>결론에 쓰는 것은 "실시간 포착" 신호뿐</b>입니다(과거를 뒤늦게 훑어 찾은 '백필'과 휴무시간대 신호는 편향이 있어 참고용). 그래서 전체가 늘어도 게이지는 실시간 신호가 생길 때만 움직입니다.</li>
+          </ul>
+        </details>
         <LabFreshBar lab={lab} />
         <CollectBar st={s.status} a={assess} funnel={s.funnel} />
         <VerifyBar s={s.status.verify} />
@@ -341,7 +350,19 @@ export function LabResultTab({ lab, initialAssessment }: { lab: LabApi; initialA
 
         <div className="rs-kpis">
           <div className="rs-kpi"><b><CountUp value={s.counts.total} /></b><span>누적 신호(로우)</span></div>
-          <div className="rs-kpi"><b><CountUp value={s.counts.eligible} /></b><span>인정 신호</span></div>
+          {/* [v0.69.4 — 오너 지적 "인정 신호는 느는데 표본부족 게이지는 안 변한다"] 예전엔 이 칸이 '전체'(백필·휴무시간대 포함)라 게이지(실시간·운영시간만)와 숫자가 달라 보였다.
+              이제 게이지와 같은 숫자(실시간 인정)를 크게 보이고, 전체가 어떻게 구성되는지 바로 아래에 풀어 적는다. */}
+          <div className="rs-kpi">
+            <b><CountUp value={assess ? assess.counts.realtimeEligible : s.counts.eligible} /></b>
+            <span>
+              실시간 인정 신호 (결론·게이지 기준)
+              <br />
+              <small>
+                전체 {s.counts.eligible}건 = 실시간 {assess ? assess.counts.realtimeEligible : "—"} + 백필 {assess ? assess.counts.backfilledEligible : "—"}
+                {assess ? ` + 휴무시간대(05~17시) ${Math.max(0, s.counts.eligible - assess.counts.allEligible)}` : ""}
+              </small>
+            </span>
+          </div>
           <div className="rs-kpi"><b className={cls(b?.expectancyPerSignal)}><CountUp value={b?.expectancyPerSignal ?? null} decimals={2} suffix="%" signed /></b><span>1위 조합 신호당 기대값</span></div>
           <div className="rs-kpi"><b><CountUp value={b?.winRate ?? null} decimals={0} suffix="%" /></b><span>1위 조합 승률</span></div>
           <div className="rs-kpi"><b><CountUp value={b?.fillRate ?? null} decimals={0} suffix="%" /></b><span>1위 조합 체결률</span></div>

@@ -633,6 +633,7 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:orders:conditionals", () => e.conditionals());
   ipcMain.handle("tool:orders:cancel", (_ev, id: string) => e.cancelNormalOrder(id));
   ipcMain.handle("tool:orders:cancelConditional", (_ev, id: string) => e.cancelConditional(id));
+  ipcMain.handle("tool:auto:dismissUnprotected", (_ev, symbol: string) => e.dismissUnprotected(symbol)); // [v0.69.4]
   ipcMain.handle("tool:auto:cancelPosition", (_ev, symbol: string, entry: number, enteredAtMs: number) =>
     e.cancelAutoPosition(symbol, entry, enteredAtMs),
   );

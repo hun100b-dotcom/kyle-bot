@@ -116,3 +116,36 @@ describe("[v0.69.1] 자동 취소 API 실패(timeout) — 포지션을 지우지
     }
   }, 20_000);
 });
+
+describe("[v0.69.4] 보호 중단(직접 관리) — 오너가 손절을 빼고 익절 매도만 걸어 둔 종목에 봇이 계속 보호주문을 시도하지 않는다", () => {
+  it("dismissUnprotected: 목록에서 빠지고, 이후 가드·감사가 같은 종목을 다시 올리지 않는다", async () => {
+    const { dir, eng, x, stopTimer } = await setup();
+    try {
+      x.autoTradeHistory.push(histEntry());
+      expect(await eng.auditUnprotectedHoldings()).toBe(1);
+      stopTimer();
+      const r = eng.dismissUnprotected("AAPL");
+      expect(r.ok).toBe(true);
+      expect(x.autoUnprotected).toHaveLength(0);
+      expect(await eng.auditUnprotectedHoldings()).toBe(0); // 12시간 동안 다시 올리지 않음
+      stopTimer();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("토스에 직접 건 매도 주문이 있으면 가드는 OCO를 계속 시도하지 않고 보호 대기를 해제한다", async () => {
+    const { dir, eng, x, stopTimer } = await setup();
+    try {
+      x.autoTradeHistory.push(histEntry());
+      expect(await eng.auditUnprotectedHoldings()).toBe(1);
+      stopTimer();
+      await eng.placeSell({ symbol: "AAPL", quantity: 100, orderType: "LIMIT", price: 9 }); // 익절 지정가 매도만 걸어 둔 상태(체결 안 되는 높은 가격)
+      await eng.runGuard();
+      expect(x.autoUnprotected).toHaveLength(0); // 해제됨
+      expect((await eng.conditionals()).length).toBe(0); // 조건주문을 새로 걸지 않았다
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+});

@@ -1370,6 +1370,8 @@ export class ToolEngine extends EventEmitter {
   private autoTradePositions: AutoPosition[] = []; // 지금 자동매매로 감시·보유 중인 포지션(파일로 영속)
   /** [v0.69.0] 보호주문 없이 남은 보유 종목 — 가드가 보호가 걸리거나 팔릴 때까지 반복 시도(파일로 영속, 재시작해도 이어감). */
   private autoUnprotected: UnprotectedPos[] = [];
+  /** [v0.69.4] 오너가 [보호 중단]을 눌러 "이 종목은 내가 직접 관리한다"고 한 종목 → 해제 시각(ms). 그때까지 가드·감사가 다시 올리지 않는다. */
+  private guardDismissed: Record<string, number> = {};
   private guardTimer: ReturnType<typeof setTimeout> | null = null;
   private guardBusy = false;
   /** 조건주문이 토스에서 사라졌는데 실계좌엔 주식이 남은 경우(WHLR·NAUT)에도 자동으로 다시 보호할지(기본 켬). */
@@ -5502,10 +5504,10 @@ export class ToolEngine extends EventEmitter {
         lastCycleAt?: string | null;
         lastCycleAtMs?: number | null;
         unprotected?: UnprotectedPos[];
-  /** [v0.69.2] 주문 전 검증 관문에서 막힌 최근 주문(최대 10건) — 화면 붉은 경고용. */
-  orderBlocks?: Array<{ ts: string; symbol: string; kind: string; reasons: string[] }>;
+        dismissed?: Record<string, number>;
       };
       this.autoUnprotected = Array.isArray(raw.unprotected) ? raw.unprotected : [];
+      this.guardDismissed = raw.dismissed && typeof raw.dismissed === "object" ? raw.dismissed : {};
       this.autoTradePositions = Array.isArray(raw.positions) ? raw.positions : [];
       this.autoTradeUsedKeys = new Set(Array.isArray(raw.usedKeys) ? raw.usedKeys : []);
       this.autoTradeLastScan = raw.lastScan ?? null;
@@ -5531,6 +5533,7 @@ export class ToolEngine extends EventEmitter {
         lastCycleAt: this.autoTradeLastCycleAt,
         lastCycleAtMs: this.autoTradeLastCycleAtMs,
         unprotected: this.autoUnprotected,
+        dismissed: this.guardDismissed,
       };
       const tmp = this.autoPositionsPath + ".tmp";
       writeFileSync(tmp, JSON.stringify(payload, null, 2), "utf8");
@@ -6218,6 +6221,8 @@ export class ToolEngine extends EventEmitter {
         return { ok: true, journal: await this.placeSell(payload as Parameters<ToolEngine["placeSell"]>[0]) };
       case "cancelAutoPosition":
         return await this.cancelAutoPosition(String(payload.symbol), Number(payload.entry), Number(payload.enteredAtMs));
+      case "dismissUnprotected":
+        return this.dismissUnprotected(String(payload.symbol));
       case "autoScanNow":
         return { ok: true, status: await this.autoScanNow() };
       default:
@@ -7852,6 +7857,7 @@ export class ToolEngine extends EventEmitter {
   private registerUnprotected(pos: AutoPosition, reason: string): void {
     const sym = pos.symbol.toUpperCase();
     if (this.autoUnprotected.some((u) => u.symbol === sym)) return;
+    if ((this.guardDismissed[sym] ?? 0) > Date.now()) return; // [v0.69.4] 오너가 직접 관리하겠다고 한 종목
     this.autoUnprotected.push({
       symbol: sym, entry: pos.entry, tp: pos.tp, sl: pos.sl, quantity: pos.quantity, enteredAtMs: pos.enteredAtMs, fillPrice: pos.fillPrice ?? null,
       reason, sinceMs: Date.now(), attempts: 0, lastAttemptMs: null, lastError: null,
@@ -7863,6 +7869,24 @@ export class ToolEngine extends EventEmitter {
       notify: true, notifyTitle: `🛡 보호 복구 시작: ${sym}`,
     });
     this.scheduleGuard(3000);
+  }
+
+  /**
+   * [v0.69.4 — 오너 요청 "손절 조건주문을 직접 취소하고 익절 매도만 걸어 둘 때가 있는데, 보호 가드가 계속 조건주문을 시도한다 — 보호주문을 취소할 수 있는 버튼이 필요"]
+   *   보호 대기 목록에서 종목을 빼고, 일정 시간(기본 12시간) 동안 가드·감사가 그 종목을 다시 올리지 않게 한다. 토스의 주문은 건드리지 않는다(봇의 재시도만 멈춤).
+   */
+  dismissUnprotected(symbol: string, hours = 12): { ok: boolean; message: string } {
+    const sym = String(symbol).toUpperCase();
+    const had = this.autoUnprotected.some((u) => u.symbol === sym);
+    this.autoUnprotected = this.autoUnprotected.filter((u) => u.symbol !== sym);
+    this.guardDismissed[sym] = Date.now() + Math.max(1, hours) * 3600_000;
+    this.saveAutoPositions();
+    this.addJournal({
+      kind: "info", symbol: sym,
+      summary: `🛡 ${sym} 보호 복구를 오너가 중단했습니다(직접 관리) — ${hours}시간 동안 봇이 이 종목에 보호주문을 다시 걸지 않습니다. 토스의 기존 주문은 그대로입니다.`,
+    });
+    void this.pushLiveState(true);
+    return { ok: true, message: had ? `${sym} 보호 복구를 중단했습니다(${hours}시간).` : `${sym}은(는) 보호 대기 목록에 없었지만 ${hours}시간 동안 자동 보호 대상에서 제외했습니다.` };
   }
 
   /** 토스 미체결 목록에서 이 자동매매 포지션의 매수 주문(같은 종목·같은 지정가·봇이 낸 brk 주문)을 찾는다. */
@@ -7945,6 +7969,7 @@ export class ToolEngine extends EventEmitter {
     let added = 0;
     for (const [sym, qty] of held) {
       if (tracked.has(sym) || openSyms.has(sym)) continue;
+      if ((this.guardDismissed[sym] ?? 0) > Date.now()) continue; // [v0.69.4] 오너가 직접 관리 중
       const mine = this.autoTradeHistory
         .filter((e) => e.symbol.toUpperCase() === sym && Number(e.id.split("@")[2]) >= cutoff && e.status !== "dryrun")
         .sort((a, b) => Number(b.id.split("@")[2]) - Number(a.id.split("@")[2]))[0];
@@ -7985,6 +8010,14 @@ export class ToolEngine extends EventEmitter {
       }
       let open: ConditionalOrderResponse[] | null = null;
       try { open = await listConditionalOrders("OPEN"); } catch { open = null; }
+      // [v0.69.4] 오너가 손절을 빼고 익절 지정가 매도만 걸어 둔 경우 — 그 매도가 주식을 잡고 있어 OCO는 계속 "매도 가능 수량 부족"으로 실패한다.
+      //   토스에 이 종목의 미체결 SELL 주문이 있으면 오너가 직접 관리하는 것으로 보고 보호 대기를 해제한다(손절이 없다는 경고는 저널에 남긴다).
+      let openSellSyms: Set<string> | null = null;
+      try {
+        openSellSyms = new Set((await this.openOrders()).filter((o) => o.side === "SELL").map((o) => String(o.symbol ?? "").toUpperCase()));
+      } catch {
+        openSellSyms = null;
+      }
 
       for (const u of [...this.autoUnprotected]) {
         const done = (why: string, hist?: Partial<AutoTradeHistoryEntry>) => {
@@ -7996,6 +8029,11 @@ export class ToolEngine extends EventEmitter {
         const qtyHeld = held.get(u.symbol) ?? 0;
         if (qtyHeld <= 0) { done("보유 수량이 없습니다(이미 매도됨)"); continue; }
         if (open && open.some((o) => String(o.symbol ?? "").toUpperCase() === u.symbol)) { done("토스에 익절/손절 조건주문이 걸려 있습니다"); continue; }
+        if (openSellSyms?.has(u.symbol)) {
+          this.guardDismissed[u.symbol] = Date.now() + 12 * 3600_000;
+          done("토스에 직접 건 매도 주문이 있어 오너가 관리 중인 것으로 보고 보호 대기를 해제합니다(손절 주문은 없으니 필요하면 직접 걸어 주세요)");
+          continue;
+        }
 
         u.attempts++;
         u.lastAttemptMs = Date.now();

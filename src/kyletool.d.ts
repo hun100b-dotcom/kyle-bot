@@ -1047,6 +1047,8 @@ interface KyletoolBridge {
   cancelConditional(id: string): Promise<JournalEntry>;
   /** [v0.41.0] 자동매매가 지금 감시 중인 포지션 하나를 즉시 직접 취소한다. */
   cancelAutoPosition(symbol: string, entry: number, enteredAtMs: number): Promise<{ ok: boolean; message: string }>;
+  /** [v0.69.4] 보호 복구(봇이 계속 보호주문을 다시 거는 중)를 중단하고 일정 시간 직접 관리로 전환. */
+  dismissUnprotected(symbol: string): Promise<{ ok: boolean; message: string }>;
 
   mockSetPrice(symbol: string, price: number): Promise<boolean>;
 

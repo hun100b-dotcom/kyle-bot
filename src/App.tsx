@@ -122,15 +122,6 @@ const JOURNAL_CATEGORY_ICON: Record<JournalCategory, string> = {
   주문: "🧾", 인증: "🔐", 동기화: "☁️", 자동매매: "🤖", 시스템: "⚙️", 오류: "⚠️",
 };
 
-/** [v0.60.4 — 오너 실사용 보고 "최근 명령 표에 영문 그대로 떠서 뭘 보낸 건지 헷갈린다"]
- *  "📱 원격 조종" 카드의 최근 명령 표가 electron/tool-engine.ts의 dispatchCommand 타입
- *  문자열(영문)을 그대로 찍고 있었다 — 사람이 읽을 라벨로 바꿔 보여준다. */
-const REMOTE_CMD_LABEL: Record<string, string> = {
-  autoTradeStart: "자동매매 시작", autoTradeStop: "자동매매 중지",
-  setKillSwitch: "비상 정지 설정", placeEntry: "진입 주문", placeSell: "매도 주문",
-  cancelAutoPosition: "포지션 취소", autoScanNow: "지금 스캔", saveAutoTradeSettings: "설정 저장",
-};
-
 /**
  * [v0.2.6 입력 버그 수정] 숫자 입력 공통 처리.
  *
@@ -723,8 +714,6 @@ function App() {
   const [pcAppVersion, setPcAppVersion] = useState<string | null>(null);
   // [v0.60.4] 웹(폰)에서 자동매매 시작/중지를 원격 명령으로 보냈을 때의 결과 메시지.
   const [autoToggleMsg, setAutoToggleMsg] = useState("");
-  const [remoteCmds, setRemoteCmds] = useState<Array<{ id: string; type: string; status: string; result: unknown; createdAt: string }>>([]);
-  const [remoteBusy, setRemoteBusy] = useState<string | null>(null); // 처리 중인 명령 타입(버튼 개별 비활성용)
   const [screenBusy, setScreenBusy] = useState(false);
   const [screenProg, setScreenProg] = useState<ScreenProgress | null>(null);
   // [v0.43.0] 스크리닝 취소 버튼 — 요청을 보냈으면 협조적 취소가 실제로 멈출 때까지(screenBusy가
@@ -1025,6 +1014,20 @@ function App() {
   //   보였을 뿐이다("조용히 아무 일도 안 하는 것처럼 보인다"의 실제 정체). 이 버튼 바로 아래에
   //   뜨는 전용 메시지로 분리한다 — 실패하면 실패 사유가 바로 여기 보인다.
   const [autoCancelMsg, setAutoCancelMsg] = useState("");
+  /** [v0.69.4] 보호 대기 종목의 [보호 중단] — 봇의 재시도만 멈춘다(토스 주문은 그대로). 폰이면 원격 명령 큐로. */
+  async function doDismissUnprotected(symbol: string) {
+    if (!confirm(`${symbol}에 봇이 보호주문(익절/손절)을 다시 거는 것을 12시간 동안 멈출까요?\n(토스에 이미 걸린 주문은 그대로 두고, 이 종목은 직접 관리하게 됩니다. 손절 주문이 없으면 급락 때 보호되지 않아요.)`)) return;
+    try {
+      const r = canReconcileLive
+        ? await window.kyletool.dismissUnprotected(symbol)
+        : await window.kyletool.sendCommand("dismissUnprotected", { symbol });
+      setAutoCancelMsg(`${symbol}: ${r.ok ? "✅ " : "⚠️ "}${r.message}`);
+      if (canReconcileLive) setAutoStatus(await window.kyletool.autoTradeStatus());
+      else setTimeout(() => void refreshLiveState(), 10_000);
+    } catch (e) {
+      setAutoCancelMsg(`${symbol}: ⚠️ 요청이 실패했습니다(${e instanceof Error ? e.message : String(e)}).`);
+    }
+  }
   const [reconcileBusy, setReconcileBusy] = useState(false); // [v0.45.0] "🔄 지금 확인" 버튼 눌림 상태
   async function doCancelAutoPosition(p: AutoPosition) {
     const key = `${p.symbol}@${p.entry}@${p.enteredAtMs}`;
@@ -1428,7 +1431,6 @@ function App() {
     else if (t === "report") void loadReport();
     // [v0.27.0] 자동매매 현황/스크리닝 결과 탭을 열 때 최신 상태를 바로 받아온다(20초 폴링을 기다리지 않게).
     else if (t === "autoControl" || t === "autoScan") void window.kyletool.autoTradeStatus().then(setAutoStatus);
-    if (t === "autoControl") void loadRemoteCommands(); // [v0.59.0] 원격 조종 탭을 열 때 최근 명령 상태를 바로 보여준다.
     // [v0.30.0] 자동매매기록 탭을 열 때 최신 기록을 불러온다.
     // [v0.33.0] 매매연구 탭도 같은 기록(autoHistory)을 재료로 통계를 내므로 똑같이 불러온다.
     else if (t === "autoHistory" || t === "research") void loadAutoHistory();
@@ -1581,34 +1583,6 @@ function App() {
     const id = setInterval(poll, 20_000);
     return () => clearInterval(id);
   }, []);
-
-  /** [v0.59.0] 원격 명령 목록을 다시 불러온다(최근 처리 상태 확인용). */
-  async function loadRemoteCommands() {
-    try {
-      setRemoteCmds(await window.kyletool.listMyCommands(10));
-    } catch {
-      /* 무시 */
-    }
-  }
-  /** [v0.60.0 긴급 수정 — "취소 버튼 무반응" 계열 버그를 이 카드에도 같은 원리로 남기지 않으려고
-   *   syncMsg(저 멀리 [설정] 탭에만 보임) 대신 이 카드 전용 메시지로 분리했다. */
-  const [remoteCmdMsg, setRemoteCmdMsg] = useState("");
-  /** [v0.59.0] 원격 명령을 보내고, 잠시 뒤 목록을 새로고침해 처리 상태를 보여준다. */
-  async function doSendCommand(type: string, payload?: Record<string, unknown>) {
-    setRemoteBusy(type);
-    setRemoteCmdMsg("");
-    try {
-      const r = await window.kyletool.sendCommand(type, payload);
-      setRemoteCmdMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
-      await loadRemoteCommands();
-      // PC가 8초 주기로 집어가므로, 잠시 후 한 번 더 새로고침해 처리 결과까지 보여준다.
-      setTimeout(() => void loadRemoteCommands(), 10_000);
-    } catch (e) {
-      setRemoteCmdMsg(`⚠️ 명령 전송 자체가 실패했습니다(${e instanceof Error ? e.message : String(e)}).`);
-    } finally {
-      setRemoteBusy(null);
-    }
-  }
 
   // [v0.30.0] 로테이션 전환 — 포지션이 2개 이상일 때만 3.5초마다 다음 종목으로 넘긴다.
   useEffect(() => {
@@ -4311,7 +4285,10 @@ ${msg}
                   {autoStatus!.unprotected!.map((u) => (
                     <li key={u.symbol}>
                       <b>{u.symbol}</b> · {u.reason} · 시도 {u.attempts}회{u.lastError ? ` · 마지막 실패: ${u.lastError}` : ""}
-                      <span className="hint small"> (진입 ${u.entry} → 익절 ${u.tp} / 손절 ${u.sl})</span>
+                      <span className="hint small"> (진입 ${u.entry} → 익절 ${u.tp} / 손절 ${u.sl})</span>{" "}
+                      <button className="mini" onClick={() => void doDismissUnprotected(u.symbol)} title="봇이 이 종목에 보호주문(익절/손절)을 다시 거는 걸 12시간 동안 멈춥니다. 토스의 기존 주문은 건드리지 않아요.">
+                        ✋ 보호 중단(직접 관리)
+                      </button>
                     </li>
                   ))}
                 </ul>
@@ -4555,59 +4532,6 @@ ${msg}
             </div>
           </section>
 
-          {/* [v0.59.0] 폰 원격 조종 — "PC가 켜져 있는 동안은 폰에서 전부 조작 가능해야 한다"
-              (오너 지시). 위 버튼들은 이 기기가 곧 PC일 때(또는 QR 페어링 상태일 때)만 바로
-              듣는다 — 이 카드는 그것과 무관하게, 로그인만 돼 있으면 어디서든(외부망 포함)
-              명령을 큐에 넣고 로그인된 PC가 몇 초 안에 집어 실행하는 별도 경로다. */}
-          <section className="card wide">
-            <h2>📱 원격 조종 {pcConnected ? <span className="ok">(PC 연결됨)</span> : <span className="hint">(PC 꺼져 있음 — 명령이 쌓이기만 하고 실행 안 됨)</span>}</h2>
-            <p className="hint">
-              여기 버튼은 어디서든(외부망 포함) 로그인만 돼 있으면 눌러집니다 — 다만 <b>PC(데스크톱 앱)가
-              켜져 있어야</b> 실제로 실행됩니다(위 상단바 배지 참고). PC가 꺼져 있으면 명령은 큐에 쌓여
-              있다가 PC를 켜면 그때 실행됩니다 — "눌렀는데 반영 안 됐다"고 PC가 켜진 줄 착각하지 마세요.
-              {/* [v0.60.4] 자동매매 시작/중지는 이제 위 "🤖 자동매매" 카드의 평소 버튼이 폰에서도
-                  바로 이 원격 명령 경로를 그대로 쓴다 — 여기 따로 둘 필요가 없어 뺐다. */}
-              자동매매 <b>시작/중지는 위 "🤖 자동매매" 카드의 평소 버튼</b>을 그대로 쓰세요(폰에서도
-              같은 버튼이 원격으로 전달됩니다) — 여기는 그 외(비상정지·지금 스캔)만 모아 뒀습니다.
-            </p>
-            <div className="form-row">
-              <button className="btn btn-kill" disabled={remoteBusy !== null || !pcConnected} onClick={() => void doSendCommand("setKillSwitch", { on: true })}>
-                🛑 비상 정지 켜기(원격)
-              </button>
-              <button className="btn" disabled={remoteBusy !== null || !pcConnected} onClick={() => void doSendCommand("setKillSwitch", { on: false })}>
-                비상 정지 끄기(원격)
-              </button>
-              <button className="btn" disabled={remoteBusy !== null || !pcConnected} onClick={() => void doSendCommand("autoScanNow")}>
-                🔄 지금 스캔(원격)
-              </button>
-            </div>
-            <p className="hint small">
-              💡 포지션 개별 취소는 위 "지금 감시 중인 자동매매 포지션" 표의 [✕ 취소]가 이미 이 기기가
-              PC일 때 바로 동작합니다. 신규 진입·수동 매도 명령도 서버 큐에는 이미 지원돼 있지만
-              (electron/tool-engine.ts의 dispatchCommand), 이 화면에는 아직 입력 폼을 만들지
-              않았습니다 — 다음에 필요하면 추가하겠습니다.
-            </p>
-            {remoteCmdMsg && (
-              <p className={remoteCmdMsg.includes("⚠️") ? "hint small danger" : "hint small ok"} style={{ whiteSpace: "pre-wrap" }}>
-                {remoteCmdMsg}
-              </p>
-            )}
-            <button className="mini" onClick={() => void loadRemoteCommands()}>🔄 최근 명령 새로고침</button>
-            {remoteCmds.length > 0 && (
-              <table className="result-table">
-                <thead><tr><th>명령</th><th>상태</th><th>보낸 시각</th></tr></thead>
-                <tbody>
-                  {remoteCmds.map((c) => (
-                    <tr key={c.id}>
-                      <td>{REMOTE_CMD_LABEL[c.type] ?? c.type}</td>
-                      <td>{c.status === "pending" ? "⏳ 대기" : c.status === "acked" ? "⏳ 처리 중" : c.status === "done" ? "✅ 완료" : "⚠️ 실패"}</td>
-                      <td>{DateTime.fromISO(c.createdAt).setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss")}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </section>
         </main>
       )}
 
@@ -6524,12 +6448,13 @@ ${msg}
             {autoReports.length === 0 && !autoReportBusy && (
               <p className="hint">아직 운용 기록이 없습니다. 자동매매를 한 번 켰다 끄면 이곳에 리포트가 생겨요.</p>
             )}
-            {autoReports.map((r) => (
-              <article key={r.runId} className="changelog-entry">
-                <h3>
+            {autoReports.map((r, ri) => (
+              <details key={r.runId} className="changelog-entry" open={ri === 0}>
+                <summary style={{ cursor: "pointer", fontWeight: 700, padding: "6px 0" }}>
                   {DateTime.fromMillis(r.overview.startedAtMs).setZone("Asia/Seoul").toFormat("MM-dd HH:mm")} 시작
                   {r.live ? " · 🟢 진행 중(현재까지)" : ` · 종료: ${r.overview.endReason}`}
-                </h3>
+                  {r.trades ? ` · 매매 ${r.trades.total}건` : ""}
+                </summary>
                 <div className="hist-actions" style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "6px 0" }}>
                   <button className="mini" onClick={() => void copyReportText(reportToMarkdown(r), "리포트(마크다운)")}>📋 리포트 복사</button>
                   <button className="mini" onClick={() => void copyReportText(reportAiPrompt(r), "AI 분석용 프롬프트+리포트")}>🤖 AI 분석용으로 복사</button>
@@ -6561,7 +6486,7 @@ ${msg}
                     {r.notes.map((n, i) => <li key={i}>{n}</li>)}
                   </ul>
                 </details>
-              </article>
+              </details>
             ))}
           </section>
         </main>

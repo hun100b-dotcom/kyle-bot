@@ -220,7 +220,7 @@ export function LabLiveTab({ lab }: { lab: LabApi }) {
             <h3>데이터 현황</h3>
             <div className="lab-cards">
               <div className="lab-card"><b>{s.counts.total}</b><span>누적 신호(로우)</span></div>
-              <div className="lab-card"><b>{s.counts.eligible}</b><span>인정 신호(거래량 충족)</span></div>
+              <div className="lab-card"><b>{s.counts.eligible}</b><span>전체 인정 신호(백필·휴무시간대 포함 — 결론엔 실시간만 사용)</span></div>
               <div className="lab-card"><b>{s.counts.complete}</b><span>관찰 완료</span></div>
               <div className="lab-card"><b>{s.counts.open}</b><span>관찰 중</span></div>
             </div>
