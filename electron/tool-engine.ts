@@ -1478,6 +1478,18 @@ export class ToolEngine extends EventEmitter {
    *  구조적으로 없다(폰은 sendCommand로 "넣기"만 한다). */
   private remoteControlTimer: ReturnType<typeof setInterval> | null = null;
   private static readonly REMOTE_CONTROL_INTERVAL_MS = 8_000; // 8초마다(Realtime 대신 폴링)
+  /** [v0.71.0 — 오너 보고 "손절 종목이 계속 나온다" 조사 중 발견한 LPCN 37시간 무방비 사례]
+   *  보호 감사(auditUnprotectedHoldings)가 지금까지 autoTradeTick 안에서만 돌았다 — 즉
+   *  "자동매매가 켜져 있을 때만" 확인됐다. 마스터 스위치는 절대 저장 안 되므로(CLAUDE.md),
+   *  앱을 새로 켤 때마다 오너가 자동매매를 다시 켜기 전까지는 이미 보유 중인 종목의
+   *  조건주문(OCO)이 사라졌는지 아무도 확인하지 않았다. 실사례: 조건주문이 중간에 사라졌는데
+   *  37시간 동안 아무도 못 알아채다가 보호 가드가 결국 시장가로 정리(−26.4%, 이 기록 중
+   *  가장 큰 손실). PC(데스크톱)에서만, 로그인해 있는 동안은 자동매매 켜짐과 무관하게 돈다
+   *  (startGroupSyncLoop·startRemoteControlLoop와 같은 패턴 — 로그인 직후 시작, 로그아웃
+   *  하면 멈춤). 웹(폰) 쪽 인스턴스는 이 타이머를 절대 돌리지 않는다(remoteControlTimer와
+   *  같은 이유 — 실제 토스 보유·조건주문 조회라 PC만 할 수 있음). */
+  private protectionAuditTimer: ReturnType<typeof setInterval> | null = null;
+  private static readonly PROTECTION_AUDIT_INTERVAL_MS = 5 * 60_000; // 5분마다(자동매매 사이클과 같은 주기)
   /** [v0.35.0] "스크리닝은 확정인데 왜 안 사졌지?"를 화면에서 바로 보이게 — 사이클마다 다시 채움
    *  (지난 사이클 이유가 이번 사이클에도 그대로 남아 헷갈리는 일이 없도록 매번 초기화). */
   private autoTradeSkipReasons: Record<string, string> = {};
@@ -2435,6 +2447,7 @@ export class ToolEngine extends EventEmitter {
   authSignOut(): { ok: boolean } {
     this.stopGroupSyncLoop(); // [v0.56.0] 로그아웃하면 그룹 자동 동기화도 즉시 멈춘다.
     this.stopRemoteControlLoop(); // [v0.59.0] 로그아웃하면 원격 명령 폴링도 즉시 멈춘다.
+    this.stopProtectionAuditLoop(); // [v0.71.0] 로그아웃하면 보호 감사도 즉시 멈춘다.
     this.authAccessToken = null;
     this.authRefreshToken = null;
     this.authEmail = null;
@@ -6067,6 +6080,23 @@ export class ToolEngine extends EventEmitter {
     if (this.remoteControlTimer) {
       clearInterval(this.remoteControlTimer);
       this.remoteControlTimer = null;
+    }
+  }
+
+  /** [PC 전용 — main.ts만 호출] 로그인 직후 시작. 이미 돌고 있으면 무시(안전한 재호출).
+   *  [v0.71.0] auditUnprotectedHoldings를 자동매매 켜짐 여부와 무관하게 돌린다 — 왜 필요한지는
+   *  위 protectionAuditTimer 필드 주석(LPCN 37시간 무방비 사례) 참고. */
+  startProtectionAuditLoop(): void {
+    if (this.protectionAuditTimer) return;
+    if (!this.authAccessToken && !this.authRefreshToken) return;
+    void this.auditUnprotectedHoldings().catch(() => 0);
+    this.protectionAuditTimer = setInterval(() => void this.auditUnprotectedHoldings().catch(() => 0), ToolEngine.PROTECTION_AUDIT_INTERVAL_MS);
+  }
+
+  stopProtectionAuditLoop(): void {
+    if (this.protectionAuditTimer) {
+      clearInterval(this.protectionAuditTimer);
+      this.protectionAuditTimer = null;
     }
   }
 

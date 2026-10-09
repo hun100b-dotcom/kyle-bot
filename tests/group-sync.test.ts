@@ -30,6 +30,7 @@ type EngineInternals = {
   authUserId: string | null;
   autoTradeHistory: unknown[];
   groupSyncTimer: ReturnType<typeof setInterval> | null;
+  protectionAuditTimer: ReturnType<typeof setInterval> | null;
 };
 
 /** 네트워크 호출 없이 "로그인된 상태"를 흉내낸다 — ensureAccessToken이 즉시 이 토큰을 돌려준다. */
@@ -184,6 +185,68 @@ describe("[v0.56.0] 그룹 전체 실시간 동기화 — startGroupSyncLoop/sto
       expect((eng as unknown as EngineInternals).groupSyncTimer).not.toBeNull();
       eng.authSignOut();
       expect((eng as unknown as EngineInternals).groupSyncTimer).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("[v0.71.0 — LPCN 37시간 무방비 사례 조사] 보호 감사 루프 — startProtectionAuditLoop/stopProtectionAuditLoop", () => {
+  it("로그인 안 돼 있으면 시작하지 않는다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-protaudit1-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.startProtectionAuditLoop();
+      expect((eng as unknown as EngineInternals).protectionAuditTimer).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("로그인해 있으면 자동매매 켜짐 여부와 무관하게 타이머를 시작하고, stopProtectionAuditLoop로 멈출 수 있다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-protaudit2-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      logInFake(eng);
+      // [핵심] 자동매매는 꺼진 채로 둔다 — autoTradeTick 안에서만 돌던 예전 방식이었다면
+      //   이 상태에서는 보호 감사가 절대 안 돌았다(LPCN 사례의 원인).
+      expect((eng as unknown as { autoTradeEnabled: boolean }).autoTradeEnabled).toBe(false);
+
+      eng.startProtectionAuditLoop();
+      expect((eng as unknown as EngineInternals).protectionAuditTimer).not.toBeNull();
+      eng.stopProtectionAuditLoop();
+      expect((eng as unknown as EngineInternals).protectionAuditTimer).toBeNull();
+      // 즉시 실행된 첫 점검(비동기, catch로 감싸져 있음)이 끝날 시간을 잠깐 준다.
+      await new Promise((r) => setTimeout(r, 50));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("로그아웃(authSignOut)하면 자동으로 멈춘다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-protaudit3-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      logInFake(eng);
+      eng.startProtectionAuditLoop();
+      expect((eng as unknown as EngineInternals).protectionAuditTimer).not.toBeNull();
+      eng.authSignOut();
+      expect((eng as unknown as EngineInternals).protectionAuditTimer).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("이미 돌고 있으면 다시 불러도 타이머를 중복으로 만들지 않는다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-protaudit4-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      logInFake(eng);
+      eng.startProtectionAuditLoop();
+      const first = (eng as unknown as EngineInternals).protectionAuditTimer;
+      eng.startProtectionAuditLoop();
+      expect((eng as unknown as EngineInternals).protectionAuditTimer).toBe(first);
+      eng.stopProtectionAuditLoop();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

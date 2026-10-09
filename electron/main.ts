@@ -792,6 +792,12 @@ app.whenReady().then(async () => {
   engine.startRemoteControlLoop();
   setInterval(() => engine?.startRemoteControlLoop(), 15_000);
 
+  // [v0.71.0] 보호 감사 루프 — "자동매매가 꺼져 있어도" 이미 산 종목의 조건주문(OCO)이
+  //   사라지지 않았는지 계속 확인한다(위 engine.ts의 protectionAuditTimer 필드 주석 참고).
+  //   위 원격 조종 루프와 똑같은 재시도 패턴(로그인 전엔 조용히 무시, 15초마다 재시도).
+  engine.startProtectionAuditLoop();
+  setInterval(() => engine?.startProtectionAuditLoop(), 15_000);
+
   // 자동 업데이트는 실제 설치본에서만(개발/검증 실행 제외). 실패해도 앱은 정상.
   if (app.isPackaged && !process.env.KYLEBOT_SHOT) {
     setupAutoUpdater();
