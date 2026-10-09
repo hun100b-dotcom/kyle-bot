@@ -904,6 +904,11 @@ function App() {
   //   false인 세션(=폰, 중계 미연결)이 getLiveState()로 받아올 때마다 갱신한다. 화면에
   //   "마지막 갱신 HH:MM:SS"로 보여줘, 멈춘 건지 원래 이 상태인지 구분할 수 있게 한다(오너 지시).
   const [liveStateUpdatedAtMs, setLiveStateUpdatedAtMs] = useState<number | null>(null);
+  // [v0.70.0 — 오너 지시 "세팅값 수정 후 저장을 눌러도 이게 적용이되는건지 명확히 모르겠다"]
+  //   PC가 상태 미러에 실어 올린 "지금 PC에 실제로 저장된 설정 전체". 폰 화면 입력칸(autoForm 등)과는
+  //   별개의 읽기 전용 값이다 — 섞으면 폰이 "지금 타이핑 중인 값"이 PC가 올린 값으로 갑자기
+  //   덮어써질 위험이 있어(20초마다 폴링) 일부러 분리했다. 저장 버튼 옆에 "PC 실제값"으로만 보여준다.
+  const [pcSettings, setPcSettings] = useState<ToolSettings | null>(null);
   /** [v0.61.0] PC가 올려 둔 최신 상태(자동매매 현황 전체 + 최근 로그)를 받아와 화면에 반영한다.
    *  canReconcileLive가 false인 세션(=폰, 토스에 직접 못 붙음) 전용 — PC가 push한 그대로
    *  믿고 쓴다(과거엔 capri_auto_state에 lastScan/skipReasons를 끼워 넣어 받았는데, 이제
@@ -921,6 +926,7 @@ function App() {
       if (r.killSwitch != null) setPcKillSwitch(r.killSwitch);
       setPcScanProgress(r.scanProgress); // [v0.61.4] null도 의미 있다(= PC가 아직 한 번도 안 돈 것)
       setPcLab(r.lab ?? null); //          [v0.65.0]
+      if (r.settings) setPcSettings(r.settings); // [v0.70.0] PC가 올려 둔 "실제 저장된 설정"
       return r.status;
     }
     return null;
@@ -2365,6 +2371,9 @@ ${msg}
     }
     // [v0.63.0] 방어 필터(이격도·기울기·변동성) 탈락 사유 — 엔진이 켜진 필터만 판정해 넣어 준다.
     for (const d of r.defenseReasons ?? []) reasons.push(d);
+    // [v0.70.0] 워런트 탈락 — 패턴·하드게이트를 다 넘었어도(passed는 그대로 둠, 아래 defenseReasons와
+    //   같은 원칙) 워런트 사유로 탈락했으면 그 이유를 보여준다(electron/tool-engine.ts의 applyWarrantGate).
+    if (r.warrantWarning) reasons.push(r.warrantWarning);
     return { passed, reasons };
   }
 
@@ -2407,6 +2416,8 @@ ${msg}
       for (const d of r.defenseReasons ?? []) {
         bump(d.startsWith("EMA 이격도") ? "EMA 이격도 미달" : d.startsWith("EMA가 상승") || d.startsWith("EMA 기울기") ? "EMA 상승 중 아님" : "변동성 과다/계산 불가");
       }
+      // [v0.70.0] 워런트 탈락 사유도 통계에 잡는다(오너가 "어느 조건이 병목인지" 한눈에 보도록).
+      if (r.warrantWarning) bump("워런트 저가 탈락");
     }
     return Object.entries(counts)
       .map(([label, count]) => ({ label, count }))
@@ -2632,6 +2643,19 @@ ${msg}
     setTimeout(() => setSavedMsg(""), 4000);
   }
 
+  /** [v0.70.0] 자동매매 한도 설정값을 한 줄 문구로 — PC 로컬 저장 성공 메시지와, 폰에서 보는
+   *  "PC 실제값" 표시가 같은 문구를 쓰게 해서(따로 두면 나중에 서로 달라질 위험) 하나로 합쳤다. */
+  function describeAutoTradeLimits(s: Pick<ToolSettings,
+    "autoTradeMaxPositions" | "autoTradeMaxLossPct" | "autoTradeMaxInvestPct" | "autoTradeWatchMinutes" |
+    "autoTradeEntryLevel" | "autoTradeSlMode" | "autoTradeEmaStopBufferPct" | "autoTradeLossStreakLimit">): string {
+    return (
+      `최대 ${s.autoTradeMaxPositions}종목 · 손실한도 ${s.autoTradeMaxLossPct}% · ` +
+      `투입한도 ${s.autoTradeMaxInvestPct}% · 미체결 자동취소 ${s.autoTradeWatchMinutes}분 · 진입 타점 ${s.autoTradeEntryLevel}분할 · ` +
+      `손절 ${s.autoTradeSlMode === "ema" ? `EMA 기준(-${s.autoTradeEmaStopBufferPct}%)` : s.autoTradeSlMode === "fixed" ? "고정 %" : "확인 안 됨(구버전 PC)"} · ` +
+      `연속손절 중지 ${s.autoTradeLossStreakLimit ? `${s.autoTradeLossStreakLimit}회` : s.autoTradeLossStreakLimit === 0 ? "끔" : "확인 안 됨(구버전 PC)"}`
+    );
+  }
+
   /** [v0.26.0→v0.42.0→v0.61.1] 자동매매 한도 4개(최대 종목 수·최대손실 한도·최대 투입
    *  비율·미체결 자동취소 기준) 저장.
    *  [v0.61.1 — ③ 전수조사에서 발견한 치명 버그 수정] 예전엔 웹(폰)에서도 이 버튼이
@@ -2665,22 +2689,36 @@ ${msg}
     }
     if (isWebApp) {
       const r = await window.kyletool.sendCommand("saveAutoTradeSettings", { maxPositions, maxLossPct, maxInvestPct, watchMinutes, entryLevel: autoEntryLevel, ...defense });
-      setSavedMsg(r.ok ? "✅ PC로 자동매매 한도 저장 명령을 보냈습니다(PC가 몇 초 안에 반영)." : `⚠️ ${r.message}`);
+      setSavedMsg(r.ok ? "✅ PC로 자동매매 한도 저장 명령을 보냈습니다(PC가 몇 초 안에 반영 — 아래 'PC 실제값'으로 확인하세요)." : `⚠️ ${r.message}`);
       setTimeout(() => setSavedMsg(""), 4000);
+      // [v0.70.0] PC가 명령을 처리할 몇 초를 준 뒤 상태 미러를 다시 받아와 "PC 실제값"을 갱신한다
+      //   (비상정지 버튼이 이미 쓰던 패턴과 동일 — 20초 정기 폴링까지 기다리지 않게).
+      setTimeout(() => void refreshLiveState(), 2000);
       return;
     }
     const s = await window.kyletool.saveAutoTradeSettings({ maxPositions, maxLossPct, maxInvestPct, watchMinutes, entryLevel: autoEntryLevel, ...defense });
     setSettings(s);
-    setSavedMsg(
-      `자동매매 한도 저장됨 — 최대 ${s.autoTradeMaxPositions}종목 · 손실한도 ${s.autoTradeMaxLossPct}% · ` +
-      `투입한도 ${s.autoTradeMaxInvestPct}% · 미체결 자동취소 ${s.autoTradeWatchMinutes}분 · 진입 타점 ${s.autoTradeEntryLevel}분할 · ` +
-      `손절 ${s.autoTradeSlMode === "ema" ? `EMA 기준(-${s.autoTradeEmaStopBufferPct}%)` : "고정 %"} · 연속손절 중지 ${s.autoTradeLossStreakLimit ? `${s.autoTradeLossStreakLimit}회` : "끔"}`,
-    );
+    setSavedMsg(`자동매매 한도 저장됨 — ${describeAutoTradeLimits(s)}`);
     setTimeout(() => setSavedMsg(""), 4000);
   }
 
   // [v0.45.0] saveAutoScanSettingsUI (자동 스크리너 탭 전용 저장 버튼)는 제거했다 — 도지 몸통비율
   //   등 조건 편집은 이제 saveScreenCriteriaUI([스크리닝 기준] 탭) 한 곳으로만 한다(중복 UI 정리).
+
+  /** [v0.70.0] "스크리닝 기준" 탭 조건 전체(약 20개)를 한 줄로 — 폰에서 "PC 실제값"을 보여줄 때 쓴다.
+   *  (자동매매 한도의 describeAutoTradeLimits와 같은 목적 — PC가 지금 실제로 뭘 쓰는지 직접 확인.) */
+  function describeScreenCriteria(s: ToolSettings): string {
+    return (
+      `스캔 ${s.autoScanCount}종목 · 가격대 $${s.autoScanPriceMin}~$${s.autoScanPriceMax} · 도지 몸통상한 ${Math.round(s.autoScanBodyRatio * 100)}% · ` +
+      `EMA${s.autoScanEmaPeriod} 위 ${s.autoScanEmaTrendEnabled ? "켜짐" : "꺼짐"} · 구름 위 ${s.autoScanCloudEnabled ? "켜짐" : "꺼짐"} · ` +
+      `도지 꼬리 ${(s.autoScanDojiWickMinRatio * 100).toFixed(0)}% · 신선도 ${s.autoScanDojiMaxAgeEnabled ? `${s.autoScanDojiMaxAgeMinutes}분` : "꺼짐"} · ` +
+      `고점~도지 ${s.autoScanDojiMaxGapEnabled ? `${s.autoScanDojiMaxGapMinutes}분` : "꺼짐"} · ` +
+      `EMA 이격도 ${s.autoScanEmaMinGapEnabled ? `${s.autoScanEmaMinGapPct}%` : "꺼짐"} · EMA 상승 ${s.autoScanEmaSlopeEnabled ? "켜짐" : "꺼짐"} · ` +
+      `변동성상한 ${s.autoScanAtrFilterEnabled ? `${s.autoScanAtrMaxPct}%` : "꺼짐"} · 다음봉확인 ${s.autoScanNextCandleConfirmEnabled ? "켜짐" : "꺼짐"} · ` +
+      `ETF제외 ${s.autoScanExcludeEtf ? "켜짐" : "꺼짐"} · 세션(데이/프리/본장/애프터) ` +
+      `${s.autoScanDayEnabled ? "✓" : "✗"}/${s.autoScanPreEnabled ? "✓" : "✗"}/${s.autoScanRegularEnabled ? "✓" : "✗"}/${s.autoScanAfterEnabled ? "✓" : "✗"}`
+    );
+  }
 
   /** [v0.33.0] "스크리닝 기준" 탭 — 추가 8개 조건(켜짐/꺼짐 + 수치) 저장.
    *  Key Point(오너 요청): 여기서 저장한 값은 saveAutoScanSettings → autoScanEmaPeriod 등 필드로
@@ -2742,8 +2780,10 @@ ${msg}
     //   clamp된 값으로 입력칸을 되맞추는 건 PC 로컬에서만 한다.
     if (isWebApp) {
       const r = await window.kyletool.sendCommand("saveAutoScanSettings", criteria);
-      setSavedMsg(r.ok ? "✅ PC로 스크리닝 기준 저장 명령을 보냈습니다(PC가 몇 초 안에 반영)." : `⚠️ ${r.message}`);
+      setSavedMsg(r.ok ? "✅ PC로 스크리닝 기준 저장 명령을 보냈습니다(PC가 몇 초 안에 반영 — 아래 'PC 실제값'으로 확인하세요)." : `⚠️ ${r.message}`);
       setTimeout(() => setSavedMsg(""), 4000);
+      // [v0.70.0] 비상정지 버튼과 같은 패턴 — PC가 처리할 몇 초를 준 뒤 상태 미러를 다시 받아온다.
+      setTimeout(() => void refreshLiveState(), 2000);
       return;
     }
     const s = await window.kyletool.saveAutoScanSettings(criteria);
@@ -3848,11 +3888,6 @@ ${msg}
                                 {r.proximityPct != null ? `${r.proximityPct >= 0 ? "+" : ""}${r.proximityPct.toFixed(2)}%` : "—"}
                               </td>
                             </tr>
-                            {r.warrantWarning && (
-                              <tr className="evid-row">
-                                <td colSpan={9}><p className="hint danger" style={{ margin: 0 }}>{r.warrantWarning}</p></td>
-                              </tr>
-                            )}
                             {open && r.evidence && (
                               <tr className="evid-row">
                                 <td colSpan={9}><ScreenEvidenceView ev={r.evidence} price={r.price} metrics={r.entryMetrics} defenseReasons={r.defenseReasons} /></td>
@@ -4396,6 +4431,24 @@ ${msg}
                 <button className="btn btn-start" onClick={saveAutoSettings}>한도 저장</button>
                 {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
               </div>
+              {/* [v0.70.0 — 오너 지시 "세팅값 수정 후 저장을 눌러도 이게 적용이되는건지 명확히
+                  모르겠다"] 폰(웹)에서는 "보냈다"는 메시지만으론 PC가 실제로 반영했는지 알 수
+                  없었다 — PC가 상태 미러에 실어 올린 실제 저장값을 그대로 보여준다(위 입력칸은
+                  오너가 "지금 입력 중인 값"이라 서로 다를 수 있음에 주의). */}
+              {isWebApp && (
+                <p className="hint small">
+                  📡 PC 실제값:{" "}
+                  {pcSettings ? (
+                    <>
+                      {describeAutoTradeLimits(pcSettings)}
+                      {liveStateUpdatedAtMs != null && <> (PC 확인 {new Date(liveStateUpdatedAtMs).toLocaleTimeString("ko-KR", { hour12: false })})</>}
+                      {" "}— 위 입력칸과 다르면 아직 PC에 반영 전입니다(몇 초 뒤 자동으로 다시 확인해요).
+                    </>
+                  ) : (
+                    "아직 PC 상태를 못 받아왔습니다(PC가 켜져 있는지 확인하세요)."
+                  )}
+                </p>
+              )}
               <p className="hint small">
                 예) 최대 투입 30% → 종목 1개당 예산은 시드의 30%(종목 수로 나누지 않습니다 — 3종목이면 최대
                 동시 투입 합계는 시드의 최대 90%까지 커질 수 있습니다). 손실 한도는 이번 자동매매 실행 동안
@@ -4779,11 +4832,6 @@ ${msg}
                                   </tr>
                                 );
                               })()}
-                              {r.warrantWarning && (
-                                <tr className="evid-row">
-                                  <td colSpan={5}><p className="hint danger" style={{ margin: 0 }}>{r.warrantWarning}</p></td>
-                                </tr>
-                              )}
                               {open && r.evidence && (
                                 <tr className="evid-row">
                                   <td colSpan={5}>
@@ -5219,6 +5267,22 @@ ${msg}
               <button className="btn btn-start" onClick={saveScreenCriteriaUI}>스크리닝 기준 저장</button>
               {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
             </div>
+            {/* [v0.70.0] 자동매매 현황 탭의 "PC 실제값"과 같은 목적 — 폰에서 저장 명령을 보낸 뒤
+                "진짜 PC에 반영됐는지"를 PC가 올린 실제값으로 직접 확인한다. */}
+            {isWebApp && (
+              <p className="hint small">
+                📡 PC 실제값:{" "}
+                {pcSettings ? (
+                  <>
+                    {describeScreenCriteria(pcSettings)}
+                    {liveStateUpdatedAtMs != null && <> (PC 확인 {new Date(liveStateUpdatedAtMs).toLocaleTimeString("ko-KR", { hour12: false })})</>}
+                    {" "}— 위 조건들과 다르면 아직 PC에 반영 전입니다(몇 초 뒤 자동으로 다시 확인해요).
+                  </>
+                ) : (
+                  "아직 PC 상태를 못 받아왔습니다(PC가 켜져 있는지 확인하세요)."
+                )}
+              </p>
+            )}
           </section>
         </main>
       )}

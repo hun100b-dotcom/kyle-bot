@@ -1069,6 +1069,10 @@ interface KyletoolBridge {
     /** [v0.61.4] 지금 PC가 스캔 중인지 + 진행률(게이지). 스캔이 한 번도 안 돌았거나 옛 버전
      *  PC면 null. */
     scanProgress: LiveScanProgress | null;
+    /** [v0.70.0] PC에 지금 실제로 저장된 설정 전체(자동매매 한도 + 스크리닝 기준 포함) —
+     *  "저장 명령을 보냈는데 PC에 실제로 반영됐는지" 폰에서 직접 확인하는 용도. 옛 버전
+     *  PC가 올린 상태면 없음/null. */
+    settings?: ToolSettings | null;
     updatedAtMs: number | null;
     message?: string;
   }>;

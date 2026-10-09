@@ -104,7 +104,7 @@ import {
 import { createMockTossServer } from "../mocks/toss-mock";
 import { canAutoEnter, isLossLimitBreached, type AutoTradeLimits } from "../lib/auto-risk";
 import { checkBracketPrices, checkPercentSettings, checkSimpleOrder, type SanityExpect } from "../lib/order-sanity"; // [v0.69.2] 주문 전 정합성 검사
-import { guessWarrantTickers } from "../lib/warrant"; // [v0.36.0] 워런트 의심 종목 코멘트용
+import { guessWarrantTickers, applyWarrantGate } from "../lib/warrant"; // [v0.36.0] 워런트 의심 종목 감지 / [v0.70.0] 탈락 게이트
 
 // -----------------------------------------------------------------------------
 // 타입: 화면과 주고받는 모양
@@ -678,8 +678,10 @@ export interface ScreenResult {
   n5m: number; //            합성한 5분봉 수
   evidence: ScreenEvidence | null; // 판정 근거(펼침용)
   note?: string; //          데이터 부족·오류 등 사유
-  /** [v0.36.0] 워런트 의심 코멘트(확정/관찰 후보만 확인 — 티커 추측 방식이라 100% 정확하진 않음,
-   *  "차단"이 아니라 화면에 경고만 표시하는 용도. 없으면 확인 안 됨/문제 없음). */
+  /** [v0.36.0→v0.70.0] 워런트 탈락 사유 코멘트(확정/관찰 후보만 확인 — 티커 추측 방식이라
+   *  100% 정확하진 않음). 있으면 이 종목은 이미 status가 "none"으로 탈락 처리된 상태다
+   *  (applyWarrantGate) — 화면은 "왜 탈락했는지"를 보여주는 데 쓴다. 없으면 워런트 사유로는
+   *  탈락하지 않음(확인 안 됨 포함). */
   warrantWarning?: string | null;
   /** [v0.63.0] 진입 시점 측정값(이격도·ATR%·EMA 기울기) — 필터 판정·기록·화면 표시 공용. */
   entryMetrics?: EntryMetrics;
@@ -5812,6 +5814,11 @@ export class ToolEngine extends EventEmitter {
         scanProgress: this.scanProgressForMirror,
         reports: this.buildRecentReports(5), // [v0.62.1] 폰도 자동매매 리포트를 볼 수 있게
         lab: this.labMirror(), // [v0.65.0] 폰도 매매연구소 요약을 볼 수 있게
+        // [v0.70.0 — 오너 지시 "세팅값 수정 후 저장을 눌러도 이게 적용이되는건지 명확히
+        //   모르겠다"] 지금 PC에 실제로 저장된 설정 전체(자동매매 한도 + 스크리닝 기준
+        //   포함)를 그대로 싣는다. 폰은 "보냈다"는 메시지만 보고 믿는 게 아니라, 이 값을
+        //   직접 읽어 "PC가 실제로 지금 뭘 쓰고 있는지"를 보여줄 수 있다(App.tsx의 pcSettings).
+        settings: this.getSettings(),
       };
       const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_live_state?on_conflict=user_id,kind`, {
         method: "POST",
@@ -5854,23 +5861,29 @@ export class ToolEngine extends EventEmitter {
     scanProgress: LiveScanProgress | null;
     reports: AutoReport[];
     lab: LabMirror | null;
+    /** [v0.70.0] PC에 지금 실제로 저장된 설정 전체 — "저장은 됐는데 반영은 됐나?"를 폰이
+     *  직접 확인할 수 있게 한다. 옛 PC가 올린 상태(이 필드 없음)면 null. */
+    settings: ReturnType<ToolEngine["getSettings"]> | null;
     updatedAtMs: number | null;
     message?: string;
   }> {
     const token = await this.ensureAccessToken();
-    if (!token) return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, reports: [], lab: null, updatedAtMs: null, message: "먼저 로그인하세요." };
+    if (!token) return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, reports: [], lab: null, settings: null, updatedAtMs: null, message: "먼저 로그인하세요." };
     try {
       const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_live_state?kind=eq.snapshot&select=payload,updated_at`, {
         headers: this.authRestHeaders(token),
       }, 10_000, "capri_live_state");
       if (!res.ok)
-        return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, reports: [], lab: null, updatedAtMs: null, message: `조회 실패(HTTP ${res.status}).` };
+        return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, reports: [], lab: null, settings: null, updatedAtMs: null, message: `조회 실패(HTTP ${res.status}).` };
       const rows = (await res.json()) as Array<{
-        payload: { status?: AutoTradeStatus; journal?: JournalEntry[]; killSwitch?: boolean; scanProgress?: LiveScanProgress | null; reports?: AutoReport[]; lab?: LabMirror };
+        payload: {
+          status?: AutoTradeStatus; journal?: JournalEntry[]; killSwitch?: boolean; scanProgress?: LiveScanProgress | null;
+          reports?: AutoReport[]; lab?: LabMirror; settings?: ReturnType<ToolEngine["getSettings"]>;
+        };
         updated_at: string;
       }>;
       if (!rows[0])
-        return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, reports: [], lab: null, updatedAtMs: null, message: "PC가 아직 상태를 올린 적이 없습니다." };
+        return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, reports: [], lab: null, settings: null, updatedAtMs: null, message: "PC가 아직 상태를 올린 적이 없습니다." };
       return {
         ok: true,
         status: rows[0].payload.status ?? null,
@@ -5879,10 +5892,11 @@ export class ToolEngine extends EventEmitter {
         scanProgress: rows[0].payload.scanProgress ?? null,
         reports: rows[0].payload.reports ?? [],
         lab: rows[0].payload.lab ?? null,
+        settings: rows[0].payload.settings ?? null,
         updatedAtMs: new Date(rows[0].updated_at).getTime(),
       };
     } catch (e) {
-      return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, reports: [], lab: null, updatedAtMs: null, message: e instanceof Error ? e.message : String(e) };
+      return { ok: false, status: null, journal: [], killSwitch: null, scanProgress: null, reports: [], lab: null, settings: null, updatedAtMs: null, message: e instanceof Error ? e.message : String(e) };
     }
   }
 
@@ -7034,12 +7048,20 @@ export class ToolEngine extends EventEmitter {
           };
           const defenseEval = evaluateDefenseFilters(entryMetrics, defense);
           // 패턴이 후보(확정·관찰)인데 방어 필터에서 떨어지면 후보에서 뺀다(사유는 defenseReasons로 남겨 화면·통계에 표시).
-          const status = gatedStatus !== "none" && !defenseEval.ok ? "none" : gatedStatus;
+          const statusAfterDefense = gatedStatus !== "none" && !defenseEval.ok ? "none" : gatedStatus;
           const proximityPct = pat.sessionHigh && Number.isFinite(price) ? ((price - pat.sessionHigh) / pat.sessionHigh) * 100 : null;
           // [v0.36.0] 워런트 의심 확인 — 확정/관찰 후보만(API 호출 절약, 어차피 나머지는 진입
-          //   대상이 아니라 확인할 의미가 없다). 차단하지 않고 코멘트만 붙인다(위 파일 상단 이유).
+          //   대상이 아니라 확인할 의미가 없다).
+          // [v0.70.0 — 오너 지시 2026-10-09 "현재가보다 낮은 가격에 워런트 잡혀있을경우 워런트로
+          //   종목선정 탈락"] v0.37.0까지는 추측 방식의 불확실성 때문에 코멘트만 붙이고 막지
+          //   않았는데, 오너가 실사용 후 다시 명시적으로 차단을 요청해 이제는 applyWarrantGate가
+          //   실제로 후보에서 뺀다(status→"none"). 코멘트(warrantWarning)는 그대로 남겨 두어
+          //   missReasons/tallyMissReasons(App.tsx)가 "왜 탈락했는지"를 계속 보여줄 수 있게 한다.
           const warrantWarning =
-            status === "confirmed" || status === "watch" ? await this.checkWarrantWarning(rk.symbol, price) : null;
+            statusAfterDefense === "confirmed" || statusAfterDefense === "watch"
+              ? await this.checkWarrantWarning(rk.symbol, price)
+              : null;
+          const status = applyWarrantGate(statusAfterDefense, warrantWarning);
 
           results.push({
             rank: rk.rank,
@@ -7119,10 +7141,13 @@ export class ToolEngine extends EventEmitter {
   }
 
   /**
-   * [v0.36.0] 워런트 의심 확인 — 흔한 접미사(W/.WS/-WT/WS)로 워런트 티커를 추측해 실제로
-   *   시세가 있는지 조회하고, 있으면서 그 가격이 본주 현재가보다 낮으면 경고 문구를 만든다.
-   *   [오너 지시] 추측 방식이라 틀릴 수 있어 "차단"이 아니라 코멘트 용도 — 실패(시세 없음)는
-   *   그냥 "워런트 없음/확인 안 됨"으로 조용히 넘어간다(에러 아님).
+   * [v0.36.0→v0.70.0] 워런트 의심 확인 — 흔한 접미사(W/.WS/-WT/WS)로 워런트 티커를 추측해
+   *   실제로 시세가 있는지 조회하고, 있으면서 그 가격이 본주 현재가보다 낮으면 문구를 만든다.
+   *   [v0.70.0] 호출부(scanScreener)가 이제 이 문구를 applyWarrantGate로 넘겨 실제 탈락
+   *   처리까지 한다(예전엔 코멘트만 — lib/warrant.ts 상단 이력 참고) — 그래서 문구도 "확인
+   *   필요"가 아니라 "탈락(제외)" 사실을 그대로 전달하도록 바꿨다. 추측이 틀릴 수 있다는
+   *   한계는 여전하다. 실패(시세 없음)는 그냥 "워런트 없음/확인 안 됨"으로 조용히 넘어간다
+   *   (에러 아님).
    */
   private async checkWarrantWarning(symbol: string, price: number): Promise<string | null> {
     if (!Number.isFinite(price)) return null;
@@ -7130,9 +7155,9 @@ export class ToolEngine extends EventEmitter {
       try {
         const wp = await getPrice(guess);
         if (Number.isFinite(wp.price) && wp.price < price) {
-          return `⚠️ 워런트 의심(확인 필요): ${guess} 시세가 $${wp.price}로 본주 현재가($${price})보다 낮습니다 — 진입 전 직접 확인하세요.`;
+          return `⚠️ 워런트 탈락: ${guess} 시세가 $${wp.price}로 본주 현재가($${price})보다 낮아 종목선정에서 제외했습니다(추측 기반 — 실제 연계 워런트가 아닐 수도 있습니다. 확인해 보시고 오탐이면 알려주세요).`;
         }
-        return null; // 워런트로 보이는 티커는 찾았지만 가격이 본주보다 낮지 않음 → 경고 없음
+        return null; // 워런트로 보이는 티커는 찾았지만 가격이 본주보다 낮지 않음 → 탈락 아님
       } catch {
         // 이 추측은 실존하는 종목이 아님 — 다음 추측 시도
       }
