@@ -10,7 +10,7 @@
 //   화면은 preload.cjs가 허용한 창구(window.kyletool.*)로만 엔진과 대화한다.
 // =============================================================================
 
-import { app, BrowserWindow, ipcMain, Menu, powerMonitor, shell } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, shell } from "electron";
 import { join } from "node:path";
 import { existsSync, writeFileSync } from "node:fs";
 import { ToolEngine } from "./tool-engine";
@@ -121,11 +121,21 @@ async function loadRenderer(target: BrowserWindow): Promise<void> {
 // [예전 흐름] 앱 시작 → 조용히 새 버전 확인 → 있으면 화면에 팝업 → 사용자가
 //   "지금 업데이트"를 눌러야 다운로드 → "재시작하고 적용"을 또 눌러야 설치.
 // [바뀐 흐름] 앱 시작(+30분마다) → 새 버전을 찾으면 **묻지 않고 바로 다운로드** →
-//   다 받으면, "자동매매가 꺼져 있고 + 사람이 10분 이상 손을 안 댄(유휴)" 순간을 5분마다
-//   확인해 그때 **조용히 재시작·적용**한다(quitAndInstall(true, true) — 확인창 없음).
-//   자동매매가 켜져 있으면 무슨 일이 있어도 재시작하지 않는다(실계좌 매매 도중 앱이
-//   꺼지는 사고를 막기 위한 최우선 안전장치) — 그런 경우엔 다음 자연 종료(앱을 직접
-//   끌 때, autoInstallOnAppQuit) 때 적용된다.
+//   다 받으면, "자동매매가 꺼져 있는" 순간을 5분마다 확인해 그때 **조용히 재시작·적용**
+//   한다(quitAndInstall(true, true) — 확인창 없음). 자동매매가 켜져 있으면 무슨 일이
+//   있어도 재시작하지 않는다(실계좌 매매 도중 앱이 꺼지는 사고를 막기 위한 최우선
+//   안전장치이자, 이제 유일한 조건) — 그런 경우엔 다음 자연 종료(앱을 직접 끌 때,
+//   autoInstallOnAppQuit) 때 적용된다.
+//
+// [v0.79.0 — 오너 지시로 "유휴 10분" 조건 제거] 원래는 ①자동매매 꺼짐 + ②사람이 10분
+//   이상 손을 안 댐(유휴), 두 조건을 모두 만족해야 조용히 재시작했다. 그런데 오너는
+//   "업데이트 받고 지금바로재시작 버튼 누르는 과정조차 사치다. 항상 자동반영해서 자동
+//   다운, 업데이트 모두 자동화하라"고 명시적으로 지시했다 — 조사해보니 오너는 자동매매를
+//   몇 시간씩 켜 두는 게 일상이라 ①이 좀처럼 안 풀리고, 설령 풀려도 컴퓨터를 계속
+//   쓰고 있으면 ②(유휴 10분) 때문에 또 안 적용돼 결국 매번 직접 버튼을 눌러야 했던 게
+//   불편의 실제 원인이었다. ②는 애초에 "화면을 보다가 갑자기 창이 재시작되면 놀라지
+//   않게" 하려던 배려일 뿐 돈 안전과는 무관해서 없앤다 — ①(자동매매 중엔 절대 재시작
+//   안 함)만은 실계좌 보호용 핵심 안전장치라 그대로 남긴다.
 //
 // [화면 표시] 버튼을 눌러야만 진행되던 팝업은 없앴다. 대신 작게 접히는 배너로 "새 버전을
 //   자동으로 받고 있어요/적용 대기 중이에요"만 알리고, "지금 바로 재시작" 버튼은 급한
@@ -167,7 +177,7 @@ function setupAutoUpdater(): void {
     win?.webContents.send("update:progress", Math.round(p.percent));
   });
 
-  // 다운로드 완료: 재시작 대기 상태로 기록하고, 아래 유휴 감시 타이머가 조용히 적용한다.
+  // 다운로드 완료: 재시작 대기 상태로 기록하고, 아래 무음 재시작 타이머가 조용히 적용한다.
   autoUpdater.on("update-downloaded", () => {
     updateReadyToInstall = true;
     win?.webContents.send("update:downloaded");
@@ -195,15 +205,16 @@ function setupAutoUpdater(): void {
     }
   }, 30 * 60_000);
 
-  // [v0.58.0] 유휴 무음 재시작 — 5분마다, 아래 두 조건을 모두 만족할 때만 조용히 적용한다:
-  //   ① 자동매매가 지금 켜져 있지 않음(실계좌 매매 도중 앱이 꺼지는 사고 방지 — 최우선 안전장치)
-  //   ② 사람이 10분 이상 마우스/키보드를 건드리지 않음(powerMonitor — OS 전체 기준 유휴시간)
+  // [v0.79.0] 무음 재시작 — 5분마다, "자동매매가 지금 켜져 있지 않음" 하나만 확인해
+  //   조용히 적용한다(실계좌 매매 도중 앱이 꺼지는 사고 방지 — 유일하면서 최우선인
+  //   안전장치). 예전엔 "사람이 10분 이상 유휴"라는 조건이 하나 더 있었지만, 오너가
+  //   컴퓨터를 계속 쓰는 동안은 이 조건이 안 풀려 결국 매번 수동으로 재시작 버튼을
+  //   눌러야 했다 — 오너 지시로 제거(위 setupAutoUpdater 주석 참고).
   //   실패해도(quitAndInstall이 예외를 던져도) 조용히 무시하고 다음 주기에 다시 시도한다.
   setInterval(() => {
     if (!updateReadyToInstall) return;
-    if (engine?.getAutoTradeStatus().enabled) return; // ① 자동매매 중엔 절대 재시작 안 함
+    if (engine?.getAutoTradeStatus().enabled) return; // 자동매매 중엔 절대 재시작 안 함
     try {
-      if (powerMonitor.getSystemIdleTime() < 600) return; // ② 10분(600초) 미만이면 대기
       autoUpdater.quitAndInstall(true, true); // 확인창 없이(silent) 재시작까지(force run after)
     } catch {
       /* 조용히 무시 — 다음 5분 주기에 다시 시도 */
@@ -227,6 +238,8 @@ function setupAutoUpdater(): void {
 // =============================================================================
 const RELEASES_LATEST_API = "https://api.github.com/repos/hun100b-dotcom/kyle-bot-releases/releases/latest";
 let lastMacDmgPath: string | null = null;
+// [v0.79.0] 직접교체 준비가 끝났는지 — 아래 "자동 재시작" 루프가 이 플래그로 판단한다.
+let macSwapReadyToInstall = false;
 
 /** "1.2.3" 형태의 두 버전을 비교해 a가 b보다 최신이면 true. */
 function isNewerVersion(a: string, b: string): boolean {
@@ -284,6 +297,13 @@ async function checkMacDmgFallback(): Promise<void> {
 //   자동 교체가 가능한지 보고, 준비되면 종료 훅을 걸고 화면에 알린다. 준비에 실패하면
 //   (네트워크 문제·unzip 없음·체크섬 불일치 등 무엇이든) 조용히 옛 dmg 차선책으로
 //   넘어간다 — 어떤 경우에도 사람이 새 버전을 받을 방법 자체가 없어지진 않는다.
+//
+// [v0.79.0 — "준비"와 "적용"을 분리] 예전엔 여기서 준비만 해 두고, 실제 교체는 오너가
+//   버튼을 누르거나 앱을 자연스럽게 껐다 켤 때까지 기다렸다 — 그런데 오너가 "재시작
+//   버튼 누르는 과정조차 사치"라고 지시해, 아래 macSwapReadyToInstall 플래그를 세워
+//   두고 별도의 5분 주기 루프(whenReady 안, Windows의 무음 재시작과 동일한 패턴)가
+//   "자동매매가 꺼져 있으면" 스스로 app.quit()한다 — 종료 훅(scheduleMacSelfUpdateSwap)이
+//   이미 걸려 있으니 그 quit 과정에서 교체+재실행까지 알아서 끝난다.
 // =============================================================================
 async function runMacAutoUpdateCycle(): Promise<void> {
   if (process.platform !== "darwin" || !app.isPackaged) return;
@@ -291,6 +311,7 @@ async function runMacAutoUpdateCycle(): Promise<void> {
     const ready = await prepareMacSelfUpdate(app.getVersion());
     if (ready) {
       scheduleMacSelfUpdateSwap(ready);
+      macSwapReadyToInstall = true;
       win?.webContents.send("update:macSwapReady", { version: ready.version });
       return; // 직접 교체가 준비됐으니 dmg 차선책은 필요 없다
     }
@@ -815,6 +836,22 @@ app.whenReady().then(async () => {
     if (process.platform === "darwin") {
       setTimeout(() => void runMacAutoUpdateCycle(), 5000);
       setInterval(() => void runMacAutoUpdateCycle(), 30 * 60_000);
+      // [v0.79.0] 무음 자동 재시작 — Windows(setupAutoUpdater 안의 5분 루프)와 똑같은
+      //   패턴. 예전엔 직접교체가 준비돼도 오너가 "지금 바로 재시작"을 누르거나 앱을
+      //   자연스럽게 껐다 켤 때까지 기다렸는데, 그러면 오너가 버튼을 누르지 않는 한
+      //   사실상 적용이 안 됐다 — "재시작 버튼 누르는 과정조차 사치" 지시에 따라, 이제
+      //   5분마다 "자동매매가 꺼져 있으면" 스스로 app.quit()한다. 종료 훅
+      //   (scheduleMacSelfUpdateSwap이 runMacAutoUpdateCycle에서 이미 걸어 둠)이 그
+      //   quit 과정에서 번들 교체+재실행까지 알아서 끝낸다.
+      setInterval(() => {
+        if (!macSwapReadyToInstall) return;
+        if (engine?.getAutoTradeStatus().enabled) return; // 자동매매 중엔 절대 재시작 안 함
+        try {
+          app.quit();
+        } catch {
+          /* 조용히 무시 — 다음 5분 주기에 다시 시도 */
+        }
+      }, 5 * 60_000);
     }
   }
 

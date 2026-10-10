@@ -3322,7 +3322,7 @@ ${msg}
               "연결됨"이라 다 됐나 싶지만 실제로는 새 기능이 아직 없는 옛 코드다. 폰에서
               PC 버전과 지금 이 화면(appVer) 버전을 바로 대조해, 다르면 바로 보이게 한다. */}
           {isWebApp && pcConnected && pcAppVersion && appVer && pcAppVersion !== appVer && (
-            <span className="badge badge-dry" title="PC가 자동매매를 켜 둔 채라 재시작(업데이트 적용)을 못 하고 있을 수 있습니다 — 자동매매를 끄면 PC가 유휴 상태를 거쳐 스스로 최신 버전으로 업데이트합니다.">
+            <span className="badge badge-dry" title="PC가 자동매매를 켜 둔 채라 재시작(업데이트 적용)을 못 하고 있을 수 있습니다 — 자동매매를 끄면 PC가 5분 안에 스스로 최신 버전으로 업데이트합니다.">
               ⚠️ PC 버전 다름(PC: v{pcAppVersion} / 이 화면: v{appVer})
             </span>
           )}
@@ -6885,17 +6885,19 @@ ${msg}
         </div>
       )}
 
-      {/* ===== [v0.58.0] 자동 업데이트 안내 — 작은 배너(화면을 막지 않음, 누르지 않아도 된다) =====
+      {/* ===== [v0.58.0→v0.79.0] 자동 업데이트 안내 — 작은 배너(화면을 막지 않음, 누르지 않아도 된다) =====
           [바뀐 점] 예전엔 이 자리가 전체 화면을 가리는 팝업이었고, "지금 업데이트"→"재시작하고
           적용"을 사람이 직접 두 번 눌러야만 새 버전이 반영됐다. 이제 다운로드는 새 버전이
           보이는 즉시 메인 프로세스가 알아서 시작하고(electron/main.ts의 autoDownload), 다
-          받으면 "자동매매가 꺼져 있고 사람이 10분 이상 자리를 비운" 순간에 스스로 조용히
-          재시작해 적용한다. 이 배너는 그 진행 상황을 참고로만 보여주는 것이라, 안 누르고
-          그냥 둬도 알아서 끝난다 — "지금 바로 재시작"은 급할 때만 쓰는 선택 버튼이다. */}
+          받으면 "자동매매가 꺼져 있는" 순간(5분마다 확인)에 스스로 조용히 재시작해 적용한다
+          (v0.79.0 — 예전엔 여기에 "사람이 10분 이상 자리를 비움" 조건도 있었는데, 오너가
+          컴퓨터를 계속 쓰면 영영 안 풀려서 제거했다). 이 배너는 그 진행 상황을 참고로만
+          보여주는 것이라, 안 누르고 그냥 둬도 알아서 끝난다 — "지금 바로 재시작"은 5분을
+          못 기다릴 만큼 급할 때만 쓰는 선택 버튼이다. */}
       {update && (
         <div className="update-banner">
           <span>
-            🎉 v{update.version} {updateReady ? "— 받기 완료(유휴 시 자동 적용)" : updateProgress != null ? `— 받는 중 ${updateProgress}%` : "감지됨"}
+            🎉 v{update.version} {updateReady ? "— 받기 완료(자동매매 꺼지면 곧 자동 적용)" : updateProgress != null ? `— 받는 중 ${updateProgress}%` : "감지됨"}
           </span>
           {updateReady && (
             <button className="btn" onClick={startInstallUpdate} disabled={updateInstalling}>
@@ -6929,13 +6931,14 @@ ${msg}
         </div>
       )}
 
-      {/* ===== [v0.60.0] macOS 직접 교체 자동업데이트 준비 완료 배너 — "지금 바로 재시작"을
-          누르면 앱이 꺼지고, 종료 훅이 번들을 교체한 뒤 알아서 다시 연다. 안 눌러도 다음에
-          어차피 앱을 껐다 켤 때 자동으로 적용된다(자동매매 중이어도 안전 — 이건 화면(UI)
-          교체가 아니라 앱 자체 재시작이 필요한 드문 경우라 자동 재시작은 하지 않는다). */}
+      {/* ===== [v0.60.0→v0.79.0] macOS 직접 교체 자동업데이트 준비 완료 배너 =====
+          "지금 바로 재시작"을 누르면 바로 앱이 꺼지고, 종료 훅이 번들을 교체한 뒤 알아서
+          다시 연다. 안 눌러도 된다 — electron/main.ts가 5분마다 "자동매매가 꺼져 있는지"를
+          확인해 스스로 재시작·적용한다(Windows와 동일한 패턴). 자동매매 중엔 그 자동
+          재시작이 보류될 뿐, 이 버튼 자체는 급할 때 바로 끄고 싶을 때 쓰는 선택지다. */}
       {macSwap && (
         <div className="update-banner" style={update ? { top: 64 } : undefined}>
-          <span>🍎 새 버전(v{macSwap.version})이 준비됐어요 — 앱을 껐다 켜면 자동으로 적용돼요.</span>
+          <span>🍎 새 버전(v{macSwap.version})이 준비됐어요 — 자동매매 꺼지면 곧 자동으로 적용돼요.</span>
           <button className="btn" onClick={doInstallMacSwap} disabled={macSwapBusy}>
             {macSwapBusy ? "적용 중…" : "↻ 지금 바로 재시작"}
           </button>
