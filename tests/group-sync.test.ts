@@ -31,6 +31,7 @@ type EngineInternals = {
   autoTradeHistory: unknown[];
   groupSyncTimer: ReturnType<typeof setInterval> | null;
   protectionAuditTimer: ReturnType<typeof setInterval> | null;
+  positionSyncTimer: ReturnType<typeof setInterval> | null;
 };
 
 /** 네트워크 호출 없이 "로그인된 상태"를 흉내낸다 — ensureAccessToken이 즉시 이 토큰을 돌려준다. */
@@ -247,6 +248,69 @@ describe("[v0.71.0 — LPCN 37시간 무방비 사례 조사] 보호 감사 루�
       eng.startProtectionAuditLoop();
       expect((eng as unknown as EngineInternals).protectionAuditTimer).toBe(first);
       eng.stopProtectionAuditLoop();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("[v0.74.0 — task #72 '토스 증권과의 실시간 양방향 동기화'] 포지션 동기화 루프 — startPositionSyncLoop/stopPositionSyncLoop", () => {
+  it("로그인 안 돼 있으면 시작하지 않는다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-possync1-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.startPositionSyncLoop();
+      expect((eng as unknown as EngineInternals).positionSyncTimer).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("로그인해 있으면 자동매매 켜짐 여부와 무관하게 타이머를 시작하고, stopPositionSyncLoop로 멈출 수 있다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-possync2-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      logInFake(eng);
+      // [핵심] 자동매매는 꺼진 채로 둔다 — 예전엔 화면 탭이 열려 있거나(20초 렌더러 타이머)
+      //   자동매매가 켜져 있을 때(5분 사이클)만 포지션이 다시 확인됐다. 둘 다 아닌 이 상태에서도
+      //   돌아야 "화면을 안 보고 있어도 실시간 반영된다"는 오너 지시를 지킨 것이다.
+      expect((eng as unknown as { autoTradeEnabled: boolean }).autoTradeEnabled).toBe(false);
+
+      eng.startPositionSyncLoop();
+      expect((eng as unknown as EngineInternals).positionSyncTimer).not.toBeNull();
+      eng.stopPositionSyncLoop();
+      expect((eng as unknown as EngineInternals).positionSyncTimer).toBeNull();
+      // 즉시 실행된 첫 확인(비동기, catch로 감싸져 있음)이 끝날 시간을 잠깐 준다.
+      await new Promise((r) => setTimeout(r, 50));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("로그아웃(authSignOut)하면 자동으로 멈춘다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-possync3-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      logInFake(eng);
+      eng.startPositionSyncLoop();
+      expect((eng as unknown as EngineInternals).positionSyncTimer).not.toBeNull();
+      eng.authSignOut();
+      expect((eng as unknown as EngineInternals).positionSyncTimer).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("이미 돌고 있으면 다시 불러도 타이머를 중복으로 만들지 않는다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-possync4-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      logInFake(eng);
+      eng.startPositionSyncLoop();
+      const first = (eng as unknown as EngineInternals).positionSyncTimer;
+      eng.startPositionSyncLoop();
+      expect((eng as unknown as EngineInternals).positionSyncTimer).toBe(first);
+      eng.stopPositionSyncLoop();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

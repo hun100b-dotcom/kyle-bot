@@ -1512,6 +1512,20 @@ export class ToolEngine extends EventEmitter {
    *  같은 이유 — 실제 토스 보유·조건주문 조회라 PC만 할 수 있음). */
   private protectionAuditTimer: ReturnType<typeof setInterval> | null = null;
   private static readonly PROTECTION_AUDIT_INTERVAL_MS = 5 * 60_000; // 5분마다(자동매매 사이클과 같은 주기)
+  /** [v0.74.0 — 오너 지시 "토스 증권과의 실시간 양방향 동기화"(task #72, "가장 중요")] 1단계:
+   *  토스 앱에서 직접 조건주문을 취소하거나 체결됐을 때, 그 변화를 자동매매 현황·감시
+   *  포지션에 반영하는 reconcileAutoPositionsNow()는 이미 있었다(v0.45.0) — 다만 지금까지는
+   *  ① 화면에 그 탭이 열려 있는 동안만 도는 20초 자동 갱신(렌더러 쪽 타이머), ② 자동매매가
+   *  켜져 있을 때만 도는 5분 사이클, 둘 중 하나로만 불렸다. 앱을 최소화해 두거나(화면 탭을
+   *  안 보는 중) 자동매매를 꺼 둔 상태에서 토스 앱으로 직접 주문을 취소·체결하면, 사람이
+   *  다시 그 탭을 열거나 "지금 확인"을 누르기 전까지는 반영이 안 됐다 — "실시간 반영"이라는
+   *  오너 지시와 어긋나는 지점이다. reconcileAutoPositionsNow()는 이미 "보유 포지션 수만큼만
+   *  조회하므로 가볍다, 더 자주 불러도 안전하다"고 문서화돼 있어(위 메서드 주석), 이 루프를
+   *  위 protectionAuditTimer와 똑같은 패턴(PC 전용, 로그인해 있는 동안 자동매매 켜짐과 무관)
+   *  으로 추가한다 — 이제 화면을 안 보고 있어도, 자동매매가 꺼져 있어도 백그라운드에서
+   *  계속 최신 상태를 유지한다. */
+  private positionSyncTimer: ReturnType<typeof setInterval> | null = null;
+  private static readonly POSITION_SYNC_INTERVAL_MS = 20_000; // 20초마다(기존 화면 자동 갱신과 같은 주기)
   /** [v0.35.0] "스크리닝은 확정인데 왜 안 사졌지?"를 화면에서 바로 보이게 — 사이클마다 다시 채움
    *  (지난 사이클 이유가 이번 사이클에도 그대로 남아 헷갈리는 일이 없도록 매번 초기화). */
   private autoTradeSkipReasons: Record<string, string> = {};
@@ -2477,6 +2491,7 @@ export class ToolEngine extends EventEmitter {
     this.stopGroupSyncLoop(); // [v0.56.0] 로그아웃하면 그룹 자동 동기화도 즉시 멈춘다.
     this.stopRemoteControlLoop(); // [v0.59.0] 로그아웃하면 원격 명령 폴링도 즉시 멈춘다.
     this.stopProtectionAuditLoop(); // [v0.71.0] 로그아웃하면 보호 감사도 즉시 멈춘다.
+    this.stopPositionSyncLoop(); // [v0.74.0] 로그아웃하면 포지션 동기화도 즉시 멈춘다.
     this.authAccessToken = null;
     this.authRefreshToken = null;
     this.authEmail = null;
@@ -6177,6 +6192,23 @@ export class ToolEngine extends EventEmitter {
     if (this.protectionAuditTimer) {
       clearInterval(this.protectionAuditTimer);
       this.protectionAuditTimer = null;
+    }
+  }
+
+  /** [PC 전용 — main.ts만 호출] 로그인 직후 시작. 이미 돌고 있으면 무시(안전한 재호출).
+   *  [v0.74.0] 위 positionSyncTimer 필드 주석(task #72) 참고 — 화면 탭이 닫혀 있거나
+   *  자동매매가 꺼져 있어도 감시 포지션 상태를 계속 최신으로 유지한다. */
+  startPositionSyncLoop(): void {
+    if (this.positionSyncTimer) return;
+    if (!this.authAccessToken && !this.authRefreshToken) return;
+    void this.reconcileAutoPositionsNow().catch(() => 0);
+    this.positionSyncTimer = setInterval(() => void this.reconcileAutoPositionsNow().catch(() => 0), ToolEngine.POSITION_SYNC_INTERVAL_MS);
+  }
+
+  stopPositionSyncLoop(): void {
+    if (this.positionSyncTimer) {
+      clearInterval(this.positionSyncTimer);
+      this.positionSyncTimer = null;
     }
   }
 

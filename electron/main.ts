@@ -798,6 +798,13 @@ app.whenReady().then(async () => {
   engine.startProtectionAuditLoop();
   setInterval(() => engine?.startProtectionAuditLoop(), 15_000);
 
+  // [v0.74.0 — task #72 "토스 증권과의 실시간 양방향 동기화"(오너 지시 "가장 중요")] 포지션
+  //   동기화 루프 — 화면 탭이 닫혀 있거나 자동매매가 꺼져 있어도, 토스 앱에서 직접 주문을
+  //   취소·체결했을 때 그 변화가 최대 20초 안에 반영되게 한다(위 engine.ts의
+  //   positionSyncTimer 필드 주석 참고). 위 두 루프와 똑같은 재시도 패턴.
+  engine.startPositionSyncLoop();
+  setInterval(() => engine?.startPositionSyncLoop(), 15_000);
+
   // 자동 업데이트는 실제 설치본에서만(개발/검증 실행 제외). 실패해도 앱은 정상.
   if (app.isPackaged && !process.env.KYLEBOT_SHOT) {
     setupAutoUpdater();
