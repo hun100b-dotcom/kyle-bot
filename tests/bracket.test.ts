@@ -597,7 +597,7 @@ describe("[v0.54.0 긴급 수정] onAutoBracketResolved — '장시간 미체결
       pushWatchingPosition(eng, "PROTECTX", 10, enteredAtMs);
       engAny.autoTradeRealizedPnlUsd = 0;
 
-      engAny.onAutoBracketResolved("PROTECTX", 10, { status: "protected_by_market_sell", exitPrice: 12, quantity: 1 });
+      engAny.onAutoBracketResolved("PROTECTX", 10, { status: "protected_by_market_sell", exitPrice: 12, quantity: 1, exitPriceIsEstimate: false });
 
       const h = eng.getAutoTradeHistory().find((e) => e.symbol === "PROTECTX");
       expect(h?.status).toBe("closed_win"); // "oco_failed"(실패)가 아니라 실제 청산 결과로 기록됨
@@ -620,7 +620,7 @@ describe("[v0.54.0 긴급 수정] onAutoBracketResolved — '장시간 미체결
       pushWatchingPosition(eng, "PROTECTY", 10, enteredAtMs); // entry $10, exitPrice $8 → 손실
       engAny.autoTradeRealizedPnlUsd = 0;
 
-      engAny.onAutoBracketResolved("PROTECTY", 10, { status: "protected_by_market_sell", exitPrice: 8, quantity: 1 });
+      engAny.onAutoBracketResolved("PROTECTY", 10, { status: "protected_by_market_sell", exitPrice: 8, quantity: 1, exitPriceIsEstimate: false });
 
       const h = eng.getAutoTradeHistory().find((e) => e.symbol === "PROTECTY");
       expect(h?.status).toBe("closed_loss");
@@ -642,7 +642,7 @@ describe("[v0.54.0 긴급 수정] onAutoBracketResolved — '장시간 미체결
       pushWatchingPosition(eng, "PARTIALZ", 10, enteredAtMs, 3);
       engAny.autoTradeRealizedPnlUsd = 0;
 
-      engAny.onAutoBracketResolved("PARTIALZ", 10, { status: "protected_by_market_sell", exitPrice: 12, quantity: 2 });
+      engAny.onAutoBracketResolved("PARTIALZ", 10, { status: "protected_by_market_sell", exitPrice: 12, quantity: 2, exitPriceIsEstimate: false });
 
       const h = eng.getAutoTradeHistory().find((e) => e.symbol === "PARTIALZ");
       // [핵심] pos.quantity(3)이 아니라 res.quantity(2)로 계산해야 한다 — (12-10)*2=4.

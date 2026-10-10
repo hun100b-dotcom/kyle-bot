@@ -945,7 +945,7 @@ export type WatchAndBracketResult =
    *  불가능한 상황) OCO 재시도 대신 즉시 시장가로 매도해 포지션을 보호한다. 이 경우는
    *  "실패"가 아니라 실제로 포지션이 정상적으로 청산된 것이므로, 손익을 계산해 기록할 수
    *  있게 exitPrice를 함께 돌려준다. */
-  | { status: "protected_by_market_sell"; exitPrice: number; quantity: number };
+  | { status: "protected_by_market_sell"; exitPrice: number; quantity: number; exitPriceIsEstimate: boolean };
 
 // -----------------------------------------------------------------------------
 // [v0.26.0] 자동매매 타입
@@ -3979,22 +3979,19 @@ export class ToolEngine extends EventEmitter {
     const reason =
       reasonOverride ?? (cur >= spec.tpTrigger ? `익절 감시가($${spec.tpTrigger}) 이상으로 이미 올라` : `손절 감시가($${spec.slTrigger}) 이하로 이미 내려가`);
     try {
-      // [2차 검토 — 실제 체결가 vs 추정가] 시장가 주문 응답은 즉시 체결가를 안 주므로(토스
-      //   스펙상 주문 생성 응답은 orderId뿐 — 실제 체결가는 별도 조회가 필요), 방금 조회한
-      //   현재가(cur)를 손익 계산의 기준으로 쓴다. 변동성 큰 저가주 특성상 실제 체결가와
-      //   몇 센트 차이가 날 수 있다는 점을 기록에 정직하게 남긴다(아래 note 참고) — "정확한
-      //   체결가"가 아니라 "판단 시점의 추정 기준가"임을 숨기지 않는다.
       // [v0.69.0] 한 번 실패하면 포기하던 것을 재시도로 바꾼다 — WETO 실사례는 "매도 가능 수량 부족(422)"으로 이 시장가 매도가
       //   실패하자 그대로 무보호 상태로 끝났다. 실제 매도 가능 수량을 확인해 그만큼만(전량 아니면 가드가 나머지를 이어서) 판다.
       let soldAll = false;
       let lastSellErr: unknown = null;
+      let sellOrderId: string | null = null;
       for (let attempt = 0; attempt <= this.marketSellRetryDelaysMs.length; attempt++) {
         if (attempt > 0) await new Promise((r) => setTimeout(r, this.marketSellRetryDelaysMs[attempt - 1]));
         try {
           const sq = await this.sellableQty(symbol).catch(() => null);
           const qty = sq != null && Number.isFinite(sq) ? Math.min(quantity, Math.floor(sq)) : quantity;
           if (qty <= 0) { lastSellErr = new Error("매도 가능 수량이 아직 0입니다(체결 직후 반영 대기)"); continue; }
-          await this.placeSell({ symbol, quantity: qty, orderType: "MARKET" });
+          const sellEntry = await this.placeSell({ symbol, quantity: qty, orderType: "MARKET" });
+          sellOrderId = (sellEntry.detail as OrderResponse | undefined)?.tossOrderId ?? null;
           soldAll = qty >= quantity;
           if (!soldAll) { lastSellErr = new Error(`일부(${qty}/${quantity}주)만 매도 가능 — 나머지는 가드가 이어서 처리`); }
           break;
@@ -4003,14 +4000,43 @@ export class ToolEngine extends EventEmitter {
         }
       }
       if (!soldAll) throw lastSellErr instanceof Error ? lastSellErr : new Error(String(lastSellErr ?? "시장가 매도 실패"));
+      // [v0.73.0 긴급 수정 — 오너 실계좌 보고 "매수가와 똑같은 가격에 매도 기록, 실제론 손실인데
+      //   앱은 +$7.42 익절로 기록"(AGRZ, 2026-10-10)] 시장가 주문 생성 응답 자체는 체결가를 안
+      //   준다(토스 스펙상 orderId뿐) — 예전엔 그래서 "매도 직전 조회한 현재가(cur)"를 그대로
+      //   손익 계산에 썼는데, 변동성 큰 저가주는 그사이 가격이 몇 %씩 움직일 수 있어 "몇 센트
+      //   차이"로 넘길 수준이 아니었다(실제로 +3.29% 익절 기록이 실제로는 수수료만 까먹은 거래
+      //   였음). 이제는 매도 주문번호로 실제 체결가(avg_filled_price)를 직접 조회해 그 값을
+      //   쓴다 — 시장가 주문은 거의 즉시 체결되므로 짧게 몇 번만 재확인한다. 그래도 못 받아오면
+      //   (조회 실패·드라이런 등) 그때만 예전처럼 추정가로 폴백하되, 기록에 "추정가"임을 남긴다.
+      let exitPrice = cur;
+      let exitPriceIsEstimate = true;
+      if (sellOrderId) {
+        for (let i = 0; i < 5; i++) {
+          await new Promise((r) => setTimeout(r, ToolEngine.BRACKET_FAST_POLL_MS));
+          try {
+            const filled = await getOrder(sellOrderId);
+            if (filled.avg_filled_price != null && filled.avg_filled_price > 0) {
+              exitPrice = filled.avg_filled_price;
+              exitPriceIsEstimate = false;
+              break;
+            }
+          } catch {
+            // 조회 실패는 다음 시도에서 재시도(아래 폴백이 있으므로 막지 않음)
+          }
+        }
+      }
       this.addJournal({
         kind: "info",
         symbol,
-        summary: `⚠️ 체결 후 보호주문(OCO)을 걸려 했지만, 그 사이 현재가($${cur})가 ${reason} 있어 OCO 등록이 불가능했습니다(토스 규칙상 감시가 사이에 있어야 함) — 대기 대신 즉시 시장가로 매도해 포지션을 정리했습니다(기록된 가격은 매도 직전 조회한 추정가 — 실제 체결가와 약간 다를 수 있습니다).`,
+        summary:
+          `⚠️ 체결 후 보호주문(OCO)을 걸려 했지만, 그 사이 현재가($${cur})가 ${reason} 있어 OCO 등록이 불가능했습니다(토스 규칙상 감시가 사이에 있어야 함) — 대기 대신 즉시 시장가로 매도해 포지션을 정리했습니다` +
+          (exitPriceIsEstimate
+            ? `(실제 체결가 조회에 실패해 매도 직전 조회한 추정가 $${cur}로 기록 — 실제 체결가와 다를 수 있습니다).`
+            : `(실제 체결가 $${exitPrice} 확인 완료).`),
         notify: true,
         notifyTitle: `⚠️ 즉시 보호매도: ${symbol}`,
       });
-      return { status: "protected_by_market_sell", exitPrice: cur, quantity };
+      return { status: "protected_by_market_sell", exitPrice, quantity, exitPriceIsEstimate };
     } catch (e) {
       const error = String(e).replace(/^Error:\s*/, "");
       this.addJournal({
@@ -7899,7 +7925,9 @@ export class ToolEngine extends EventEmitter {
             exitPrice: result.exitPrice,
             pnlUsd: Math.round(pnlUsd * 100) / 100,
             pnlPct: Math.round(pnlPct * 100) / 100,
-            note: "재시작 후 재확인 — 가격이 감시가를 이미 넘어서 OCO 등록이 불가능해, 즉시 시장가로 매도해 정리함",
+            note: result.exitPriceIsEstimate
+              ? "재시작 후 재확인 — 가격이 감시가를 이미 넘어서 OCO 등록이 불가능해, 즉시 시장가로 매도해 정리함(실제 체결가 조회 실패 — 매도 직전 추정가로 기록)"
+              : "재시작 후 재확인 — 가격이 감시가를 이미 넘어서 OCO 등록이 불가능해, 즉시 시장가로 매도해 정리함",
           });
         } else {
           // OCO 등록 자체가 실패 — registerOcoForFilled가 이미 상세 사유를 저널에 남겼다.
@@ -8276,7 +8304,9 @@ export class ToolEngine extends EventEmitter {
           exitPrice: res.exitPrice,
           pnlUsd: Math.round(pnlUsd * 100) / 100,
           pnlPct: Math.round(pnlPct * 100) / 100,
-          note: "체결 직후 가격이 익절/손절 감시가를 이미 넘어서 OCO 등록이 불가능해, 즉시 시장가로 매도해 정리함",
+          note: res.exitPriceIsEstimate
+            ? "체결 직후 가격이 익절/손절 감시가를 이미 넘어서 OCO 등록이 불가능해, 즉시 시장가로 매도해 정리함(실제 체결가 조회 실패 — 매도 직전 추정가로 기록)"
+            : "체결 직후 가격이 익절/손절 감시가를 이미 넘어서 OCO 등록이 불가능해, 즉시 시장가로 매도해 정리함",
         });
       } else if (res.status === "oco_failed") {
         this.updateAutoTradeHistory(symbol, entry, enteredAtMs, {

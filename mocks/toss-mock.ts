@@ -38,6 +38,10 @@ interface MockOrder {
   filledQuantity: number;
   remaining: number;
   pollCount: number; // 단건 조회 횟수(부분체결 "누적" 시연용)
+  /** [v0.73.0] 시장가(MARKET) 주문은 price가 없어 체결가를 따로 저장해 둬야 한다(실제 토스처럼
+   *  "체결 시점의 시세"로 평균체결가를 보고하기 위함 — electron/tool-engine.ts의 protectByMarketSell이
+   *  실제 체결가를 조회해 쓰는지 검증하려면 이 목 서버도 정직하게 값을 채워야 한다). */
+  filledPrice?: number;
 }
 
 /** 조건주문 한 다리(leg) — [v0.51.0] 실스펙 정합: status/triggeredOrderId를 실제처럼 갖는다. */
@@ -159,7 +163,7 @@ function toDetail(o: MockOrder) {
     quantity: String(o.quantity),
     execution: {
       filledQuantity: String(o.filledQuantity),
-      averageFilledPrice: o.filledQuantity > 0 && o.price !== undefined ? String(o.price) : null,
+      averageFilledPrice: o.filledQuantity > 0 && (o.filledPrice ?? o.price) !== undefined ? String(o.filledPrice ?? o.price) : null,
     },
   };
 }
@@ -607,6 +611,7 @@ export function createMockTossServer() {
         order.status = "FILLED";
         order.filledQuantity = quantity;
         order.remaining = 0;
+        order.filledPrice = priceOf(state.prices, symbol); // 시장가 체결 시점의 시세
       } else if (limitFill(side, priceOf(state.prices, symbol), price as number)) {
         order.status = "FILLED";
         order.filledQuantity = quantity;

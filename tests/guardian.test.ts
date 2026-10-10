@@ -22,7 +22,12 @@ type Internals = {
   registerUnprotected: (p: AutoPosition, reason: string) => void;
   onAutoBracketResolved: (symbol: string, entry: number, res: { status: "oco_failed"; error: string }) => void;
   clearAutoPositionWithoutPnl: (pos: AutoPosition, summary: string, note: string) => Promise<void>;
-  protectByMarketSell: (symbol: string, quantity: number, cur: number, spec: { tpTrigger: number; slTrigger: number }) => Promise<{ status: string }>;
+  protectByMarketSell: (
+    symbol: string,
+    quantity: number,
+    cur: number,
+    spec: { tpTrigger: number; slTrigger: number },
+  ) => Promise<{ status: string; exitPrice?: number; exitPriceIsEstimate?: boolean }>;
   guardTimer: ReturnType<typeof setTimeout> | null;
   mock: { state: { conditionalOrderAlwaysRejectBand: boolean } };
 };
@@ -185,6 +190,29 @@ describe("[v0.69.0] 보호 가드 — 보호주문 없는 보유 종목을 끝�
       const r = await x.protectByMarketSell("AAPL", 1, 2.6, { tpTrigger: 2.5, slTrigger: 1.8 });
       expect(r.status).toBe("protected_by_market_sell");
       expect(calls).toBe(3); // 두 번 실패 뒤 세 번째에 성공
+      // [v0.73.0] 이 테스트는 placeSell 자체를 가짜로 바꿔치기해서(주문번호가 없는 응답) 실제
+      //   체결가를 조회할 길이 없다 — 그럴 땐 예전처럼 매도 직전 추정가(cur)로 폴백하고, 그
+      //   사실을 정직하게 표시해야 한다.
+      expect(r.exitPrice).toBe(2.6);
+      expect(r.exitPriceIsEstimate).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("[v0.73.0 — 오너 실계좌 보고(AGRZ, 2026-10-10): 매수가와 똑같은 가격에 매도 기록돼 실제 손실인데 +익절로 표시됨] 시장가 보호매도는 매도 직전 추정가가 아니라 실제 체결가를 조회해 기록한다", async () => {
+    const { dir, eng, x } = await setup();
+    try {
+      // 목 서버의 '실제 시세'는 2.6 — 시장가 매도는 이 가격에 체결된다(mocks/toss-mock.ts의
+      // MARKET 처리, order.filledPrice = priceOf(state.prices, symbol)).
+      await eng.mockSetPrice("AAPL", 2.6);
+      // cur(99)는 일부러 실제 시세와 다른 "매도 직전에 조회해 둔 추정가"를 흉내낸다 — AGRZ
+      // 실사례처럼 그 사이 가격이 더 움직였다고 가정. 예전 버그였다면 exitPrice가 그대로 99로
+      // 기록됐을 것이다(실제로는 전혀 다른 가격에 체결됐는데도).
+      const r = await x.protectByMarketSell("AAPL", 1, 99, { tpTrigger: 2.5, slTrigger: 1.8 });
+      expect(r.status).toBe("protected_by_market_sell");
+      expect(r.exitPrice).toBe(2.6); // 추정가(99)가 아니라 실제 체결가(2.6)로 기록돼야 한다
+      expect(r.exitPriceIsEstimate).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
