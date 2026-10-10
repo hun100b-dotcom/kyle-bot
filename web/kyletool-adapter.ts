@@ -239,6 +239,7 @@ export function installKyleTool(): ToolEngine {
     cancelConditional: (id: string) => e.cancelConditional(id),
     cancelAutoPosition: (symbol: string, entry: number, enteredAtMs: number) => e.cancelAutoPosition(symbol, entry, enteredAtMs),
     dismissUnprotected: async (symbol: string) => e.dismissUnprotected(symbol), // [v0.69.4]
+    setAutoReflectExcluded: async (symbol: string, excluded: boolean) => e.setAutoReflectExcluded(symbol, excluded), // [v0.78.0]
 
     // ── 현황(보유·주문·포지션·근거) ────────────────────────────
     positions: () => e.positions(),

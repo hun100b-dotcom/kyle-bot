@@ -395,7 +395,8 @@ describe("[v0.67.0] 엔진 운영 안전 — 자동 검증·양보·초기화 �
       const st = eng.getLabStatus();
       expect(st.lastSkip).toContain("양보");
       expect(st.lastTickAtMs).toBe(before); // 스캔이 실제로 돌지 않음
-      (eng as unknown as { labDeferTimer: ReturnType<typeof setTimeout> | null }).labDeferTimer && clearTimeout((eng as unknown as { labDeferTimer: ReturnType<typeof setTimeout> }).labDeferTimer);
+      const deferTimer = (eng as unknown as { labDeferTimer: ReturnType<typeof setTimeout> | null }).labDeferTimer;
+      if (deferTimer) clearTimeout(deferTimer);
     } finally {
       rmSync(dir, { recursive: true, force: true });
       clear();

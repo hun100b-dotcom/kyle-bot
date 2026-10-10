@@ -216,7 +216,7 @@ body {
 }
 .pane-tag { font-size: 11px; color: var(--muted); }
 .pane-select {
-  flex: 1; max-width: 260px; padding: 6px 10px; font-size: 13px;
+  flex: 1; max-width: 260px; padding: 6px 32px 6px 10px; font-size: 13px;
   background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 8px;
 }
 
@@ -283,6 +283,24 @@ input {
 }
 .form-col input { width: 100%; }
 input:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px rgba(76,130,251,0.18); }
+
+/* [v0.78.0 — 오너 지적 "선택창(드롭다운) UI가 안 어울림"] <select>는 지금까지 아무 스타일도
+   안 줘서 브라우저/OS 기본 모양(흰 배경·시스템 글꼴)이 그대로 나와, 바로 옆 input·button의
+   다크 테마와 확 튀었다(자동매매 카드의 "진입 타점"·"손절 방식" 드롭다운이 그 예). input과
+   똑같은 배경·테두리·글자색을 입히고, 기본 화살표(appearance: none으로 끔) 대신 테마에 맞는
+   얇은 화살표를 직접 그려 넣는다. */
+select {
+  background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+  border-radius: var(--r-sm); padding: 10px 32px 10px 12px; font-size: 15px; width: 130px;
+  appearance: none; -webkit-appearance: none; -moz-appearance: none; cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5L6 8L9.5 4.5' stroke='%23aeb4c7' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 10px center;
+}
+.form-col select { width: 100%; }
+select:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px rgba(76,130,251,0.18); }
+/* option(펼쳤을 때 목록)은 OS가 직접 그리는 경우가 많아 완전히 못 바꿀 수 있지만, 바꿀 수
+   있는 브라우저(크롬 계열 — 이 앱이 쓰는 Electron도 포함)에서는 이것도 다크 테마로 맞춘다. */
+select option { background: var(--panel2); color: var(--text); }
 .radio { flex-direction: row; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; color: var(--text); }
 .radio input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--blue); cursor: pointer; }
 
@@ -322,6 +340,28 @@ th { color: var(--muted); font-weight: 500; font-size: 11.5px; }
 .mono { font-family: ui-monospace, monospace; font-size: 11.5px; }
 .small { font-size: 11.5px; }
 ul.hint { padding-left: 18px; }
+
+/* [v0.75.0 — 오너 요청 "설명들을 전부 접기/펼치기로"] 화면 곳곳에 늘 펼쳐져 있던 긴 설명
+   문단(길게는 4~5문장)을 기본적으로 접어 두고, 궁금할 때만 펼쳐 보게 하는 공용 패턴.
+   네이티브 <details>/<summary> 그대로 씀(외부 라이브러리 없이 가볍게 — 스크리너 차트
+   주석의 기존 원칙과 동일). .lab-rules·.rs-legend처럼 테두리 상자로 두르지 않는 이유:
+   그 둘은 화면에 한두 번만 나오는 "안내문 전체"용이지만, 이 .explain은 계산기·자동매매
+   설정 등 곳곳에 수십 곳 반복되므로 매번 상자를 두르면 그 자체가 새 잡음이 된다 — 그래서
+   이미 쓰고 있는 .hint(보조색·작은 글자) 톤을 그대로 잇고, summary에 화살표만 붙여
+   "눌러서 펼칠 수 있다"는 신호만 최소로 더한다. 기본 접힘(= <details>에 open 없음). */
+.explain { margin: 4px 0; }
+.explain > summary {
+  list-style: none; cursor: pointer; color: var(--muted); font-size: 12px; line-height: 1.6;
+  padding: 2px 0; user-select: none;
+}
+.explain > summary::-webkit-details-marker { display: none; }
+.explain > summary::before { content: "▸ "; }
+.explain[open] > summary::before { content: "▾ "; }
+.explain > summary:hover { color: var(--text); }
+.explain[open] > summary { color: var(--text); font-weight: 600; }
+/* 펼친 내용(대개 <p className="hint">)은 기존 .hint 스타일을 그대로 쓰고, summary에 속한
+   내용임이 보이게 살짝 들여쓴다. */
+.explain > p, .explain > div { margin: 4px 0 2px 2px; }
 
 /* ===== v2 추가: 주문 확인 팝업(모달) ===== */
 .modal-back {

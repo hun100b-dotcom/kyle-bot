@@ -803,6 +803,7 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
       const engAny = eng as unknown as EngineInternals;
       expect(engAny.autoTradePositions).toEqual([]); // 이 엔진은 자동매매로 연 포지션이 하나도 없음(핵심 전제)
 
+      freezeKst(2026, 7, 16, 23, 0); // [v0.75.0] 간헐적 실패 수정 — 실제 시각이 "장 마감"이면 세션 게이트가 스캔 자체를 건너뛰어 버리므로 정규장으로 고정
       engAny.autoTradeEnabled = true; // startAutoTrade()의 백그라운드 반복 없이 tick 한 번만 직접 검증
       await engAny.autoTradeTick();
 
@@ -842,6 +843,7 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
           sessionHigh: 4, proximityPct: -3, n1m: 300, n5m: 60, evidence: null,
         }],
       };
+      freezeKst(2026, 7, 16, 23, 0); // [v0.75.0] 간헐적 실패 수정 — 세션 게이트가 실제 시각에 좌우되지 않게 정규장으로 고정
       engAny.autoTradeEnabled = true;
       await engAny.autoTradeTick();
 
@@ -874,6 +876,7 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
           sessionHigh: 2.6, proximityPct: -3, n1m: 300, n5m: 60, evidence: null,
         }],
       });
+      freezeKst(2026, 7, 16, 23, 0); // [v0.75.0] 간헐적 실패 수정 — 세션 게이트가 실제 시각에 좌우되지 않게 정규장으로 고정
       engAny.autoTradeEnabled = true;
       await engAny.autoTradeTick();
 
@@ -928,6 +931,7 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
           sessionHigh: 4.1, proximityPct: -3, n1m: 300, n5m: 60, evidence: null,
         }],
       });
+      freezeKst(2026, 7, 16, 23, 0); // [v0.75.0] 간헐적 실패 수정 — autoScanNow도 내부적으로 세션 게이트를 타므로 정규장으로 고정
       engAny.autoTradeEnabled = true;
 
       const s = await eng.autoScanNow();
@@ -968,6 +972,7 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
       // (스캔~집행 사이 시차 동안 추세가 무너진 실제 상황을 재현).
       await eng.mockSetPrice("TSLA", 190);
 
+      freezeKst(2026, 7, 16, 23, 0); // [v0.75.0] 간헐적 실패 수정 — 세션 게이트가 실제 시각에 좌우되지 않게 정규장으로 고정
       engAny.autoTradeEnabled = true;
       await engAny.autoTradeTick();
 
@@ -1000,6 +1005,7 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
       // 주문 직전에도 여전히 EMA200(200) 위(205) — 재확인 통과해야 정상 진입.
       await eng.mockSetPrice("TSLA", 205);
 
+      freezeKst(2026, 7, 16, 23, 0); // [v0.75.0] 간헐적 실패 수정 — 세션 게이트가 실제 시각에 좌우되지 않게 정규장으로 고정
       engAny.autoTradeEnabled = true;
       await engAny.autoTradeTick();
 
@@ -1042,6 +1048,7 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
       });
       await eng.mockSetPrice("TSLA", 4000); // EMA200 재확인은 통과하게(이 테스트의 관심사가 아님)
 
+      freezeKst(2026, 7, 16, 23, 0); // [v0.75.0] 간헐적 실패 수정 — 세션 게이트가 실제 시각에 좌우되지 않게 정규장으로 고정
       engAny.autoTradeEnabled = true;
       await engAny.autoTradeTick();
 
@@ -1082,6 +1089,7 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
       });
       await eng.mockSetPrice("TSLA", 3500);
 
+      freezeKst(2026, 7, 16, 23, 0); // [v0.75.0] 간헐적 실패 수정 — 세션 게이트가 실제 시각에 좌우되지 않게 정규장으로 고정
       engAny.autoTradeEnabled = true;
       await engAny.autoTradeTick();
 

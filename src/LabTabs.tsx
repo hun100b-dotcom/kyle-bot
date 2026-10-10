@@ -155,11 +155,14 @@ export function LabLiveTab({ lab }: { lab: LabApi }) {
           <h2>🔬 신호 기록 모드 <span className="hint">(주문 없음 · 읽기 전용 연구)</span></h2>
           <GuideButton onClick={guide.show} />
         </div>
-        <p className="hint">
-          카일이 제안한 "도지 → 연속 양봉 돌파 → 4번째 고점 → 삼분할 연계" 전략을 <b>실제 시장에서 주문 없이</b> 돌려 봅니다.
-          5분마다(이 앱이 켜져 있는 동안) 토스 거래량 순위 상위 종목을 훑어 패턴을 찾고, 찾을 때마다 <b>가상 매수 → 로직대로 가상 매매 → 결과</b>까지
-          전부 <b>로우 데이터</b>로 쌓습니다. 이 데이터로 매수 방식·손절·익절을 실제 숫자로 정한 뒤에야 실매수에 연결합니다.
-        </p>
+        <details className="explain">
+          <summary>❓ 무엇을 기록하나요?</summary>
+          <p className="hint">
+            카일이 제안한 "도지 → 연속 양봉 돌파 → 4번째 고점 → 삼분할 연계" 전략을 <b>실제 시장에서 주문 없이</b> 돌려 봅니다.
+            5분마다(이 앱이 켜져 있는 동안) 토스 거래량 순위 상위 종목을 훑어 패턴을 찾고, 찾을 때마다 <b>가상 매수 → 로직대로 가상 매매 → 결과</b>까지
+            전부 <b>로우 데이터</b>로 쌓습니다. 이 데이터로 매수 방식·손절·익절을 실제 숫자로 정한 뒤에야 실매수에 연결합니다.
+          </p>
+        </details>
         <LabFreshBar lab={lab} />
         <LabNotice lab={lab} />
 
@@ -209,11 +212,14 @@ export function LabLiveTab({ lab }: { lab: LabApi }) {
           </label>
           <button className="btn btn-start" disabled={lab.busy || !dirty} onClick={save}>설정 저장</button>
         </div>
-        <p className="hint small">
-          거래량 순위: 10~200위(기본 120). 도지 몸통 5~30%(기본 15), 신호 몸통 40~90%(기본 60), 거래량 배수 1~5배(기본 1.5 = 150%),
-          최소 봉 크기 0~5%(기본 0.5 — 호가 1~2틱짜리 초소형 봉은 몸통 "비율"이 100%여도 의미 있는 돌파가 아니라서 뺍니다).
-          가격대는 [스크리닝 기준]의 가격대($1~9 기본)를 그대로 씁니다. 기준은 신호가 기록될 때의 값으로 판정되며, 나중에 바꿔도 이미 쌓인 로우는 그대로입니다.
-        </p>
+        <details className="explain">
+          <summary>❓ 입력 범위·동작 방식 보기</summary>
+          <p className="hint small">
+            거래량 순위: 10~200위(기본 120). 도지 몸통 5~30%(기본 15), 신호 몸통 40~90%(기본 60), 거래량 배수 1~5배(기본 1.5 = 150%),
+            최소 봉 크기 0~5%(기본 0.5 — 호가 1~2틱짜리 초소형 봉은 몸통 "비율"이 100%여도 의미 있는 돌파가 아니라서 뺍니다).
+            가격대는 [스크리닝 기준]의 가격대($1~9 기본)를 그대로 씁니다. 기준은 신호가 기록될 때의 값으로 판정되며, 나중에 바꿔도 이미 쌓인 로우는 그대로입니다.
+          </p>
+        </details>
 
         {s && (
           <>
@@ -420,10 +426,13 @@ export function LabSignalsTab({ lab }: { lab: LabApi }) {
           <h2>🧾 신호 로우 <span className="hint">(찾은 신호를 한 건씩, 가상 매매 결과까지)</span></h2>
           <GuideButton onClick={guide.show} />
         </div>
-        <p className="hint">
-          한 줄 = 패턴이 인정된 신호 한 건(2번째 캔들 마감 시점). 아래 "기준 변형"으로 가상 매매했을 때의 결과를 줄마다 보여 줍니다.
-          줄을 누르면 그 신호의 <b>캔들 차트와 모든 변형(최대 약 100가지)의 개별 결과</b>가 열립니다.
-        </p>
+        <details className="explain">
+          <summary>❓ 이 표는 어떻게 보나요?</summary>
+          <p className="hint">
+            한 줄 = 패턴이 인정된 신호 한 건(2번째 캔들 마감 시점). 아래 "기준 변형"으로 가상 매매했을 때의 결과를 줄마다 보여 줍니다.
+            줄을 누르면 그 신호의 <b>캔들 차트와 모든 변형(최대 약 100가지)의 개별 결과</b>가 열립니다.
+          </p>
+        </details>
         <LabFreshBar lab={lab} />
         <LabNotice lab={lab} />
 
@@ -610,10 +619,13 @@ export function LabCompareTab({ lab }: { lab: LabApi }) {
           <h2>⚖️ 전략 비교·연계 <span className="hint">(어떤 매수 방식·손절·익절이 나은가 — 로우에서 계산한 실제 숫자)</span></h2>
           <GuideButton onClick={guide.show} />
         </div>
-        <p className="hint">
-          같은 신호들을 변형별로 가상 매매한 결과를 비교합니다. <b>기대값</b> = 신호 하나당 평균 순손익(%)이며, 미체결은 0으로 칩니다 — 체결이 잘 안 되는 방식은
-          승률이 높아 보여도 기대값이 낮게 나오므로 "정말 쓸 만한가"를 가장 정직하게 보여 주는 숫자예요.
-        </p>
+        <details className="explain">
+          <summary>❓ 기대값이란 무엇인가요?</summary>
+          <p className="hint">
+            같은 신호들을 변형별로 가상 매매한 결과를 비교합니다. <b>기대값</b> = 신호 하나당 평균 순손익(%)이며, 미체결은 0으로 칩니다 — 체결이 잘 안 되는 방식은
+            승률이 높아 보여도 기대값이 낮게 나오므로 "정말 쓸 만한가"를 가장 정직하게 보여 주는 숫자예요.
+          </p>
+        </details>
         <LabFreshBar lab={lab} />
         <LabNotice lab={lab} />
 
@@ -738,18 +750,24 @@ export function LabCompareTab({ lab }: { lab: LabApi }) {
               <div className="lab-card"><b>{s.linkage.avgGapMin != null ? `${Math.round(s.linkage.avgGapMin)}분` : "—"}</b><span>상승 끝 → 삼분할 확정까지</span></div>
               <div className="lab-card"><b>{num(s.linkage.avgEmaGapPct, 1, "%")}</b><span>그때 전봉종가 EMA 이격</span></div>
             </div>
-            <p className="hint small">
-              연계율이 낮으면 "캔들 상승 뒤에 삼분할이 자연스럽게 이어진다"는 전제가 약하다는 뜻입니다. 이어진 경우의 삼분할 매수 성적은 위에서 [삼분할 연계 진입]을 눌러 보세요.
-              ({s.linkage.linkedAnyEligible}건은 4번째 차단 여부와 무관하게 연계가 잡힘)
-            </p>
+            <details className="explain">
+              <summary>❓ 연계율은 어떻게 해석하나요?</summary>
+              <p className="hint small">
+                연계율이 낮으면 "캔들 상승 뒤에 삼분할이 자연스럽게 이어진다"는 전제가 약하다는 뜻입니다. 이어진 경우의 삼분할 매수 성적은 위에서 [삼분할 연계 진입]을 눌러 보세요.
+                ({s.linkage.linkedAnyEligible}건은 4번째 차단 여부와 무관하게 연계가 잡힘)
+              </p>
+            </details>
 
             {!lab.isMirror && (
               <>
                 <h4>이어서 한 시나리오: 캔들 매매 → 끝난 뒤 삼분할</h4>
-                <p className="hint small">
-                  위 순위표에서 <b>캔들 1차 진입</b> 변형을 하나 고르면, 그 변형 뒤에 아래 삼분할 변형을 이어서 한 합계를 계산합니다.
-                  규칙(오너·카일 답변): 캔들 포지션이 <b>완전히 청산된 뒤에만</b> 삼분할 진입, 캔들 매매가 <b>손절로 끝났으면 그날 삼분할 금지</b>.
-                </p>
+                <details className="explain">
+                  <summary>❓ 이 시나리오는 어떻게 계산되나요?</summary>
+                  <p className="hint small">
+                    위 순위표에서 <b>캔들 1차 진입</b> 변형을 하나 고르면, 그 변형 뒤에 아래 삼분할 변형을 이어서 한 합계를 계산합니다.
+                    규칙(오너·카일 답변): 캔들 포지션이 <b>완전히 청산된 뒤에만</b> 삼분할 진입, 캔들 매매가 <b>손절로 끝났으면 그날 삼분할 금지</b>.
+                  </p>
+                </details>
                 <div className="form-row">
                   <label>삼분할 변형
                     <select value={linkKey} onChange={(e) => setLinkKey(e.target.value)}>

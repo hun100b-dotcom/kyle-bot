@@ -24,7 +24,7 @@ import { getSession, getSessionStart, getMarketStatus, isOrderFrozen, isInDailyP
 import { calcSplit3, calcSplit3Level, calcOrderbook, calcCandle, roundPrice, getTick, type SplitOrder } from "../lib/calc";
 import { encryptSecret, decryptSecret, encryptJson, decryptJson } from "../lib/keysync"; // [v0.8.0] 키 기기 간 동기화(클라이언트 암호화) + [v0.10.0] 매매 이력용
 import { classifyTicks, strengthFromTicks, strengthFromVolumes, updateStrengthWindow, isWindowCapped, analyzeStrengthSeries, type Side, type StrengthSignals, type WindowBufferEntry } from "../lib/strength";
-import { buildReport, buildReportFromRealized, makePeriod, type DailyReport, type PeriodKind } from "../lib/report"; // [v0.9.1] 매매 리포트
+import { buildReportFromRealized, makePeriod, type DailyReport, type PeriodKind } from "../lib/report"; // [v0.9.1] 매매 리포트
 import { matchFifo, mergeFills, coveredSince, shouldReuseCache, type Fill, type RealizedTrade } from "../lib/fills"; // [v0.9.6] 토스 실제 체결내역으로 손익 계산 (+v0.10.1 기간 커버리지 헬퍼)
 import { reconcileHistoryEntry, enteredAtMsFromId, type HistoryReconcileResult } from "../lib/history-reconcile"; // [v0.64.0] 자동매매기록을 토스 실제 체결과 대조
 import { buildCycles, analyzeTrades, type TradeCycle, type TradeInsights } from "../lib/trade-analysis"; // [v0.19.0] 매매 사이클 자동추적·분석
@@ -49,7 +49,6 @@ import {
   buildSeries,
   detectRuns,
   buildSignal,
-  updateSignal,
   simulateSignal,
   summarizeVariants,
   summarizeLinkage,
@@ -102,7 +101,7 @@ import {
   type OrderResponse,
 } from "../lib/toss";
 import { createMockTossServer } from "../mocks/toss-mock";
-import { canAutoEnter, isLossLimitBreached, volScaledInvestPct, type AutoTradeLimits } from "../lib/auto-risk";
+import { canAutoEnter, isLossLimitBreached, volScaledInvestPct } from "../lib/auto-risk";
 import { checkBracketPrices, checkPercentSettings, checkSimpleOrder, type SanityExpect } from "../lib/order-sanity"; // [v0.69.2] 주문 전 정합성 검사
 import { guessWarrantTickers, applyWarrantGate } from "../lib/warrant"; // [v0.36.0] 워런트 의심 종목 감지 / [v0.70.0] 탈락 게이트
 
@@ -1009,6 +1008,8 @@ export interface AutoTradeStatus {
   enabled: boolean;
   /** [v0.69.0] 보호주문이 없어 봇이 복구를 시도 중인 보유 종목(없으면 빈 배열). */
   unprotected: UnprotectedPos[];
+  /** [v0.78.0] 오너가 "장기보유" 등으로 표시해 reflectUnknownHoldings 자동 반영에서 뺀 종목(대문자 심볼). */
+  reflectExcluded: string[];
   /** [v0.69.2] 주문 전 검증 관문에서 막힌 최근 주문(최대 10건) — 화면 붉은 경고용. */
   orderBlocks: Array<{ ts: string; symbol: string; kind: string; reasons: string[] }>;
   positions: AutoPosition[];
@@ -1394,6 +1395,8 @@ export class ToolEngine extends EventEmitter {
   private autoUnprotected: UnprotectedPos[] = [];
   /** [v0.69.4] 오너가 [보호 중단]을 눌러 "이 종목은 내가 직접 관리한다"고 한 종목 → 해제 시각(ms). 그때까지 가드·감사가 다시 올리지 않는다. */
   private guardDismissed: Record<string, number> = {};
+  /** [v0.78.0] 오너가 "장기보유" 등으로 표시해 reflectUnknownHoldings(자동 반영 대상)에서 뺀 종목(대문자 심볼 → true). */
+  private autoReflectExcluded: Record<string, true> = {};
   private guardTimer: ReturnType<typeof setTimeout> | null = null;
   private guardBusy = false;
   /** 조건주문이 토스에서 사라졌는데 실계좌엔 주식이 남은 경우(WHLR·NAUT)에도 자동으로 다시 보호할지(기본 켬). */
@@ -5615,9 +5618,11 @@ export class ToolEngine extends EventEmitter {
         lastCycleAtMs?: number | null;
         unprotected?: UnprotectedPos[];
         dismissed?: Record<string, number>;
+        reflectExcluded?: Record<string, true>;
       };
       this.autoUnprotected = Array.isArray(raw.unprotected) ? raw.unprotected : [];
       this.guardDismissed = raw.dismissed && typeof raw.dismissed === "object" ? raw.dismissed : {};
+      this.autoReflectExcluded = raw.reflectExcluded && typeof raw.reflectExcluded === "object" ? raw.reflectExcluded : {};
       this.autoTradePositions = Array.isArray(raw.positions) ? raw.positions : [];
       this.autoTradeUsedKeys = new Set(Array.isArray(raw.usedKeys) ? raw.usedKeys : []);
       this.autoTradeLastScan = raw.lastScan ?? null;
@@ -5644,6 +5649,7 @@ export class ToolEngine extends EventEmitter {
         lastCycleAtMs: this.autoTradeLastCycleAtMs,
         unprotected: this.autoUnprotected,
         dismissed: this.guardDismissed,
+        reflectExcluded: this.autoReflectExcluded,
       };
       const tmp = this.autoPositionsPath + ".tmp";
       writeFileSync(tmp, JSON.stringify(payload, null, 2), "utf8");
@@ -6180,12 +6186,18 @@ export class ToolEngine extends EventEmitter {
 
   /** [PC 전용 — main.ts만 호출] 로그인 직후 시작. 이미 돌고 있으면 무시(안전한 재호출).
    *  [v0.71.0] auditUnprotectedHoldings를 자동매매 켜짐 여부와 무관하게 돌린다 — 왜 필요한지는
-   *  위 protectionAuditTimer 필드 주석(LPCN 37시간 무방비 사례) 참고. */
+   *  위 protectionAuditTimer 필드 주석(LPCN 37시간 무방비 사례) 참고.
+   *  [v0.78.0] reflectUnknownHoldings도 같은 주기로 함께 돈다 — 둘 다 "로그인해 있으면(자동매매
+   *  켜짐과 무관) 계속 보유 현황을 확인"한다는 성격이 같아 새 타이머를 늘리지 않고 여기 묶었다. */
   startProtectionAuditLoop(): void {
     if (this.protectionAuditTimer) return;
     if (!this.authAccessToken && !this.authRefreshToken) return;
-    void this.auditUnprotectedHoldings().catch(() => 0);
-    this.protectionAuditTimer = setInterval(() => void this.auditUnprotectedHoldings().catch(() => 0), ToolEngine.PROTECTION_AUDIT_INTERVAL_MS);
+    const tick = () => {
+      void this.auditUnprotectedHoldings().catch(() => 0);
+      void this.reflectUnknownHoldings().catch(() => 0);
+    };
+    tick();
+    this.protectionAuditTimer = setInterval(tick, ToolEngine.PROTECTION_AUDIT_INTERVAL_MS);
   }
 
   stopProtectionAuditLoop(): void {
@@ -6379,6 +6391,8 @@ export class ToolEngine extends EventEmitter {
         return await this.cancelAutoPosition(String(payload.symbol), Number(payload.entry), Number(payload.enteredAtMs));
       case "dismissUnprotected":
         return this.dismissUnprotected(String(payload.symbol));
+      case "setAutoReflectExcluded": // [v0.78.0]
+        return this.setAutoReflectExcluded(String(payload.symbol), !!payload.excluded);
       case "autoScanNow":
         return { ok: true, status: await this.autoScanNow() };
       default:
@@ -7527,6 +7541,7 @@ export class ToolEngine extends EventEmitter {
     return {
       enabled: this.autoTradeEnabled,
       unprotected: this.autoUnprotected.map((u) => ({ ...u })),
+      reflectExcluded: this.getAutoReflectExcluded(), // [v0.78.0]
       orderBlocks: this.orderBlocks.map((b) => ({ ...b })), // [v0.69.2] 주문 전 검증에서 막힌 주문(화면 붉은 경고)
       positions: this.autoTradePositions.map((p) => ({ ...p })),
       realizedPnlUsd: Math.round(this.autoTradeRealizedPnlUsd * 100) / 100,
@@ -8153,6 +8168,71 @@ export class ToolEngine extends EventEmitter {
     return added;
   }
 
+  /** [v0.78.0 — task #111 나머지 절반] 오너가 "장기보유"처럼 Capri와 무관한 종목으로 표시해
+   *  자동 반영 대상에서 뺀 목록(심볼 대문자). 화면의 보유 현황에서 종목을 선택해 추가/해제한다. */
+  getAutoReflectExcluded(): string[] {
+    return Object.keys(this.autoReflectExcluded).sort();
+  }
+
+  /** [v0.78.0] 종목 하나를 자동 반영 제외 목록에 넣거나(excluded=true) 뺀다(false). */
+  setAutoReflectExcluded(symbol: string, excluded: boolean): { ok: true; excluded: string[] } {
+    const sym = symbol.toUpperCase().trim();
+    if (excluded) this.autoReflectExcluded[sym] = true;
+    else delete this.autoReflectExcluded[sym];
+    this.saveAutoPositions();
+    return { ok: true, excluded: this.getAutoReflectExcluded() };
+  }
+
+  /**
+   * [v0.78.0 — 오너 지시 "Capri가 모르는 매매도 자동 반영, 단 장기보유 종목은 내가 선택해서
+   *   제외"] 실계좌에 있는데 Capri가 전혀 모르는(최근 3일 안에 산 기록도 없는) 종목을 찾아
+   *   매매기록에 **참고용으로만** 남긴다. 위 auditUnprotectedHoldings(봇이 직접 산 종목만
+   *   대상)와 역할이 다르다 — 여기는 "Capri가 이 매매를 했다"고 주장하지 않으므로, 절대
+   *   익절/손절(OCO)을 새로 걸거나 가드(autoUnprotected)에 올리지 않는다(오너가 요청한 적
+   *   없는 신규 자동 주문을 내보내면 안 된다는 CLAUDE.md 안전 규칙). 오너가 "장기보유" 등으로
+   *   표시해 둔 종목(autoReflectExcluded)은 건너뛴다.
+   */
+  async reflectUnknownHoldings(): Promise<number> {
+    if (this.isDryRun()) return 0;
+    let held: Array<{ symbol: string; qty: number; avgPrice: number | null }>;
+    try {
+      await this.prepareBackend(); // [v0.78.0] 접속 상태(주소/모드) 단일 진실 소스 유지 — 다른 호출(quote 등)이 먼저 깨워 준 상태에 암묵적으로 기대지 않고, 이 함수 혼자 불려도 항상 안전하게 동작해야 한다
+      const h = (await getHoldings()) as Record<string, unknown>;
+      held = [];
+      for (const it of (h?.items as Array<Record<string, unknown>>) ?? []) {
+        const q = this.num(it.quantity);
+        const sym = String(it.symbol ?? "").toUpperCase();
+        const avg = this.num(it.averagePurchasePrice ?? it.averagePrice);
+        if (sym && q != null && q > 0) held.push({ symbol: sym, qty: q, avgPrice: avg != null && avg > 0 ? avg : null });
+      }
+    } catch {
+      return 0; // 확인 못 하면 손대지 않는다
+    }
+    const tracked = new Set<string>([...this.autoTradePositions.map((p) => p.symbol.toUpperCase()), ...this.autoUnprotected.map((u) => u.symbol)]);
+    const cutoff = Date.now() - 3 * 24 * 3600_000;
+    let added = 0;
+    for (const h of held) {
+      if (tracked.has(h.symbol)) continue; // 이미 Capri가 추적 중
+      if (this.autoReflectExcluded[h.symbol]) continue; // 오너가 제외함(장기보유 등)
+      const already = this.autoTradeHistory.some(
+        (e) => e.symbol.toUpperCase() === h.symbol && (Number(e.id.split("@")[2]) >= cutoff || e.note.startsWith("[자동반영]")),
+      );
+      if (already) continue; // 최근 Capri 기록이 있거나(봇이 산 것 — 위 함수 담당), 이미 한 번 반영해 뒀음(중복 생성 방지)
+      const entry = h.avgPrice ?? 0;
+      this.autoTradeHistory.push({
+        id: `${h.symbol}@${entry}@${Date.now()}`,
+        symbol: h.symbol, entry, tp: entry, sl: entry, quantity: h.qty,
+        enteredAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
+        status: "active", exitedAt: null, exitPrice: null, pnlUsd: null, pnlPct: null,
+        note: "[자동반영] 토스에 있는데 Capri가 모르던 보유 종목이라 참고용으로만 기록했습니다(Capri가 산 게 아니라 익절/손절도 자동으로 안 걸립니다 — 직접 관리하세요. 제외하려면 [보유 현황]에서 \"장기보유로 표시\").",
+        conditionalOrderId: null, buyOrderId: null,
+      });
+      added++;
+    }
+    if (added > 0) this.persistAutoTradeHistory();
+    return added;
+  }
+
   private scheduleGuard(delayMs: number): void {
     if (this.guardTimer || this.autoUnprotected.length === 0) return;
     // [v0.69.1] 점검 도중 예외(저장 실패 등)가 처리되지 않은 프라미스 거부로 새어 앱/테스트를 흔들지 않게 막고, 타이머가 프로세스 종료를 붙잡지 않게 한다.
@@ -8196,7 +8276,25 @@ export class ToolEngine extends EventEmitter {
           if (hist) this.updateAutoTradeHistory(u.symbol, u.entry, u.enteredAtMs, hist);
         };
         const qtyHeld = held.get(u.symbol) ?? 0;
-        if (qtyHeld <= 0) { done("보유 수량이 없습니다(이미 매도됨)"); continue; }
+        if (qtyHeld <= 0) {
+          // [v0.77.0 — task #111 "Capri가 모르는 매매 자동 반영"] 예전엔 추적만 지우고 매매기록은
+          //   그대로 뒀다 — 오너가 토스 앱에서 이 종목을 직접 팔았을 수 있는데, 그러면 기록이
+          //   "active"에 영원히 멈춰(손익도 영원히 null로 남아) 매매분석 통계를 왜곡한다. 실제
+          //   체결가를 "추정"하려고 과거 매도 주문들을 뒤져 짜맞추는 건 엉뚱한 주문을 집어 잘못된
+          //   손익을 지어낼 위험이 있어(이 API는 체결 시각을 안 줘 어느 매도가 이 포지션 건지
+          //   확실히 구분할 길이 없음) — 숫자를 지어내는 대신, 최소한 "끝났다"는 사실만 정직하게
+          //   기록해 통계에서 최소한 "아직 진행 중"으로 잘못 잡히는 것만 막는다(exitPrice/pnl은
+          //   null로 남겨 "모른다"를 숨기지 않음 — 정확한 금액은 토스 앱에서 직접 확인).
+          done("보유 수량이 없습니다(이미 매도됨) — 매매기록을 종료 처리합니다(정확한 체결가는 토스 앱에서 확인하세요)", {
+            status: "closed_manual",
+            exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
+            exitPrice: null,
+            pnlUsd: null,
+            pnlPct: null,
+            note: "보호 가드가 보유 수량 0을 확인 — 토스 앱 등에서 직접 매도된 것으로 보임(정확한 체결가·손익은 확인 불가, [주문현황]에서 직접 확인 가능)",
+          });
+          continue;
+        }
         if (open && open.some((o) => String(o.symbol ?? "").toUpperCase() === u.symbol)) { done("토스에 익절/손절 조건주문이 걸려 있습니다"); continue; }
         if (openSellSyms?.has(u.symbol)) {
           this.guardDismissed[u.symbol] = Date.now() + 12 * 3600_000;
@@ -8233,13 +8331,42 @@ export class ToolEngine extends EventEmitter {
             done(`익절/손절 조건주문을 다시 등록했습니다(${qty}주)`, { status: "active", exitedAt: null, conditionalOrderId: id, note: "보호 가드가 익절/손절 조건주문을 복구 등록함" });
           } else {
             // 가격이 이미 감시가 밖 — 조건주문을 걸 수 없으니 지금 시장가로 정리한다.
-            await this.placeSell({ symbol: u.symbol, quantity: qty, orderType: "MARKET" });
-            const pnlUsd = (cur - u.entry) * qty;
+            // [v0.75.0 — "애드밸류 감사" 중 발견: v0.73.0 AGRZ 수정(protectByMarketSell)과 같은
+            //   부류의 버그가 이 경로에도 있었다] 시장가 주문 생성 응답은 체결가를 안 주는데,
+            //   예전엔 "매도 직전 조회한 현재가(cur)"를 그대로 손익에 썼다 — AGRZ 때처럼 가격이
+            //   급변하는 바로 그 상황(감시가 밖으로 튄 직후)이라 오차가 작지 않을 수 있다.
+            //   protectByMarketSell과 똑같이 매도 주문번호로 실제 체결가를 직접 조회해 쓰고,
+            //   못 받아오면 그때만 추정가로 폴백하며 그 사실을 기록에 남긴다. 손익 기준도
+            //   u.entry(주문가)가 아니라 u.fillPrice(실제 체결가, 있으면)로 — line ~7694의
+            //   costBasis 패턴과 통일.
+            const sellEntry = await this.placeSell({ symbol: u.symbol, quantity: qty, orderType: "MARKET" });
+            const sellOrderId = (sellEntry.detail as OrderResponse | undefined)?.tossOrderId ?? null;
+            let exitPrice = cur;
+            let exitPriceIsEstimate = true;
+            if (sellOrderId) {
+              for (let i = 0; i < 5; i++) {
+                await new Promise((r) => setTimeout(r, ToolEngine.BRACKET_FAST_POLL_MS));
+                try {
+                  const filled = await getOrder(sellOrderId);
+                  if (filled.avg_filled_price != null && filled.avg_filled_price > 0) {
+                    exitPrice = filled.avg_filled_price;
+                    exitPriceIsEstimate = false;
+                    break;
+                  }
+                } catch {
+                  // 조회 실패는 다음 시도에서 재시도(아래 폴백이 있으므로 막지 않음)
+                }
+              }
+            }
+            const costBasis = u.fillPrice ?? u.entry;
+            const pnlUsd = (exitPrice - costBasis) * qty;
             this.autoTradeRealizedPnlUsd += pnlUsd;
             done(`가격($${cur})이 감시가 밖이라 시장가로 매도했습니다(${qty}주)`, {
               status: pnlUsd >= 0 ? "closed_win" : "closed_loss", exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),
-              exitPrice: cur, pnlUsd: Math.round(pnlUsd * 100) / 100, pnlPct: Math.round(((cur - u.entry) / u.entry) * 10000) / 100,
-              note: "보호 가드가 시장가로 정리함(체결가는 매도 직전 조회한 추정가)",
+              exitPrice, pnlUsd: Math.round(pnlUsd * 100) / 100, pnlPct: Math.round(((exitPrice - costBasis) / costBasis) * 10000) / 100,
+              note: exitPriceIsEstimate
+                ? "보호 가드가 시장가로 정리함(실제 체결가 조회 실패 — 매도 직전 조회한 추정가로 기록)"
+                : "보호 가드가 시장가로 정리함(실제 체결가 확인 완료)",
             });
           }
         } catch (e) {

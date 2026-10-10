@@ -17,7 +17,6 @@ import { matchFifo, type Fill } from "../lib/fills";
 import { buildReportFromRealized, makePeriod } from "../lib/report";
 
 const KST = 540;
-const H = 3_600_000;
 function ms(y: number, m: number, d: number, hh = 10): number {
   return Date.UTC(y, m - 1, d, hh) - KST * 60_000;
 }

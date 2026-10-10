@@ -149,3 +149,179 @@ describe("[v0.69.4] 보호 중단(직접 관리) — 오너가 손절을 빼고 
     }
   }, 20_000);
 });
+
+// =============================================================================
+// [v0.75.0 — "애드밸류" 감사에서 발견: v0.73.0 AGRZ 수정(protectByMarketSell)과 같은 부류의
+//   버그가 runGuard()의 시장가 정리 분기에도 있었다] 가격이 감시가(tp/sl) 밖으로 나가 OCO를
+//   걸 수 없어 즉시 시장가로 정리하는 경우, 예전엔 "매도 직전 조회한 현재가(cur)"를 그대로
+//   exitPrice로 기록했다 — AGRZ 실사례처럼 그 사이 가격이 더 움직이면 실제 손익과 다르게
+//   기록된다. tests/guardian.test.ts의 AGRZ 테스트와 같은 원리로, "매도 직전 조회값"과
+//   "실제 체결 시점 가격"을 일부러 다르게 만들어 검증한다.
+// =============================================================================
+describe("[v0.75.0 — AGRZ와 같은 부류] runGuard 시장가 정리 분기도 추정가 대신 실제 체결가를 기록한다", () => {
+  it("매도 직전 조회가(cur)와 실제 체결가가 다르면, 기록되는 exitPrice는 실제 체결가다", async () => {
+    const { dir, eng, x, stopTimer } = await setup();
+    try {
+      x.autoTradeHistory.push(histEntry({ tp: 2.5, sl: 1.8 })); // 감시 밴드: $1.8~$2.5
+      await eng.mockSetPrice("AAPL", 2.6); // 감시가(2.5) 밖 — "매도 직전 조회가"(cur)로 읽힘
+      expect(await eng.auditUnprotectedHoldings()).toBe(1);
+      stopTimer();
+      // placeSell 호출 시점(=실제 시장가 체결 시점)에 가격이 한 번 더 움직였다고 흉내 —
+      // cur(2.6)과 실제 체결가(2.75)가 달라야 버그(옛 동작)와 수정(새 동작)을 구분할 수 있다.
+      const realPlaceSell = eng.placeSell.bind(eng);
+      (eng as unknown as { placeSell: (s: unknown) => Promise<unknown> }).placeSell = async (s: unknown) => {
+        await eng.mockSetPrice("AAPL", 2.75);
+        return realPlaceSell(s as Parameters<typeof eng.placeSell>[0]);
+      };
+      await eng.runGuard();
+      const rec = eng.getAutoTradeHistory().find((h) => h.symbol === "AAPL");
+      expect(rec?.status).toBe("closed_win");
+      expect(rec?.exitPrice).toBe(2.75); // 추정가(2.6)가 아니라 실제 체결가(2.75)
+      expect(rec?.note).toContain("실제 체결가 확인 완료");
+      expect(rec?.pnlUsd).toBe(65); // (2.75 - 2.1) × 100주
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("실제 체결가 조회가 끝내 안 되면(주문번호 없음) 추정가로 폴백하되 그 사실을 정직하게 남긴다", async () => {
+    const { dir, eng, x, stopTimer } = await setup();
+    try {
+      x.autoTradeHistory.push(histEntry({ tp: 2.5, sl: 1.8 }));
+      await eng.mockSetPrice("AAPL", 2.6);
+      expect(await eng.auditUnprotectedHoldings()).toBe(1);
+      stopTimer();
+      // placeSell이 주문번호 없는 응답을 돌려주는 상황(예: 드라이런이 아닌데 detail이 비정상)을
+      // 흉내 — 실제 체결가를 조회할 길이 없어 옛 방식(추정가)으로 폴백해야 한다.
+      (eng as unknown as { placeSell: (s: unknown) => Promise<unknown> }).placeSell = async () => ({ kind: "entry" });
+      await eng.runGuard();
+      const rec = eng.getAutoTradeHistory().find((h) => h.symbol === "AAPL");
+      expect(rec?.exitPrice).toBe(2.6); // 폴백: 매도 직전 조회가
+      expect(rec?.note).toContain("실제 체결가 조회 실패");
+      expect(rec?.note).toContain("추정가");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+});
+
+// =============================================================================
+// [v0.78.0 — task #111 나머지 절반, 오너 결정: "장기보유 종목만 제외하고 Capri가 모르는
+//   매매도 자동으로 반영"] reflectUnknownHoldings — 토스에 있는데 Capri가 전혀 모르는 종목을
+//   참고용으로만 매매기록에 반영한다(익절/손절 자동 등록 없음). setAutoReflectExcluded로
+//   오너가 빼 둔 종목(장기보유 등)은 건너뛴다.
+// =============================================================================
+describe("[v0.78.0] reflectUnknownHoldings — Capri가 모르는 보유 종목을 참고용으로 자동 반영", () => {
+  it("기록이 전혀 없는 종목(AAPL, 목 서버 기본 보유)을 참고용으로 반영한다", async () => {
+    const { dir, eng, x } = await setup();
+    try {
+      const added = await eng.reflectUnknownHoldings();
+      expect(added).toBe(1);
+      expect(x.autoTradeHistory).toHaveLength(1);
+      const rec = x.autoTradeHistory[0];
+      expect(rec.symbol).toBe("AAPL");
+      expect(rec.quantity).toBe(100); // 목 서버 기본 보유 수량
+      expect(rec.entry).toBe(2); // 목 서버 기본 평단가($2.00)
+      expect(rec.status).toBe("active");
+      expect(rec.note).toContain("[자동반영]");
+      expect(rec.note).toContain("익절/손절도 자동으로 안 걸립니다");
+      // 자동으로 OCO를 걸거나 가드에 올리지 않는다 — Capri가 "산 것"이 아니므로.
+      expect(x.autoUnprotected).toHaveLength(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("같은 종목을 두 번 돌려도 중복으로 반영하지 않는다", async () => {
+    const { dir, eng } = await setup();
+    try {
+      expect(await eng.reflectUnknownHoldings()).toBe(1);
+      expect(await eng.reflectUnknownHoldings()).toBe(0); // 이미 반영했음
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("최근(3일 이내) Capri 기록이 있는 종목은 건드리지 않는다(auditUnprotectedHoldings 담당)", async () => {
+    const { dir, eng, x } = await setup();
+    try {
+      x.autoTradeHistory.push(histEntry()); // 최근 1시간 전 AAPL 기록
+      expect(await eng.reflectUnknownHoldings()).toBe(0);
+      expect(x.autoTradeHistory).toHaveLength(1); // 새로 추가된 게 없음
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("이미 추적 중인 포지션/보호 대기 종목은 건드리지 않는다", async () => {
+    const { dir, eng, x } = await setup();
+    try {
+      x.autoTradePositions.push({ symbol: "AAPL", entry: 2, tp: 2.2, sl: 1.8, quantity: 100, enteredAtMs: Date.now(), status: "watching", conditionalOrderId: null });
+      expect(await eng.reflectUnknownHoldings()).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("오너가 제외로 표시한 종목(장기보유 등)은 반영하지 않고, 다시 포함하면 반영된다", async () => {
+    const { dir, eng } = await setup();
+    try {
+      expect(eng.getAutoReflectExcluded()).toEqual([]);
+      const r1 = eng.setAutoReflectExcluded("aapl", true); // 소문자로 줘도 대문자로 저장
+      expect(r1.excluded).toEqual(["AAPL"]);
+      expect(eng.getAutoReflectExcluded()).toEqual(["AAPL"]);
+      expect(await eng.reflectUnknownHoldings()).toBe(0); // 제외됐으니 반영 안 됨
+
+      const r2 = eng.setAutoReflectExcluded("AAPL", false); // 다시 포함
+      expect(r2.excluded).toEqual([]);
+      expect(await eng.reflectUnknownHoldings()).toBe(1); // 이제는 반영됨
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("제외 목록은 재시작(새 엔진)해도 그대로 유지된다", async () => {
+    const { dir, eng } = await setup();
+    try {
+      eng.setAutoReflectExcluded("AAPL", true);
+      const eng2 = new ToolEngine(dir, { forceMock: true });
+      expect(eng2.getAutoReflectExcluded()).toEqual(["AAPL"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+});
+
+// =============================================================================
+// [v0.77.0 — task #111 "토스 실시간 동기화 2단계: Capri가 모르는 매매 자동 반영"] 가드가
+//   "보호 대기 중"(autoUnprotected)인 종목의 실계좌 보유가 0으로 사라진 걸 발견하면(오너가 토스
+//   앱에서 직접 팔았을 수 있음), 예전엔 추적만 지우고 매매기록은 그대로 뒀다 — "active"에 영원히
+//   멈춰(손익도 null로 영구 미확정) 매매분석 통계를 왜곡했다. 이제는 최소한 "끝났다"는 사실은
+//   정직하게 기록한다(정확한 체결가는 이 API로 믿을 수 있게 복원할 길이 없어 지어내지 않음).
+// =============================================================================
+describe("[v0.77.0 — task #111] 보호 가드가 보유 수량 0을 발견하면 매매기록도 함께 종료 처리한다", () => {
+  it("오너가 토스 앱에서 직접 팔아 보유가 사라지면, 매매기록이 'active'에 영원히 안 남고 종료 처리된다(손익은 모른다고 정직하게 null)", async () => {
+    const { dir, eng, x, stopTimer } = await setup();
+    try {
+      const enteredAtMs = Date.now() - 3600_000;
+      // GHOST는 목 서버 홀딩 목록에 없는 심볼이라 held.get("GHOST")는 항상 0 — "보유 수량 0"을
+      // 자연스럽게 재현한다(discovery 단계인 auditUnprotectedHoldings는 건너뛰고, runGuard가
+      // "이미 추적 중인" 종목을 처리하는 동작만 직접 검증).
+      x.autoTradeHistory.push(histEntry({ id: `GHOST@5@${enteredAtMs}`, symbol: "GHOST", entry: 5, quantity: 10, status: "active", exitedAt: null }));
+      x.autoUnprotected.push({
+        symbol: "GHOST", entry: 5, fillPrice: null, tp: 5.5, sl: 4.5, quantity: 10, enteredAtMs,
+        reason: "테스트: 체결 후 OCO 등록 전", sinceMs: Date.now(), attempts: 0, lastAttemptMs: null, lastError: null,
+      });
+      await eng.runGuard();
+      stopTimer();
+      expect(x.autoUnprotected).toHaveLength(0); // 추적은 지워짐(옛 동작과 동일)
+      const rec = eng.getAutoTradeHistory().find((h) => h.symbol === "GHOST");
+      expect(rec?.status).toBe("closed_manual"); // "active"에 영원히 안 남음(이번 수정의 핵심)
+      expect(rec?.exitPrice).toBeNull(); // 모르는 걸 숫자로 지어내지 않음
+      expect(rec?.pnlUsd).toBeNull();
+      expect(rec?.note).toContain("직접 매도된 것으로 보임");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+});

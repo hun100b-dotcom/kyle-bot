@@ -369,7 +369,9 @@ export function LabResultTab({ lab, initialAssessment }: { lab: LabApi; initialA
           <div className="rs-kpi"><b><CountUp value={linkBlock.linkRate} decimals={0} suffix="%" /></b><span>삼분할 연계율</span></div>
         </div>
 
-        <details className="rs-legend" open>
+        {/* [v0.75.0] 다른 rs-legend(위 "매매연구소는 무엇을 하나요?")와 똑같이 기본 접힘으로 —
+            예전엔 여기만 open이 박혀 있어 항상 펼쳐진 채 화면을 차지했다(오너 "설명들 접기/펼치기" 지시). */}
+        <details className="rs-legend">
           <summary>📖 이 화면의 % 는 무엇인가요? (계좌 수익률이 아닙니다)</summary>
           <ul>
             <li><b>신호당 기대값(%)</b> — 이 전략으로 <b>신호가 한 번 나올 때마다 평균적으로 남는 순손익률</b>입니다. 진입가 대비 %, 수수료를 뺀 값, 체결 안 된 신호는 0으로 계산. 예) +0.30% = 신호 100번이면 평균적으로 합계 +30%p(종목당 투입금 기준) — <u>내 계좌 전체 수익률이 아니라 "한 번의 가상 매매"의 평균</u>입니다.</li>

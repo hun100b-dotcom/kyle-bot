@@ -1,7 +1,7 @@
 {
   "name": "kyle-bot",
   "private": true,
-  "version": "0.74.0",
+  "version": "0.78.0",
   "description": "Capri 매매도구 — Capri매매기법 계산기 + 토스 조건주문 (v0.2: 주문 잠금/드라이런)",
   "author": "hun100b",
   "type": "module",
@@ -48,7 +48,6 @@
     "electron-builder": "^26.15.3",
     "esbuild": "^0.28.1",
     "oxlint": "^1.71.0",
-    "pg-query-emscripten": "^5.1.0",
     "tsx": "^4.23.1",
     "typescript": "~6.0.2",
     "vite": "^8.1.1",

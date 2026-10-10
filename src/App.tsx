@@ -1043,6 +1043,30 @@ function App() {
       setAutoCancelMsg(`${symbol}: ⚠️ 요청이 실패했습니다(${e instanceof Error ? e.message : String(e)}).`);
     }
   }
+  // [v0.78.0 — 오너 지시 "Capri가 모르는 매매도 자동 반영, 장기보유 종목은 내가 선택해서 제외"]
+  //   토스에 있는데 Capri가 모르는 종목(최근 3일 안에 산 기록 없음)을 매매기록에 참고용으로
+  //   자동 반영하는 기능을 켰다 — 장기보유처럼 Capri와 무관한 종목은 여기서 빼 둘 수 있다.
+  const [reflectExcludeInput, setReflectExcludeInput] = useState("");
+  const [reflectExcludeBusy, setReflectExcludeBusy] = useState(false);
+  async function setReflectExcluded(symbol: string, excluded: boolean) {
+    const sym = symbol.trim().toUpperCase();
+    if (!sym) return;
+    setReflectExcludeBusy(true);
+    try {
+      if (canReconcileLive) {
+        await window.kyletool.setAutoReflectExcluded(sym, excluded);
+        setAutoStatus(await window.kyletool.autoTradeStatus());
+      } else {
+        await window.kyletool.sendCommand("setAutoReflectExcluded", { symbol: sym, excluded });
+        setTimeout(() => void refreshLiveState(), 10_000); // PC가 처리할 시간을 준 뒤 상태 미러로 반영 확인
+      }
+      if (excluded) setReflectExcludeInput("");
+    } catch (e) {
+      setAutoCancelMsg(`${sym}: ⚠️ 제외 설정 요청이 실패했습니다(${e instanceof Error ? e.message : String(e)}).`);
+    } finally {
+      setReflectExcludeBusy(false);
+    }
+  }
   const [reconcileBusy, setReconcileBusy] = useState(false); // [v0.45.0] "🔄 지금 확인" 버튼 눌림 상태
   async function doCancelAutoPosition(p: AutoPosition) {
     const key = `${p.symbol}@${p.entry}@${p.enteredAtMs}`;
@@ -3586,7 +3610,10 @@ ${msg}
                   <label>EMA200 $
                     <input type="text" inputMode="decimal" placeholder="예: 11.10" value={ema200} onChange={(e) => isNumericDraft(e.target.value) && setEma200(e.target.value)} />
                   </label>
-                  <span className="hint">직전에 <b>마감된 봉의 종가</b>와 <b>EMA200</b>(가격 200개의 평균을 이은 선) 사이를 3등분해 <b>1·2·3차 매수가</b>를 냅니다. (전봉 종가가 EMA200보다 위여야 계산돼요.)</span>
+                  <details className="explain">
+                    <summary>❓ 1·2·3차 매수가는 어떻게 계산되나요?</summary>
+                    <span className="hint">직전에 <b>마감된 봉의 종가</b>와 <b>EMA200</b>(가격 200개의 평균을 이은 선) 사이를 3등분해 <b>1·2·3차 매수가</b>를 냅니다. (전봉 종가가 EMA200보다 위여야 계산돼요.)</span>
+                  </details>
                 </div>
               )}
               {tech === "orderbook" && (
@@ -3594,7 +3621,10 @@ ${msg}
                   <label>매수벽 가격 $
                     <input type="text" inputMode="decimal" placeholder="예: 11.33" value={wallPrice} onChange={(e) => isNumericDraft(e.target.value) && setWallPrice(e.target.value)} />
                   </label>
-                  <span className="hint"><b>매수벽</b>(사려는 주문이 두껍게 쌓인 가격)보다 <b>한 칸(1틱) 위</b>에서 삽니다. 어디가 벽인지는 호가창을 보고 직접 정하세요.</span>
+                  <details className="explain">
+                    <summary>❓ 매수벽 기준은 어떻게 정하나요?</summary>
+                    <span className="hint"><b>매수벽</b>(사려는 주문이 두껍게 쌓인 가격)보다 <b>한 칸(1틱) 위</b>에서 삽니다. 어디가 벽인지는 호가창을 보고 직접 정하세요.</span>
+                  </details>
                 </div>
               )}
               {tech === "candle" && (
@@ -3724,13 +3754,17 @@ ${msg}
                       ))}
                     </tbody>
                   </table>
-                  <p className="hint">
-                    💡 1·2·3차 매수가는 <b>어느 것이 낫다고 정해진 게 아닙니다</b>(취향껏 고르세요). 버튼 4개 뜻:
-                    <br />· <b>매수만 (지정가)</b> = 이 가격에 사기만. · <b>매수+익절 자동</b> = 사자마자 익절까지 자동(<b>손절은 직접</b>). · <b>익절+손절 걸기</b> = <b>이미 갖고 있을 때</b> 익절·손절 동시.
-                    <br />· <b>매수+익절+손절 한번에</b> = 매수 후 체결되면 이 프로그램이 자동으로 익절+손절을 걸어 줍니다(<b>앱이 켜져 있는 동안만</b>, 최대 15분 감시 — 토스 조건주문은 다리가 2개까지만 가능해 한 번의 API로는 3개를 못 받기 때문입니다).
-                    <br />익절·손절 감시는 <b>토스 서버가 대신</b> 해줘서, 앱을 꺼 둬도 작동합니다.
-                    {status.dryRun && " (지금은 주문 잠금 — 실제로 안 나가고 연습 기록만)"}
-                  </p>
+                  <details className="explain">
+                    <summary>❓ 버튼 4개, 뭐가 다른가요?</summary>
+                    <p className="hint">
+                      💡 1·2·3차 매수가는 <b>어느 것이 낫다고 정해진 게 아닙니다</b>(취향껏 고르세요). 버튼 4개 뜻:
+                      <br />· <b>매수만 (지정가)</b> = 이 가격에 사기만. · <b>매수+익절 자동</b> = 사자마자 익절까지 자동(<b>손절은 직접</b>). · <b>익절+손절 걸기</b> = <b>이미 갖고 있을 때</b> 익절·손절 동시.
+                      <br />· <b>매수+익절+손절 한번에</b> = 매수 후 체결되면 이 프로그램이 자동으로 익절+손절을 걸어 줍니다(<b>앱이 켜져 있는 동안만</b>, 최대 15분 감시 — 토스 조건주문은 다리가 2개까지만 가능해 한 번의 API로는 3개를 못 받기 때문입니다).
+                      <br />익절·손절 감시는 <b>토스 서버가 대신</b> 해줘서, 앱을 꺼 둬도 작동합니다.
+                    </p>
+                  </details>
+                  {/* [v0.75.0] DRY_RUN(주문 잠금) 안내는 실계좌 안전 표시라 접지 않고 항상 보인다(CLAUDE.md 안전 규칙). */}
+                  {status.dryRun && <p className="hint small">(지금은 주문 잠금 — 실제로 안 나가고 연습 기록만)</p>}
                 </>
               ) : (
                 <div className="result-empty hint">
@@ -3766,16 +3800,19 @@ ${msg}
                 {screenBusy ? "스캔 중…" : "🔍 스캔"}
               </button>
             </div>
-            <p className="hint">
-              거래량 많은 종목을 훑어 <b>매수 후보</b>를 찾아 줍니다(ETF·레버리지·인버스는 제외). 아래 조건을 <b>모두</b> 만족하면 후보예요:
-              <br />① 현재가가 <b>$1~$9</b>
-              <br />② 현재가가 <b>EMA200</b>(가격 200개를 이은 평균선) <b>위</b>
-              <br />③ 현재가가 <b>이치모쿠 구름</b>(추세를 보는 띠) <b>위</b>
-              <br />④ 장 시작 뒤 최고점을 찍은 다음, <b>첫 '음봉 도지'</b> — 위·아래 꼬리가 <b>둘 다</b> 있고 몸통이 작은 봉(한쪽 꼬리만 있는 망치형은 제외)
-              <br />⑤ 그 다음 봉도 <b>음봉</b>(내린 봉)
-              <br /><span className="hint small">※ 도지 뒤에 다시 신고가가 나오면 무효. 캔들은 <b>하이킨아시</b>(노이즈를 줄여 추세를 매끈하게 보는 방식, 트레이딩뷰 'HA'와 같음)로 보고, <b>다 마감된 봉만</b> 판정합니다. 스캔에 1~2분 걸려요.</span>
-              <br />🔴 <b>확정</b> = 도지 + 다음 음봉까지 나옴 · 🟡 <b>관찰</b> = 도지는 나왔고 다음 봉 대기 중. <b>▸ 근거</b>를 펼치면 기준 캔들을 볼 수 있고, 줄을 누르면 그 종목이 계산기에 채워집니다.
-            </p>
+            <details className="explain">
+              <summary>❓ 후보는 어떤 기준으로 찾나요?</summary>
+              <p className="hint">
+                거래량 많은 종목을 훑어 <b>매수 후보</b>를 찾아 줍니다(ETF·레버리지·인버스는 제외). 아래 조건을 <b>모두</b> 만족하면 후보예요:
+                <br />① 현재가가 <b>$1~$9</b>
+                <br />② 현재가가 <b>EMA200</b>(가격 200개를 이은 평균선) <b>위</b>
+                <br />③ 현재가가 <b>이치모쿠 구름</b>(추세를 보는 띠) <b>위</b>
+                <br />④ 장 시작 뒤 최고점을 찍은 다음, <b>첫 '음봉 도지'</b> — 위·아래 꼬리가 <b>둘 다</b> 있고 몸통이 작은 봉(한쪽 꼬리만 있는 망치형은 제외)
+                <br />⑤ 그 다음 봉도 <b>음봉</b>(내린 봉)
+                <br /><span className="hint small">※ 도지 뒤에 다시 신고가가 나오면 무효. 캔들은 <b>하이킨아시</b>(노이즈를 줄여 추세를 매끈하게 보는 방식, 트레이딩뷰 'HA'와 같음)로 보고, <b>다 마감된 봉만</b> 판정합니다. 스캔에 1~2분 걸려요.</span>
+                <br />🔴 <b>확정</b> = 도지 + 다음 음봉까지 나옴 · 🟡 <b>관찰</b> = 도지는 나왔고 다음 봉 대기 중. <b>▸ 근거</b>를 펼치면 기준 캔들을 볼 수 있고, 줄을 누르면 그 종목이 계산기에 채워집니다.
+              </p>
+            </details>
 
             {/* [v0.11.0] 사용자 조절 필터: 종목수 · 가격대 · 도지 몸통비율 */}
             <div className="screen-controls">
@@ -3969,11 +4006,14 @@ ${msg}
               <h2>내 삼분할 기록</h2>
               <button className="mini" onClick={() => void refreshSplits()}>↻ 새로고침</button>
             </div>
-            <p className="hint">
-              계산기에서 <b>💾 기록 저장</b>을 누르면 여기에 쌓입니다. 종목을 바꿔 계산해도 사라지지 않고,
-              <b> 앱을 껐다 켜도 유지</b>됩니다. 여러 종목(A·B·C·D)의 삼분할 타점을 한눈에 관리하세요.
-              <br />※ 이 기록은 <b>메모일 뿐</b>이며 실제 주문과는 무관합니다. 주문은 [계산기] 탭에서 냅니다.
-            </p>
+            <details className="explain">
+              <summary>❓ 이 기록은 무엇인가요?</summary>
+              <p className="hint">
+                계산기에서 <b>💾 기록 저장</b>을 누르면 여기에 쌓입니다. 종목을 바꿔 계산해도 사라지지 않고,
+                <b> 앱을 껐다 켜도 유지</b>됩니다. 여러 종목(A·B·C·D)의 삼분할 타점을 한눈에 관리하세요.
+                <br />※ 이 기록은 <b>메모일 뿐</b>이며 실제 주문과는 무관합니다. 주문은 [계산기] 탭에서 냅니다.
+              </p>
+            </details>
 
             {splits.length === 0 && (
               <div className="result-empty hint">
@@ -4091,13 +4131,16 @@ ${msg}
             {/* [v0.23.0] '체결강도 기록' → '보유 종목 체결강도'. 수동 [기록 시작] 제거하고,
                 지금 보유 중인 종목들의 체결강도를 자동으로 가져와 칩으로 보여준다(종목 클릭 시 상세). */}
             <h2>보유 종목 체결강도 <span className="hint">(사려는 힘 vs 팔려는 힘)</span></h2>
-            <p className="hint">
-              <b>체결강도</b>는 방금 사고팔린 양을 비교해 <b>지금 어느 쪽 힘이 센지</b> 보는 숫자예요
-              (매수 ÷ 매도 × 100 → <b>100보다 크면 사는 힘, 작으면 파는 힘 우세</b>).
-              <br />✅ <b>매매하면 자동으로 기록됩니다.</b> 여기엔 <b>지금 보유 중인 종목</b>의 체결강도가 저절로 떠요 — 종목을 눌러 자세히 봅니다.
-              <br /><span className="hint small">실시간 값은 <b>집 PC 연결</b>이 있어야 쌓입니다(폰이면 [폰에서 쓰기]). 연결이 없으면 아래에 안내가 떠요(조용히 실패하지 않아요).
-              ※ 방향은 추정치예요(토스가 매수/매도를 직접 주지 않아, 오르며 체결=매수·내리며 체결=매도로 추정). 참고용.</span>
-            </p>
+            <details className="explain">
+              <summary>❓ 체결강도란 무엇인가요?</summary>
+              <p className="hint">
+                <b>체결강도</b>는 방금 사고팔린 양을 비교해 <b>지금 어느 쪽 힘이 센지</b> 보는 숫자예요
+                (매수 ÷ 매도 × 100 → <b>100보다 크면 사는 힘, 작으면 파는 힘 우세</b>).
+                <br />✅ <b>매매하면 자동으로 기록됩니다.</b> 여기엔 <b>지금 보유 중인 종목</b>의 체결강도가 저절로 떠요 — 종목을 눌러 자세히 봅니다.
+                <br /><span className="hint small">실시간 값은 <b>집 PC 연결</b>이 있어야 쌓입니다(폰이면 [폰에서 쓰기]). 연결이 없으면 아래에 안내가 떠요(조용히 실패하지 않아요).
+                ※ 방향은 추정치예요(토스가 매수/매도를 직접 주지 않아, 오르며 체결=매수·내리며 체결=매도로 추정). 참고용.</span>
+              </p>
+            </details>
 
             {/* --- 보유 종목 줄: 새로고침 + (있으면) 종목 칩 --- */}
             <div className="str-controls">
@@ -4220,12 +4263,15 @@ ${msg}
             )}
 
             {heldSyms.length > 0 && (
-              <p className="hint">
-                💡 짧게 치고 빠질 때 참고: 내리던 중 <b>체결강도가 바닥에서 반등</b>하면 매수 참고,
-                오르던 중 <b>고점에서 꺾이면</b> 익절 참고. 특히 <b>가격은 더 내렸는데 체결강도는 오히려 오르면</b>
-                (＝사는 힘이 살아나는 신호) 반등이 가까울 수 있어요.
-                <br/>⚠️ 이 값은 <b>참고용 보조 신호</b>일 뿐이에요(방향을 추정한 값). <b>이것만 보고 결정하지 말고</b> 가격·거래량·캔들과 함께 보세요.
-              </p>
+              <details className="explain">
+                <summary>❓ 이 값을 어떻게 참고하나요?</summary>
+                <p className="hint">
+                  💡 짧게 치고 빠질 때 참고: 내리던 중 <b>체결강도가 바닥에서 반등</b>하면 매수 참고,
+                  오르던 중 <b>고점에서 꺾이면</b> 익절 참고. 특히 <b>가격은 더 내렸는데 체결강도는 오히려 오르면</b>
+                  (＝사는 힘이 살아나는 신호) 반등이 가까울 수 있어요.
+                  <br/>⚠️ 이 값은 <b>참고용 보조 신호</b>일 뿐이에요(방향을 추정한 값). <b>이것만 보고 결정하지 말고</b> 가격·거래량·캔들과 함께 보세요.
+                </p>
+              </details>
             )}
           </section>
 
@@ -4238,10 +4284,13 @@ ${msg}
               <h2>매매분석 <span className="hint small">산 뒤 판 것까지 한 묶음으로 자동 정리</span></h2>
               <button className="mini" disabled={analysisBusy} onClick={() => void loadAnalysis()}>↻ 새로고침</button>
             </div>
-            <p className="hint">
-              토스에 남은 <b>실제 체결 내역</b>으로, 이미 판 매매를 <b>산 가격 → 판 가격 · 수량 · 며칠 들고 있었나 · 수익률 · 손익 금액 · 이겼나 졌나</b>까지 자동으로 정리해 줍니다.
-              카프리로 주문해 기록이 남은 매매엔 <b>어떤 기법으로 샀는지·살 때 체결강도</b>도 함께 보여줘요.
-            </p>
+            <details className="explain">
+              <summary>❓ 매매분석은 무엇을 보여주나요?</summary>
+              <p className="hint">
+                토스에 남은 <b>실제 체결 내역</b>으로, 이미 판 매매를 <b>산 가격 → 판 가격 · 수량 · 며칠 들고 있었나 · 수익률 · 손익 금액 · 이겼나 졌나</b>까지 자동으로 정리해 줍니다.
+                카프리로 주문해 기록이 남은 매매엔 <b>어떤 기법으로 샀는지·살 때 체결강도</b>도 함께 보여줘요.
+              </p>
+            </details>
 
             {analysis?.source === "cache" && <div className="rp-source">💾 저장해 둔 기록으로 보는 중 · 집 PC에 연결되면 최신으로 갱신돼요</div>}
             {analysis?.source === "none" && (
@@ -4342,12 +4391,15 @@ ${msg}
               </div>
             )}
             <h2>🤖 자동매매</h2>
-            <p className="hint">
-              5분마다 스스로 탐색해 <b>합격 종목을 삼분할 '1분할' 타점으로 자동 매수</b>하고, 체결되면 익절·손절까지
-              자동으로 겁니다. <b>이 프로그램이 켜져 있는 동안만</b> 작동하고, 앱을 끄면 자동매매도 함께 멈춥니다
-              (이미 낸 주문·조건주문은 토스에 그대로 남아 있어요 — 토스 서버가 계속 감시합니다).
-              무엇을 스캔했는지는 <b>[🤖 자동매매 → 스크리닝 결과]</b> 탭에서 자세히 볼 수 있어요.
-            </p>
+            <details className="explain">
+              <summary>❓ 자동매매는 어떻게 동작하나요?</summary>
+              <p className="hint">
+                5분마다 스스로 탐색해 <b>합격 종목을 삼분할 '1분할' 타점으로 자동 매수</b>하고, 체결되면 익절·손절까지
+                자동으로 겁니다. <b>이 프로그램이 켜져 있는 동안만</b> 작동하고, 앱을 끄면 자동매매도 함께 멈춥니다
+                (이미 낸 주문·조건주문은 토스에 그대로 남아 있어요 — 토스 서버가 계속 감시합니다).
+                무엇을 스캔했는지는 <b>[🤖 자동매매 → 스크리닝 결과]</b> 탭에서 자세히 볼 수 있어요.
+              </p>
+            </details>
 
             <div className="settings-block">
               <div className="form-row">
@@ -4446,6 +4498,40 @@ ${msg}
                 <button className="btn btn-start" onClick={saveAutoSettings}>한도 저장</button>
                 {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
               </div>
+              {/* [v0.78.0] "Capri가 모르는 매매 자동 반영"에서 뺄 종목(장기보유 등) — 오너가
+                  직접 심볼을 적어 선택한다(토스 보유 목록을 매번 새로 불러오지 않아도 됨, 어떤
+                  종목이 장기보유인지는 오너가 이미 알고 있으므로). */}
+              <div className="form-col" style={{ marginTop: 14 }}>
+                <label>🚫 자동 반영에서 제외할 종목(장기보유 등 — Capri와 무관한 종목)
+                  <div className="form-row" style={{ marginTop: 4 }}>
+                    <input type="text" value={reflectExcludeInput}
+                      onChange={(e) => setReflectExcludeInput(e.target.value.toUpperCase())}
+                      onKeyDown={(e) => { if (e.key === "Enter" && reflectExcludeInput.trim()) void setReflectExcluded(reflectExcludeInput, true); }}
+                      placeholder="예: AAPL" style={{ width: 120 }} />
+                    <button className="btn" disabled={!reflectExcludeInput.trim() || reflectExcludeBusy}
+                      onClick={() => void setReflectExcluded(reflectExcludeInput, true)}>제외 추가</button>
+                  </div>
+                </label>
+                {(autoStatus?.reflectExcluded?.length ?? 0) > 0 && (
+                  <div className="form-row" style={{ marginTop: 2 }}>
+                    {autoStatus!.reflectExcluded!.map((sym) => (
+                      <span key={sym} className="cat-chip" style={{ cursor: "default" }}>
+                        {sym}
+                        <button className="mini" disabled={reflectExcludeBusy} onClick={() => void setReflectExcluded(sym, false)} title="다시 자동 반영 대상에 포함">✕</button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <details className="explain">
+                  <summary>❓ "Capri가 모르는 매매 자동 반영"이 뭔가요?</summary>
+                  <p className="hint small">
+                    토스 앱에서 직접 사고판 종목(Capri가 진입한 게 아닌 것)도 최대 5분 안에 매매분석에
+                    참고용으로 자동으로 보이게 합니다 — <b>Capri가 산 게 아니므로 익절/손절은 자동으로
+                    안 걸립니다</b>(직접 관리하세요). 이미 반영된 종목은 중복으로 다시 올라오지 않습니다.
+                    위에 적어 둔 종목(장기 보유 등 Capri와 무관한 것)은 아예 올라오지 않습니다.
+                  </p>
+                </details>
+              </div>
               {/* [v0.70.0 — 오너 지시 "세팅값 수정 후 저장을 눌러도 이게 적용이되는건지 명확히
                   모르겠다"] 폰(웹)에서는 "보냈다"는 메시지만으론 PC가 실제로 반영했는지 알 수
                   없었다 — PC가 상태 미러에 실어 올린 실제 저장값을 그대로 보여준다(위 입력칸은
@@ -4464,40 +4550,55 @@ ${msg}
                   )}
                 </p>
               )}
-              <p className="hint small">
-                예) 최대 투입 30% → 종목 1개당 예산은 시드의 30%(종목 수로 나누지 않습니다 — 3종목이면 최대
-                동시 투입 합계는 시드의 최대 90%까지 커질 수 있습니다). 손실 한도는 이번 자동매매 실행 동안
-                누적된 실현손익(달러) 기준으로, 시드 대비 %를 넘으면 자동매매가 스스로 멈춥니다.
-              </p>
-              <p className="hint small">
-                🛡 <b>EMA 기준 손절</b>이란: 손절가를 "진입가 −10%" 대신 "EMA200 × (1 − 여유%)"로 둡니다. 이 기법의 근거는
-                "EMA200 위 눌림"이라, EMA가 깨지면 근거가 사라진 것이니 거기서 바로 나가자는 뜻입니다(지금 손절 사례들은
-                EMA가 깨진 뒤에도 6% 가까이 더 버티다 −10%로 나갔습니다). 단, 기존 고정 손절선보다 더 깊어지지는
-                않습니다(둘 중 더 빨리 끊는 쪽). 진입가가 EMA에 너무 붙어 손절선을 둘 수 없으면 그 종목은 건너뜁니다.
-                연속 손절 자동중지는 "이번에 켠 이후" 손절이 연달아 N번 나오면 자동매매를 스스로 끕니다(익절이 끼면 0부터 다시).
-              </p>
-              <p className="hint small">
-                ⏱ <b>장기간 미체결 자동취소 기준</b>이란: 자동매매가 진입 주문(매수)을 넣었는데 이 시간
-                (기본 10분, 1~60분 사이로 조절 가능)이 지나도 체결이 안 되면, 아직 안 산 부분만
-                자동으로 취소하고 그 자리를 다음 5분 사이클의 새 후보에게 넘겨줍니다(이미 일부라도
-                체결됐다면 그 수량은 보호를 위해 익절/손절을 그대로 걸어 둡니다). 너무 짧게 잡으면
-                조금만 기다리면 체결될 주문도 성급하게 취소될 수 있고, 너무 길게 잡으면(60분 근처)
-                자리가 오래 묶여 다른 후보가 기회를 못 잡을 수 있습니다.
-              </p>
-              <p className="hint small">
-                🔒 여러 기기에서 동시에 자동매매를 켜도(예: PC와 폰 양쪽에서 자동매매 시작, 또는
-                PC 두 대) 안전합니다 — 신규 진입 직전 매번 <b>실계좌 보유 현황을 직접 조회</b>해
-                최대 종목 수·중복 종목을 확인하므로(어느 기기의 로컬 기록이 아니라 토스 계좌 자체가
-                기준), 한 기기가 모르는 사이 다른 기기가 이미 채운 자리에는 진입하지 않습니다.
-              </p>
+              <details className="explain">
+                <summary>❓ 최대 투입 비율·손실 한도는 어떻게 계산되나요?</summary>
+                <p className="hint small">
+                  예) 최대 투입 30% → 종목 1개당 예산은 시드의 30%(종목 수로 나누지 않습니다 — 3종목이면 최대
+                  동시 투입 합계는 시드의 최대 90%까지 커질 수 있습니다). 손실 한도는 이번 자동매매 실행 동안
+                  누적된 실현손익(달러) 기준으로, 시드 대비 %를 넘으면 자동매매가 스스로 멈춥니다.
+                </p>
+              </details>
+              <details className="explain">
+                <summary>❓ EMA 기준 손절·연속손절 자동중지란?</summary>
+                <p className="hint small">
+                  🛡 <b>EMA 기준 손절</b>이란: 손절가를 "진입가 −10%" 대신 "EMA200 × (1 − 여유%)"로 둡니다. 이 기법의 근거는
+                  "EMA200 위 눌림"이라, EMA가 깨지면 근거가 사라진 것이니 거기서 바로 나가자는 뜻입니다(지금 손절 사례들은
+                  EMA가 깨진 뒤에도 6% 가까이 더 버티다 −10%로 나갔습니다). 단, 기존 고정 손절선보다 더 깊어지지는
+                  않습니다(둘 중 더 빨리 끊는 쪽). 진입가가 EMA에 너무 붙어 손절선을 둘 수 없으면 그 종목은 건너뜁니다.
+                  연속 손절 자동중지는 "이번에 켠 이후" 손절이 연달아 N번 나오면 자동매매를 스스로 끕니다(익절이 끼면 0부터 다시).
+                </p>
+              </details>
+              <details className="explain">
+                <summary>❓ 장기간 미체결 자동취소 기준이란?</summary>
+                <p className="hint small">
+                  ⏱ 자동매매가 진입 주문(매수)을 넣었는데 이 시간
+                  (기본 10분, 1~60분 사이로 조절 가능)이 지나도 체결이 안 되면, 아직 안 산 부분만
+                  자동으로 취소하고 그 자리를 다음 5분 사이클의 새 후보에게 넘겨줍니다(이미 일부라도
+                  체결됐다면 그 수량은 보호를 위해 익절/손절을 그대로 걸어 둡니다). 너무 짧게 잡으면
+                  조금만 기다리면 체결될 주문도 성급하게 취소될 수 있고, 너무 길게 잡으면(60분 근처)
+                  자리가 오래 묶여 다른 후보가 기회를 못 잡을 수 있습니다.
+                </p>
+              </details>
+              <details className="explain">
+                <summary>❓ 여러 기기에서 동시에 켜도 안전한가요?</summary>
+                <p className="hint small">
+                  🔒 여러 기기에서 동시에 자동매매를 켜도(예: PC와 폰 양쪽에서 자동매매 시작, 또는
+                  PC 두 대) 안전합니다 — 신규 진입 직전 매번 <b>실계좌 보유 현황을 직접 조회</b>해
+                  최대 종목 수·중복 종목을 확인하므로(어느 기기의 로컬 기록이 아니라 토스 계좌 자체가
+                  기준), 한 기기가 모르는 사이 다른 기기가 이미 채운 자리에는 진입하지 않습니다.
+                </p>
+              </details>
 
               <h3>🔔 알림</h3>
-              <p className="hint small">
-                화면을 안 보고 있어도 <b>관찰 확정</b>(스크리닝 통과)과 <b>주문 이벤트</b>(진입·체결·
-                익절/손절·취소/실패)를 이 기기의 알림으로 받을 수 있습니다(이 앱/탭이 켜져 있는
-                동안만 — 토스 자체 매수·매도 알림과는 별개로, 카프리가 자동매매에서 직접 보는
-                내용을 알려줍니다).
-              </p>
+              <details className="explain">
+                <summary>❓ 알림은 무엇을 알려주나요?</summary>
+                <p className="hint small">
+                  화면을 안 보고 있어도 <b>관찰 확정</b>(스크리닝 통과)과 <b>주문 이벤트</b>(진입·체결·
+                  익절/손절·취소/실패)를 이 기기의 알림으로 받을 수 있습니다(이 앱/탭이 켜져 있는
+                  동안만 — 토스 자체 매수·매도 알림과는 별개로, 카프리가 자동매매에서 직접 보는
+                  내용을 알려줍니다).
+                </p>
+              </details>
               {notifyPermission === "unsupported" && (
                 <p className="hint small">이 브라우저는 알림 기능을 지원하지 않습니다.</p>
               )}
@@ -4616,12 +4717,15 @@ ${msg}
         <main className="grid">
           <section className="card wide">
             <h2>자동 스크리너 <span className="hint">(자동매매가 실제로 쓰는 조건 — 5분마다 스스로 갱신)</span></h2>
-            <p className="hint">
-              자동매매가 켜져 있는 동안 여기서 정한 조건으로 5분마다 자동으로 스캔해요. 여기 뜨는 후보 중{" "}
-              <b>진입 조건(빈 자리·중복 방지·안전 한도)</b>을 통과한 것만 실제로 매수됩니다 — 아래 배지로
-              진입 여부를 바로 확인할 수 있어요. 조건을 바꾸면 다음 사이클(최대 5분)부터, 또는 아래{" "}
-              <b>[지금 새로고침]</b>으로 바로 적용됩니다.
-            </p>
+            <details className="explain">
+              <summary>❓ 자동 스크리너는 어떻게 동작하나요?</summary>
+              <p className="hint">
+                자동매매가 켜져 있는 동안 여기서 정한 조건으로 5분마다 자동으로 스캔해요. 여기 뜨는 후보 중{" "}
+                <b>진입 조건(빈 자리·중복 방지·안전 한도)</b>을 통과한 것만 실제로 매수됩니다 — 아래 배지로
+                진입 여부를 바로 확인할 수 있어요. 조건을 바꾸면 다음 사이클(최대 5분)부터, 또는 아래{" "}
+                <b>[지금 새로고침]</b>으로 바로 적용됩니다.
+              </p>
+            </details>
 
             {/* [v0.29.0] 다음 스캔까지 카운트다운 — 오너 요청("몇분 후 스크리닝 진행 표시 필요") */}
             {autoStatus?.enabled && autoStatus.nextCycleAtMs != null && (
@@ -4959,14 +5063,17 @@ ${msg}
         <main className="grid">
           <section className="card wide">
             <h2>스크리닝 기준 <span className="hint">(조건 전부를 한 곳에서 켜고 끄거나 수치 조절)</span></h2>
-            <p className="hint">
-              여기서 끈 조건은 스캔할 때 아예 검사하지 않고(항상 통과 취급), 켠 조건은 옆 수치를
-              기준으로 실제로 걸러냅니다. 조건마다 짧은 설명이 붙어 있고, <b>[자세히]</b>를 누르면
-              더 상세한 설명을 볼 수 있어요. 아래 [저장] 버튼 하나로 이 탭의 조건 전부(14개)가
-              저장됩니다 — 자동매매 스크리닝 조건 편집은 <b>이 탭 하나</b>에서만 합니다
-              ([자동 스크리너] 탭은 이제 결과를 보는 화면이라, 지금 적용된 값을 읽기 전용으로만
-              보여줘요 — 헷갈리지 않게 저장 버튼을 한 곳으로 모았습니다).
-            </p>
+            <details className="explain">
+              <summary>❓ 조건은 어떻게 켜고 끄나요?</summary>
+              <p className="hint">
+                여기서 끈 조건은 스캔할 때 아예 검사하지 않고(항상 통과 취급), 켠 조건은 옆 수치를
+                기준으로 실제로 걸러냅니다. 조건마다 짧은 설명이 붙어 있고, <b>[자세히]</b>를 누르면
+                더 상세한 설명을 볼 수 있어요. 아래 [저장] 버튼 하나로 이 탭의 조건 전부(14개)가
+                저장됩니다 — 자동매매 스크리닝 조건 편집은 <b>이 탭 하나</b>에서만 합니다
+                ([자동 스크리너] 탭은 이제 결과를 보는 화면이라, 지금 적용된 값을 읽기 전용으로만
+                보여줘요 — 헷갈리지 않게 저장 버튼을 한 곳으로 모았습니다).
+              </p>
+            </details>
 
             {/* ⓪ 스캔 범위(기존 4개 — v0.28.0부터 있던 조건, 항상 켜짐) */}
             <div className="crit-card">
@@ -5001,12 +5108,15 @@ ${msg}
                 와는 별개의 조건 — 둘 다 켜져 있으면 둘 다 통과해야 진입한다. */}
             <div className="crit-card">
               <div className="crit-head"><b>매매진행할 장(세션) 선택</b></div>
-              <p className="hint">
-                자동매매가 <b>어느 장에서만 신규 진입을 시도할지</b> 고릅니다. 기존 포지션 감시(익절/
-                손절)는 이 설정과 무관하게 항상 계속됩니다. [자동매매 현황]의 "시스템 휴무 시간대
-                (05:00~17:00 KST)"가 켜져 있으면 그 시간대는 여기서 뭘 켜 두든 항상 멈춰요 — 둘은
-                서로 다른 조건이라 <b>동시에 통과해야</b> 진입합니다.
-              </p>
+              <details className="explain">
+                <summary>❓ 세션 선택은 어떻게 작동하나요?</summary>
+                <p className="hint">
+                  자동매매가 <b>어느 장에서만 신규 진입을 시도할지</b> 고릅니다. 기존 포지션 감시(익절/
+                  손절)는 이 설정과 무관하게 항상 계속됩니다. [자동매매 현황]의 "시스템 휴무 시간대
+                  (05:00~17:00 KST)"가 켜져 있으면 그 시간대는 여기서 뭘 켜 두든 항상 멈춰요 — 둘은
+                  서로 다른 조건이라 <b>동시에 통과해야</b> 진입합니다.
+                </p>
+              </details>
               <div className="screen-filters" style={{ marginTop: 8 }}>
                 <label className="radio">
                   <input type="checkbox" checked={screenCritForm.dayEnabled}
@@ -5311,11 +5421,14 @@ ${msg}
         <main className="grid">
           <section className="card wide">
             <h2>자동매매기록 <span className="hint">(자동매매가 낸 매매의 전체 이력 — 청산돼도 여기 남습니다)</span></h2>
-            <p className="hint">
-              진입 접수부터 체결 확인·익절/손절·취소까지, 자동매매가 스스로 낸 매매를 전부 기록해
-              둡니다. 위 [자동매매 현황]의 "지금 감시 중" 목록은 끝나면 지워지지만, 여기는 지워지지
-              않아요 — 나중에 복기·통계에 쓰세요.
-            </p>
+            <details className="explain">
+              <summary>❓ 이 기록은 무엇인가요?</summary>
+              <p className="hint">
+                진입 접수부터 체결 확인·익절/손절·취소까지, 자동매매가 스스로 낸 매매를 전부 기록해
+                둡니다. 위 [자동매매 현황]의 "지금 감시 중" 목록은 끝나면 지워지지만, 여기는 지워지지
+                않아요 — 나중에 복기·통계에 쓰세요.
+              </p>
+            </details>
             <div className="form-row">
               <button className="mini" disabled={autoHistoryBusy} onClick={() => void loadAutoHistory()}>
                 {autoHistoryBusy ? "불러오는 중…" : "↻ 새로고침"}
@@ -6022,12 +6135,15 @@ ${msg}
           {window.kyletool.phoneStart && (
             <section className="card wide">
               <h2>📱 폰에서 쓰기</h2>
-              <p className="hint">
-                이 PC를 <b>중계소</b> 삼아 폰에서도 카프리를 씁니다. 토스는 <b>등록된 인터넷 주소에서만</b> 열려서,
-                이 PC(주소가 이미 허용됨)를 거쳐 가는 방식이에요.
-                <br />
-                아래 [폰 연결 켜기]를 누르고 <b>폰 카메라로 QR을 찍으면</b> 끝 — 폰에서도 시세·주문까지 다 됩니다.
-              </p>
+              <details className="explain">
+                <summary>❓ 어떻게 연결되나요?</summary>
+                <p className="hint">
+                  이 PC를 <b>중계소</b> 삼아 폰에서도 카프리를 씁니다. 토스는 <b>등록된 인터넷 주소에서만</b> 열려서,
+                  이 PC(주소가 이미 허용됨)를 거쳐 가는 방식이에요.
+                  <br />
+                  아래 [폰 연결 켜기]를 누르고 <b>폰 카메라로 QR을 찍으면</b> 끝 — 폰에서도 시세·주문까지 다 됩니다.
+                </p>
+              </details>
               <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 <button
                   className="btn"
@@ -6108,10 +6224,13 @@ ${msg}
             </div>
             <div className="settings-block">
               <h3>토스 키 {settings.hasClientId && settings.hasClientSecret ? "✅ 저장됨" : "❌ 아직 없음"}</h3>
-              <p className="hint">
-                토스 개발자센터에서 받은 키를 넣는 곳이에요. 키는 <b>이 컴퓨터 안에만</b> 저장되고(본인만 읽기),
-                한 번 저장하면 <b>화면에 다시 보이지 않습니다</b>(보안). 바꿀 때만 다시 입력하세요.
-              </p>
+              <details className="explain">
+                <summary>❓ 이 키는 어디에 저장되고, 왜 다시 안 보이나요?</summary>
+                <p className="hint">
+                  토스 개발자센터에서 받은 키를 넣는 곳이에요. 키는 <b>이 컴퓨터 안에만</b> 저장되고(본인만 읽기),
+                  한 번 저장하면 <b>화면에 다시 보이지 않습니다</b>(보안). 바꿀 때만 다시 입력하세요.
+                </p>
+              </details>
               <div className="form-col">
                 <label>
                   Client ID (앱 아이디)
@@ -6151,10 +6270,13 @@ ${msg}
               버튼만 남긴다. 로그인 화면 자체는 App() 맨 앞의 "로그인 게이트" 참고. */}
           <section className="card wide">
             <h2>☁️ 계정</h2>
-            <p className="hint">
-              토스 키와 매매 이력은 로그인 즉시 이 계정 안에서 자동으로 동기화됩니다.
-              다른 사람의 키·매매 이력은 서로 <b>절대 볼 수 없어요</b>.
-            </p>
+            <details className="explain">
+              <summary>❓ 다른 사람과 내 정보가 섞이지 않나요?</summary>
+              <p className="hint">
+                토스 키와 매매 이력은 로그인 즉시 이 계정 안에서 자동으로 동기화됩니다.
+                다른 사람의 키·매매 이력은 서로 <b>절대 볼 수 없어요</b>.
+              </p>
+            </details>
             <div className="form-row">
               <span className="ok">✅ 로그인됨: <b>{authState.email}</b></span>
               <button className="mini" disabled={syncBusy} onClick={doSignOut}>로그아웃</button>
@@ -6383,11 +6505,14 @@ ${msg}
           {authState.isOwner && (
             <section className="card wide">
               <h2>📋 가입 승인 대기 ({pendingAccounts.length}건)</h2>
-              <p className="hint">
-                가입하면 바로 여기 쌓입니다(계정은 이미 만들어졌고 승인 전엔 아무 데이터도 못 봅니다).
-                PC가 꺼져 있어도, 폰으로 로그인만 하면 이 화면에서 바로 처리할 수 있어요. 디스코드
-                웹훅을 아래에 설정해 두면 새 신청이 올 때마다 알림도 옵니다.
-              </p>
+              <details className="explain">
+                <summary>❓ 어떻게 처리하나요?</summary>
+                <p className="hint">
+                  가입하면 바로 여기 쌓입니다(계정은 이미 만들어졌고 승인 전엔 아무 데이터도 못 봅니다).
+                  PC가 꺼져 있어도, 폰으로 로그인만 하면 이 화면에서 바로 처리할 수 있어요. 디스코드
+                  웹훅을 아래에 설정해 두면 새 신청이 올 때마다 알림도 옵니다.
+                </p>
+              </details>
               <button className="mini" onClick={() => void loadPendingAccounts()}>🔄 새로고침</button>
               {pendingAccounts.length === 0 ? (
                 <p className="hint">대기 중인 계정이 없습니다.</p>
@@ -6537,10 +6662,13 @@ ${msg}
         <main className="pane">
           <section className="card wide">
             <h2>📑 자동매매 리포트</h2>
-            <p className="hint">
-              자동매매를 켠 뒤 끌 때까지(또는 앱이 꺼질 때까지)를 "한 번의 운용"으로 보고, 그 동안의 성적을 한 장으로 정리합니다.
-              ① 운용 개요 ② 수익·자산 ③ 매매 통계 ④ 포지션·시스템. 맨 위가 가장 최근 운용이며, 진행 중이면 "현재까지" 기준입니다.
-            </p>
+            <details className="explain">
+              <summary>❓ 이 리포트는 무엇을 보여주나요?</summary>
+              <p className="hint">
+                자동매매를 켠 뒤 끌 때까지(또는 앱이 꺼질 때까지)를 "한 번의 운용"으로 보고, 그 동안의 성적을 한 장으로 정리합니다.
+                ① 운용 개요 ② 수익·자산 ③ 매매 통계 ④ 포지션·시스템. 맨 위가 가장 최근 운용이며, 진행 중이면 "현재까지" 기준입니다.
+              </p>
+            </details>
             <button className="mini" disabled={autoReportBusy} onClick={() => void loadAutoReports()}>
               {autoReportBusy ? "불러오는 중…" : "🔄 새로고침"}
             </button>

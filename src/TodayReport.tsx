@@ -148,12 +148,15 @@ export default function TodayReport({
             <>
               {/* 저장된 이력이 진짜 하나도 없는 경우 */}
               <h2>아직 저장된 매매 기록이 없어요</h2>
-              <p className="hint">
-                <b>집 PC에 연결된 상태로 이 화면을 한 번만 열면</b> 그동안의 매매가 이 기기에 저장되고,
-                그 뒤로는 <b>회사에서도·이동 중에도</b> 연결 없이 볼 수 있어요.
-                <br />
-                (연결하는 법: PC의 Capri에서 <b>설정 → 📱 폰에서 쓰기</b>를 켜고, 폰으로 <b>QR을 찍으면</b> 끝)
-              </p>
+              <details className="explain">
+                <summary>❓ 어떻게 연결하나요?</summary>
+                <p className="hint">
+                  <b>집 PC에 연결된 상태로 이 화면을 한 번만 열면</b> 그동안의 매매가 이 기기에 저장되고,
+                  그 뒤로는 <b>회사에서도·이동 중에도</b> 연결 없이 볼 수 있어요.
+                  <br />
+                  (연결하는 법: PC의 Capri에서 <b>설정 → 📱 폰에서 쓰기</b>를 켜고, 폰으로 <b>QR을 찍으면</b> 끝)
+                </p>
+              </details>
             </>
           ) : (
             <>
@@ -291,14 +294,17 @@ export default function TodayReport({
             </div>
           ))}
         </div>
-        <p className="hint report-note">
-          <b>{data.periodLabel}</b> 동안 <b>실제로 판 거래</b>를 토스 체결 내역에서 그대로 가져옵니다
-          — 카프리로 판 것, 토스 앱에서 판 것, <b>조건주문이 자동으로 체결된 것까지</b> 모두 포함됩니다.
-          손익은 먼저 산 것부터 팔린 것으로 보고(선입선출) 수수료·세금까지 뺀 값입니다.
-          아직 들고 있는 종목은 판 뒤에 반영됩니다.
-          {data.periodKind === "week" && " · 1주일 = 오늘 포함 최근 7일"}
-          {data.periodKind === "month" && " · 1개월 = 오늘 포함 최근 30일"}
-        </p>
+        <details className="explain report-note">
+          <summary>❓ 이 숫자는 어떻게 계산되나요?</summary>
+          <p className="hint">
+            <b>{data.periodLabel}</b> 동안 <b>실제로 판 거래</b>를 토스 체결 내역에서 그대로 가져옵니다
+            — 카프리로 판 것, 토스 앱에서 판 것, <b>조건주문이 자동으로 체결된 것까지</b> 모두 포함됩니다.
+            손익은 먼저 산 것부터 팔린 것으로 보고(선입선출) 수수료·세금까지 뺀 값입니다.
+            아직 들고 있는 종목은 판 뒤에 반영됩니다.
+            {data.periodKind === "week" && " · 1주일 = 오늘 포함 최근 7일"}
+            {data.periodKind === "month" && " · 1개월 = 오늘 포함 최근 30일"}
+          </p>
+        </details>
       </section>
     </main>
   );
