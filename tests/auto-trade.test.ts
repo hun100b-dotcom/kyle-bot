@@ -24,9 +24,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Settings, DateTime } from "luxon";
 import {
-  ToolEngine, computeSeedQty, newlyConfirmedSymbols, applyScreenGates, findDirectionConflict,
+  ToolEngine, computeSeedQty, newlyConfirmedSymbols, newlyWatchedSymbols, applyScreenGates, findDirectionConflict,
   type AutoPosition, type JournalEntry, type NotifyEvent, type ScreenResult, type AutoTradeHistoryEntry,
 } from "../electron/tool-engine";
+import { volScaledInvestPct } from "../lib/auto-risk";
 
 /** [v0.30.1] OCO 등록 저널이 뜰 때까지 기다린다(bracket.test.ts의 waitForJournal과 동일 패턴). */
 function waitForOcoJournal(eng: ToolEngine, timeoutMs = 5000): Promise<JournalEntry> {
@@ -384,6 +385,33 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
       const qty = computeSeedQty(seedUsd, 30, price, commissionRate);
       expect(qty).toBe(32); // 옛 버그(30/3=10%)였다면 10주에 그쳤을 것
       expect(qty).not.toBe(1); // 실계좌에서 관찰됐던 "1주만 매수" 증상이 재현되지 않음을 확인
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("[v0.72.0 — 오너 지시 '2번으로 진행'] ATR이 높은 후보는 volScaledSizingEnabled가 켜져 있으면 투입 비율이 깎여 수량이 줄어든다", () => {
+    // autoTradeTick 안에서 실제로 하는 것과 동일: perSlotPct = volScaledInvestPct(maxInvestPct, cand.entryMetrics?.atrPct)
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.saveAutoTradeSettings({ maxPositions: 3, maxLossPct: 5, maxInvestPct: 30, volScaledSizingEnabled: true });
+      const seedUsd = 1000;
+      const price = 9.2;
+      const commissionRate = 0;
+      // ATR 12%(기준 6%의 2배) 후보 — perSlotPct = 30 * min(1, 6/12) = 15.
+      const perSlotPct = volScaledInvestPct(30, 12);
+      expect(perSlotPct).toBe(15);
+      const qty = computeSeedQty(seedUsd, perSlotPct, price, commissionRate);
+      expect(qty).toBe(16); // 깎이지 않았다면(perSlotPct=30) 32주였을 것
+      expect(qty).toBeLessThan(32);
+
+      // 설정이 꺼져 있으면(volScaledSizingEnabled:false) 깎지 않고 원래 비율 그대로 써야 한다
+      // — 엔진 쪽 분기(this.autoTradeVolScaledSizingEnabled ? volScaledInvestPct(...) : this.autoTradeMaxInvestPct)와 동일.
+      const s2 = eng.saveAutoTradeSettings({ volScaledSizingEnabled: false });
+      expect(s2.autoTradeVolScaledSizingEnabled).toBe(false);
+      const qtyUnscaled = computeSeedQty(seedUsd, 30, price, commissionRate);
+      expect(qtyUnscaled).toBe(32);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1088,6 +1116,12 @@ describe("[v0.32.0] 알림 — 스크리닝 관찰 확정 + 주문 이벤트", (
     expect(newlyConfirmedSymbols(results, new Set())).toEqual(["AAPL"]);
   });
 
+  it("newlyWatchedSymbols — confirmed와 독립적으로, 새로 '관찰'이 된 종목만 돌려준다", () => {
+    const results = [mkResult("AAPL", "watch"), mkResult("TSLA", "watch"), mkResult("MSFT", "confirmed")];
+    const added = newlyWatchedSymbols(results, new Set(["AAPL"]));
+    expect(added).toEqual(["TSLA"]); // AAPL은 직전에도 관찰이었음(제외), MSFT는 watch가 아님(대상 아님)
+  });
+
   it("stopAutoTrade — 이유가 있을 때만(손실 한도 등 프로그램이 스스로 멈춘 경우) 알림을 낸다, 오너가 직접 누른 중지는 알리지 않는다", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
@@ -1102,6 +1136,96 @@ describe("[v0.32.0] 알림 — 스크리닝 관찰 확정 + 주문 이벤트", (
       expect(notifies).toHaveLength(1);
       expect(notifies[0].title).toContain("자동 중지");
       expect(notifies[0].body).toContain("최대손실 한도 도달");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("[v0.72.0 — 오너 지시 '관찰, 확정된 종목이 나오면 즉시 디스코드로 알림'] sendDiscordAlert(private)", () => {
+  function logIn(eng: ToolEngine): void {
+    const engAny = eng as unknown as { authAccessToken: string | null; authExpiresAtMs: number; authUserId: string | null };
+    engAny.authAccessToken = "test-access-token";
+    engAny.authExpiresAtMs = Date.now() + 3_600_000;
+    engAny.authUserId = "test-user-id";
+  }
+  function send(eng: ToolEngine, msg: string): Promise<void> {
+    return (eng as unknown as { sendDiscordAlert: (m: string) => Promise<void> }).sendDiscordAlert(msg);
+  }
+
+  it("웹훅 주소를 설정 안 했으면(capri_notify_settings 비어있음) 외부로 아무것도 안 보낸다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-discord1-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      logIn(eng);
+      const calledUrls: string[] = [];
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+        const u = String(url);
+        calledUrls.push(u);
+        if (u.includes("capri_notify_settings")) return new Response(JSON.stringify([{ discord_webhook_url: null }]), { status: 200 });
+        return originalFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        await send(eng, "테스트 메시지");
+        expect(calledUrls.some((u) => !u.includes("capri_notify_settings"))).toBe(false); // 설정 조회 말고는 아무 데도 안 쏨
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("웹훅 주소가 설정돼 있으면 그 주소로 메시지를 담아 POST한다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-discord2-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      logIn(eng);
+      let posted: { url: string; body: string } | null = null;
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+        const u = String(url);
+        if (u.includes("capri_notify_settings")) {
+          return new Response(JSON.stringify([{ discord_webhook_url: "https://discord.com/api/webhooks/fake/token" }]), { status: 200 });
+        }
+        if (u.includes("discord.com/api/webhooks")) {
+          posted = { url: u, body: String(init?.body ?? "") };
+          return new Response(null, { status: 204 });
+        }
+        return originalFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        await send(eng, "🔴 확정: AAPL (현재가 $2.5)");
+        expect(posted).not.toBeNull();
+        expect(posted!.url).toBe("https://discord.com/api/webhooks/fake/token");
+        expect(JSON.parse(posted!.body)).toEqual({ content: "🔴 확정: AAPL (현재가 $2.5)" });
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("디스코드 전송 자체가 실패해도(네트워크 오류) 예외를 던지지 않는다 — 매매 사이클을 막으면 안 됨", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-discord3-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      logIn(eng);
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: string | URL) => {
+        const u = String(url);
+        if (u.includes("capri_notify_settings")) {
+          return new Response(JSON.stringify([{ discord_webhook_url: "https://discord.com/api/webhooks/fake/token" }]), { status: 200 });
+        }
+        throw new Error("네트워크 끊김(시뮬레이션)");
+      }) as typeof fetch;
+      try {
+        await expect(send(eng, "테스트")).resolves.toBeUndefined(); // 던지지 않고 조용히 끝남
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1631,6 +1755,7 @@ describe("[v0.45.0] AutoTradeHistoryEntry.criteriaSnapshot — 진입 시점 설
         maxPositions: 3,
         maxLossPct: 5,
         maxInvestPct: 30,
+        appliedInvestPct: 15, // [v0.72.0] ATR 연동 축소가 적용된 실제값(설정값 30%의 절반)
         watchMinutes: 10,
       });
 
@@ -1638,6 +1763,7 @@ describe("[v0.45.0] AutoTradeHistoryEntry.criteriaSnapshot — 진입 시점 설
       expect(rec?.criteriaSnapshot?.cloudEnabled).toBe(false);
       expect(rec?.criteriaSnapshot?.session).toBe("regular");
       expect(rec?.criteriaSnapshot?.maxInvestPct).toBe(30);
+      expect(rec?.criteriaSnapshot?.appliedInvestPct).toBe(15); // [v0.72.0] 설정값과 실제 적용값이 다를 수 있음을 기록
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

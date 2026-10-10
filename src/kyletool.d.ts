@@ -131,6 +131,9 @@ interface ToolSettings {
   autoTradeSlMode?: "fixed" | "ema";
   autoTradeEmaStopBufferPct?: number;
   autoTradeReentryBlockEnabled?: boolean;
+  /** [v0.72.0] ATR(평균 변동폭)이 높은(위험한) 종목일수록 종목당 투입 비율을 자동으로 깎는다.
+   *  공장값 켜짐(보험 성격) — 옛 PC면 없을 수 있음. */
+  autoTradeVolScaledSizingEnabled?: boolean;
   autoTradeLossStreakLimit?: number;
   autoTradeReprotectVanished?: boolean; // [v0.69.0]
   autoTradeEnabled: boolean;
@@ -914,6 +917,8 @@ interface KyletoolBridge {
     slMode?: "fixed" | "ema";
     emaStopBufferPct?: number;
     reentryBlockEnabled?: boolean;
+    /** [v0.72.0] ATR 연동 투입 비율 축소 켜짐/꺼짐. */
+    volScaledSizingEnabled?: boolean;
     lossStreakLimit?: number;
     reprotectVanished?: boolean; // [v0.69.0] 보호주문이 사라진 보유 종목 자동 재보호
   }): Promise<ToolSettings>;

@@ -10,7 +10,7 @@
 // =============================================================================
 
 import { describe, it, expect } from "vitest";
-import { canAutoEnter, isLossLimitBreached, type AutoTradeLimits } from "../lib/auto-risk";
+import { canAutoEnter, isLossLimitBreached, volScaledInvestPct, type AutoTradeLimits } from "../lib/auto-risk";
 
 const LIMITS: AutoTradeLimits = { enabled: true, maxPositions: 3, maxLossPct: 5, maxInvestPct: 30 };
 
@@ -108,5 +108,45 @@ describe("canAutoEnter — 종목당 투입 비율은 종목 수로 나뉘지 �
       candidateQty: qty,
     });
     expect(r.allow).toBe(true);
+  });
+});
+
+describe("volScaledInvestPct — ATR(변동성)에 반비례한 투입 비율 축소(v0.72.0, '2번' 지시 반영)", () => {
+  it("ATR이 기준(기본 6%)과 같으면 깎지 않는다(scale=1 경계값)", () => {
+    expect(volScaledInvestPct(30, 6)).toBe(30);
+  });
+
+  it("ATR이 기준보다 낮아 안정적이어도 원래 비율보다 늘리지는 않는다(방어적 스케일링만)", () => {
+    // 6/3=2배 스케일이 나오지만 Math.min(1, ...)로 상한이 걸려야 한다.
+    expect(volScaledInvestPct(30, 3)).toBe(30);
+  });
+
+  it("ATR이 기준의 2배(12%)면 절반으로 깎인다", () => {
+    expect(volScaledInvestPct(30, 12)).toBe(15); // 30 * min(1, 6/12=0.5) = 15
+  });
+
+  it("ATR이 아주 높아도 바닥선(기본 0.4) 밑으로는 안 깎인다", () => {
+    // 6/30=0.2인데 floorScale 0.4가 더 크므로 0.4가 적용돼야 한다.
+    expect(volScaledInvestPct(30, 30)).toBe(12); // 30 * 0.4 = 12
+  });
+
+  it("바닥선 경계값 — scale이 정확히 floorScale과 같으면 그 값 그대로", () => {
+    // referenceAtrPct(6) / candidateAtrPct(15) = 0.4 = floorScale 기본값과 정확히 일치.
+    expect(volScaledInvestPct(30, 15)).toBe(12); // 30 * 0.4 = 12
+  });
+
+  it("ATR을 모르면(null) 원래 비율을 그대로 돌려준다 — 깎지 않는다", () => {
+    expect(volScaledInvestPct(30, null)).toBe(30);
+  });
+
+  it("ATR이 비정상값(NaN/0/음수)이어도 원래 비율을 그대로 돌려준다(안전한 폴백)", () => {
+    expect(volScaledInvestPct(30, NaN)).toBe(30);
+    expect(volScaledInvestPct(30, 0)).toBe(30);
+    expect(volScaledInvestPct(30, -5)).toBe(30);
+  });
+
+  it("referenceAtrPct·floorScale을 직접 지정하면 그 값으로 계산한다", () => {
+    // 기준을 10%로, 바닥을 0.5로 바꾼 경우: ATR 20% → 10/20=0.5배, 바닥(0.5)과 같아 그대로 0.5배.
+    expect(volScaledInvestPct(30, 20, 10, 0.5)).toBe(15);
   });
 });

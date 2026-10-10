@@ -156,9 +156,10 @@ describe("[v0.63.0] 엔진 — 설정 저장·복원 + 연속 손절 자동중�
       expect(s0.autoTradeSlMode).toBe("fixed");
       expect(s0.autoTradeReentryBlockEnabled).toBe(true);
       expect(s0.autoTradeLossStreakLimit).toBe(3);
+      expect(s0.autoTradeVolScaledSizingEnabled).toBe(true); // [v0.72.0] 공장값 켜짐(보험 성격)
 
       eng.saveAutoScanSettings({ emaMinGapEnabled: true, emaMinGapPct: 999, emaSlopeEnabled: true, atrFilterEnabled: true, atrMaxPct: 0.01 });
-      eng.saveAutoTradeSettings({ slMode: "ema", emaStopBufferPct: 2, reentryBlockEnabled: false, lossStreakLimit: 2 });
+      eng.saveAutoTradeSettings({ slMode: "ema", emaStopBufferPct: 2, reentryBlockEnabled: false, volScaledSizingEnabled: false, lossStreakLimit: 2 });
       const s1 = new ToolEngine(dir, { forceMock: true }).getSettings();
       expect(s1.autoScanEmaMinGapEnabled).toBe(true);
       expect(s1.autoScanEmaMinGapPct).toBe(50); // 상한 보정
@@ -169,6 +170,7 @@ describe("[v0.63.0] 엔진 — 설정 저장·복원 + 연속 손절 자동중�
       expect(s1.autoTradeEmaStopBufferPct).toBe(2);
       expect(s1.autoTradeReentryBlockEnabled).toBe(false);
       expect(s1.autoTradeLossStreakLimit).toBe(2);
+      expect(s1.autoTradeVolScaledSizingEnabled).toBe(false); // [v0.72.0] 꺼서 재시작해도 유지되는지
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

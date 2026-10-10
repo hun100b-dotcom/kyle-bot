@@ -22,6 +22,7 @@
 // [순서 중요] env 껍데기를 **엔진보다 먼저** 불러와야 한다(엔진이 불러오는 순간 설정을 읽기 때문).
 import env, { setProxyBase } from "./env-shim";
 import { ToolEngine } from "../electron/tool-engine";
+import { fetchWithTimeout } from "../lib/fetch-timeout";
 
 /**
  * ★ 중계 서버 기본 주소 ★
@@ -322,11 +323,27 @@ export function installKyleTool(): ToolEngine {
     mockSetPrice: (_symbol: string, _price: number) =>
       Promise.reject(new Error("연습 모드는 웹앱에서 지원하지 않습니다(PC용 Capri를 사용하세요).")),
 
-    // [v0.60.5] 지금 이 웹 세션이 토스에 실제로 닿을 수 있는지(QR로 집 PC 중계 연결이 돼
-    //   있는지). 없으면(apiBase 빈 값) 화면이 "감시 중 포지션을 직접 재확인"처럼 실제
-    //   토스 호출이 필요한 폴링을 스스로 끄는 데 쓴다 — 안 그러면 매번 실패만 반복하며
+    // [v0.60.5 → v0.72.0 긴급 수정] 지금 이 웹 세션이 토스에 실제로 닿을 수 있는지(QR로 집 PC
+    //   중계 연결이 돼 있는지). 없으면(apiBase 빈 값) 화면이 "감시 중 포지션을 직접 재확인"처럼
+    //   실제 토스 호출이 필요한 폴링을 스스로 끄는 데 쓴다 — 안 그러면 매번 실패만 반복하며
     //   "폰 연결이 아직 안 돼 있습니다" 경고가 포지션에 계속 쌓인다(오너 실사용 보고).
-    hasTossRelay: () => Promise.resolve(Boolean(apiBase)),
+    //   [v0.72.0 — 오너 보고 "매매기록 탭이 전부 작동 안 함, 새로고침도 무반응" 원인 규명]
+    //   예전엔 apiBase 문자열이 "있는지"만 보고 true로 믿었다 — 그런데 이 문자열은 QR을 한 번
+    //   스캔하면 브라우저에 영구 저장돼, **그 뒤로 집 PC(릴레이)가 꺼지거나 재워지거나 터널이
+    //   끊겨도 문자열 자체는 그대로 남아** 계속 "연결됨"으로 잘못 보고했다. 그러면 주문현황
+    //   탭은 새로고침 버튼이 꺼지지 않은 채(disabled 조건이 이 값을 보므로) 눌러도 매번 조용히
+    //   실패하고, 자동매매기록 탭은 "지금 토스에 직접 물어보기" 경로를 타다가 똑같이 실패해
+    //   클라우드 동기화(폴백)로 안 넘어갔다 — 오너가 "여러 탭이 동시에 먹통"이라고 느낀 진짜
+    //   원인이다. 이제는 문자열 존재 여부가 아니라 **릴레이의 헬스체크(/api/health)를 실제로
+    //   불러서 응답이 오는지**로 판단한다(electron/relay.ts가 토큰 없이도 응답하는 전용 경로 —
+    //   새 서버 추가 없이 이미 있는 것을 그대로 씀). 아래 App.tsx 쪽도 이 확인을 한 번만 하지
+    //   않고 30초마다 다시 해, PC가 꺼졌다 켜져도 새로고침 없이 자동으로 복구되게 했다.
+    hasTossRelay: () => {
+      if (!apiBase) return Promise.resolve(false); // 아예 QR을 스캔한 적 없음 — 네트워크 호출 불필요
+      return fetchWithTimeout(`${apiBase}/api/health`, { method: "GET" }, 5000, "toss-relay-health")
+        .then((r) => r.ok)
+        .catch(() => false); // 타임아웃·연결거부 등 전부 "연결 안 됨"으로 간주(안전한 쪽)
+    },
     // [v0.61.0] 상태 미러 — PC가 올려 둔 최신 자동매매 현황+최근 로그를 읽는다(capri_live_state).
     getLiveState: () => e.getLiveState(),
 

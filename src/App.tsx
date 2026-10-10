@@ -639,7 +639,15 @@ function App() {
   const [hasTossRelay, setHasTossRelay] = useState(true);
   useEffect(() => {
     if (!isWebApp) return; // 데스크톱은 항상 true(기본값 유지) — 확인할 필요 없음
-    void window.kyletool.hasTossRelay?.().then(setHasTossRelay).catch(() => setHasTossRelay(false));
+    const check = () => void window.kyletool.hasTossRelay?.().then(setHasTossRelay).catch(() => setHasTossRelay(false));
+    check(); // 페이지 열릴 때 한 번 즉시 확인
+    // [v0.72.0 긴급 수정 — 오너 보고 "매매기록 탭이 전부 작동 안 함"] 예전엔 딱 한 번만 확인하고
+    //   끝이라, 페이지를 열어 둔 채로 집 PC가 꺼지면(또는 터널이 끊기면) 이 값이 영원히 옛 값(대개
+    //   true)에 멈춰 있었다 — 그 뒤로 켜지는 모든 탭이 "연결된 척"하다 조용히 실패했다. 이제는
+    //   30초마다(주문현황 탭의 자동새로고침과 같은 주기) 다시 확인해, PC가 꺼지거나 다시 켜져도
+    //   새로고침 없이 몇십 초 안에 화면이 저절로 맞는 상태로 돌아온다.
+    const timer = setInterval(check, 30_000);
+    return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   /** 지금 이 세션이 토스를 직접(실시간) 호출해도 되는가 — 데스크톱은 항상, 웹은 중계 연결됐을 때만. */
@@ -897,7 +905,7 @@ function App() {
   //   반면 이건 "둘 중 하나 고르는" 선택지라 모양이 달라 섞으면 폼 렌더 로직이 지저분해진다.
   const [autoEntryLevel, setAutoEntryLevel] = useState<1 | 1.5 | 2>(1);
   // [v0.63.0] 방어 전략 — 손절 방식·EMA 아래 여유%·손절 종목 당일 재진입 금지·연속 손절 자동중지
-  const [defenseForm, setDefenseForm] = useState({ slMode: "fixed" as "fixed" | "ema", emaStopBufferPct: "1.5", reentryBlockEnabled: true, lossStreakLimit: "3", reprotectVanished: true });
+  const [defenseForm, setDefenseForm] = useState({ slMode: "fixed" as "fixed" | "ema", emaStopBufferPct: "1.5", reentryBlockEnabled: true, volScaledSizingEnabled: true, lossStreakLimit: "3", reprotectVanished: true });
   const [autoStatus, setAutoStatus] = useState<AutoTradeStatus | null>(null);
   const [autoBusy, setAutoBusy] = useState(false);
   // [v0.61.0] 상태 미러(capri_live_state) — PC가 마지막으로 올린 시각(ms). canReconcileLive가
@@ -1304,6 +1312,7 @@ function App() {
         slMode: s.autoTradeSlMode === "ema" ? "ema" : "fixed",
         emaStopBufferPct: String(s.autoTradeEmaStopBufferPct ?? 1.5),
         reentryBlockEnabled: s.autoTradeReentryBlockEnabled ?? true,
+        volScaledSizingEnabled: s.autoTradeVolScaledSizingEnabled ?? true,
         lossStreakLimit: String(s.autoTradeLossStreakLimit ?? 3),
         reprotectVanished: s.autoTradeReprotectVanished ?? true,
       });
@@ -2647,12 +2656,13 @@ ${msg}
    *  "PC 실제값" 표시가 같은 문구를 쓰게 해서(따로 두면 나중에 서로 달라질 위험) 하나로 합쳤다. */
   function describeAutoTradeLimits(s: Pick<ToolSettings,
     "autoTradeMaxPositions" | "autoTradeMaxLossPct" | "autoTradeMaxInvestPct" | "autoTradeWatchMinutes" |
-    "autoTradeEntryLevel" | "autoTradeSlMode" | "autoTradeEmaStopBufferPct" | "autoTradeLossStreakLimit">): string {
+    "autoTradeEntryLevel" | "autoTradeSlMode" | "autoTradeEmaStopBufferPct" | "autoTradeLossStreakLimit" | "autoTradeVolScaledSizingEnabled">): string {
     return (
       `최대 ${s.autoTradeMaxPositions}종목 · 손실한도 ${s.autoTradeMaxLossPct}% · ` +
       `투입한도 ${s.autoTradeMaxInvestPct}% · 미체결 자동취소 ${s.autoTradeWatchMinutes}분 · 진입 타점 ${s.autoTradeEntryLevel}분할 · ` +
       `손절 ${s.autoTradeSlMode === "ema" ? `EMA 기준(-${s.autoTradeEmaStopBufferPct}%)` : s.autoTradeSlMode === "fixed" ? "고정 %" : "확인 안 됨(구버전 PC)"} · ` +
-      `연속손절 중지 ${s.autoTradeLossStreakLimit ? `${s.autoTradeLossStreakLimit}회` : s.autoTradeLossStreakLimit === 0 ? "끔" : "확인 안 됨(구버전 PC)"}`
+      `연속손절 중지 ${s.autoTradeLossStreakLimit ? `${s.autoTradeLossStreakLimit}회` : s.autoTradeLossStreakLimit === 0 ? "끔" : "확인 안 됨(구버전 PC)"} · ` +
+      `ATR 연동 투입축소 ${s.autoTradeVolScaledSizingEnabled === false ? "OFF" : "ON"}`
     );
   }
 
@@ -2676,7 +2686,7 @@ ${msg}
       setTimeout(() => setSavedMsg(""), 4000);
       return;
     }
-    const defense = { slMode: defenseForm.slMode, emaStopBufferPct, reentryBlockEnabled: defenseForm.reentryBlockEnabled, lossStreakLimit, reprotectVanished: defenseForm.reprotectVanished };
+    const defense = { slMode: defenseForm.slMode, emaStopBufferPct, reentryBlockEnabled: defenseForm.reentryBlockEnabled, volScaledSizingEnabled: defenseForm.volScaledSizingEnabled, lossStreakLimit, reprotectVanished: defenseForm.reprotectVanished };
     if (
       maxPositions === null || maxPositions <= 0 ||
       maxLossPct === null || maxLossPct <= 0 ||
@@ -4418,6 +4428,11 @@ ${msg}
                   <input type="checkbox" checked={defenseForm.reentryBlockEnabled}
                     onChange={(e) => setDefenseForm({ ...defenseForm, reentryBlockEnabled: e.target.checked })} />
                   🛡 손절된 종목은 그날 재진입 금지
+                </label>
+                <label className="radio" title="ATR(평균 변동폭)이 기준(6%)보다 높은(위험한) 종목일수록 종목당 투입 비율을 자동으로 줄입니다. 손절 한 번의 충격(달러 손실액)을 줄이기 위한 보험 성격 — 아무리 변동성이 커도 원래 투입의 40% 밑으로는 줄이지 않습니다.">
+                  <input type="checkbox" checked={defenseForm.volScaledSizingEnabled}
+                    onChange={(e) => setDefenseForm({ ...defenseForm, volScaledSizingEnabled: e.target.checked })} />
+                  🛡 변동성(ATR) 높은 종목은 투입 비율 자동 축소
                 </label>
                 <label className="radio" title="체결 후 익절·손절 주문이 안 걸렸거나, 걸었던 조건주문이 토스에서 사라졌는데 주식이 계좌에 남아 있으면 봇이 다시 보호주문을 걸거나 정리합니다. (등록 실패한 경우는 이 설정과 무관하게 항상 복구)">
                   <input type="checkbox" checked={defenseForm.reprotectVanished}

@@ -102,7 +102,7 @@ import {
   type OrderResponse,
 } from "../lib/toss";
 import { createMockTossServer } from "../mocks/toss-mock";
-import { canAutoEnter, isLossLimitBreached, type AutoTradeLimits } from "../lib/auto-risk";
+import { canAutoEnter, isLossLimitBreached, volScaledInvestPct, type AutoTradeLimits } from "../lib/auto-risk";
 import { checkBracketPrices, checkPercentSettings, checkSimpleOrder, type SanityExpect } from "../lib/order-sanity"; // [v0.69.2] 주문 전 정합성 검사
 import { guessWarrantTickers, applyWarrantGate } from "../lib/warrant"; // [v0.36.0] 워런트 의심 종목 감지 / [v0.70.0] 탈락 게이트
 
@@ -460,6 +460,15 @@ export function findDirectionConflict(
  */
 export function newlyConfirmedSymbols(results: ScreenResult[], previouslyConfirmed: Set<string>): string[] {
   return results.filter((r) => r.status === "confirmed" && !previouslyConfirmed.has(r.symbol)).map((r) => r.symbol);
+}
+
+/**
+ * [v0.72.0 — 오너 지시 "관찰, 확정된 종목이 나오면 즉시 디스코드로 알림"] "watch"판도 같은
+ *   원리로 신규 여부를 가린다(newlyConfirmedSymbols와 쌍 — 한 줄짜리 로직이라 매개변수로
+ *   합치기보다 각자 읽기 쉽게 따로 둔다).
+ */
+export function newlyWatchedSymbols(results: ScreenResult[], previouslyWatched: Set<string>): string[] {
+  return results.filter((r) => r.status === "watch" && !previouslyWatched.has(r.symbol)).map((r) => r.symbol);
 }
 
 /**
@@ -1088,6 +1097,11 @@ export interface AutoTradeHistoryEntry {
     maxPositions: number;
     maxLossPct: number;
     maxInvestPct: number;
+    /** [v0.72.0] 변동성(ATR) 연동 축소까지 반영해 실제로 이번 진입에 적용된 투입 비율(%).
+     *  volScaledSizingEnabled가 꺼져 있었거나 ATR을 몰랐으면 maxInvestPct와 같다. 나중에
+     *  "ATR이 높아서 실제로 덜 투입된 매매가 손절을 덜 겪었는지"를 그룹 연구탭에서 복기하려면
+     *  설정값(maxInvestPct)만으론 부족하고 실제 적용값이 따로 필요해 추가했다. */
+    appliedInvestPct?: number;
     watchMinutes: number;
     /** [v0.61.8] 진입 당시 선택돼 있던 타점 분할(1~2) — 연구탭에서 "몇 분할로 들어갔을 때
      *  성적이 어땠는지" 비교할 수 있게. 이 필드가 생기기 전 기록은 undefined(=당시엔 늘
@@ -1297,6 +1311,12 @@ export class ToolEngine extends EventEmitter {
   private autoTradeEmaStopBufferPct = 1.5; //            EMA 기준 손절일 때 EMA 아래 여유(%)
   private autoTradeReentryBlockEnabled = true; //       ⑤ 손절된 종목은 그날(KST) 재진입 금지 — 보험 성격이라 공장값 켜짐
   private autoTradeLossStreakLimit = 3; //              ⑤ 이번 실행에서 연속 손절 N회면 자동매매 자동 중지(0=끔)
+  // [v0.72.0 — 오너 지시 "2번으로 진행"(ATR 상한 심화 + 변동성 연동 투입 비율)] ATR(평균 변동폭)이
+  // 높은(위험한) 종목일수록 종목당 투입 비율을 자동으로 깎는다(lib/auto-risk.ts의 volScaledInvestPct).
+  // v0.71.0에서 "ATR이 높을수록 손절 확률이 급격히 커진다"가 실데이터로 확인됐고, ATR 상한
+  // 게이트(atrMaxPct)는 "아예 거르기"만 하므로 상한 바로 아래 구간의 위험까지 줄이려면 이 설정이
+  // 추가로 필요하다는 게 오너 결론 — 보험 성격이라 공장값 켜짐.
+  private autoTradeVolScaledSizingEnabled = true;
   // [v0.44.0] 오너 결정 — 매일 05:00~17:00 KST(데이마켓+애프터 구간, 토스 합성시세)는 스크리닝·
   //   수동 주문·자동매매를 전부 멈춘다. 재개는 정확히 17:00(프리마켓 시작)이다. "켜짐" 여부는
   //   다른 자동매매 토글과 달리 껐다 켜도 유지한다(안전장치라 기본 켜짐을 지키는 게 맞음).
@@ -1409,6 +1429,8 @@ export class ToolEngine extends EventEmitter {
   /** [v0.32.0] "관찰 확정" 알림을 중복으로 보내지 않기 위해, 직전 스캔에서 이미 확정 상태였던
    *  종목을 기억해 둔다(재시작하면 초기화돼도 무해 — 다시 확정되면 또 한 번 알려도 문제 없음). */
   private autoScanNotifiedConfirmed = new Set<string>();
+  /** [v0.72.0] 위와 같은 목적, "관찰(watch)" 상태용 — 디스코드 즉시 알림에 쓴다. */
+  private autoScanNotifiedWatch = new Set<string>();
   private static readonly AUTO_TRADE_INTERVAL_MS = 5 * 60_000; // "기본적으로 5분마다"(오너 지시)
   /** [v0.29.0→v0.42.0] 자동매매 진입 주문의 체결 감시 최대 시간 — 오너 요청(2026-09-25) "장시간
    *  미체결 대책": 수동 버튼(기본 15분, 사람이 지켜보며 직접 판단)보다 짧게 잡아, 5분 사이클 기준
@@ -1645,6 +1667,8 @@ export class ToolEngine extends EventEmitter {
     if (Number.isFinite(aesb) && aesb >= 0) this.autoTradeEmaStopBufferPct = aesb;
     if (process.env.AUTO_REENTRY_BLOCK_ENABLED === "false") this.autoTradeReentryBlockEnabled = false;
     else if (process.env.AUTO_REENTRY_BLOCK_ENABLED === "true") this.autoTradeReentryBlockEnabled = true;
+    if (process.env.AUTO_VOL_SCALED_SIZING_ENABLED === "false") this.autoTradeVolScaledSizingEnabled = false;
+    else if (process.env.AUTO_VOL_SCALED_SIZING_ENABLED === "true") this.autoTradeVolScaledSizingEnabled = true;
     if (process.env.AUTO_REPROTECT_VANISHED === "false") this.autoReprotectVanished = false;
     else if (process.env.AUTO_REPROTECT_VANISHED === "true") this.autoReprotectVanished = true;
     const alsl = Number(process.env.AUTO_LOSS_STREAK_LIMIT);
@@ -1736,6 +1760,7 @@ export class ToolEngine extends EventEmitter {
       autoTradeSlMode: this.autoTradeSlMode, // [v0.63.0] 방어 전략
       autoTradeEmaStopBufferPct: this.autoTradeEmaStopBufferPct,
       autoTradeReentryBlockEnabled: this.autoTradeReentryBlockEnabled,
+      autoTradeVolScaledSizingEnabled: this.autoTradeVolScaledSizingEnabled, // [v0.72.0] ATR 연동 투입 비율 축소
       autoTradeLossStreakLimit: this.autoTradeLossStreakLimit,
       autoTradeReprotectVanished: this.autoReprotectVanished, // [v0.69.0]
       autoTradeEnabled: this.autoTradeEnabled,
@@ -1794,6 +1819,7 @@ export class ToolEngine extends EventEmitter {
     slMode?: "fixed" | "ema"; // [v0.63.0] 방어 전략
     emaStopBufferPct?: number;
     reentryBlockEnabled?: boolean;
+    volScaledSizingEnabled?: boolean; // [v0.72.0] ATR 연동 투입 비율 축소
     lossStreakLimit?: number;
     reprotectVanished?: boolean; // [v0.69.0] 보호주문이 사라진 보유 종목 자동 재보호
   }) {
@@ -1803,6 +1829,7 @@ export class ToolEngine extends EventEmitter {
       this.autoTradeEmaStopBufferPct = Math.min(10, input.emaStopBufferPct); // 0~10%
     }
     if (typeof input.reentryBlockEnabled === "boolean") this.autoTradeReentryBlockEnabled = input.reentryBlockEnabled;
+    if (typeof input.volScaledSizingEnabled === "boolean") this.autoTradeVolScaledSizingEnabled = input.volScaledSizingEnabled;
     if (typeof input.lossStreakLimit === "number" && Number.isFinite(input.lossStreakLimit) && input.lossStreakLimit >= 0) {
       this.autoTradeLossStreakLimit = Math.round(Math.min(10, input.lossStreakLimit)); // 0(끔)~10
     }
@@ -1833,7 +1860,8 @@ export class ToolEngine extends EventEmitter {
         `진입 타점 ${this.autoTradeEntryLevel}분할 · ` +
         `손절 방식 ${this.autoTradeSlMode === "ema" ? `EMA 기준(EMA 아래 ${this.autoTradeEmaStopBufferPct}%)` : "고정 %"} · ` +
         `손절 종목 당일 재진입 금지 ${this.autoTradeReentryBlockEnabled ? "ON" : "OFF"} · ` +
-        `연속 손절 자동중지 ${this.autoTradeLossStreakLimit > 0 ? `${this.autoTradeLossStreakLimit}회` : "OFF"}`,
+        `연속 손절 자동중지 ${this.autoTradeLossStreakLimit > 0 ? `${this.autoTradeLossStreakLimit}회` : "OFF"} · ` +
+        `변동성(ATR) 연동 투입 비율 축소 ${this.autoTradeVolScaledSizingEnabled ? "ON" : "OFF"}`,
     });
     return this.getSettings();
   }
@@ -2144,6 +2172,7 @@ export class ToolEngine extends EventEmitter {
       `AUTO_SL_MODE=${this.autoTradeSlMode}`, // [v0.63.0] 방어 전략
       `AUTO_EMA_STOP_BUFFER_PCT=${this.autoTradeEmaStopBufferPct}`,
       `AUTO_REENTRY_BLOCK_ENABLED=${this.autoTradeReentryBlockEnabled}`,
+      `AUTO_VOL_SCALED_SIZING_ENABLED=${this.autoTradeVolScaledSizingEnabled}`, // [v0.72.0]
       `AUTO_LOSS_STREAK_LIMIT=${this.autoTradeLossStreakLimit}`,
       `AUTO_REPROTECT_VANISHED=${this.autoReprotectVanished}`, // [v0.69.0]
       `LAST_SEEN_CHANGELOG=${this.lastSeenChangelogVersion ?? ""}`, // [v0.61.9] 이 기기가 마지막으로 읽은 업데이트 내역 버전
@@ -2709,6 +2738,31 @@ export class ToolEngine extends EventEmitter {
       return { ok: true, message: discordWebhookUrl.trim() ? "저장했습니다. 다음 신규 가입부터 디스코드로 알림이 갑니다." : "웹훅 주소를 비웠습니다(알림 꺼짐)." };
     } catch (err) {
       return { ok: false, message: String(err).replace(/^Error:\s*/, "") };
+    }
+  }
+
+  /**
+   * [v0.72.0 — 오너 지시 "스크리너를 통해 관찰, 확정된 종목이 나오면 즉시 디스코드로 알림"]
+   *   전수조사 결과, capri_notify_settings의 웹훅 주소는 지금까지 "새 가입 대기"(DB 트리거,
+   *   위 섹션 참고) 용도로만 쓰이고 있었다 — 스크리닝/매매 신호로 디스코드를 쏘는 경로는
+   *   어디에도 없었다(데스크톱 알림(OS Notification, addJournal의 notify 플래그)과는 완전히
+   *   별개 통로). 같은 웹훅 주소를 재사용해 이제 자동매매 사이클(아래 호출부)에서 직접 쏜다.
+   *   [앱이 꺼져 있을 때는?] 스캔 자체가 앱이 켜져 있을 때만 도니, "꺼져 있어도 와야 한다"는
+   *   새 가입 알림과 달리 DB 트리거가 필요 없다(알릴 일 자체가 없음).
+   *   실패해도 자동매매 사이클을 막으면 안 되므로 항상 조용히 넘어간다(호출부도 await는 하되
+   *   에러를 바깥으로 던지지 않음 — try/catch로 완전히 격리).
+   */
+  private async sendDiscordAlert(message: string): Promise<void> {
+    try {
+      const { discordWebhookUrl } = await this.getNotifySettings();
+      if (!discordWebhookUrl) return; // 설정 안 했으면 조용히 아무 일도 안 함(새 가입 알림과 동일 원칙)
+      await fetchWithTimeout(discordWebhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: message }),
+      }, 10_000, "discord-webhook");
+    } catch {
+      /* 알림 실패는 조용히 무시 — 매매 로직엔 영향 없음 */
     }
   }
 
@@ -8448,16 +8502,32 @@ export class ToolEngine extends EventEmitter {
       const newlyConfirmed = newlyConfirmedSymbols(run.results, this.autoScanNotifiedConfirmed);
       for (const sym of newlyConfirmed) {
         const r = run.results.find((x) => x.symbol === sym);
+        const priceTxt = r?.price != null ? `$${r.price}` : "확인 불가";
         this.addJournal({
           kind: "info",
           symbol: sym,
-          summary: `🔍 스크리닝에서 ${sym}이 진입 조건을 모두 통과해 관찰이 확정됐습니다(현재가 ${r?.price != null ? `$${r.price}` : "확인 불가"}).`,
+          summary: `🔍 스크리닝에서 ${sym}이 진입 조건을 모두 통과해 관찰이 확정됐습니다(현재가 ${priceTxt}).`,
           notify: true,
           notifyTitle: `🔍 관찰 확정: ${sym}`,
         });
+        // [v0.72.0] 디스코드 즉시 알림 — 위 OS 알림(notify)과 별개 통로(앱을 안 보고 있어도 옴).
+        void this.sendDiscordAlert(`🔴 **확정**: ${sym} (현재가 ${priceTxt}) — 자동매매 스크리닝에서 진입 조건을 모두 통과했습니다.`);
       }
       // 다음 비교 기준을 이번 스캔으로 교체(빠졌다가 나중에 재확정되면 그때 다시 알림).
       this.autoScanNotifiedConfirmed = new Set(run.results.filter((r) => r.status === "confirmed").map((r) => r.symbol));
+
+      // [v0.72.0 — 오너 지시 "관찰, 확정된 종목이 나오면 즉시 디스코드로 알림"] "확정"은 이미
+      //   위에서(OS 알림+디스코드) 알리고 있었다 — "관찰(watch, 다음 봉 확인 대기 중)"도 같은
+      //   원리로 새로 생긴 것만 디스코드로 알린다. 관찰은 아직 최종 신호가 아니라서(다음 봉
+      //   확인 전) OS 알림(notify)까지는 안 울리던 자리였는데, 디스코드는 "지금 뭔가 움직이기
+      //   시작했다"는 더 이른 신호로 의미가 있어 오너가 명시적으로 요청했다.
+      const newlyWatched = newlyWatchedSymbols(run.results, this.autoScanNotifiedWatch);
+      for (const sym of newlyWatched) {
+        const r = run.results.find((x) => x.symbol === sym);
+        const priceTxt = r?.price != null ? `$${r.price}` : "확인 불가";
+        void this.sendDiscordAlert(`🟡 **관찰**: ${sym} (현재가 ${priceTxt}) — 도지 패턴 발생, 다음 5분봉 확인 중입니다.`);
+      }
+      this.autoScanNotifiedWatch = new Set(run.results.filter((r) => r.status === "watch").map((r) => r.symbol));
 
       // [v0.32.0] 로컬 기록(이 기기가 아는 것)과 실계좌 보유(다른 기기가 넣었을 수도 있는 것)를
       //   합쳐서 "이미 잡고 있는 종목"으로 취급 — 둘 중 하나만 보면 다른 기기가 방금 넣은 종목에
@@ -8467,7 +8537,9 @@ export class ToolEngine extends EventEmitter {
       const commissionRate = await this.resolveCommissionRate();
       // [오너 지시 2026-09-25 정정] "최대 투입 비율"은 종목 1개당 배정 시드 비율이다 — 종목 수로
       // 나누지 않는다(이전 버전은 나눠서 저가주에서 1주만 나오는 버그가 있었음).
-      const perSlotPct = this.autoTradeMaxInvestPct;
+      // [v0.72.0 — 오너 지시 "2번으로 진행"] 다만 그 비율 자체를 종목별 변동성(ATR)에 따라 다시
+      // 깎을 수 있다 — ATR이 높을수록(위험할수록) 투입을 줄여 손절 한 번의 충격을 줄인다. 종목마다
+      // ATR이 다르므로 더 이상 사이클당 하나의 상수가 아니라, 아래 루프 안에서 후보마다 계산한다.
 
       // [v0.35.0] 이번 사이클에 실제로 검토한 후보만 채운다 — 지난 사이클 사유가 남아 헷갈리지 않게.
       this.autoTradeSkipReasons = {};
@@ -8571,6 +8643,10 @@ export class ToolEngine extends EventEmitter {
           continue;
         }
 
+        // [v0.72.0] ATR(평균 변동폭) 기반 투입 비율 축소 — 설정이 꺼져 있으면 원래 비율 그대로.
+        const perSlotPct = this.autoTradeVolScaledSizingEnabled
+          ? volScaledInvestPct(this.autoTradeMaxInvestPct, cand.entryMetrics?.atrPct ?? null)
+          : this.autoTradeMaxInvestPct;
         const qty = computeSeedQty(seedUsd, perSlotPct, level1.entry, commissionRate) ?? 0;
         const gate = canAutoEnter({
           limits: {
@@ -8656,6 +8732,7 @@ export class ToolEngine extends EventEmitter {
           maxPositions: this.autoTradeMaxPositions,
           maxLossPct: this.autoTradeMaxLossPct,
           maxInvestPct: this.autoTradeMaxInvestPct,
+          appliedInvestPct: perSlotPct, // [v0.72.0] ATR 연동 축소까지 반영된 실제 적용값
           watchMinutes: this.autoTradeWatchMinutes,
           entryLevel: this.autoTradeEntryLevel,
           emaMinGapEnabled: this.autoScanEmaMinGapEnabled, // [v0.63.0]

@@ -87,3 +87,31 @@ export function canAutoEnter(input: AutoRiskInput): AutoRiskResult {
   }
   return { allow: true };
 }
+
+/**
+ * volScaledInvestPct — 변동성(ATR, 평균 변동폭)에 반비례해 종목당 투입 비율을 깎는 순수 함수(v0.72.0).
+ *   [왜 필요한가] v0.71.0에서 실제 손절 기록을 분석해 "ATR이 높을수록(캔들 한 개가 크게 흔들릴수록)
+ *   손절 확률이 급격히 커진다"는 사실을 데이터로 확인했다. ATR 상한(atrMaxPct) 하나로 "너무 위험한
+ *   종목은 거르기"는 되지만, 상한 바로 아래(예: 11%)와 아주 안정적인 종목(예: 2%)이 똑같은 금액을
+ *   배정받는 건 여전히 불공평하다 — 위험이 큰 종목일수록 배정 금액을 줄여야 "손절 한 번"의 충격
+ *   (달러 손실액)이 작아진다. 즉 "걸러내기"(atrMaxPct)와 "배정 줄이기"(이 함수)는 서로 다른 안전장치고,
+ *   같이 써야 상한 바로 아래 구간의 위험도 줄어든다.
+ *   [계산 방식] 기준 ATR(referenceAtrPct, 기본 6% — v0.71.0에서 관찰된 "안전권" 상단 근사치)보다
+ *   변동성이 큰 종목일수록 비율을 줄이고, 기준보다 안정적인 종목이라도 원래 배정 비율(baseInvestPct)
+ *   보다 더 늘리지는 않는다(공격적으로 베팅을 키우는 건 이 함수의 목적이 아님 — 위험 종목만 줄이는
+ *   "방어적" 스케일링이다). floorScale(기본 0.4)은 "아무리 변동성이 커도 원래 배정의 40% 밑으로는
+ *   줄이지 않는다"는 바닥선 — 끝없이 줄이면 1주도 못 사는 상황만 늘어나 기회비용이 커지기 때문이다.
+ *   [안전한 폴백] ATR 값을 모르면(null/NaN/0 이하) 깎지 않고 원래 비율(baseInvestPct)을 그대로
+ *   돌려준다 — "모르면 보수적으로 막기"가 아니라 "모르면 원래 설정을 존중"하는 쪽을 택한 이유는,
+ *   ATR 상한 게이트가 이미 별도로 위험 종목을 걸러내므로 이 함수까지 중복으로 막을 필요가 없어서다.
+ */
+export function volScaledInvestPct(
+  baseInvestPct: number,
+  candidateAtrPct: number | null,
+  referenceAtrPct = 6,
+  floorScale = 0.4,
+): number {
+  if (candidateAtrPct == null || !Number.isFinite(candidateAtrPct) || candidateAtrPct <= 0) return baseInvestPct;
+  const scale = Math.min(1, referenceAtrPct / candidateAtrPct);
+  return baseInvestPct * Math.max(floorScale, scale);
+}
