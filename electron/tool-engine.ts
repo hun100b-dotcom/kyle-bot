@@ -8060,6 +8060,25 @@ export class ToolEngine extends EventEmitter {
           notify: true,
           notifyTitle: `${o.status === "cancelled" ? "취소됨" : "⚠️ 실패"}: ${pos.symbol}`,
         });
+        // [v0.84.1 — 오너 보고 "장기간 미체결 자동취소 디코로 안 옴"] 실사용 기록을 직접 확인한
+        //   결과, 타임아웃 취소는 거의 전부 이 경로로 들어오고 있었다 — watchAndBracket(살아있는
+        //   감시)이 취소를 요청한 바로 뒤에 앱이 재시작돼, 그 감시가 끝까지 못 보고 죽고,
+        //   다음 틱에서 "재시작 후 재확인" 경로(여기)가 뒤늦게 "취소됨"을 발견하는 흐름이었다.
+        //   v0.84.0은 "재시작 없이 살아있는 감시"(onAutoBracketResolved)만 고쳐서, 실제로 가장
+        //   흔한 이 경로는 빠져 있었다 — 늦게라도 여기서 알린다. 감시시간을 이미 넘겼으면
+        //   (아래 else-if와 같은 기준) 거의 확실히 타임아웃이 원인이라 그렇게 알리고, 아직 안
+        //   지났는데 취소된 경우는(드묾 — 오너가 재시작 직전에 직접 취소했을 가능성) 원인을
+        //   단정하지 않는다.
+        if (o.status === "cancelled") {
+          const likelyTimeout = Date.now() - pos.enteredAtMs > this.autoTradeWatchMinutes * 60_000;
+          void this.sendDiscordAlert(
+            likelyTimeout
+              ? `⏱ **미체결 자동취소**: ${pos.symbol} — 감시시간(${this.autoTradeWatchMinutes}분)이 지나 매수 주문이 취소된 것을 뒤늦게(앱 재시작 중) 확인했습니다.`
+              : `**매수 주문 취소 확인**: ${pos.symbol} — 앱 재시작 중 주문이 취소된 상태로 확인됐습니다(사유 불명확).`,
+          );
+        } else {
+          void this.sendDiscordAlert(`⚠️ **매수 주문 실패**: ${pos.symbol} — 앱 재시작 중 확인한 결과 주문이 실패 상태였습니다.`);
+        }
         this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, {
           status: "closed_manual",
           exitedAt: DateTime.now().setZone("Asia/Seoul").toFormat("MM-dd HH:mm:ss"),

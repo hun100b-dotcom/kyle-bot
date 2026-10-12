@@ -153,4 +153,46 @@ describe("[v0.69.3] 미체결 매수 주문이 토스에 남는 문제", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it("[v0.84.1 — 오너 보고 '장기간 미체결 자동취소 디코로 안 옴'] 재시작 복구 경로가 취소를 확인하는 순간에도 디스코드로 알린다", async () => {
+    const { dir, eng, x } = await setup();
+    const engAny = eng as unknown as { authAccessToken: string | null; authExpiresAtMs: number; authUserId: string | null };
+    engAny.authAccessToken = "test-access-token";
+    engAny.authExpiresAtMs = Date.now() + 3_600_000;
+    engAny.authUserId = "test-user-id";
+    let posted: { body: string } | null = null;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("capri_user_notify_settings")) {
+        return new Response(JSON.stringify([{ discord_webhook_url: "https://discord.com/api/webhooks/fake/token" }]), { status: 200 });
+      }
+      if (u.includes("discord.com/api/webhooks")) {
+        posted = { body: String(init?.body ?? "") };
+        return new Response(null, { status: 204 });
+      }
+      return originalFetch(url as never, init);
+    }) as typeof fetch;
+    try {
+      await eng.placeBracket({ symbol: "AAPL", price: 1.9, quantity: 1, tpTrigger: 2.5, tpPrice: 2.5, slTrigger: 1.8, slPrice: 1.79, expireDate: "2026-12-30", watchMinutes: 0.01, pollMs: 20 });
+      const o = (await eng.openOrders())[0];
+      // 실사용 재현: 감시시간(0.01분)을 이미 넘긴 "watching" 포지션 — 살아있는 감시(watchAndBracket)가
+      //   끝까지 못 보고 앱이 재시작된 뒤 이 복구 경로가 뒤늦게 집은 상황.
+      x.autoTradePositions.push({
+        symbol: "AAPL", entry: 1.9, tp: 2.5, sl: 1.8, quantity: 1, enteredAtMs: Date.now() - 3 * 3_600_000, status: "watching", conditionalOrderId: null, buyOrderId: o.tossOrderId,
+      });
+      await x.reconcileAutoPositions(); // 1차: 감시시간 초과 발견 → 취소 요청(목 서버가 즉시 반영)
+      await x.reconcileAutoPositions(); // 2차: "취소됨"을 확인 → 여기서 디스코드가 나가야 한다
+
+      const start = Date.now();
+      while (!posted && Date.now() - start < 1000) await new Promise((r) => setTimeout(r, 5));
+      expect(posted).not.toBeNull();
+      const content = JSON.parse(posted!.body).content as string;
+      expect(content).toContain("AAPL");
+      expect(content).toContain("미체결 자동취소"); // 감시시간을 이미 넘긴 뒤라 "타임아웃" 문구로 알려야 한다
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
