@@ -1043,30 +1043,6 @@ function App() {
       setAutoCancelMsg(`${symbol}: ⚠️ 요청이 실패했습니다(${e instanceof Error ? e.message : String(e)}).`);
     }
   }
-  // [v0.78.0 — 오너 지시 "Capri가 모르는 매매도 자동 반영, 장기보유 종목은 내가 선택해서 제외"]
-  //   토스에 있는데 Capri가 모르는 종목(최근 3일 안에 산 기록 없음)을 매매기록에 참고용으로
-  //   자동 반영하는 기능을 켰다 — 장기보유처럼 Capri와 무관한 종목은 여기서 빼 둘 수 있다.
-  const [reflectExcludeInput, setReflectExcludeInput] = useState("");
-  const [reflectExcludeBusy, setReflectExcludeBusy] = useState(false);
-  async function setReflectExcluded(symbol: string, excluded: boolean) {
-    const sym = symbol.trim().toUpperCase();
-    if (!sym) return;
-    setReflectExcludeBusy(true);
-    try {
-      if (canReconcileLive) {
-        await window.kyletool.setAutoReflectExcluded(sym, excluded);
-        setAutoStatus(await window.kyletool.autoTradeStatus());
-      } else {
-        await window.kyletool.sendCommand("setAutoReflectExcluded", { symbol: sym, excluded });
-        setTimeout(() => void refreshLiveState(), 10_000); // PC가 처리할 시간을 준 뒤 상태 미러로 반영 확인
-      }
-      if (excluded) setReflectExcludeInput("");
-    } catch (e) {
-      setAutoCancelMsg(`${sym}: ⚠️ 제외 설정 요청이 실패했습니다(${e instanceof Error ? e.message : String(e)}).`);
-    } finally {
-      setReflectExcludeBusy(false);
-    }
-  }
   const [reconcileBusy, setReconcileBusy] = useState(false); // [v0.45.0] "🔄 지금 확인" 버튼 눌림 상태
   async function doCancelAutoPosition(p: AutoPosition) {
     const key = `${p.symbol}@${p.entry}@${p.enteredAtMs}`;
@@ -4497,40 +4473,6 @@ ${msg}
                 </label>
                 <button className="btn btn-start" onClick={saveAutoSettings}>한도 저장</button>
                 {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
-              </div>
-              {/* [v0.78.0] "Capri가 모르는 매매 자동 반영"에서 뺄 종목(장기보유 등) — 오너가
-                  직접 심볼을 적어 선택한다(토스 보유 목록을 매번 새로 불러오지 않아도 됨, 어떤
-                  종목이 장기보유인지는 오너가 이미 알고 있으므로). */}
-              <div className="form-col" style={{ marginTop: 14 }}>
-                <label>🚫 자동 반영에서 제외할 종목(장기보유 등 — Capri와 무관한 종목)
-                  <div className="form-row" style={{ marginTop: 4 }}>
-                    <input type="text" value={reflectExcludeInput}
-                      onChange={(e) => setReflectExcludeInput(e.target.value.toUpperCase())}
-                      onKeyDown={(e) => { if (e.key === "Enter" && reflectExcludeInput.trim()) void setReflectExcluded(reflectExcludeInput, true); }}
-                      placeholder="예: AAPL" style={{ width: 120 }} />
-                    <button className="btn" disabled={!reflectExcludeInput.trim() || reflectExcludeBusy}
-                      onClick={() => void setReflectExcluded(reflectExcludeInput, true)}>제외 추가</button>
-                  </div>
-                </label>
-                {(autoStatus?.reflectExcluded?.length ?? 0) > 0 && (
-                  <div className="form-row" style={{ marginTop: 2 }}>
-                    {autoStatus!.reflectExcluded!.map((sym) => (
-                      <span key={sym} className="cat-chip" style={{ cursor: "default" }}>
-                        {sym}
-                        <button className="mini" disabled={reflectExcludeBusy} onClick={() => void setReflectExcluded(sym, false)} title="다시 자동 반영 대상에 포함">✕</button>
-                      </span>
-                    ))}
-                  </div>
-                )}
-                <details className="explain">
-                  <summary>❓ "Capri가 모르는 매매 자동 반영"이 뭔가요?</summary>
-                  <p className="hint small">
-                    토스 앱에서 직접 사고판 종목(Capri가 진입한 게 아닌 것)도 최대 5분 안에 매매분석에
-                    참고용으로 자동으로 보이게 합니다 — <b>Capri가 산 게 아니므로 익절/손절은 자동으로
-                    안 걸립니다</b>(직접 관리하세요). 이미 반영된 종목은 중복으로 다시 올라오지 않습니다.
-                    위에 적어 둔 종목(장기 보유 등 Capri와 무관한 것)은 아예 올라오지 않습니다.
-                  </p>
-                </details>
               </div>
               {/* [v0.70.0 — 오너 지시 "세팅값 수정 후 저장을 눌러도 이게 적용이되는건지 명확히
                   모르겠다"] 폰(웹)에서는 "보냈다"는 메시지만으론 PC가 실제로 반영했는지 알 수

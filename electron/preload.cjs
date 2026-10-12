@@ -161,7 +161,6 @@ contextBridge.exposeInMainWorld("kyletool", {
   cancelConditional: (id) => ipcRenderer.invoke("tool:orders:cancelConditional", id),
   cancelAutoPosition: (symbol, entry, enteredAtMs) => ipcRenderer.invoke("tool:auto:cancelPosition", symbol, entry, enteredAtMs),
   dismissUnprotected: (symbol) => ipcRenderer.invoke("tool:auto:dismissUnprotected", symbol), // [v0.69.4]
-  setAutoReflectExcluded: (symbol, excluded) => ipcRenderer.invoke("tool:auto:setReflectExcluded", symbol, excluded), // [v0.78.0]
 
   // 연습 모드 전용
   // [폰에서 쓰기] 집 PC 릴레이 + 인터넷 터널 제어

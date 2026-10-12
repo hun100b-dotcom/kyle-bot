@@ -220,107 +220,11 @@ describe("[v0.75.0 — AGRZ와 같은 부류] runGuard 시장가 정리 분기�
 });
 
 // =============================================================================
-// [v0.78.0 — task #111 나머지 절반, 오너 결정: "장기보유 종목만 제외하고 Capri가 모르는
-//   매매도 자동으로 반영"] reflectUnknownHoldings — 토스에 있는데 Capri가 전혀 모르는 종목을
-//   참고용으로만 매매기록에 반영한다(익절/손절 자동 등록 없음). setAutoReflectExcluded로
-//   오너가 빼 둔 종목(장기보유 등)은 건너뛴다.
+// [v0.78.0→v0.81.0] "Capri가 모르는 보유 종목을 참고용으로 자동 반영"하던 reflectUnknownHoldings
+//   기능은 완전히 제거됐다 — 그 기록을 auditUnprotectedHoldings가 "Capri 포지션"으로 오인해
+//   실제로 매도까지 나간 사고(2026-10-11, 하이닉스·필옵틱스·아이온큐) 때문이다. 재발 방지
+//   테스트는 위 "[v0.80.0 긴급]" 테스트(reflectedOnly 플래그 단독 검증)로 충분히 남아 있다.
 // =============================================================================
-describe("[v0.78.0] reflectUnknownHoldings — Capri가 모르는 보유 종목을 참고용으로 자동 반영", () => {
-  it("기록이 전혀 없는 종목(AAPL, 목 서버 기본 보유)을 참고용으로 반영한다", async () => {
-    const { dir, eng, x } = await setup();
-    try {
-      const added = await eng.reflectUnknownHoldings();
-      expect(added).toBe(1);
-      expect(x.autoTradeHistory).toHaveLength(1);
-      const rec = x.autoTradeHistory[0];
-      expect(rec.symbol).toBe("AAPL");
-      expect(rec.quantity).toBe(100); // 목 서버 기본 보유 수량
-      expect(rec.entry).toBe(2); // 목 서버 기본 평단가($2.00)
-      expect(rec.status).toBe("active");
-      expect(rec.note).toContain("[자동반영]");
-      expect(rec.note).toContain("익절/손절도 자동으로 안 걸립니다");
-      // 자동으로 OCO를 걸거나 가드에 올리지 않는다 — Capri가 "산 것"이 아니므로.
-      expect(x.autoUnprotected).toHaveLength(0);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }, 20_000);
-
-  it("[v0.80.0 긴급] 반영한 뒤 다음 주기에 auditUnprotectedHoldings가 돌아도 보호 대상(가드)에 올리지 않는다 — 실제 사고를 그대로 재현해 검증", async () => {
-    // 실제 사고 순서 그대로: ①reflectUnknownHoldings가 참고 기록을 남김 → ②5분 뒤 다음 점검에서
-    // auditUnprotectedHoldings가 돈다. 수정 전에는 ②가 ①의 기록을 "봇이 산 것"으로 착각해
-    // autoUnprotected에 올리고, runGuard가 기본 손절%로 실제 매도(또는 OCO 등록)까지 이어졌다.
-    const { dir, eng, x, stopTimer } = await setup();
-    try {
-      expect(await eng.reflectUnknownHoldings()).toBe(1); // ① 참고용 기록만 남김
-      const added = await eng.auditUnprotectedHoldings(); // ② 다음 점검 — 여기가 사고 지점이었다
-      stopTimer();
-      expect(added).toBe(0);
-      expect(x.autoUnprotected).toHaveLength(0); // runGuard로 이어질 여지 자체가 없어야 한다
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }, 20_000);
-
-  it("같은 종목을 두 번 돌려도 중복으로 반영하지 않는다", async () => {
-    const { dir, eng } = await setup();
-    try {
-      expect(await eng.reflectUnknownHoldings()).toBe(1);
-      expect(await eng.reflectUnknownHoldings()).toBe(0); // 이미 반영했음
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }, 20_000);
-
-  it("최근(3일 이내) Capri 기록이 있는 종목은 건드리지 않는다(auditUnprotectedHoldings 담당)", async () => {
-    const { dir, eng, x } = await setup();
-    try {
-      x.autoTradeHistory.push(histEntry()); // 최근 1시간 전 AAPL 기록
-      expect(await eng.reflectUnknownHoldings()).toBe(0);
-      expect(x.autoTradeHistory).toHaveLength(1); // 새로 추가된 게 없음
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }, 20_000);
-
-  it("이미 추적 중인 포지션/보호 대기 종목은 건드리지 않는다", async () => {
-    const { dir, eng, x } = await setup();
-    try {
-      x.autoTradePositions.push({ symbol: "AAPL", entry: 2, tp: 2.2, sl: 1.8, quantity: 100, enteredAtMs: Date.now(), status: "watching", conditionalOrderId: null });
-      expect(await eng.reflectUnknownHoldings()).toBe(0);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }, 20_000);
-
-  it("오너가 제외로 표시한 종목(장기보유 등)은 반영하지 않고, 다시 포함하면 반영된다", async () => {
-    const { dir, eng } = await setup();
-    try {
-      expect(eng.getAutoReflectExcluded()).toEqual([]);
-      const r1 = eng.setAutoReflectExcluded("aapl", true); // 소문자로 줘도 대문자로 저장
-      expect(r1.excluded).toEqual(["AAPL"]);
-      expect(eng.getAutoReflectExcluded()).toEqual(["AAPL"]);
-      expect(await eng.reflectUnknownHoldings()).toBe(0); // 제외됐으니 반영 안 됨
-
-      const r2 = eng.setAutoReflectExcluded("AAPL", false); // 다시 포함
-      expect(r2.excluded).toEqual([]);
-      expect(await eng.reflectUnknownHoldings()).toBe(1); // 이제는 반영됨
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }, 20_000);
-
-  it("제외 목록은 재시작(새 엔진)해도 그대로 유지된다", async () => {
-    const { dir, eng } = await setup();
-    try {
-      eng.setAutoReflectExcluded("AAPL", true);
-      const eng2 = new ToolEngine(dir, { forceMock: true });
-      expect(eng2.getAutoReflectExcluded()).toEqual(["AAPL"]);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }, 20_000);
-});
 
 // =============================================================================
 // [v0.77.0 — task #111 "토스 실시간 동기화 2단계: Capri가 모르는 매매 자동 반영"] 가드가

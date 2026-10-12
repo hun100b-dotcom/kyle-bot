@@ -224,21 +224,6 @@ describe("[v0.71.0 — LPCN 37시간 무방비 사례 조사] 보호 감사 루�
     }
   });
 
-  it("[v0.78.0] 이 루프가 reflectUnknownHoldings도 같은 주기로 함께 돈다(Capri가 모르는 보유 종목 자동 반영)", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "kyle-protaudit5-"));
-    try {
-      const eng = new ToolEngine(dir, { forceMock: true });
-      logInFake(eng);
-      eng.startProtectionAuditLoop(); // 즉시 첫 점검 1회 실행(비동기)
-      await new Promise((r) => setTimeout(r, 50)); // 비동기 점검이 끝날 시간을 준다
-      eng.stopProtectionAuditLoop();
-      const history = (eng as unknown as EngineInternals).autoTradeHistory as Array<{ symbol: string; note: string }>;
-      expect(history.some((h) => h.symbol === "AAPL" && h.note.includes("[자동반영]"))).toBe(true);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   it("로그아웃(authSignOut)하면 자동으로 멈춘다", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-protaudit3-"));
     try {

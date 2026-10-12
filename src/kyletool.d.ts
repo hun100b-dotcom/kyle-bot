@@ -193,8 +193,6 @@ interface UnprotectedPos {
 interface AutoTradeStatus {
   enabled: boolean;
   unprotected?: UnprotectedPos[];
-  /** [v0.78.0] 오너가 "장기보유" 등으로 표시해 자동 반영에서 뺀 종목(대문자 심볼). */
-  reflectExcluded?: string[];
   orderBlocks?: Array<{ ts: string; symbol: string; kind: string; reasons: string[] }>; // [v0.69.2] 주문 전 검증에서 막힌 주문
   positions: AutoPosition[];
   realizedPnlUsd: number;
@@ -1056,8 +1054,6 @@ interface KyletoolBridge {
   cancelAutoPosition(symbol: string, entry: number, enteredAtMs: number): Promise<{ ok: boolean; message: string }>;
   /** [v0.69.4] 보호 복구(봇이 계속 보호주문을 다시 거는 중)를 중단하고 일정 시간 직접 관리로 전환. */
   dismissUnprotected(symbol: string): Promise<{ ok: boolean; message: string }>;
-  /** [v0.78.0] 종목을 "Capri가 모르는 매매 자동 반영" 대상에서 빼거나(excluded=true, 예: 장기보유) 다시 넣는다(false). */
-  setAutoReflectExcluded(symbol: string, excluded: boolean): Promise<{ ok: true; excluded: string[] }>;
 
   mockSetPrice(symbol: string, price: number): Promise<boolean>;
 
