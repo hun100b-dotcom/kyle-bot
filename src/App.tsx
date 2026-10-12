@@ -1286,6 +1286,79 @@ function App() {
   const [macSwap, setMacSwap] = useState<{ version: string } | null>(null);
   const [macSwapBusy, setMacSwapBusy] = useState(false);
 
+  // --------------------------------------------------------------------------
+  // [v0.84.0 — 오너 지시 "피씨 폼 스크리닝 기준 및 매수매도 기준 등 모든 설정
+  //   동기화하게끔"] 조사 결과: 폰→PC 원격 명령 자체는 정상 작동한다(Supabase
+  //   capri_commands 직접 확인 — 전부 done/성공). 진짜 문제는 **PC 화면이 원격으로
+  //   바뀐 값을 다시 읽어오지 않는 것** — 이 입력칸들(autoForm 등)은 앱을 막 켰을 때
+  //   딱 한 번만 getSettings()로 채워지고, 그 뒤로는 "이 기기에서 직접 저장"했을 때만
+  //   갱신된다. 폰에서 바꾼 값은 PC 엔진에 실제로는 바로 반영되지만(다음 자동매매
+  //   사이클부터 새 값으로 동작 — 엔진은 항상 this.필드를 그 순간 그대로 읽으므로),
+  //   PC 화면엔 안 보여서 "안 반영되는 것처럼" 보인다. 더 위험한 건: 화면이 옛값을
+  //   보여주는 채로 오너가 PC에서 "저장"을 또 누르면, 방금 폰에서 더 엄격하게 줄인
+  //   값을 옛(더 느슨한) 값으로 도로 덮어써버릴 수 있다는 것 — 조용한 안전한도 역행.
+  //   아래 두 함수는 "설정값 → 입력칸 상태"를 한 곳에 모아 둔다(마운트 시 최초 1회뿐
+  //   아니라, 탭을 열 때·새로고침 버튼을 눌렀을 때도 똑같이 재사용 — describeAutoTradeLimits
+  //   /describeScreenCriteria를 공용 함수로 뽑았던 v0.70.0과 같은 이유: 두 곳에 따로
+  //   적어두면 나중에 하나만 고쳐져 말이 달라지는 사고가 난다).
+  // --------------------------------------------------------------------------
+  const applyAutoFormsFromSettings = (s: ToolSettings) => {
+    setAutoForm({
+      maxPositions: String(s.autoTradeMaxPositions ?? 3),
+      maxLossPct: String(s.autoTradeMaxLossPct ?? 5),
+      maxInvestPct: String(s.autoTradeMaxInvestPct ?? 30),
+      watchMinutes: String(s.autoTradeWatchMinutes ?? 10),
+    });
+    setAutoEntryLevel(s.autoTradeEntryLevel === 2 ? 2 : s.autoTradeEntryLevel === 1.5 ? 1.5 : 1);
+    setDefenseForm({
+      slMode: s.autoTradeSlMode === "ema" ? "ema" : "fixed",
+      emaStopBufferPct: String(s.autoTradeEmaStopBufferPct ?? 1.5),
+      reentryBlockEnabled: s.autoTradeReentryBlockEnabled ?? true,
+      volScaledSizingEnabled: s.autoTradeVolScaledSizingEnabled ?? true,
+      lossStreakLimit: String(s.autoTradeLossStreakLimit ?? 3),
+      reprotectVanished: s.autoTradeReprotectVanished ?? true,
+    });
+  };
+  const applyScreenFormsFromSettings = (s: ToolSettings) => {
+    setAutoScanForm({
+      scanCount: String(s.autoScanCount ?? 60),
+      priceMin: String(s.autoScanPriceMin ?? 1),
+      priceMax: String(s.autoScanPriceMax ?? 9),
+    });
+    setAutoScanBodyRatio(s.autoScanBodyRatio ?? 0.3);
+    setScreenCritForm({
+      emaTrendEnabled: s.autoScanEmaTrendEnabled ?? true,
+      emaPeriod: String(s.autoScanEmaPeriod ?? 200),
+      cloudEnabled: s.autoScanCloudEnabled ?? true,
+      dojiWickMinRatio: String(s.autoScanDojiWickMinRatio ?? 0.1),
+      dojiMaxAgeEnabled: s.autoScanDojiMaxAgeEnabled ?? true,
+      dojiMaxAgeMinutes: String(s.autoScanDojiMaxAgeMinutes ?? 40),
+      dojiMaxGapEnabled: s.autoScanDojiMaxGapEnabled ?? true,
+      dojiMaxGapMinutes: String(s.autoScanDojiMaxGapMinutes ?? 30),
+      emaMinGapEnabled: s.autoScanEmaMinGapEnabled ?? false,
+      emaMinGapPct: String(s.autoScanEmaMinGapPct ?? 6),
+      emaSlopeEnabled: s.autoScanEmaSlopeEnabled ?? false,
+      atrFilterEnabled: s.autoScanAtrFilterEnabled ?? false,
+      atrMaxPct: String(s.autoScanAtrMaxPct ?? 3),
+      nextCandleConfirmEnabled: s.autoScanNextCandleConfirmEnabled ?? true,
+      excludeEtf: s.autoScanExcludeEtf ?? true,
+      dayEnabled: s.autoScanDayEnabled ?? true,
+      preEnabled: s.autoScanPreEnabled ?? true,
+      regularEnabled: s.autoScanRegularEnabled ?? true,
+      afterEnabled: s.autoScanAfterEnabled ?? true,
+    });
+  };
+  /** [v0.84.0] PC 전용 — 지금 엔진에 실제로 저장된 값을 다시 읽어와 두 폼을 통째로 재동기화한다.
+   *  isWebApp이면 아무 것도 안 한다(폰의 입력칸은 "PC로 보낼 명령 초안"이라 로컬 재조회가 의미
+   *  없음 — v0.61.1 설계 그대로 존중). */
+  const resyncPcFormsFromEngine = async () => {
+    if (isWebApp) return;
+    const s = await window.kyletool.getSettings();
+    setSettings(s);
+    applyAutoFormsFromSettings(s);
+    applyScreenFormsFromSettings(s);
+  };
+
   useEffect(() => {
     refreshStatus();
     window.kyletool.journal().then(setJournal);
@@ -1307,51 +1380,11 @@ function App() {
       if (s.defaultTpPct) setTpPct(String(s.defaultTpPct));
       if (s.defaultSlPct) setSlPct(String(s.defaultSlPct));
       setDefForm({ tp: String(s.defaultTpPct ?? 2), sl: String(s.defaultSlPct ?? 10) });
-      // [v0.26.0] 저장된 자동매매 한도를 입력칸 초기값으로("켜짐" 자체는 저장 안 되므로 항상 꺼진 채 시작).
-      setAutoForm({
-        maxPositions: String(s.autoTradeMaxPositions ?? 3),
-        maxLossPct: String(s.autoTradeMaxLossPct ?? 5),
-        maxInvestPct: String(s.autoTradeMaxInvestPct ?? 30),
-        watchMinutes: String(s.autoTradeWatchMinutes ?? 10),
-      });
-      setAutoEntryLevel(s.autoTradeEntryLevel === 2 ? 2 : s.autoTradeEntryLevel === 1.5 ? 1.5 : 1); // [v0.61.8]
-      setDefenseForm({
-        slMode: s.autoTradeSlMode === "ema" ? "ema" : "fixed",
-        emaStopBufferPct: String(s.autoTradeEmaStopBufferPct ?? 1.5),
-        reentryBlockEnabled: s.autoTradeReentryBlockEnabled ?? true,
-        volScaledSizingEnabled: s.autoTradeVolScaledSizingEnabled ?? true,
-        lossStreakLimit: String(s.autoTradeLossStreakLimit ?? 3),
-        reprotectVanished: s.autoTradeReprotectVanished ?? true,
-      });
-      // [v0.28.0] 저장된 자동매매 스크리너 조건을 입력칸 초기값으로.
-      setAutoScanForm({
-        scanCount: String(s.autoScanCount ?? 60),
-        priceMin: String(s.autoScanPriceMin ?? 1),
-        priceMax: String(s.autoScanPriceMax ?? 9),
-      });
-      setAutoScanBodyRatio(s.autoScanBodyRatio ?? 0.3);
-      // [v0.33.0] 저장된 "스크리닝 기준" 8개 조건을 입력칸 초기값으로.
-      setScreenCritForm({
-        emaTrendEnabled: s.autoScanEmaTrendEnabled ?? true,
-        emaPeriod: String(s.autoScanEmaPeriod ?? 200),
-        cloudEnabled: s.autoScanCloudEnabled ?? true,
-        dojiWickMinRatio: String(s.autoScanDojiWickMinRatio ?? 0.1),
-        dojiMaxAgeEnabled: s.autoScanDojiMaxAgeEnabled ?? true,
-        dojiMaxAgeMinutes: String(s.autoScanDojiMaxAgeMinutes ?? 40),
-        dojiMaxGapEnabled: s.autoScanDojiMaxGapEnabled ?? true,
-        dojiMaxGapMinutes: String(s.autoScanDojiMaxGapMinutes ?? 30),
-        emaMinGapEnabled: s.autoScanEmaMinGapEnabled ?? false,
-        emaMinGapPct: String(s.autoScanEmaMinGapPct ?? 6),
-        emaSlopeEnabled: s.autoScanEmaSlopeEnabled ?? false,
-        atrFilterEnabled: s.autoScanAtrFilterEnabled ?? false,
-        atrMaxPct: String(s.autoScanAtrMaxPct ?? 3),
-        nextCandleConfirmEnabled: s.autoScanNextCandleConfirmEnabled ?? true,
-        excludeEtf: s.autoScanExcludeEtf ?? true,
-        dayEnabled: s.autoScanDayEnabled ?? true,
-        preEnabled: s.autoScanPreEnabled ?? true,
-        regularEnabled: s.autoScanRegularEnabled ?? true,
-        afterEnabled: s.autoScanAfterEnabled ?? true,
-      });
+      // [v0.26.0→v0.84.0] 저장된 자동매매 한도·스크리닝 기준을 입력칸 초기값으로("켜짐" 자체는
+      //   저장 안 되므로 항상 꺼진 채 시작). 두 함수 다 재사용 가능하게 뽑아 뒀다(위 주석 참고) —
+      //   탭을 다시 열 때·새로고침 버튼에서도 똑같이 쓴다.
+      applyAutoFormsFromSettings(s);
+      applyScreenFormsFromSettings(s);
       // [v0.3.0] 실서버면 켜자마자 상단 바(예수금·손익)와 기본 종목 시세를 자동 로드한다.
       if (s.mode === "live") {
         void loadAccount();
@@ -1453,7 +1486,10 @@ function App() {
     else if (t === "strength") { void loadHoldingsStrength(); void loadAnalysis(); }
     else if (t === "report") void loadReport();
     // [v0.27.0] 자동매매 현황/스크리닝 결과 탭을 열 때 최신 상태를 바로 받아온다(20초 폴링을 기다리지 않게).
-    else if (t === "autoControl" || t === "autoScan") void window.kyletool.autoTradeStatus().then(setAutoStatus);
+    // [v0.84.0] 자동매매 현황·스크리닝 기준 탭을 열 때마다 PC 입력칸도 엔진 실제값으로 재동기화한다
+    //   (위 resyncPcFormsFromEngine 주석 참고 — 폰에서 바꾼 값이 PC 화면엔 안 보이던 버그 수정).
+    else if (t === "autoControl" || t === "autoScan") { void window.kyletool.autoTradeStatus().then(setAutoStatus); void resyncPcFormsFromEngine(); }
+    else if (t === "screenCriteria") void resyncPcFormsFromEngine();
     // [v0.30.0] 자동매매기록 탭을 열 때 최신 기록을 불러온다.
     // [v0.33.0] 매매연구 탭도 같은 기록(autoHistory)을 재료로 통계를 내므로 똑같이 불러온다.
     else if (t === "autoHistory" || t === "research") void loadAutoHistory();
@@ -4503,6 +4539,12 @@ ${msg}
                     onChange={(e) => isNumericDraft(e.target.value) && setDefenseForm({ ...defenseForm, lossStreakLimit: e.target.value })} placeholder="3" />
                 </label>
                 <button className="btn btn-start" onClick={saveAutoSettings}>한도 저장</button>
+                {/* [v0.84.0] PC 전용 — 폰에서 방금 바꿨을 수도 있으니, 버튼 한 번으로 지금 엔진에
+                    실제로 저장된 값으로 이 입력칸을 다시 맞춘다(탭을 다시 열면 자동으로도 됨 —
+                    activateTab 참고. 지금 바로 확인하고 싶을 때를 위한 수동 버튼). */}
+                {!isWebApp && (
+                  <button className="btn" onClick={() => void resyncPcFormsFromEngine()}>🔄 PC 실제값으로 새로고침</button>
+                )}
                 {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
               </div>
               {/* [v0.70.0 — 오너 지시 "세팅값 수정 후 저장을 눌러도 이게 적용이되는건지 명확히
@@ -5363,6 +5405,10 @@ ${msg}
 
             <div className="form-row" style={{ marginTop: 12 }}>
               <button className="btn btn-start" onClick={saveScreenCriteriaUI}>스크리닝 기준 저장</button>
+              {/* [v0.84.0] PC 전용 — 자동매매 현황 탭과 같은 이유로 수동 새로고침 버튼 추가. */}
+              {!isWebApp && (
+                <button className="btn" onClick={() => void resyncPcFormsFromEngine()}>🔄 PC 실제값으로 새로고침</button>
+              )}
               {savedMsg && <span className={savedMsg.startsWith("⚠") ? "err" : "ok"}>{savedMsg}</span>}
             </div>
             {/* [v0.70.0] 자동매매 현황 탭의 "PC 실제값"과 같은 목적 — 폰에서 저장 명령을 보낸 뒤

@@ -24,8 +24,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Settings, DateTime } from "luxon";
 import {
-  ToolEngine, computeSeedQty, newlyConfirmedSymbols, newlyWatchedSymbols, applyScreenGates, findDirectionConflict,
-  type AutoPosition, type JournalEntry, type NotifyEvent, type ScreenResult, type AutoTradeHistoryEntry,
+  ToolEngine, computeSeedQty, newlyConfirmedSymbols, newlyWatchedSymbols, summarizeConfirmEvidence, applyScreenGates, findDirectionConflict,
+  type AutoPosition, type JournalEntry, type NotifyEvent, type ScreenResult, type AutoTradeHistoryEntry, type ScreenEvidence,
 } from "../electron/tool-engine";
 import { volScaledInvestPct } from "../lib/auto-risk";
 
@@ -1128,6 +1128,40 @@ describe("[v0.32.0] 알림 — 스크리닝 관찰 확정 + 주문 이벤트", (
     const results = [mkResult("AAPL", "watch"), mkResult("TSLA", "watch"), mkResult("MSFT", "confirmed")];
     const added = newlyWatchedSymbols(results, new Set(["AAPL"]));
     expect(added).toEqual(["TSLA"]); // AAPL은 직전에도 관찰이었음(제외), MSFT는 watch가 아님(대상 아님)
+  });
+
+  // [v0.84.0 — 오너 지시 "확정 시 확정사유"] 디스코드 확정 알림에 붙는 한 줄 요약. 실제 스캔으로
+  //   "확정"을 재현할 수 없으므로(위 파일 상단 설명) 이 순수 함수만 직접 검증한다 — 알림 문구가
+  //   실제로 쓰는 값이 바로 이 반환값이라, 이것만 맞으면 알림 내용도 맞는다.
+  function mkEvidence(overrides: Partial<ScreenEvidence> = {}): ScreenEvidence {
+    return {
+      mode: "ha", sessionStart: "10-12 09:30", sessionHigh: 2.6, sessionHighTime: "09:35",
+      doji: { time: "09:50", open: 2.5, high: 2.55, low: 2.4, close: 2.45, bearish: true, bodyRatio: 0.08, upperWickPct: 0.3, lowerWickPct: 0.25 },
+      next: { time: "09:55", open: 2.44, high: 2.46, low: 2.3, close: 2.32, bearish: true },
+      filters: { priceBand: true, aboveEma: true, aboveCloud: true, firstDoji: true, bothWicks: true, nextBearish: true, recentDoji: true, dojiNearHigh: true },
+      gapFromHighMinutes: 15,
+      ...overrides,
+    };
+  }
+  it("summarizeConfirmEvidence — 근거 없으면(evidence=null) '근거 정보 없음'", () => {
+    expect(summarizeConfirmEvidence(null)).toBe("근거 정보 없음");
+  });
+  it("summarizeConfirmEvidence — 세션고점·도지 시각/몸통비율·고점간격·다음봉 확인을 한 줄로 담는다", () => {
+    const s = summarizeConfirmEvidence(mkEvidence());
+    expect(s).toContain("세션고점 $2.6");
+    expect(s).toContain("09:35");
+    expect(s).toContain("도지 09:50");
+    expect(s).toContain("몸통8%");
+    expect(s).toContain("고점~도지 15분");
+    expect(s).toContain("다음봉 음봉 확인됨");
+  });
+  it("summarizeConfirmEvidence — 다음봉이 아직 음봉이 아니면(확인 중) 그렇게 표시한다", () => {
+    const s = summarizeConfirmEvidence(mkEvidence({ next: { time: "09:55", open: 2.44, high: 2.5, low: 2.43, close: 2.48, bearish: false } }));
+    expect(s).toContain("다음봉 확인 중");
+  });
+  it("summarizeConfirmEvidence — 아무 근거 필드도 없으면(전부 null) 안전한 기본 문구로 대체한다", () => {
+    const s = summarizeConfirmEvidence(mkEvidence({ sessionHigh: null, doji: null, next: null, gapFromHighMinutes: null }));
+    expect(s).toBe("EMA200·구름 위 + 음봉 도지 패턴 확인");
   });
 
   it("stopAutoTrade — 이유가 있을 때만(손실 한도 등 프로그램이 스스로 멈춘 경우) 알림을 낸다, 오너가 직접 누른 중지는 알리지 않는다", () => {

@@ -567,6 +567,56 @@ describe("[v0.54.0 긴급 수정] onAutoBracketResolved — '장시간 미체결
     }
   });
 
+  it("[v0.84.0 — 오너 지시 '타임아웃 주문취소 시 디코로 알림'] cancelled_by_timeout이면 OS 알림+디스코드로도 알린다(예전엔 완전한 공백이었음)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-resolve-timeout-discord-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const engAny = eng as unknown as EngineInternals & {
+        authAccessToken: string | null; authExpiresAtMs: number; authUserId: string | null;
+      };
+      // sendDiscordAlert가 "내 웹훅"을 조회하려면 로그인 상태가 필요하다(v0.83.0 개인용 웹훅).
+      engAny.authAccessToken = "test-access-token";
+      engAny.authExpiresAtMs = Date.now() + 3_600_000;
+      engAny.authUserId = "test-user-id";
+      const enteredAtMs = Date.now();
+      pushWatchingPosition(eng, "TIMEOUTD", 10, enteredAtMs);
+
+      let posted: { body: string } | null = null;
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+        const u = String(url);
+        if (u.includes("capri_user_notify_settings")) {
+          return new Response(JSON.stringify([{ discord_webhook_url: "https://discord.com/api/webhooks/fake/token" }]), { status: 200 });
+        }
+        if (u.includes("discord.com/api/webhooks")) {
+          posted = { body: String(init?.body ?? "") };
+          return new Response(null, { status: 204 });
+        }
+        return originalFetch(url as never, init);
+      }) as typeof fetch;
+
+      try {
+        engAny.onAutoBracketResolved("TIMEOUTD", 10, { status: "cancelled_by_timeout" });
+
+        // [핵심 1] OS 알림(notify)도 이번에 처음 생겼다 — 예전엔 이 분기 전체가 조용했다.
+        const j = eng.getJournal().find((e) => e.symbol === "TIMEOUTD" && e.notifyTitle?.includes("미체결 자동취소"));
+        expect(j?.notify).toBe(true);
+
+        // [핵심 2] 디스코드 전송은 fire-and-forget(void)이라 fetch가 끝날 때까지 짧게 기다린다.
+        const start = Date.now();
+        while (!posted && Date.now() - start < 1000) await new Promise((r) => setTimeout(r, 5));
+        expect(posted).not.toBeNull();
+        const content = JSON.parse(posted!.body).content as string;
+        expect(content).toContain("TIMEOUTD");
+        expect(content).toContain("미체결 자동취소");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("cancelled(감시 마감 전 다른 경로로 취소됨)이면 '장시간 미체결'이 아니라고 정직하게 기록한다(오너 보고 회귀)", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-resolve-cancel-"));
     try {

@@ -471,6 +471,27 @@ export function newlyWatchedSymbols(results: ScreenResult[], previouslyWatched: 
 }
 
 /**
+ * [v0.84.0 — 오너 지시 "확정 시 확정사유"] 디스코드 확정 알림에 "왜 지금 확정됐는지"를 한 줄로
+ *   붙이기 위한 요약. ScreenEvidenceView(App.tsx, 화면의 판정 근거 패널)와 같은 데이터를
+ *   쓰지만, "확정"은 정의상 모든 체크(✓)가 이미 통과한 상태라 칸을 전부 나열해봐야 전부
+ *   ✓뿐이라 의미가 없다 — 대신 "이 종목이 왜 하필 지금 떴는지"를 설명하는 핵심(세션 고점·도지
+ *   발생 시각과 몸통 비율·고점과의 간격)만 추려 짧게 보여준다. 순수 함수라 실제 스캔 없이도
+ *   문구를 테스트할 수 있다.
+ */
+export function summarizeConfirmEvidence(ev: ScreenEvidence | null): string {
+  if (!ev) return "근거 정보 없음";
+  const parts: string[] = [];
+  if (ev.sessionHigh != null) parts.push(`세션고점 $${ev.sessionHigh}${ev.sessionHighTime ? `(${ev.sessionHighTime})` : ""}`);
+  if (ev.doji) {
+    const bodyPct = ev.doji.bodyRatio != null ? ` 몸통${(ev.doji.bodyRatio * 100).toFixed(0)}%` : "";
+    parts.push(`도지 ${ev.doji.time}${bodyPct}`);
+  }
+  if (ev.gapFromHighMinutes != null) parts.push(`고점~도지 ${ev.gapFromHighMinutes}분`);
+  if (ev.next) parts.push(`다음봉 ${ev.next.bearish ? "음봉 확인됨" : "확인 중"}`);
+  return parts.length > 0 ? parts.join(" · ") : "EMA200·구름 위 + 음봉 도지 패턴 확인";
+}
+
+/**
  * [v0.33.0 — 스크리닝 기준 탭] 도지 패턴 판정(watch/confirmed/none) + 하드 게이트(가격대·EMA·
  *   구름) + "다음 봉 확인" 켜짐 여부를 합쳐 최종 상태를 정한다. scanScreener 안에 묻혀 있던
  *   이 결정 로직을 순수 함수로 빼서, 실제 스캔(네트워크·캔들 계산) 없이도 "토글을 끄면 실제로
@@ -8056,6 +8077,9 @@ export class ToolEngine extends EventEmitter {
             summary: `⏱ ${pos.symbol}: 감시시간(${this.autoTradeWatchMinutes}분)이 지나도 미체결인 매수 주문(앱 재시작 등으로 놓친 건)을 취소 요청했습니다 — 다음 확인 때 결과를 처리합니다.`,
             notify: true, notifyTitle: `⏱ 미체결 주문 취소 요청: ${pos.symbol}`,
           });
+          // [v0.84.0] 이 분기는 조건 자체가 "감시시간을 넘겼다"(위 Date.now() 비교)라 늘 타임아웃
+          //   사유다(사람이 직접 취소한 거면 이 재시작-복구 루프가 아니라 다른 경로로 끝났을 것).
+          void this.sendDiscordAlert(`⏱ **미체결 자동취소**: ${pos.symbol} — 감시시간(${this.autoTradeWatchMinutes}분)이 지나도 체결되지 않아 취소를 요청했습니다(앱 재시작 중 놓쳤던 주문).`);
         } catch (e) {
           this.addJournal({
             kind: "info", symbol: pos.symbol,
@@ -8439,6 +8463,15 @@ export class ToolEngine extends EventEmitter {
         this.updateAutoTradeHistory(symbol, entry, enteredAtMs, {
           status: "cancelled", exitedAt: closedAt, note: "장시간 미체결로 자동 취소(다음 사이클에 새 후보로 대체)",
         });
+        // [v0.84.0 — 오너 지시 "타임아웃 주문취소 시 해당 내용도 디코로 알림보내"] 이 분기는
+        //   지금까지 OS 알림도 디스코드도 전혀 없는 완전한 공백이었다(매매기록을 직접 뒤지지
+        //   않으면 알 방법이 없었음) — 보호 가드 알림(v0.82.0)과 같은 원칙으로 둘 다 추가한다.
+        this.addJournal({
+          kind: "info", symbol,
+          summary: `⏱ ${symbol} 장시간 미체결로 매수 주문을 자동 취소했습니다(감시시간 ${this.autoTradeWatchMinutes}분 경과) — 다음 사이클에 새 후보로 대체될 수 있습니다.`,
+          notify: true, notifyTitle: `⏱ 미체결 자동취소: ${symbol}`,
+        });
+        void this.sendDiscordAlert(`⏱ **미체결 자동취소**: ${symbol} — 감시시간(${this.autoTradeWatchMinutes}분) 동안 체결되지 않아 매수 주문을 취소했습니다.`);
       } else if (res.status === "cancelled") {
         // [v0.54.0 긴급 수정 — 오너 보고 "취소 시간 반영이 제대로 안 됨"] 감시 마감 전에 폴링
         //   도중 이미 취소/거부된 걸 발견한 경우 — 우리 타임아웃 로직이 취소한 게 아니라, 킬스위치·
@@ -8699,8 +8732,14 @@ export class ToolEngine extends EventEmitter {
           notify: true,
           notifyTitle: `🔍 관찰 확정: ${sym}`,
         });
-        // [v0.72.0] 디스코드 즉시 알림 — 위 OS 알림(notify)과 별개 통로(앱을 안 보고 있어도 옴).
-        void this.sendDiscordAlert(`🔴 **확정**: ${sym} (현재가 ${priceTxt}) — 자동매매 스크리닝에서 진입 조건을 모두 통과했습니다.`);
+        // [v0.72.0→v0.84.0] 디스코드 즉시 알림 — 위 OS 알림(notify)과 별개 통로(앱을 안 보고
+        //   있어도 옴). [v0.84.0 — 오너 지시 "확정 시 확정사유"] "진입 조건을 모두 통과했다"는
+        //   말만으로는 왜 하필 이 종목·이 시점인지 알 수 없었다 — summarizeConfirmEvidence로
+        //   핵심 근거(세션 고점·도지 시각·몸통 비율·고점과의 간격)를 한 줄 덧붙인다.
+        void this.sendDiscordAlert(
+          `🔴 **확정**: ${sym} (현재가 ${priceTxt}) — 자동매매 스크리닝에서 진입 조건을 모두 통과했습니다.\n` +
+          `└ 사유: ${summarizeConfirmEvidence(r?.evidence ?? null)}`,
+        );
       }
       // 다음 비교 기준을 이번 스캔으로 교체(빠졌다가 나중에 재확정되면 그때 다시 알림).
       this.autoScanNotifiedConfirmed = new Set(run.results.filter((r) => r.status === "confirmed").map((r) => r.symbol));
@@ -8749,12 +8788,21 @@ export class ToolEngine extends EventEmitter {
       }
       let placed = 0;
       for (const cand of candidates) {
+        // [v0.84.0 — 오너 지시 "실패 시 실패사유"] 확정됐는데 결국 진입까지 못 간 모든 경로를
+        //   한 곳으로 모은다 — "자리에 사유를 적는다"와 "디스코드로 알린다"를 분리해 따로
+        //   호출하면 언젠가 한쪽만 고치고 잊어버릴 위험이 있어, 아예 하나의 호출로 묶었다
+        //   (아래 각 continue 지점은 전부 이 함수만 부르면 됨 — 제어 흐름 자체는 그대로 둬서
+        //   실계좌 진입 로직을 건드리는 위험을 최소화했다).
+        const failCandidate = (reason: string) => {
+          this.autoTradeSkipReasons[cand.symbol] = reason;
+          void this.sendDiscordAlert(`⚠️ **진입 실패**: ${cand.symbol} — ${reason}`);
+        };
         if (placed >= freeSlots) {
-          this.autoTradeSkipReasons[cand.symbol] = `이번 사이클엔 빈 자리(${freeSlots}개)를 다른 후보가 먼저 채웠습니다 — 다음 사이클에 다시 시도됩니다.`;
+          failCandidate(`이번 사이클엔 빈 자리(${freeSlots}개)를 다른 후보가 먼저 채웠습니다 — 다음 사이클에 다시 시도됩니다.`);
           continue;
         }
         if (cand.ema200 == null || cand.prevClose == null) {
-          this.autoTradeSkipReasons[cand.symbol] = "가격 데이터 부족(EMA200 또는 전봉종가 확인 안 됨) — 다음 사이클에 다시 시도됩니다.";
+          failCandidate("가격 데이터 부족(EMA200 또는 전봉종가 확인 안 됨) — 다음 사이클에 다시 시도됩니다.");
           continue; // 1분할 계산 불가(데이터 부족)
         }
 
@@ -8766,8 +8814,9 @@ export class ToolEngine extends EventEmitter {
           //   가리키는 분할이다(아래 전부 이 변수를 통해서만 타점가를 쓴다).
           level1 = calcSplit3Level(cand.prevClose, cand.ema200, this.defaultTpPct, this.defaultSlPct, this.autoTradeEntryLevel);
         } catch {
-          this.autoTradeSkipReasons[cand.symbol] =
-            `${this.autoTradeEntryLevel}분할 진입 조건 불성립(전봉종가가 EMA200 이하) — 삼분할 매매기법상 지금은 진입 대상이 아닙니다.`;
+          failCandidate(
+            `${this.autoTradeEntryLevel}분할 진입 조건 불성립(전봉종가가 EMA200 이하) — 삼분할 매매기법상 지금은 진입 대상이 아닙니다.`,
+          );
           continue; // 진입 필터 불성립(전봉종가<=EMA200) — 이 종목은 건너뜀
         }
 
@@ -8776,8 +8825,9 @@ export class ToolEngine extends EventEmitter {
         if (this.autoTradeSlMode === "ema") {
           const sSl = structuralStopPrice(level1.entry, cand.ema200, this.autoTradeEmaStopBufferPct, level1.sl);
           if (sSl == null) {
-            this.autoTradeSkipReasons[cand.symbol] =
-              `EMA 기준 손절가(EMA $${cand.ema200.toFixed(4)} 아래 ${this.autoTradeEmaStopBufferPct}%)가 진입가 $${level1.entry} 이상이라 손절선을 둘 수 없어 건너뜁니다.`;
+            failCandidate(
+              `EMA 기준 손절가(EMA $${cand.ema200.toFixed(4)} 아래 ${this.autoTradeEmaStopBufferPct}%)가 진입가 $${level1.entry} 이상이라 손절선을 둘 수 없어 건너뜁니다.`,
+            );
             continue;
           }
           level1 = { ...level1, sl: roundPrice(sSl) };
@@ -8785,13 +8835,13 @@ export class ToolEngine extends EventEmitter {
 
         // [v0.63.0 ⑤-a] 오늘(KST) 이미 손절된 종목이면 다시 들어가지 않는다(하락 추세 속 반등에 또 물리는 것 방지).
         if (this.autoTradeReentryBlockEnabled && isReentryBlocked(this.autoTradeHistory, cand.symbol, Date.now())) {
-          this.autoTradeSkipReasons[cand.symbol] = "오늘 이미 손절된 종목이라 재진입하지 않습니다(손절 종목 당일 재진입 금지 — 설정에서 끌 수 있음).";
+          failCandidate("오늘 이미 손절된 종목이라 재진입하지 않습니다(손절 종목 당일 재진입 금지 — 설정에서 끌 수 있음).");
           continue;
         }
 
         const usedKey = `${cand.symbol}@${level1.entry}`;
         if (this.autoTradeUsedKeys.has(usedKey)) {
-          this.autoTradeSkipReasons[cand.symbol] = `이미 이 타점($${level1.entry})으로 진입을 완료한 적이 있습니다(동일종목 동일타점 재진입 방지).`;
+          failCandidate(`이미 이 타점($${level1.entry})으로 진입을 완료한 적이 있습니다(동일종목 동일타점 재진입 방지).`);
           continue; // [오너 지시] 동일종목 동일타점 재진입 방지
         }
 
@@ -8824,7 +8874,7 @@ export class ToolEngine extends EventEmitter {
           const reason =
             `직전 타점($${lastEntry.entry})보다 높은 가격($${level1.entry})으로 재진입하려 해 취소했습니다 ` +
             `(하락 추세 중 상향 재진입은 방향 정합성 위반 — 아직 살아있는 포지션이거나 방금 끝난 매매 기준).`;
-          this.autoTradeSkipReasons[cand.symbol] = reason;
+          failCandidate(reason);
           // [v0.61.8] 예전엔 skipReasons에만 남아 다음 사이클에 덮어써졌다 — 실제로 몇 번이나
           //   발동했는지 사후에 확인할 방법이 없었다(오너 지적 검토 중 발견). 저널(최근 로그)에도
           //   남겨 history로 확인 가능하게 한다.
@@ -8851,7 +8901,7 @@ export class ToolEngine extends EventEmitter {
           candidateQty: qty,
         });
         if (!gate.allow) {
-          this.autoTradeSkipReasons[cand.symbol] = gate.reason ?? "안전 게이트에서 거부됨.";
+          failCandidate(gate.reason ?? "안전 게이트에서 거부됨.");
           // 종목 수·손실 한도처럼 "이 사이클 전체"에 적용되는 사유면 더 시도할 필요가 없다.
           if (gate.reason?.includes("종목 수") || gate.reason?.includes("손실")) break;
           continue; // 그 외(예: 예산으로 1주도 못 사는 경우)는 이 종목만 건너뛰고 다음 후보 시도
@@ -8874,14 +8924,16 @@ export class ToolEngine extends EventEmitter {
         try {
           livePriceAtEntry = (await getPrice(cand.symbol)).price;
         } catch (e) {
-          this.autoTradeSkipReasons[cand.symbol] =
-            `주문 직전 현재가 재확인에 실패해(${String(e).replace(/^Error:\s*/, "")}) 안전하게 이번 사이클은 건너뜁니다.`;
+          failCandidate(
+            `주문 직전 현재가 재확인에 실패해(${String(e).replace(/^Error:\s*/, "")}) 안전하게 이번 사이클은 건너뜁니다.`,
+          );
           continue;
         }
         if (!(livePriceAtEntry > cand.ema200)) {
-          this.autoTradeSkipReasons[cand.symbol] =
+          failCandidate(
             `스캔 때는 EMA200 위였지만 주문 직전 재확인 결과 현재가($${livePriceAtEntry})가 EMA200($${cand.ema200}) ` +
-            `아래로 떨어져 진입을 취소했습니다(추세가 그 사이 무너짐 — 실계좌 보호를 위한 마지막 재확인).`;
+            `아래로 떨어져 진입을 취소했습니다(추세가 그 사이 무너짐 — 실계좌 보호를 위한 마지막 재확인).`,
+          );
           continue;
         }
 
@@ -8979,6 +9031,9 @@ export class ToolEngine extends EventEmitter {
             notify: true,
             notifyTitle: `🤖 진입 접수: ${cand.symbol}`,
           });
+          // [v0.84.0 — 오너 지시 "확정 다음 단계도 디코로"] "확정"만 디스코드로 가고 그 다음
+          //   실제로 들어갔는지는 PC를 봐야만 알 수 있었다 — 결과(성공)도 같은 채널로 잇는다.
+          void this.sendDiscordAlert(`🟢 **진입 접수**: ${cand.symbol} $${level1.entry} × ${qty}주 — 체결되면 익절 $${level1.tp} / 손절 $${level1.sl}을 자동 등록합니다.`);
           if (watchPromise) {
             // [v0.30.1] 매수 주문번호를 기록해 둔다 — 앱이 재시작돼 이 감시(watchPromise)가
             //   끊겨도, 이 번호로 reconcileAutoPositions가 나중에 다시 체결 여부를 물어볼 수 있다.
@@ -9010,6 +9065,7 @@ export class ToolEngine extends EventEmitter {
               summary: `⚠️ ${cand.symbol} 진입 주문은 토스에 접수됐지만 이후 처리 중 오류(${String(e).replace(/^Error:\s*/, "")})가 났습니다 — 주문은 계속 감시하며, 중복 주문하지 않습니다.`,
               notify: true, notifyTitle: `⚠️ 진입 후 처리 오류: ${cand.symbol}`,
             });
+            void this.sendDiscordAlert(`⚠️ **진입 후 처리 오류**: ${cand.symbol} — 주문은 토스에 접수됐지만 이후 처리 중 오류(${String(e).replace(/^Error:\s*/, "")})가 났습니다. 주문은 계속 감시 중입니다.`);
             placed++;
             continue;
           }
@@ -9017,7 +9073,7 @@ export class ToolEngine extends EventEmitter {
           this.saveAutoPositions();
           const errMsg = String(e).replace(/^Error:\s*/, "");
           // [v0.35.0] usedKeys에는 안 올렸으므로(위 성공 지점에서만 올림) 다음 사이클에 자동 재시도된다.
-          this.autoTradeSkipReasons[cand.symbol] = `방금 진입을 시도했지만 실패했습니다(${errMsg}) — 다음 사이클에 다시 시도됩니다.`;
+          failCandidate(`방금 진입을 시도했지만 실패했습니다(${errMsg}) — 다음 사이클에 다시 시도됩니다.`);
           this.addJournal({
             kind: "info", symbol: cand.symbol, summary: `🤖 자동매매 진입 실패 ${cand.symbol}: ${errMsg}`,
             notify: true, notifyTitle: `⚠️ 진입 실패: ${cand.symbol}`,
