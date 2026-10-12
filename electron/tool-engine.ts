@@ -8052,6 +8052,9 @@ export class ToolEngine extends EventEmitter {
       summary: `🛡 ${sym}: 보호주문이 없는 채로 보유 중입니다(${reason}) — 봇이 보호가 걸릴 때까지 계속 다시 시도합니다.`,
       notify: true, notifyTitle: `🛡 보호 복구 시작: ${sym}`,
     });
+    // [v0.82.0] 최종 결과(runGuard의 done)뿐 아니라 "지금부터 재시도 시작"도 디스코드로 —
+    //   오너가 앱을 안 보고 있어도 가장 이른 시점에 알 수 있게(OS 알림은 앱을 안 보면 못 봄).
+    void this.sendDiscordAlert(`🛡️ **보호 필요**: ${sym} — 보호주문이 없는 채로 보유 중입니다(${reason}). 보호가 걸릴 때까지 계속 시도합니다.`);
     this.scheduleGuard(3000);
   }
 
@@ -8211,11 +8214,23 @@ export class ToolEngine extends EventEmitter {
       }
 
       for (const u of [...this.autoUnprotected]) {
+        // [v0.82.0 — 긴급, 오너 지적 "계속 매도하는데 디스코드 알림이 왜 안 오냐"] hist가
+        //   있다는 건 실제로 뭔가 바뀌었다는 뜻(조건주문 재등록·시장가 매도·계좌에서 이미
+        //   사라짐 확인 등) — 이런 결과는 OS 알림+디스코드로 반드시 즉시 알린다(오늘 사고
+        //   때도 이 알림이 전혀 없어서 한참 뒤에야 알게 됐다). hist가 없는 경우("이미
+        //   조건주문 걸려있음"/"오너가 직접 관리 중")는 아무 것도 안 바뀐 "확인만"이라
+        //   조용히 넘어간다(알림 피로 방지).
         const done = (why: string, hist?: Partial<AutoTradeHistoryEntry>) => {
           this.autoUnprotected = this.autoUnprotected.filter((x) => x.symbol !== u.symbol);
           this.saveAutoPositions();
-          this.addJournal({ kind: "info", symbol: u.symbol, summary: `🛡 ${u.symbol} 보호 확인 — ${why}` });
-          if (hist) this.updateAutoTradeHistory(u.symbol, u.entry, u.enteredAtMs, hist);
+          this.addJournal({
+            kind: "info", symbol: u.symbol, summary: `🛡 ${u.symbol} 보호 확인 — ${why}`,
+            ...(hist ? { notify: true, notifyTitle: `🛡 보호 가드 결과: ${u.symbol}` } : {}),
+          });
+          if (hist) {
+            this.updateAutoTradeHistory(u.symbol, u.entry, u.enteredAtMs, hist);
+            void this.sendDiscordAlert(`🛡️ **보호 가드**: ${u.symbol} — ${why}`);
+          }
         };
         const qtyHeld = held.get(u.symbol) ?? 0;
         if (qtyHeld <= 0) {

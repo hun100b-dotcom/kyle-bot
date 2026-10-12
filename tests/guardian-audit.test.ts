@@ -198,6 +198,37 @@ describe("[v0.75.0 — AGRZ와 같은 부류] runGuard 시장가 정리 분기�
     }
   }, 20_000);
 
+  it("[v0.82.0 긴급] 보호 가드가 실제로 매도/재등록했으면(hist 있음) OS 알림(notify)이 켜진다 — 오너 지적: '계속 매도하는데 알림이 안 온다'", async () => {
+    const { dir, eng, x, stopTimer } = await setup();
+    try {
+      x.autoTradeHistory.push(histEntry({ tp: 2.5, sl: 1.8 }));
+      await eng.mockSetPrice("AAPL", 2.6); // 감시가 밖 — 시장가 정리 분기를 탄다
+      expect(await eng.auditUnprotectedHoldings()).toBe(1);
+      stopTimer();
+      await eng.runGuard();
+      const j = eng.getJournal().find((e) => e.symbol === "AAPL" && e.summary.includes("보호 확인"));
+      expect(j?.notify).toBe(true); // 결과가 실제로 바뀌었으니(시장가 매도) 반드시 알려야 한다
+      expect(j?.notifyTitle).toContain("보호 가드 결과");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("[v0.82.0] 보호 가드가 '이미 조건주문 걸려있음'처럼 아무 것도 안 바꿨으면 알림을 안 보낸다(알림 피로 방지)", async () => {
+    const { dir, eng, x, stopTimer } = await setup();
+    try {
+      x.autoTradeHistory.push(histEntry());
+      expect(await eng.auditUnprotectedHoldings()).toBe(1);
+      stopTimer();
+      await eng.placeOco({ symbol: "AAPL", quantity: 1, tpTrigger: 2.5, tpPrice: 2.5, slTrigger: 1.8, slPrice: 1.79, expireDate: "2026-12-30" });
+      await eng.runGuard();
+      const j = eng.getJournal().find((e) => e.symbol === "AAPL" && e.summary.includes("보호 확인"));
+      expect(j?.notify).toBeFalsy(); // 이미 조건주문이 걸려 있어 아무 것도 안 바뀜 — 알릴 필요 없음
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it("실제 체결가 조회가 끝내 안 되면(주문번호 없음) 추정가로 폴백하되 그 사실을 정직하게 남긴다", async () => {
     const { dir, eng, x, stopTimer } = await setup();
     try {
