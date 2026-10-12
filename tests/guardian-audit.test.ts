@@ -66,6 +66,20 @@ describe("[v0.69.1] 독립 감사 — 봇이 산 보유 종목인데 보호 조�
     }
   }, 20_000);
 
+  it("[v0.80.0 긴급] reflectUnknownHoldings의 참고용 기록(reflectedOnly)은 '봇이 산 기록'으로 착각하지 않는다 — 하이닉스·필옵틱스·아이온큐 오매도 사고 재발 방지", async () => {
+    const { dir, eng, x, stopTimer } = await setup();
+    try {
+      // reflectUnknownHoldings가 실제로 남기는 모양 그대로: status="active", tp=sl=entry, reflectedOnly=true.
+      x.autoTradeHistory.push(histEntry({ status: "active", exitedAt: null, tp: 2.1, sl: 2.1, reflectedOnly: true }));
+      const added = await eng.auditUnprotectedHoldings();
+      stopTimer();
+      expect(added).toBe(0); // reflectedOnly 기록만으로는 절대 보호 대상에 올리지 않는다
+      expect(x.autoUnprotected).toHaveLength(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it("이미 토스에 조건주문이 걸려 있으면 올리지 않는다", async () => {
     const { dir, eng, x, stopTimer } = await setup();
     try {
@@ -227,6 +241,22 @@ describe("[v0.78.0] reflectUnknownHoldings — Capri가 모르는 보유 종목�
       expect(rec.note).toContain("익절/손절도 자동으로 안 걸립니다");
       // 자동으로 OCO를 걸거나 가드에 올리지 않는다 — Capri가 "산 것"이 아니므로.
       expect(x.autoUnprotected).toHaveLength(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("[v0.80.0 긴급] 반영한 뒤 다음 주기에 auditUnprotectedHoldings가 돌아도 보호 대상(가드)에 올리지 않는다 — 실제 사고를 그대로 재현해 검증", async () => {
+    // 실제 사고 순서 그대로: ①reflectUnknownHoldings가 참고 기록을 남김 → ②5분 뒤 다음 점검에서
+    // auditUnprotectedHoldings가 돈다. 수정 전에는 ②가 ①의 기록을 "봇이 산 것"으로 착각해
+    // autoUnprotected에 올리고, runGuard가 기본 손절%로 실제 매도(또는 OCO 등록)까지 이어졌다.
+    const { dir, eng, x, stopTimer } = await setup();
+    try {
+      expect(await eng.reflectUnknownHoldings()).toBe(1); // ① 참고용 기록만 남김
+      const added = await eng.auditUnprotectedHoldings(); // ② 다음 점검 — 여기가 사고 지점이었다
+      stopTimer();
+      expect(added).toBe(0);
+      expect(x.autoUnprotected).toHaveLength(0); // runGuard로 이어질 여지 자체가 없어야 한다
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

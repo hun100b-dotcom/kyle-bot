@@ -1075,6 +1075,12 @@ export interface AutoTradeHistoryEntry {
   buyOrderId?: string | null;
   /** [v0.69.2] 실제 평균 체결가 — 주문가(entry)와 다르면 익절/손절은 이 값 기준으로 걸렸다. */
   fillPrice?: number | null;
+  /** [v0.80.0 — 긴급 수정] true면 reflectUnknownHoldings가 "참고용으로만" 남긴 기록이다 —
+   *  Capri가 실제로 산 게 아니므로, auditUnprotectedHoldings가 "Capri 포지션인데 보호가
+   *  안 됐다"고 착각해 runGuard(실제 매도/조건주문 등록)로 이어지면 절대 안 된다. 과거엔
+   *  note 문자열 접두사("[자동반영]")로만 구분해 안전장치가 느슨했던 게 실제 사고 원인이었다
+   *  (하이닉스·필옵틱스·아이온큐 오매도) — 타입으로 명시해 다시는 새어나가지 않게 한다. */
+  reflectedOnly?: boolean;
   /** [v0.45.0 — 오너 요청 "각 사용자가 어떤 기준으로 자동매매를 진행했는지도 연구 데이터에
    *  모이게"] 이 매매가 실제로 어떤 스크리닝·리스크 설정으로 진입됐는지의 스냅샷. 오너들이
    *  설정을 수시로 바꾸고(버전 이력은 안 남음) capri_group_trades는 이 기록을 그룹 전체가
@@ -8130,6 +8136,13 @@ export class ToolEngine extends EventEmitter {
    *     ③ 토스에 살아 있는 조건주문(OPEN)이 하나도 없는 종목 → 가드 대기 목록에 올린다.
    *   [안전장치] 봇이 산 적 없는 종목(수동 보유)은 절대 건드리지 않는다. 확인(보유·조건주문 조회)이 하나라도 실패하면 아무것도 안 한다.
    *   "조건주문이 사라진 보유 종목 자동 재보호" 설정을 끄면 이 감사도 함께 꺼진다(사람이 직접 보호를 풀어 둔 경우를 존중).
+   *
+   *   [v0.80.0 — 긴급 수정, 실계좌 오매도 사고] reflectUnknownHoldings(v0.78.0, "Capri가
+   *   모르는 보유종목 참고용 기록")가 남긴 기록(reflectedOnly: true)을 "봇이 산 기록"으로
+   *   착각해, Capri가 산 적도 없는 종목(국내종목 포함)을 보호 대상으로 올리고 runGuard가
+   *   기본 손절%로 실제 매도까지 내보내는 사고가 있었다(2026-10-12, 하이닉스·필옵틱스·
+   *   아이온큐). 아래 mine 조회에서 reflectedOnly 기록은 반드시 제외해야 한다 — 이게
+   *   "수동 보유는 절대 건드리지 않는다"는 위 안전장치의 실제 구멍이었다.
    */
   async auditUnprotectedHoldings(): Promise<number> {
     if (!this.autoReprotectVanished || this.isDryRun()) return 0;
@@ -8155,9 +8168,9 @@ export class ToolEngine extends EventEmitter {
       if (tracked.has(sym) || openSyms.has(sym)) continue;
       if ((this.guardDismissed[sym] ?? 0) > Date.now()) continue; // [v0.69.4] 오너가 직접 관리 중
       const mine = this.autoTradeHistory
-        .filter((e) => e.symbol.toUpperCase() === sym && Number(e.id.split("@")[2]) >= cutoff && e.status !== "dryrun")
+        .filter((e) => e.symbol.toUpperCase() === sym && Number(e.id.split("@")[2]) >= cutoff && e.status !== "dryrun" && !e.reflectedOnly)
         .sort((a, b) => Number(b.id.split("@")[2]) - Number(a.id.split("@")[2]))[0];
-      if (!mine) continue; // 봇이 산 적 없는 종목 — 수동 보유는 건드리지 않는다
+      if (!mine) continue; // 봇이 산 적 없는 종목(reflectUnknownHoldings의 참고 기록 포함) — 수동 보유는 건드리지 않는다
       if (mine.status === "closed_win" || mine.status === "closed_loss") continue; // 정상 청산 기록이 있으면 그 이후 새로 산 게 아닌 한 대상 아님
       this.registerUnprotected(
         { symbol: sym, entry: mine.entry, tp: mine.tp, sl: mine.sl, quantity: qty, enteredAtMs: Number(mine.id.split("@")[2]), status: "active", conditionalOrderId: null },
@@ -8226,6 +8239,7 @@ export class ToolEngine extends EventEmitter {
         status: "active", exitedAt: null, exitPrice: null, pnlUsd: null, pnlPct: null,
         note: "[자동반영] 토스에 있는데 Capri가 모르던 보유 종목이라 참고용으로만 기록했습니다(Capri가 산 게 아니라 익절/손절도 자동으로 안 걸립니다 — 직접 관리하세요. 제외하려면 [보유 현황]에서 \"장기보유로 표시\").",
         conditionalOrderId: null, buyOrderId: null,
+        reflectedOnly: true, // [v0.80.0 긴급] 아래 auditUnprotectedHoldings가 이 기록을 "Capri 포지션"으로 오인하지 않게 막는 유일한 방패
       });
       added++;
     }
