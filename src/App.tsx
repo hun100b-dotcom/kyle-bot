@@ -883,6 +883,13 @@ function App() {
   const [discordWebhook, setDiscordWebhook] = useState("");
   const [discordSaveBusy, setDiscordSaveBusy] = useState(false);
   const [discordMsg, setDiscordMsg] = useState("");
+  // [v0.83.0] 개인용 디스코드 알림 — 로그인한 사람 누구나. null=아직 안 불러옴(배너
+  // 깜빡임 방지), ""=불러왔는데 비어있음(배너 뜸), 값 있으면 설정 완료(배너 안 뜸).
+  const [myDiscordWebhook, setMyDiscordWebhook] = useState<string | null>(null);
+  const [myDiscordInput, setMyDiscordInput] = useState("");
+  const [myDiscordSaveBusy, setMyDiscordSaveBusy] = useState(false);
+  const [myDiscordMsg, setMyDiscordMsg] = useState("");
+  const [myDiscordBannerClosed, setMyDiscordBannerClosed] = useState(false);
   // [v0.3.0] 세션별 시드 비율 설정 입력칸(설정 탭). 문자열 보관(입력 중 뭉개짐 방지).
   // [v0.8.3] 기본 손익비 설정 입력칸(설정 탭). 공장값 2/10, 저장하면 계산기 초기값이 됨.
   const [defForm, setDefForm] = useState<{ tp: string; sl: string }>({ tp: "2", sl: "10" });
@@ -2941,6 +2948,7 @@ ${msg}
     try {
       const s = await window.kyletool.authStatus();
       setAuthState(s);
+      if (s.loggedIn) void loadMyNotifySettings(); // [v0.83.0] 개인용 알림 — 운영자 아니어도 누구나
       if (s.isOwner) {
         void loadAccessRequests();
         void loadPendingAccounts(); // [v0.59.0] 진짜 게이트(capri_accounts) 대기 목록
@@ -3079,6 +3087,29 @@ ${msg}
       const r = await window.kyletool.saveNotifySettings(discordWebhook);
       setDiscordMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
     } finally { setDiscordSaveBusy(false); }
+  }
+
+  // --------------------------------------------------------------------------
+  // [v0.83.0 — 오너 지시 "카일도 디스코드 알림 받으려면 개인용 웹훅 세팅창이 있어야
+  //   해"] 위 섹션(운영자 전용, 새 가입 알림용)과 별개로, 로그인한 사람 누구나 자기
+  //   웹훅을 등록하면 스크리닝 신호·보호 가드 결과를 "본인" 디스코드로 받는다.
+  // --------------------------------------------------------------------------
+  async function loadMyNotifySettings() {
+    try {
+      const s = await window.kyletool.getMyNotifySettings();
+      setMyDiscordWebhook(s.discordWebhookUrl ?? "");
+      setMyDiscordInput(s.discordWebhookUrl ?? "");
+    } catch {
+      /* 무시 — null(아직 안 불러옴) 상태로 남아 배너가 섣불리 뜨진 않는다 */
+    }
+  }
+  async function doSaveMyDiscordWebhook() {
+    setMyDiscordSaveBusy(true); setMyDiscordMsg("저장 중…");
+    try {
+      const r = await window.kyletool.saveMyNotifySettings(myDiscordInput);
+      setMyDiscordMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      if (r.ok) setMyDiscordWebhook(myDiscordInput.trim());
+    } finally { setMyDiscordSaveBusy(false); }
   }
 
   // --------------------------------------------------------------------------
@@ -6227,8 +6258,39 @@ ${msg}
             {authMsg && <p className={authMsg.startsWith("✅") ? "ok" : "hint"} style={{ whiteSpace: "pre-wrap" }}>{authMsg}</p>}
             {syncMsg && <p className="hint" style={{ whiteSpace: "pre-wrap" }}>{syncMsg}</p>}
             {authState.isOwner && (
-              <p className="hint small">📋 가입 승인·디스코드 알림 설정은 [현황 → 👥 그룹원 관리] 탭에서 할 수 있어요.</p>
+              <p className="hint small">
+                📋 가입 승인·"새 가입 신청" 디스코드 알림(운영자용)은 [현황 → 👥 그룹원 관리] 탭에서
+                할 수 있어요(스크리닝·보호 가드 알림은 바로 아래 "🔔 내 디스코드 알림"이에요).
+              </p>
             )}
+          </section>
+
+          {/* [v0.83.0 — 오너 지시] 개인용 디스코드 알림 — 운영자 전용이 아니라 로그인한
+              사람 누구나(그룹원 각자) 자기 웹훅을 등록할 수 있다. 위 "☁️ 계정" 섹션처럼
+              isOwner로 가리지 않는다. */}
+          <section className="card wide">
+            <h2>🔔 내 디스코드 알림</h2>
+            <p className="hint">
+              스크리닝 확정/관찰 신호, 보호 가드 결과(조건주문 재등록·시장가 매도 등)를
+              <b> 내 디스코드</b>로 바로 받습니다(그룹원마다 각자 자기 걸 등록 — [현황 → 👥 그룹원
+              관리] 탭에 있는 디스코드 알림은 운영자의 "새 가입 신청" 알림 전용이라 이것과
+              별개입니다). 디스코드 채널 설정 → 연동 → 웹후크 만들기에서 주소를 복사해
+              붙여넣으세요.
+            </p>
+            <div className="form-row">
+              <input
+                type="text"
+                style={{ flex: 1 }}
+                placeholder="https://discord.com/api/webhooks/…"
+                value={myDiscordInput}
+                disabled={myDiscordSaveBusy}
+                onChange={(e) => setMyDiscordInput(e.target.value)}
+              />
+              <button className="btn btn-start" disabled={myDiscordSaveBusy} onClick={() => void doSaveMyDiscordWebhook()}>
+                {myDiscordSaveBusy ? "저장 중…" : "저장"}
+              </button>
+            </div>
+            {myDiscordMsg && <p className={myDiscordMsg.startsWith("✅") ? "ok" : "hint"}>{myDiscordMsg}</p>}
           </section>
 
           {/* ── ④ 화면 표시 — 손익 색 관습(미국식/한국식) ── */}
@@ -6899,6 +6961,31 @@ ${msg}
             폴더 열기
           </button>
           <button className="btn" onClick={() => setMacDmg(null)}>
+            닫기
+          </button>
+        </div>
+      )}
+
+      {/* [v0.83.0 — 오너 지시 "디스코드 등록하지않으면 등록하라는 팝업창 뜨게하고
+          설정완료되면 팝업이뜨지않도록"] 개인용 디스코드 웹훅을 아직 등록 안 했으면 안내
+          배너를 띄운다 — myDiscordWebhook이 ""(불러왔는데 비어있음)일 때만(null=아직
+          안 불러온 중이라 섣불리 안 뜸, 값 있으면 설정 완료라 아예 안 뜸). */}
+      {authState.loggedIn && myDiscordWebhook === "" && !myDiscordBannerClosed && (
+        <div
+          className="update-banner"
+          style={
+            update || macSwap || macDmg
+              // 위에 떠 있는 배너 수만큼 64px씩 밀어낸다(둘 다 뜨면 128px — macSwap·macDmg는
+              // 서로 동시에 뜨지 않으므로 둘을 합쳐 "1개"로 셈).
+              ? { top: (update ? 64 : 0) + (macSwap || macDmg ? 64 : 0) }
+              : undefined
+          }
+        >
+          <span>🔔 디스코드 알림을 아직 등록 안 하셨어요 — 등록하면 스크리닝 신호·보호 가드 결과를 바로 받을 수 있어요.</span>
+          <button className="btn" onClick={() => goToTab("settings")}>
+            지금 등록
+          </button>
+          <button className="btn" onClick={() => setMyDiscordBannerClosed(true)}>
             닫기
           </button>
         </div>

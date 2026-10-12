@@ -1161,7 +1161,7 @@ describe("[v0.72.0 — 오너 지시 '관찰, 확정된 종목이 나오면 즉�
     return (eng as unknown as { sendDiscordAlert: (m: string) => Promise<void> }).sendDiscordAlert(msg);
   }
 
-  it("웹훅 주소를 설정 안 했으면(capri_notify_settings 비어있음) 외부로 아무것도 안 보낸다", async () => {
+  it("웹훅 주소를 설정 안 했으면(capri_user_notify_settings 비어있음) 외부로 아무것도 안 보낸다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-discord1-"));
     try {
       const eng = new ToolEngine(dir, { forceMock: true });
@@ -1171,12 +1171,13 @@ describe("[v0.72.0 — 오너 지시 '관찰, 확정된 종목이 나오면 즉�
       globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
         const u = String(url);
         calledUrls.push(u);
-        if (u.includes("capri_notify_settings")) return new Response(JSON.stringify([{ discord_webhook_url: null }]), { status: 200 });
+        // v0.83.0: 전역 설정(capri_notify_settings)이 아니라 "나" 개인용 설정(capri_user_notify_settings)을 조회함
+        if (u.includes("capri_user_notify_settings")) return new Response(JSON.stringify([{ discord_webhook_url: null }]), { status: 200 });
         return originalFetch(url as never, init);
       }) as typeof fetch;
       try {
         await send(eng, "테스트 메시지");
-        expect(calledUrls.some((u) => !u.includes("capri_notify_settings"))).toBe(false); // 설정 조회 말고는 아무 데도 안 쏨
+        expect(calledUrls.some((u) => !u.includes("capri_user_notify_settings"))).toBe(false); // 설정 조회 말고는 아무 데도 안 쏨
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -1194,7 +1195,7 @@ describe("[v0.72.0 — 오너 지시 '관찰, 확정된 종목이 나오면 즉�
       const originalFetch = globalThis.fetch;
       globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
         const u = String(url);
-        if (u.includes("capri_notify_settings")) {
+        if (u.includes("capri_user_notify_settings")) {
           return new Response(JSON.stringify([{ discord_webhook_url: "https://discord.com/api/webhooks/fake/token" }]), { status: 200 });
         }
         if (u.includes("discord.com/api/webhooks")) {
@@ -1224,13 +1225,120 @@ describe("[v0.72.0 — 오너 지시 '관찰, 확정된 종목이 나오면 즉�
       const originalFetch = globalThis.fetch;
       globalThis.fetch = (async (url: string | URL) => {
         const u = String(url);
-        if (u.includes("capri_notify_settings")) {
+        if (u.includes("capri_user_notify_settings")) {
           return new Response(JSON.stringify([{ discord_webhook_url: "https://discord.com/api/webhooks/fake/token" }]), { status: 200 });
         }
         throw new Error("네트워크 끊김(시뮬레이션)");
       }) as typeof fetch;
       try {
         await expect(send(eng, "테스트")).resolves.toBeUndefined(); // 던지지 않고 조용히 끝남
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("[v0.83.0] 개인용 디스코드 웹훅 — getMyNotifySettings/saveMyNotifySettings", () => {
+  function logIn(eng: ToolEngine): void {
+    const engAny = eng as unknown as { authAccessToken: string | null; authExpiresAtMs: number; authUserId: string | null };
+    engAny.authAccessToken = "test-access-token";
+    engAny.authExpiresAtMs = Date.now() + 3_600_000;
+    engAny.authUserId = "test-user-id";
+  }
+
+  it("로그인 안 한 상태면 null을 반환하고(조회) 저장은 실패 메시지를 준다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-mynotify1-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const got = await eng.getMyNotifySettings();
+      expect(got.discordWebhookUrl).toBeNull();
+      const saved = await eng.saveMyNotifySettings("https://discord.com/api/webhooks/x/y");
+      expect(saved.ok).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("로그인했고 저장된 값이 있으면 그 값을 그대로 돌려준다(남의 설정이 아니라 내 것만)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-mynotify2-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      logIn(eng);
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: string | URL) => {
+        const u = String(url);
+        if (u.includes("capri_user_notify_settings")) {
+          expect(u).toContain("user_id=eq.test-user-id"); // 반드시 "내" user_id로만 조회해야 함
+          return new Response(JSON.stringify([{ discord_webhook_url: "https://discord.com/api/webhooks/mine/token" }]), { status: 200 });
+        }
+        return originalFetch(url as never);
+      }) as typeof fetch;
+      try {
+        const got = await eng.getMyNotifySettings();
+        expect(got.discordWebhookUrl).toBe("https://discord.com/api/webhooks/mine/token");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("저장 시 내 user_id로 upsert(on_conflict=user_id)하고, 다른 사람 설정을 건드리지 않는다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-mynotify3-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      logIn(eng);
+      let posted: { url: string; body: string } | null = null;
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+        const u = String(url);
+        if (u.includes("capri_user_notify_settings")) {
+          posted = { url: u, body: String(init?.body ?? "") };
+          return new Response(null, { status: 201 });
+        }
+        return originalFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        const res = await eng.saveMyNotifySettings("https://discord.com/api/webhooks/new/token");
+        expect(res.ok).toBe(true);
+        expect(posted).not.toBeNull();
+        expect(posted!.url).toContain("on_conflict=user_id");
+        const body = JSON.parse(posted!.body) as { user_id: string; discord_webhook_url: string | null };
+        expect(body.user_id).toBe("test-user-id");
+        expect(body.discord_webhook_url).toBe("https://discord.com/api/webhooks/new/token");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("빈 문자열로 저장하면 알림을 끄는 것(null로 저장)이고, 성공 메시지도 그렇게 안내한다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-mynotify4-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      logIn(eng);
+      let posted: { body: string } | null = null;
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+        const u = String(url);
+        if (u.includes("capri_user_notify_settings")) {
+          posted = { body: String(init?.body ?? "") };
+          return new Response(null, { status: 201 });
+        }
+        return originalFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        const res = await eng.saveMyNotifySettings("   ");
+        expect(res.ok).toBe(true);
+        expect(res.message).toContain("꺼짐");
+        const body = JSON.parse(posted!.body) as { discord_webhook_url: string | null };
+        expect(body.discord_webhook_url).toBeNull();
       } finally {
         globalThis.fetch = originalFetch;
       }

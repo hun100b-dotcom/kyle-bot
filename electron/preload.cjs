@@ -33,6 +33,8 @@ contextBridge.exposeInMainWorld("kyletool", {
   decideAccount: (userId, decision) => ipcRenderer.invoke("tool:auth:decideAccount", userId, decision),
   getNotifySettings: () => ipcRenderer.invoke("tool:notify:get"),
   saveNotifySettings: (url) => ipcRenderer.invoke("tool:notify:save", url),
+  getMyNotifySettings: () => ipcRenderer.invoke("tool:notify:getMine"),
+  saveMyNotifySettings: (url) => ipcRenderer.invoke("tool:notify:saveMine", url),
   authOAuth: (provider) => ipcRenderer.invoke("tool:auth:oauth", provider),
   // [v0.59.0] 폰 원격 조종 — 명령 보내기/조회 + PC 생존신호 조회(실행은 항상 PC가 자동으로 한다)
   sendCommand: (type, payload) => ipcRenderer.invoke("tool:remote:send", type, payload),

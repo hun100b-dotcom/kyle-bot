@@ -2764,20 +2764,63 @@ export class ToolEngine extends EventEmitter {
     }
   }
 
+  // --------------------------------------------------------------------------
+  // [v0.83.0 — 오너 지시 "카일도 디스코드 알림 받으려면 개인용 웹훅 세팅창이 있어야
+  //   해"] 위 capri_notify_settings(단일 전역 행)는 "새 가입 대기" 알림 전용으로 계속
+  //   두고, 거래 신호(스크리닝·보호 가드)는 로그인한 사람 각자의 웹훅
+  //   (capri_user_notify_settings, 본인 행만 RLS)으로 보낸다 — 그룹 전원이 같은 앱을
+  //   쓰지만 각자 자기 디스코드로 알림을 받아야 하므로 전역 설정 하나로는 안 됐다.
+  // --------------------------------------------------------------------------
+
+  /** [개인용] 로그인한 사람 "본인"의 디스코드 웹훅 주소(있으면). */
+  async getMyNotifySettings(): Promise<{ discordWebhookUrl: string | null }> {
+    const token = await this.ensureAccessToken();
+    if (!token || !this.authUserId) return { discordWebhookUrl: null };
+    try {
+      const res = await fetchWithTimeout(
+        `${ToolEngine.SUPABASE_URL}/rest/v1/capri_user_notify_settings?select=discord_webhook_url&user_id=eq.${this.authUserId}`,
+        { headers: this.authRestHeaders(token) }, 10_000, "capri_user_notify_settings",
+      );
+      if (!res.ok) return { discordWebhookUrl: null };
+      const rows = (await res.json()) as Array<{ discord_webhook_url: string | null }>;
+      return { discordWebhookUrl: rows[0]?.discord_webhook_url ?? null };
+    } catch {
+      return { discordWebhookUrl: null };
+    }
+  }
+
+  /** [개인용] 로그인한 사람 "본인"의 디스코드 웹훅 주소 저장(빈 문자열이면 알림 끔). */
+  async saveMyNotifySettings(discordWebhookUrl: string): Promise<{ ok: boolean; message: string }> {
+    const token = await this.ensureAccessToken();
+    if (!token || !this.authUserId) return { ok: false, message: "먼저 로그인하세요." };
+    try {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_user_notify_settings?on_conflict=user_id`, {
+        method: "POST",
+        headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({ user_id: this.authUserId, discord_webhook_url: discordWebhookUrl.trim() || null, updated_at: new Date().toISOString() }),
+      }, 10_000, "capri_user_notify_settings");
+      if (!res.ok) return { ok: false, message: `저장 실패(HTTP ${res.status}).` };
+      return { ok: true, message: discordWebhookUrl.trim() ? "저장했습니다. 이제부터 스크리닝 신호·보호 가드 알림을 내 디스코드로 받습니다." : "웹훅 주소를 비웠습니다(알림 꺼짐)." };
+    } catch (err) {
+      return { ok: false, message: String(err).replace(/^Error:\s*/, "") };
+    }
+  }
+
   /**
    * [v0.72.0 — 오너 지시 "스크리너를 통해 관찰, 확정된 종목이 나오면 즉시 디스코드로 알림"]
    *   전수조사 결과, capri_notify_settings의 웹훅 주소는 지금까지 "새 가입 대기"(DB 트리거,
    *   위 섹션 참고) 용도로만 쓰이고 있었다 — 스크리닝/매매 신호로 디스코드를 쏘는 경로는
    *   어디에도 없었다(데스크톱 알림(OS Notification, addJournal의 notify 플래그)과는 완전히
-   *   별개 통로). 같은 웹훅 주소를 재사용해 이제 자동매매 사이클(아래 호출부)에서 직접 쏜다.
-   *   [앱이 꺼져 있을 때는?] 스캔 자체가 앱이 켜져 있을 때만 도니, "꺼져 있어도 와야 한다"는
-   *   새 가입 알림과 달리 DB 트리거가 필요 없다(알릴 일 자체가 없음).
+   *   별개 통로). [앱이 꺼져 있을 때는?] 스캔 자체가 앱이 켜져 있을 때만 도니, "꺼져 있어도
+   *   와야 한다"는 새 가입 알림과 달리 DB 트리거가 필요 없다(알릴 일 자체가 없음).
    *   실패해도 자동매매 사이클을 막으면 안 되므로 항상 조용히 넘어간다(호출부도 await는 하되
    *   에러를 바깥으로 던지지 않음 — try/catch로 완전히 격리).
+   *   [v0.83.0] 전역 설정 대신 호출하는 사람 "본인"의 웹훅(getMyNotifySettings)을 쓴다 —
+   *   그룹원 각자 자기 디스코드로 받아야 하므로(오너 지시).
    */
   private async sendDiscordAlert(message: string): Promise<void> {
     try {
-      const { discordWebhookUrl } = await this.getNotifySettings();
+      const { discordWebhookUrl } = await this.getMyNotifySettings();
       if (!discordWebhookUrl) return; // 설정 안 했으면 조용히 아무 일도 안 함(새 가입 알림과 동일 원칙)
       await fetchWithTimeout(discordWebhookUrl, {
         method: "POST",

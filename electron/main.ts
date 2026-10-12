@@ -545,6 +545,9 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:auth:decideAccount", (_ev, userId: string, decision: "approved" | "rejected") => e.decideAccount(userId, decision));
   ipcMain.handle("tool:notify:get", () => e.getNotifySettings());
   ipcMain.handle("tool:notify:save", (_ev, url: string) => e.saveNotifySettings(url));
+  // [v0.83.0] 개인용 디스코드 알림(로그인한 사람 누구나 자기 웹훅 등록)
+  ipcMain.handle("tool:notify:getMine", () => e.getMyNotifySettings());
+  ipcMain.handle("tool:notify:saveMine", (_ev, url: string) => e.saveMyNotifySettings(url));
   ipcMain.handle("tool:auth:oauth", (_ev, provider: "google") => startOAuthPopup(e, provider));
   // [v0.59.0] 폰 원격 조종 — 명령 보내기/조회 + PC 생존신호 조회. 명령 "실행"(폴링 루프)은
   //   IPC로 노출하지 않는다(engine.startRemoteControlLoop()는 main.ts가 직접 부른다 — 아래 참고).
