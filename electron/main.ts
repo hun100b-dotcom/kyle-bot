@@ -764,7 +764,11 @@ function registerIpc(e: ToolEngine): void {
 }
 
 // 앱을 끌 때 릴레이·터널도 같이 정리한다(좀비 프로세스 방지).
+// [v0.90.0] 디바운스 중이던 저널·포지션 저장 등을 종료 직전에 동기로 확정한다 — 그냥 종료하면
+//   300ms 디바운스 타이머가 아직 안 돈 마지막 기록이 디스크에 반영되기 전에 프로세스가 죽을 수 있다
+//   (업데이트 재시작 경로는 prepareForRestart()가 이미 같은 이유로 호출 — 평소 종료도 똑같이 챙긴다).
 app.on("before-quit", () => {
+  engine?.flushAllFileSavesSync();
   tunnel?.stop();
   void relay?.stop();
 });

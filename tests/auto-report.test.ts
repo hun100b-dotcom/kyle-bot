@@ -181,6 +181,7 @@ describe("[v0.62.1] 엔진 — 자동매매 켬/끔이 실행(run) 기록으로 
       eng.startAutoTrade();
       await eng.autoScanNow(); // 첫 사이클이 끝날 때까지 기다림
       eng.stopAutoTrade("테스트 종료");
+      eng.flushAllFileSavesSync(); // [v0.90.0] 저장이 디바운스(비동기)로 바뀌어 확인 전에 강제로 확정시킨다
       const file = join(dir, "kylebot-auto-runs.json");
       expect(existsSync(file)).toBe(true);
       const runs = JSON.parse(readFileSync(file, "utf8")) as AutoRunRecord[];
@@ -203,6 +204,7 @@ describe("[v0.62.1] 엔진 — 자동매매 켬/끔이 실행(run) 기록으로 
       const eng = new ToolEngine(dir, { forceMock: true });
       eng.startAutoTrade();
       eng.stopAutoTrade();
+      eng.flushAllFileSavesSync(); // [v0.90.0] 저장이 디바운스(비동기)로 바뀌어 확인 전에 강제로 확정시킨다
       const runs = JSON.parse(readFileSync(join(dir, "kylebot-auto-runs.json"), "utf8")) as AutoRunRecord[];
       expect(runs[0].endReason).toBe("오너가 직접 중지");
     } finally {
@@ -215,7 +217,8 @@ describe("[v0.62.1] 엔진 — 자동매매 켬/끔이 실행(run) 기록으로 
     try {
       const stale = run({ endedAtMs: null, endReason: null, lastActiveAtMs: kstMs("2026-10-02 01:00:00") });
       writeFileSync(join(dir, "kylebot-auto-runs.json"), JSON.stringify([stale]), "utf8");
-      new ToolEngine(dir, { forceMock: true }); // 생성자가 마감 처리
+      const eng = new ToolEngine(dir, { forceMock: true }); // 생성자가 마감 처리
+      eng.flushAllFileSavesSync(); // [v0.90.0] 마감 처리로 생긴 저장도 디바운스되므로 확인 전에 강제로 확정시킨다
       const runs = JSON.parse(readFileSync(join(dir, "kylebot-auto-runs.json"), "utf8")) as AutoRunRecord[];
       expect(runs[0].endedAtMs).toBe(kstMs("2026-10-02 01:00:00"));
       expect(runs[0].endReason).toContain("앱 종료");
@@ -232,6 +235,7 @@ describe("[v0.62.1] 엔진 — 자동매매 켬/끔이 실행(run) 기록으로 
       const eng = new ToolEngine(dir, { forceMock: true });
       eng.startAutoTrade(); // 새 기록 추가 → 저장 시 상한 적용
       eng.stopAutoTrade();
+      eng.flushAllFileSavesSync(); // [v0.90.0] 저장이 디바운스(비동기)로 바뀌어 확인 전에 강제로 확정시킨다
       const runs = JSON.parse(readFileSync(join(dir, "kylebot-auto-runs.json"), "utf8")) as AutoRunRecord[];
       expect(runs.length).toBe(30);
       expect(runs[0].id).toBe("run-6"); // 앞쪽 6개(0~5)가 밀려남

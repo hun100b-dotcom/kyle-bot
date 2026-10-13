@@ -163,10 +163,11 @@ describe("[v0.69.0] 보호 가드 — 보호주문 없는 보유 종목을 끝�
   }, 20_000);
 
   it("보호 대기 목록은 파일에 저장되어 앱을 껐다 켜도 이어진다", async () => {
-    const { dir, x, stopTimer } = await setup();
+    const { dir, eng, x, stopTimer } = await setup();
     try {
       x.registerUnprotected(pos(), "테스트");
       stopTimer();
+      eng.flushAllFileSavesSync(); // [v0.90.0] 저장이 디바운스(비동기)로 바뀌어 확인 전에 강제로 확정시킨다
       const saved = JSON.parse(readFileSync(join(dir, "kylebot-auto-positions.json"), "utf8")) as { unprotected: UnprotectedPos[] };
       expect(saved.unprotected).toHaveLength(1);
       expect(saved.unprotected[0].symbol).toBe("AAPL");

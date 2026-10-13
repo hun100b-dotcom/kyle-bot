@@ -112,6 +112,8 @@ describe("엔진 왕복 — 실제 파일에 저장하고 다시 읽는다(연�
       expect(list[0].memo).toBe("눌림목 후보");
       expect(list[0].levels).toHaveLength(3);
       const id = list[0].id;
+      // [v0.90.0] 저장이 디바운스(비동기)로 바뀌어 디스크 반영은 300ms 뒤다 — 확인 전에 강제로 확정시킨다.
+      eng.flushAllFileSavesSync();
       // 파일이 실제로 생겼는지
       expect(existsSync(join(dir, "kylebot-splits.json"))).toBe(true);
 
@@ -130,6 +132,7 @@ describe("엔진 왕복 — 실제 파일에 저장하고 다시 읽는다(연�
       expect(list.find((r) => r.id === id)!.memo).toBe("1차 눌림목"); // 공백 정리됨
 
       // 5) 새 엔진으로 같은 폴더를 읽어도(=앱 재시작) 저장 내용이 유지된다(체크 + 수정한 제목)
+      eng.flushAllFileSavesSync(); // [v0.90.0] 저장이 디바운스(비동기)로 바뀌어 새 엔진이 읽기 전에 지금 당장 확정한다
       const eng2 = new ToolEngine(dir, { forceMock: true });
       const reloaded = eng2.getSplits();
       expect(reloaded).toHaveLength(2);

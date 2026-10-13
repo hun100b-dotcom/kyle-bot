@@ -106,6 +106,7 @@ describe("엔진 연동 — 진입→청산 자동 기록(연습 모드)", () =>
       expect(stats.winRate).toBe(100);
 
       // 재시작(새 엔진)해도 유지
+      eng.flushAllFileSavesSync(); // [v0.90.0] 저장이 디바운스(비동기)로 바뀌어 새 엔진이 읽기 전에 지금 당장 확정한다
       const eng2 = new ToolEngine(dir, { forceMock: true });
       expect(eng2.getTradeLog()[0].outcome).toBe("win");
 

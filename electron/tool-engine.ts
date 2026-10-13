@@ -18,6 +18,7 @@
 
 import { EventEmitter } from "node:events";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, renameSync } from "node:fs";
+import { writeFile as writeFileAsync, rename as renameAsync } from "node:fs/promises"; // [v0.90.0] 디바운스 저장용 — 메인 프로세스를 안 막는 비동기 쓰기
 import { join } from "node:path";
 import { DateTime } from "luxon";
 import { getSession, getSessionStart, getMarketStatus, isOrderFrozen, isInDailyPauseWindow, type Session } from "../lib/session";
@@ -1683,6 +1684,82 @@ export class ToolEngine extends EventEmitter {
       this.autoResumeAfterUpdatePending = false;
       this.persistEnv();
       this.startAutoTrade();
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // [v0.90.0 — 오너 긴급 보고 "사용 중에 클릭 무반응일 때가 있다"] 디바운스 파일 저장.
+  //   원인: 이 엔진은 journal·rationale·splits·체결강도 시계열·trades·autoRuns·lab·
+  //   autoTradeHistory·autoPositions·fills — 총 10군데에서 상태가 바뀔 때마다 그 전체를
+  //   JSON으로 직렬화해 writeFileSync로 "즉시·동기" 저장했다. 그중에서도 체결강도
+  //   (persistStrength)는 **종목을 감시하는 내내 10~60초마다 계속** 불린다(startStrength가
+  //   매매 진입 시 자동으로 켜짐 — recordEntry 참고) — 즉 포지션을 들고 있거나 체결강도를
+  //   보는 동안은 거의 쉬지 않고 동기 쓰기가 반복된다는 뜻이라, "사용 중 가끔 멈춘다"는
+  //   증상과 정확히 들어맞는다. Electron 메인 프로세스는 싱글 스레드라, 이 동기 디스크
+  //   쓰기가 도는 그 짧은 순간 IPC(버튼 클릭 포함) 전부가 응답을 못 해 "클릭해도 반응
+  //   없음"처럼 보인다 — 저널이 1000건 가까이 쌓여 있으면 매번 그 전체를 다시 쓰는 셈이라
+  //   체감될 만큼 길어질 수 있다.
+  //   이 10가지는 전부 참고용 로그·기록이라 디스크 반영이 수백ms 늦어도 문제없다(실제
+  //   안전에 쓰이는 메모리 상태는 호출 즉시 이미 반영되고, 보유 종목 보호는 토스 서버의
+  //   조건주문이 하므로 이 파일 저장과 무관하다). 그래서 **같은 파일로의 저장 요청이 짧은
+  //   시간 안에 몰리면 하나로 묶고(디바운스), 쓰기 자체도 비동기로** 돌려 메인 프로세스를
+  //   절대 막지 않는다. 단, 업데이트 재시작·앱 종료처럼 "이제 곧 프로세스가 죽는다"가
+  //   확실한 순간에는 flushAllFileSavesSync()로 디바운스 중인 것까지 전부 동기로 확정
+  //   짓는다(그 직전 기록이 반영 안 된 채 사라지면 안 되므로 — prepareForRestart·main.ts의
+  //   before-quit에서 호출).
+  //   ⚠️ 설정 파일(persistEnv)과 재시작 표식(restartMarkerPath)은 그대로 동기 유지 —
+  //   둘 다 작고 드물게만 쓰여 애초에 블로킹 원인이 아니었고, 재시작 표식은 "지금 이 줄에서
+  //   바로 디스크에 남아야" 의미가 있어 디바운스하면 안 된다.
+  // --------------------------------------------------------------------------
+  private pendingSaves = new Map<string, { path: string; data: () => unknown; timer: ReturnType<typeof setTimeout> | null; dirty: boolean }>();
+
+  private scheduleFileSave(key: string, path: string, data: () => unknown): void {
+    let st = this.pendingSaves.get(key);
+    if (!st) {
+      st = { path, data, timer: null, dirty: false };
+      this.pendingSaves.set(key, st);
+    } else {
+      st.path = path;
+      st.data = data; // 다음 flush 때 "그 시점의 최신" 데이터를 쓰게 getter만 갱신
+    }
+    st.dirty = true;
+    if (st.timer) return; // 이미 예약돼 있으면 그대로 둔다(곧 최신 데이터로 저장됨)
+    st.timer = setTimeout(() => {
+      st!.timer = null;
+      void this.flushFileSave(key);
+    }, 300);
+    (st.timer as unknown as { unref?: () => void }).unref?.(); // 이 타이머가 앱 종료를 붙잡지 않게
+  }
+
+  private async flushFileSave(key: string): Promise<void> {
+    const st = this.pendingSaves.get(key);
+    if (!st || !st.dirty) return;
+    st.dirty = false;
+    try {
+      const tmp = st.path + ".tmp";
+      await writeFileAsync(tmp, JSON.stringify(st.data()), "utf8");
+      await renameAsync(tmp, st.path);
+    } catch {
+      /* 저장만 건너뛴다 — 메모리 상태는 이미 최신이라 동작엔 지장 없음 */
+    }
+  }
+
+  /** [재시작·종료 직전 전용] 디바운스 중인 저장을 전부 지금 당장(동기) 확정 짓는다. */
+  flushAllFileSavesSync(): void {
+    for (const st of this.pendingSaves.values()) {
+      if (st.timer) {
+        clearTimeout(st.timer);
+        st.timer = null;
+      }
+      if (!st.dirty) continue;
+      st.dirty = false;
+      try {
+        const tmp = st.path + ".tmp";
+        writeFileSync(tmp, JSON.stringify(st.data()), "utf8");
+        renameSync(tmp, st.path);
+      } catch {
+        /* 무시 — 종료 직전이라 재시도 기회가 없음, 메모리 상태는 이미 최신 */
+      }
     }
   }
 
@@ -4530,9 +4607,7 @@ export class ToolEngine extends EventEmitter {
       };
       this.rationales.push(rec);
       if (this.rationales.length > 2000) this.rationales.shift(); // 오래된 것부터 정리
-      const tmp = this.rationalePath + ".tmp";
-      writeFileSync(tmp, JSON.stringify(this.rationales, null, 2), "utf8");
-      renameSync(tmp, this.rationalePath); // 원자적 교체(쓰다 만 파일 방지)
+      this.scheduleFileSave("rationale", this.rationalePath, () => this.rationales); // [v0.90.0] 디바운스
     } catch {
       /* 기록 실패는 주문을 되돌리지 않는다 */
     }
@@ -4560,11 +4635,9 @@ export class ToolEngine extends EventEmitter {
     }
   }
 
-  /** 메모리의 기록 목록을 파일에 원자적으로 저장(쓰다 만 파일 방지). */
+  /** 메모리의 기록 목록을 파일에 저장(디바운스 — v0.90.0). */
   private persistSplits(): void {
-    const tmp = this.splitsPath + ".tmp";
-    writeFileSync(tmp, JSON.stringify(this.splits, null, 2), "utf8");
-    renameSync(tmp, this.splitsPath);
+    this.scheduleFileSave("splits", this.splitsPath, () => this.splits);
     // [v0.61.7 — ③ 전수조사 중간-2] 로그인 상태면 다른 기기도 곧바로 볼 수 있게 클라우드에도
     //   올려 둔다(persistAutoTradeHistory와 같은 패턴 — 15초 쓰로틀, 실패해도 조용히 무시).
     const longEnough = Date.now() - (this.lastSplitsPushAtMs ?? 0) > 15_000;
@@ -4655,11 +4728,9 @@ export class ToolEngine extends EventEmitter {
     }
   }
 
-  /** 시계열을 파일에 원자적으로 저장. */
+  /** 시계열을 파일에 저장(디바운스 — v0.90.0. 감시 중엔 10~60초마다 불려 가장 잦은 호출원이었다). */
   private persistStrength(): void {
-    const tmp = this.strengthPath + ".tmp";
-    writeFileSync(tmp, JSON.stringify(this.strengthSeries, null, 2), "utf8");
-    renameSync(tmp, this.strengthPath);
+    this.scheduleFileSave("strength", this.strengthPath, () => this.strengthSeries);
   }
 
   /** 지금 이 종목을 기록 중인가. */
@@ -4830,9 +4901,7 @@ export class ToolEngine extends EventEmitter {
   }
 
   private persistTrades(): void {
-    const tmp = this.tradesPath + ".tmp";
-    writeFileSync(tmp, JSON.stringify(this.trades, null, 2), "utf8");
-    renameSync(tmp, this.tradesPath);
+    this.scheduleFileSave("trades", this.tradesPath, () => this.trades); // [v0.90.0] 디바운스
   }
 
   // --------------------------------------------------------------------------
@@ -4871,9 +4940,7 @@ export class ToolEngine extends EventEmitter {
   private persistAutoRuns(): void {
     try {
       if (this.autoRuns.length > ToolEngine.AUTO_RUNS_MAX) this.autoRuns = this.autoRuns.slice(-ToolEngine.AUTO_RUNS_MAX);
-      const tmp = this.autoRunsPath + ".tmp";
-      writeFileSync(tmp, JSON.stringify(this.autoRuns, null, 2), "utf8");
-      renameSync(tmp, this.autoRunsPath);
+      this.scheduleFileSave("autoRuns", this.autoRunsPath, () => this.autoRuns); // [v0.90.0] 디바운스
     } catch {
       /* 리포트용 기록 실패는 자동매매 진행을 막지 않는다 */
     }
@@ -5057,9 +5124,11 @@ export class ToolEngine extends EventEmitter {
 
   private persistLab(): void {
     try {
-      const tmp = this.labPath + ".tmp";
-      writeFileSync(tmp, JSON.stringify({ v: ToolEngine.LAB_SCHEMA, scans: this.labScanCount, activeMs: this.labActiveMs, startedAtMs: this.labStartedAtMs, attempts: this.labAttempts, signals: this.labSignals }), "utf8");
-      renameSync(tmp, this.labPath);
+      // [v0.90.0] 디바운스 — 연구용 데이터는 자주 쌓여 동기 저장이 메인 프로세스를 자주 막던 지점 중 하나였다.
+      this.scheduleFileSave("lab", this.labPath, () => ({
+        v: ToolEngine.LAB_SCHEMA, scans: this.labScanCount, activeMs: this.labActiveMs,
+        startedAtMs: this.labStartedAtMs, attempts: this.labAttempts, signals: this.labSignals,
+      }));
     } catch {
       /* 기록 실패는 무시 — 연구용 데이터라 매매와 무관 */
     }
@@ -5603,9 +5672,7 @@ export class ToolEngine extends EventEmitter {
       if (this.autoTradeHistory.length > ToolEngine.AUTO_TRADE_HISTORY_MAX) {
         this.autoTradeHistory = this.autoTradeHistory.slice(-ToolEngine.AUTO_TRADE_HISTORY_MAX);
       }
-      const tmp = this.autoTradeHistoryPath + ".tmp";
-      writeFileSync(tmp, JSON.stringify(this.autoTradeHistory, null, 2), "utf8");
-      renameSync(tmp, this.autoTradeHistoryPath);
+      this.scheduleFileSave("autoHistory", this.autoTradeHistoryPath, () => this.autoTradeHistory); // [v0.90.0] 디바운스
     } catch {
       /* 기록 실패는 자동매매 진행을 막지 않는다 */
     }
@@ -5771,7 +5838,8 @@ export class ToolEngine extends EventEmitter {
 
   private saveAutoPositions(): void {
     try {
-      const payload = {
+      // [v0.90.0] 디바운스 — getter가 flush 시점의 최신 멤버들을 다시 모아 담는다(스냅샷을 미리 만들어두지 않음).
+      this.scheduleFileSave("autoPositions", this.autoPositionsPath, () => ({
         positions: this.autoTradePositions,
         usedKeys: [...this.autoTradeUsedKeys],
         lastScan: this.autoTradeLastScan,
@@ -5779,10 +5847,7 @@ export class ToolEngine extends EventEmitter {
         lastCycleAtMs: this.autoTradeLastCycleAtMs,
         unprotected: this.autoUnprotected,
         dismissed: this.guardDismissed,
-      };
-      const tmp = this.autoPositionsPath + ".tmp";
-      writeFileSync(tmp, JSON.stringify(payload, null, 2), "utf8");
-      renameSync(tmp, this.autoPositionsPath);
+      }));
     } catch {
       /* 저장 실패는 매매 흐름을 막지 않는다(다음 변경 때 다시 시도됨) */
     }
@@ -5808,10 +5873,8 @@ export class ToolEngine extends EventEmitter {
 
   private persistFills(): void {
     try {
-      const body = JSON.stringify({ syncedAtMs: this.fillsSyncedAtMs, fills: this.savedFills }, null, 2);
-      const tmp = this.fillsPath + ".tmp";
-      writeFileSync(tmp, body, "utf8");
-      renameSync(tmp, this.fillsPath);
+      // [v0.90.0] 디바운스
+      this.scheduleFileSave("fills", this.fillsPath, () => ({ syncedAtMs: this.fillsSyncedAtMs, fills: this.savedFills }));
     } catch {
       /* 저장 실패해도 이번 화면은 그대로 보여 준다 */
     }
@@ -8643,6 +8706,9 @@ export class ToolEngine extends EventEmitter {
     const line = `🔄 업데이트 적용을 위해 재시작합니다 — v${marker.fromVersion} → v${marker.toVersion ?? "새 버전"} · 자동매매 ${marker.autoTradeWasOn ? "켜짐(재시작 후 자동으로 다시 켭니다)" : "꺼짐"} · 보유/대기 ${marker.positions.length}종목${marker.positions.length ? " (" + marker.positions.map((p) => `${p.symbol} ${p.quantity}주 ${p.status === "active" ? "보호중" : "매수대기"}`).join(", ") + ")" : ""}`;
     this.addJournal({ kind: "info", symbol: "-", summary: line });
     await Promise.race([this.sendDiscordAlert(line), new Promise((r) => setTimeout(r, 4000))]).catch(() => undefined);
+    // [v0.90.0] 디바운스 중인 모든 저장(저널·포지션·기록 등)을 재시작 직전에 지금 당장 동기로 확정한다 —
+    //   프로세스가 몇 초 뒤 죽으므로 300ms 디바운스 타이머가 돌 기회가 없을 수 있다.
+    this.flushAllFileSavesSync();
     return marker;
   }
 
@@ -9885,12 +9951,10 @@ export class ToolEngine extends EventEmitter {
     };
     this.journal.push(entry);
     if (this.journal.length > 1000) this.journal.shift();
-    // 원자적 저장(임시 파일 → 교체): 쓰다 만 파일 방지
     // [v0.69.3] 저널 파일 저장 실패(디스크·폴더 문제)가 주문 감시 같은 핵심 흐름을 예외로 죽이지 않게 한다 — 메모리 저널과 알림은 그대로 동작.
+    // [v0.90.0] 디바운스 저장(비동기) — 예전엔 매번 writeFileSync로 최대 1000건을 통째로 다시 썼다.
     try {
-      const tmp = this.journalPath + ".tmp";
-      writeFileSync(tmp, JSON.stringify(this.journal, null, 2), "utf8");
-      renameSync(tmp, this.journalPath);
+      this.scheduleFileSave("journal", this.journalPath, () => this.journal);
     } catch {
       /* 저장만 건너뛴다 */
     }

@@ -116,6 +116,8 @@ describe("[v0.65.0] 엔진 — 설정·스캔·요약·내보내기", () => {
       expect(st.lastError).toBeNull();
       expect(st.lastScanned).toBeGreaterThan(0);
       expect(st.lastTickAtMs).not.toBeNull();
+      // [v0.90.0] 저장이 디바운스(비동기)로 바뀌어 디스크 반영은 300ms 뒤다 — 확인 전에 강제로 확정시킨다.
+      eng.flushAllFileSavesSync();
       expect(existsSync(join(dir, "kylebot-lab.json"))).toBe(true);
       const sum = eng.getLabSummary();
       expect(sum.funnel.dojis).toBeGreaterThanOrEqual(0);
@@ -170,6 +172,7 @@ describe("[v0.65.0] 엔진 — 설정·스캔·요약·내보내기", () => {
       expect(raw.signals.length).toBe(sum.counts.total);
       // 파일에 저장되고 재시작 후 복원된다
       x.persistLab();
+      eng.flushAllFileSavesSync(); // [v0.90.0] 디바운스 — 새 엔진이 읽기 전에 지금 당장 확정
       const again = new ToolEngine(dir, { forceMock: true });
       expect(again.getLabStatus().totalSignals).toBe(sum.counts.total);
       // 초기화
@@ -212,6 +215,7 @@ describe("[v0.65.1] 규칙 오류가 섞인 1판(v1) 데이터는 폐기하고 �
       expect(st.totalSignals).toBe(0);
       expect(st.note).toContain("폐기");
       expect(st.note).toContain("2건");
+      eng.flushAllFileSavesSync(); // [v0.90.0] 디바운스 — 확인 전에 강제로 확정시킨다
       const saved = JSON.parse(readFileSync(join(dir, "kylebot-lab.json"), "utf8")) as { v: number; signals: unknown[] };
       expect(saved.v).toBe(2);
       expect(saved.signals).toHaveLength(0);
@@ -271,6 +275,7 @@ describe("[v0.68.0] 연구소 1분봉 저장소 — 처음엔 통으로, 이후�
       const c = eng.getLabStatus().collect;
       expect(c.scans).toBe(1);
       expect(c.activeHours).toBeGreaterThanOrEqual(0);
+      eng.flushAllFileSavesSync(); // [v0.90.0] 디바운스 — 확인 전에 강제로 확정시킨다
       const saved = JSON.parse(readFileSync(join(dir, "kylebot-lab.json"), "utf8")) as { scans: number };
       expect(saved.scans).toBe(1);
       expect(new ToolEngine(dir, { forceMock: true }).getLabStatus().collect.scans).toBe(1); // 재시작 후 복원

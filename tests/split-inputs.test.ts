@@ -88,6 +88,7 @@ describe("삼분할 기록 — 계산기 입력값 함께 저장", () => {
       });
 
       // 같은 폴더로 엔진을 새로 만든다 = 앱 재시작과 같은 상황
+      eng1.flushAllFileSavesSync(); // [v0.90.0] 저장이 디바운스(비동기)로 바뀌어 새 엔진이 읽기 전에 지금 당장 확정한다
       const eng2 = new ToolEngine(dir, { forceMock: true });
       const again = eng2.getSplits();
       expect(again).toHaveLength(1);

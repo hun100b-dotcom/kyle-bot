@@ -194,6 +194,8 @@ describe("엔진 왕복 — 체결강도 시작/샘플/저장/재시작(연습 �
       expect(s.nTicks).toBeGreaterThan(0);
       expect(s.strength === null || s.strength > 100).toBe(true);
 
+      // [v0.90.0] 저장이 디바운스(비동기)로 바뀌어 디스크 반영은 300ms 뒤다 — 확인 전에 강제로 확정시킨다.
+      eng.flushAllFileSavesSync();
       // 파일 저장 확인
       expect(existsSync(join(dir, "kylebot-strength.json"))).toBe(true);
       const saved = JSON.parse(readFileSync(join(dir, "kylebot-strength.json"), "utf8"));

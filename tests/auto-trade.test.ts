@@ -29,6 +29,26 @@ import {
 } from "../electron/tool-engine";
 import { volScaledInvestPct } from "../lib/auto-risk";
 
+// [v0.90.0 — 테스트 안정화] 이 파일의 모든 테스트가 만드는 ToolEngine을 여기 등록해 두면,
+//   afterEach가 테스트마다 "가짜 토스 서버 닫기 + 체결강도 타이머 정리"를 자동으로 해 준다.
+//   [왜 필요해졌나?] prepareBackend()는 연습(mock) 모드에서 가짜 토스 서버를 띄우고
+//   process.env.TOSS_BASE_URL(프로세스 전역 — 모든 ToolEngine 인스턴스가 공유)에 그 주소를
+//   적어 둔다. 어떤 테스트가 가짜 서버를 닫지 않고 끝나면, 바로 다음 테스트가 자기 몫의
+//   새 가짜 서버를 띄우기 전 그 짧은 순간 아직 안 닫힌 이전 서버가 이 전역 변수를 다시
+//   가리키게 만들 수 있다 — 그러면 다음 테스트의 요청이 엉뚱한(이전 테스트의) 가짜 서버로
+//   나가 현재가 등이 그 테스트가 마지막으로 남긴 값으로 보인다. 예전엔 모든 파일 저장이
+//   동기(writeFileSync)라 테스트 사이에 "우연한 지연"이 늘 끼어 있었는데, v0.90.0에서 그
+//   저장을 비동기(디바운스)로 바꾸며 테스트가 더 빨리 끝나 이 경합이 실제로 드러났다
+//   (실제 앱은 ToolEngine 인스턴스가 하나뿐이라 이 경합 자체가 없다 — 순수 테스트 전용 이슈).
+//   개별 테스트에도 같은 이유로 eng.stopAllStrength()/await eng.stopMock()을 직접 추가해
+//   둔 곳이 있는데, 이 afterEach는 그걸 놓친 다른 모든 테스트까지 포괄하는 안전망이다.
+const createdEngines: ToolEngine[] = [];
+function mkEngine(...args: ConstructorParameters<typeof ToolEngine>): ToolEngine {
+  const e = new ToolEngine(...args);
+  createdEngines.push(e);
+  return e;
+}
+
 /** [v0.30.1] OCO 등록 저널이 뜰 때까지 기다린다(bracket.test.ts의 waitForJournal과 동일 패턴). */
 function waitForOcoJournal(eng: ToolEngine, timeoutMs = 5000): Promise<JournalEntry> {
   return new Promise((resolve, reject) => {
@@ -71,15 +91,21 @@ function freezeKst(year: number, month: number, day: number, hour: number, minut
   Settings.now = () => target;
 }
 
-afterEach(() => {
+afterEach(async () => {
   Settings.now = () => Date.now(); // 항상 원상 복구(다른 테스트로 새지 않게)
+  // [v0.90.0] 이번 테스트가 만든 엔진들의 가짜 서버·체결강도 타이머를 전부 정리(위 설명 참고).
+  const engines = createdEngines.splice(0, createdEngines.length);
+  for (const e of engines) {
+    try { e.stopAllStrength(); } catch { /* 무시 */ }
+    try { await e.stopMock(); } catch { /* 무시 */ }
+  }
 });
 
 describe("자동매매 상태 관리 — v0.26.0", () => {
   it("엔진을 처음 만들면 자동매매는 꺼진 상태고 한도는 공장값(3종목/5%/30%)이다", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const s = eng.getAutoTradeStatus();
       expect(s.enabled).toBe(false);
       expect(s.positions).toEqual([]);
@@ -101,7 +127,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
   it("[v0.28.0] 자동매매 스크리너 조건의 공장값은 메뉴얼 스크리너 기본값과 같다(종목수 60·$1~$9·몸통 30%)", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const s = eng.getSettings();
       expect(s.autoScanCount).toBe(60);
       expect(s.autoScanPriceMin).toBe(1);
@@ -115,14 +141,14 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
   it("[v0.28.0] saveAutoScanSettings는 4개 조건을 저장하고 재시작해도 유지된다", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const saved = eng.saveAutoScanSettings({ count: 120, priceMin: 2, priceMax: 15, bodyRatio: 0.6 });
       expect(saved.autoScanCount).toBe(120);
       expect(saved.autoScanPriceMin).toBe(2);
       expect(saved.autoScanPriceMax).toBe(15);
       expect(saved.autoScanBodyRatio).toBe(0.6);
 
-      const eng2 = new ToolEngine(dir, { forceMock: true });
+      const eng2 = mkEngine(dir, { forceMock: true });
       const s2 = eng2.getSettings();
       expect(s2.autoScanCount).toBe(120);
       expect(s2.autoScanPriceMin).toBe(2);
@@ -136,7 +162,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
   it("[v0.28.0] 도지 몸통비율은 0.1~0.8로 보정된다(오너 지시: 상한 80%까지)", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       expect(eng.saveAutoScanSettings({ bodyRatio: 0.95 }).autoScanBodyRatio).toBe(0.8); // 상한 넘으면 0.8로
       expect(eng.saveAutoScanSettings({ bodyRatio: 0.8 }).autoScanBodyRatio).toBe(0.8); // 정확히 상한은 그대로
       expect(eng.saveAutoScanSettings({ bodyRatio: 0.05 }).autoScanBodyRatio).toBe(0.1); // 하한 밑이면 0.1로
@@ -148,7 +174,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
   it("[v0.28.0] 스캔 종목수는 10~200으로 보정되고, 0 이하·비정상 값은 무시한다", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       expect(eng.saveAutoScanSettings({ count: 500 }).autoScanCount).toBe(200);
       expect(eng.saveAutoScanSettings({ count: 1 }).autoScanCount).toBe(10);
       const before = eng.saveAutoScanSettings({ count: 50 });
@@ -163,7 +189,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
   it("[v0.28.0] autoScanNow는 자동매매가 꺼져 있어도 스캔해서 lastScan을 채운다(진입 없이 미리보기)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       eng.saveAutoScanSettings({ count: 10 }); // 빠른 테스트를 위해 최소치로
       expect(eng.getAutoTradeStatus().enabled).toBe(false);
       const s = await eng.autoScanNow();
@@ -189,7 +215,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
   it("[v0.61.4] autoScanNow(미리보기)는 lastScan을 파일에도 저장하고 상태 미러에도 올린다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const engAny = eng as unknown as {
         authAccessToken: string | null;
         authExpiresAtMs: number;
@@ -231,7 +257,8 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
 
       // [핵심] "재시작"(같은 폴더로 새 엔진) 후에도 lastScan이 사라지지 않아야 한다 —
       // positions만 영속화돼 있고 lastScan은 메모리 전용이던 게 이번 버그의 근본 원인이었다.
-      const eng2 = new ToolEngine(dir, { forceMock: true });
+      eng.flushAllFileSavesSync(); // [v0.90.0] 저장이 디바운스(비동기)로 바뀌어 새 엔진이 읽기 전에 지금 당장 확정한다
+      const eng2 = mkEngine(dir, { forceMock: true });
       const s2 = eng2.getAutoTradeStatus();
       expect(s2.lastScan).not.toBeNull();
       expect(s2.lastScan?.results.length).toBeGreaterThan(0);
@@ -247,7 +274,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
   it("[v0.61.4] 스캔이 끝나면 상태 미러의 scanProgress가 running:false로 마감된다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const engAny = eng as unknown as {
         authAccessToken: string | null;
         authExpiresAtMs: number;
@@ -305,7 +332,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
   it("stopAutoTrade는 한 번도 시작하지 않았어도 안전하게 동작한다(꺼진 채 그대로)", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const s = eng.stopAutoTrade("테스트");
       expect(s.enabled).toBe(false);
     } finally {
@@ -316,14 +343,14 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
   it("한도 설정(saveAutoTradeSettings)은 재시작(새 엔진)해도 유지된다", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const saved = eng.saveAutoTradeSettings({ maxPositions: 5, maxLossPct: 8, maxInvestPct: 50, watchMinutes: 20 });
       expect(saved.autoTradeMaxPositions).toBe(5);
       expect(saved.autoTradeMaxLossPct).toBe(8);
       expect(saved.autoTradeMaxInvestPct).toBe(50);
       expect(saved.autoTradeWatchMinutes).toBe(20);
 
-      const eng2 = new ToolEngine(dir, { forceMock: true });
+      const eng2 = mkEngine(dir, { forceMock: true });
       const s2 = eng2.getSettings();
       expect(s2.autoTradeMaxPositions).toBe(5);
       expect(s2.autoTradeMaxLossPct).toBe(8);
@@ -355,13 +382,13 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
     it("자동매매가 켜진 상태에서 호출하면, 재시작해도 자동매매가 스스로 다시 켜진다", () => {
       const dir = mkdtempSync(join(tmpdir(), "kyle-resume-"));
       try {
-        const eng1 = new ToolEngine(dir, { forceMock: true }) as unknown as ResumeInternals;
+        const eng1 = mkEngine(dir, { forceMock: true }) as unknown as ResumeInternals;
         eng1.startAutoTrade();
         expect(eng1.autoTradeEnabled).toBe(true);
         eng1.prepareForUpdateRestart(); // main.ts가 quitAndInstall 직전에 부르는 것과 동일
         eng1.stopAutoTrade(); // (테스트 정리용 — 실제 흐름은 프로세스가 그냥 종료됨. 플래그는 이미 파일에 남았으므로 무관)
 
-        const eng2 = new ToolEngine(dir) as unknown as ResumeInternals; // forceMock 없이 — "재시작"
+        const eng2 = mkEngine(dir) as unknown as ResumeInternals; // forceMock 없이 — "재시작"
         expect(eng2.autoTradeEnabled).toBe(true); // 오너가 다시 누르지 않아도 자동으로 이어져야 함
         eng2.stopAutoTrade();
       } finally {
@@ -372,11 +399,11 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
     it("자동매매가 꺼진 상태에서 호출하면 아무 표시도 남기지 않는다(재개할 게 없으므로)", () => {
       const dir = mkdtempSync(join(tmpdir(), "kyle-resume-"));
       try {
-        const eng1 = new ToolEngine(dir, { forceMock: true }) as unknown as ResumeInternals;
+        const eng1 = mkEngine(dir, { forceMock: true }) as unknown as ResumeInternals;
         expect(eng1.autoTradeEnabled).toBe(false);
         eng1.prepareForUpdateRestart(); // 꺼진 채였으니 조용히 아무 일도 없어야 함
 
-        const eng2 = new ToolEngine(dir) as unknown as ResumeInternals;
+        const eng2 = mkEngine(dir) as unknown as ResumeInternals;
         expect(eng2.autoTradeEnabled).toBe(false);
         eng2.stopAutoTrade();
       } finally {
@@ -387,16 +414,16 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
     it("표시는 한 번 쓰면 소비된다 — 그다음 '평범한' 재시작에는 영향을 주지 않는다", () => {
       const dir = mkdtempSync(join(tmpdir(), "kyle-resume-"));
       try {
-        const eng1 = new ToolEngine(dir, { forceMock: true }) as unknown as ResumeInternals;
+        const eng1 = mkEngine(dir, { forceMock: true }) as unknown as ResumeInternals;
         eng1.startAutoTrade();
         eng1.prepareForUpdateRestart();
         eng1.stopAutoTrade();
 
-        const eng2 = new ToolEngine(dir) as unknown as ResumeInternals; // 1차 재시작 — 자동으로 다시 켜짐
+        const eng2 = mkEngine(dir) as unknown as ResumeInternals; // 1차 재시작 — 자동으로 다시 켜짐
         expect(eng2.autoTradeEnabled).toBe(true);
         eng2.stopAutoTrade(); // 오너가 직접(또는 그냥) 끔 — 이번엔 prepareForUpdateRestart를 안 부름
 
-        const eng3 = new ToolEngine(dir) as unknown as ResumeInternals; // 2차 재시작 — 이번엔 자동으로 켜지면 안 됨
+        const eng3 = mkEngine(dir) as unknown as ResumeInternals; // 2차 재시작 — 이번엔 자동으로 켜지면 안 됨
         expect(eng3.autoTradeEnabled).toBe(false);
       } finally {
         rmSync(dir, { recursive: true, force: true });
@@ -411,7 +438,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
     //   먼저 저장해 기준선을 만든 뒤 클램프 동작만 검증한다.
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       expect(eng.saveAutoTradeSettings({ watchMinutes: 15 }).autoTradeWatchMinutes).toBe(15);
       expect(eng.getAutoTradeStatus().watchMinutes).toBe(15);
 
@@ -427,7 +454,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
   it("0 이하·비정상 값은 무시하고 이전 값을 유지한다", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       eng.saveAutoTradeSettings({ maxPositions: 4, maxLossPct: 6, maxInvestPct: 40 });
       const s = eng.saveAutoTradeSettings({ maxPositions: 0, maxLossPct: -1, maxInvestPct: NaN });
       expect(s.autoTradeMaxPositions).toBe(4);
@@ -443,7 +470,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
     // (옛 버그는 perSlotInvestPct(maxInvestPct, maxPositions) = maxInvestPct/maxPositions였다).
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       eng.saveAutoTradeSettings({ maxPositions: 3, maxLossPct: 5, maxInvestPct: 30 });
       const seedUsd = 1000;
       const price = 9.2; // 저가주 예시(오너가 실계좌 테스트에서 1주만 나왔던 가격대)
@@ -461,7 +488,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
     // autoTradeTick 안에서 실제로 하는 것과 동일: perSlotPct = volScaledInvestPct(maxInvestPct, cand.entryMetrics?.atrPct)
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       eng.saveAutoTradeSettings({ maxPositions: 3, maxLossPct: 5, maxInvestPct: 30, volScaledSizingEnabled: true });
       const seedUsd = 1000;
       const price = 9.2;
@@ -487,7 +514,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
   it("startAutoTrade는 켜짐 상태로 바꾸고, 곧바로 stopAutoTrade하면 다시 꺼진다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       // [주의] startAutoTrade는 백그라운드에서 스캔(최대 60종목)을 즉시 1회 돌리기 시작한다
       // (fire-and-forget). 이 테스트는 그 스캔의 "완료"를 기다리지 않고 상태 전환만 본다.
       const s1 = eng.startAutoTrade();
@@ -504,7 +531,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
   it("[v0.29.0] nextCycleAtMs는 꺼져 있으면 null, 켜면 약 5분 뒤 시각이 채워지고, 끄면 다시 null이 된다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       // [오너 요청 2026-09-25] "자동 스크리너 탭에 몇분 후 스크리닝 진행 표시 필요" — 화면의
       //   카운트다운이 읽는 필드가 상태 전환에 맞춰 정확히 채워지고/비워지는지 확인한다.
       expect(eng.getAutoTradeStatus().nextCycleAtMs).toBeNull();
@@ -528,7 +555,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
   it("[v0.30.0] 자동매매기록(getAutoTradeHistory)은 처음엔 빈 배열이다", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       expect(eng.getAutoTradeHistory()).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -558,7 +585,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
       ];
       writeFileSync(historyPath, JSON.stringify(seed, null, 2), "utf8");
 
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const hist = eng.getAutoTradeHistory();
       expect(hist.length).toBe(2);
       // getAutoTradeHistory는 최신(배열 뒤쪽)이 위로 오게 뒤집어 준다 — TSLA가 나중에 추가됐으므로 먼저 나와야 함.
@@ -594,7 +621,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
 
       // [엔진 재시작 시뮬레이션] 같은 dir로 새 ToolEngine을 만드는 것 자체가 "앱을 껐다 켬"과
       //   동일하다(생성자에서 loadAutoPositions를 부르므로).
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const s = eng.getAutoTradeStatus();
       expect(s.positions.length).toBe(2);
       const aapl = s.positions.find((p) => p.symbol === "AAPL");
@@ -620,7 +647,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
       };
       writeFileSync(positionsPath, JSON.stringify(seed, null, 2), "utf8");
 
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       // 재시작 직후(자동매매를 다시 켜기 전)에도 이미 보여야 한다 — 오너가 "시작"을 누르기 전에도
       //   "아직 감시 중이던 종목이 있었지" 하고 화면에서 바로 확인할 수 있어야 하므로.
       expect(eng.getAutoTradeStatus().positions.length).toBe(1);
@@ -640,7 +667,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
   it("[v0.30.1] 재시작으로 감시가 끊긴 'watching' 포지션도 reconcileAutoPositions가 다시 체결을 확인해 보호주문(OCO)을 등록한다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       // 1) 실제 매수 주문을 하나 낸다(AAPL 목서버 초기가 2.05 → 2.10에 걸면 즉시 체결 — bracket.test.ts와 동일 규칙).
       //    이걸로 "재시작 전에 이미 자동매매가 낸 매수 주문"을 재현한다.
       const entry = await eng.placeEntry({ symbol: "AAPL", price: 2.1, quantity: 3 });
@@ -670,6 +697,11 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
       const pos = eng.getAutoTradeStatus().positions.find((p) => p.symbol === "AAPL");
       expect(pos?.status).toBe("active"); // watching → active로 스스로 넘어갔어야 함
       expect(pos?.conditionalOrderId).not.toBeNull(); // 보호주문(OCO)이 실제로 등록됐어야 함
+      // [v0.90.0] placeEntry가 자동으로 켠 체결강도 추적(10초 간격 setInterval)을 끈다 —
+      //   안 끄면 다음 테스트들이 도는 동안에도 계속 돌며 같은 목 서버에 섞여 들어가 다른
+      //   테스트를 교란할 수 있다(간헐적 실패의 숨은 원인이었다 — indicators.test.ts처럼 정리).
+      eng.stopAllStrength();
+      await eng.stopMock(); // 가짜 토스 서버도 정리(위 "[v0.60.0]" 테스트 주석 참고)
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -678,7 +710,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
   it("[v0.45.0] reconcileAutoPositionsNow — 오너 보고 '지금 감시 중 포지션이 실시간 연동 안 됨' — 자동매매가 꺼져 있어도(positions만 있으면) 즉시 재확인해 최신 상태를 준다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const entry = await eng.placeEntry({ symbol: "AAPL", price: 2.1, quantity: 3 });
       const buyOrderId = (entry.detail as { tossOrderId: string }).tossOrderId;
 
@@ -701,6 +733,8 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
       const pos = status.positions.find((p) => p.symbol === "AAPL");
       expect(pos?.status).toBe("active");
       expect(pos?.conditionalOrderId).not.toBeNull();
+      eng.stopAllStrength(); // [v0.90.0] placeEntry가 자동으로 켠 체결강도 추적 정리(위와 동일 이유)
+      await eng.stopMock(); // 가짜 토스 서버도 정리(위 "[v0.60.0]" 테스트 주석 참고)
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -709,7 +743,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
   it("[v0.45.0] 매매진행할 장 선택 — 지금 세션의 토글을 꺼 두면 스캔·진입 없이 그 사이클만 건너뛴다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       // 정규장(본장)만 끄고 나머지 3개(데이·프리·애프터)는 공장값(켜짐) 그대로 둔다.
       const saved = eng.saveAutoScanSettings({ regularEnabled: false });
       expect(saved.autoScanRegularEnabled).toBe(false);
@@ -739,7 +773,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
   it("[v0.45.0] 매매진행할 장 선택 — 지금 세션이 켜져 있으면(공장값 전부 켜짐) 평소대로 스캔이 실제로 돈다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       eng.saveAutoScanSettings({ count: 10 }); // 스캔 대상을 최소치로 줄여 테스트를 빠르게
       freezeKst(2026, 7, 16, 23, 0); // 정규장 — 공장값은 4개 전부 켜짐이라 막히지 않아야 함
 
@@ -760,7 +794,7 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
     try {
       const positionsPath = join(dir, "kylebot-auto-positions.json");
       writeFileSync(positionsPath, "{ 이건 유효한 JSON이 아님 ", "utf8");
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       expect(eng.getAutoTradeStatus().positions).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -777,7 +811,7 @@ describe("[v0.45.0 버그 수정] 자동매매 시작 직후 '지금 새로고�
   it("startAutoTrade() 직후 autoScanNow()를 부르면, 첫 사이클이 끝날 때까지 기다렸다가 결과를 돌려준다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       eng.saveAutoScanSettings({ count: 10 }); // 스캔 대상을 최소치로 줄여 테스트를 빠르게
       eng.startAutoTrade(); // 내부에서 첫 사이클을 발사 후 신경 안 씀으로 시작(runAutoTradeTick)
       // 오너가 실제로 겪은 순서 그대로: 시작 직후 곧바로 "지금 새로고침"을 누른 것과 동일.
@@ -821,7 +855,7 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
   it("fetchRealHeldSymbols는 실계좌(토스) 보유 종목을 그대로 돌려준다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const engAny = eng as unknown as EngineInternals;
       await (eng as unknown as { prepareBackend: () => Promise<void> }).prepareBackend();
       const held = await engAny.fetchRealHeldSymbols();
@@ -843,7 +877,7 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
   it("[v0.39.0] effectiveActivePositionCount는 실계좌 보유와 무관하게 자동매매가 직접 아는 포지션 개수만 센다", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const engAny = eng as unknown as EngineInternals;
       const mk = (symbol: string): AutoPosition => ({
         symbol, entry: 1, tp: 1.2, sl: 0.9, quantity: 1, enteredAtMs: Date.now(),
@@ -862,7 +896,7 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
   it("[v0.39.0] 자동매매와 무관한 기보유 종목이 실계좌에 있어도(=이 엔진의 autoTradePositions는 비어 있음) 신규 스캔·진입은 막히지 않는다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       // 목 서버가 항상 AAPL 1종목을 실계좌 보유로 응답한다(자동매매와 무관한 기보유 상황을 흉내냄).
       // maxPositions는 여유 있게 둬서, "실계좌 AAPL 보유"가 이 한도를 잡아먹지 않는지를 검증한다.
       eng.saveAutoTradeSettings({ maxPositions: 3 });
@@ -893,7 +927,7 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
   it("[v0.38.0/v0.39.0] 자동매매 포지션으로 꽉 차서 스캔을 생략해도, 화면에 남아있던 지난 확정 종목엔 '왜 안 들어가는지' 사유가 채워진다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       eng.saveAutoTradeSettings({ maxPositions: 1 });
       const engAny = eng as unknown as EngineInternals & { autoTradeLastScan: unknown };
       // 자동매매가 이미 진입해 감시 중인 종목 하나로 최대 종목 수(1개)를 채운다(실계좌 보유가 아님).
@@ -930,7 +964,7 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
   it("[v0.38.0] 확정 종목이 이미 실계좌에 보유 중이라 후보 목록에서 걸러져도, '이미 보유 중' 사유가 남는다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       eng.saveAutoTradeSettings({ maxPositions: 3 }); // 여유 있게 — freeSlots>0이라 스캔은 실제로 돎
       const engAny = eng as unknown as EngineInternals & {
         scanScreener: (opts?: unknown) => Promise<unknown>;
@@ -965,7 +999,7 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
   it("[v0.85.0] 확정 종목이 이미 실계좌에 보유 중이면 '확정' 디스코드/OS 알림 자체를 보내지 않는다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       eng.saveAutoTradeSettings({ maxPositions: 3 });
       const engAny = eng as unknown as EngineInternals & {
         scanScreener: (opts?: unknown) => Promise<unknown>;
@@ -1018,7 +1052,7 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
   it("[v0.85.0] 관찰 종목이 이미 실계좌에 보유 중이면 '관찰' 디스코드 알림을 보내지 않는다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       eng.saveAutoTradeSettings({ maxPositions: 3 });
       const engAny = eng as unknown as EngineInternals & {
         scanScreener: (opts?: unknown) => Promise<unknown>;
@@ -1073,7 +1107,7 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
   it("[v0.60.0] 자동매매 자리가 꽉 차 있어도, 수동 새로고침(autoScanNow)은 스캔을 생략하지 않고 lastScan을 최신으로 갈아 끼운다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       eng.saveAutoTradeSettings({ maxPositions: 1 }); // 자리 1개뿐
       const engAny = eng as unknown as EngineInternals & {
         autoTradeLastScan: unknown;
@@ -1126,7 +1160,7 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
   it("[v0.60.0] 스캔 때는 EMA200 위였지만 주문 직전 재확인 때 현재가가 EMA200 아래로 떨어졌으면 진입하지 않는다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       eng.saveAutoTradeSettings({ maxPositions: 3 });
       const engAny = eng as unknown as EngineInternals & {
         scanScreener: (opts?: unknown) => Promise<unknown>;
@@ -1161,7 +1195,7 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
   it("[v0.60.0] 반대로 주문 직전 재확인 때도 여전히 EMA200 위면(정상 케이스) 평소대로 진입한다(회귀 없음 확인)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       eng.saveAutoTradeSettings({ maxPositions: 3 });
       const engAny = eng as unknown as EngineInternals & {
         scanScreener: (opts?: unknown) => Promise<unknown>;
@@ -1195,7 +1229,7 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
   it("[v0.60.0] 24시간 안에 같은 종목에 더 낮은 가격으로 넣었던 기록이 있는데, 새 타점이 그보다 높으면 재진입을 취소한다(방향 정합성)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       eng.saveAutoTradeSettings({ maxPositions: 3 });
       const engAny = eng as unknown as EngineInternals & {
         scanScreener: (opts?: unknown) => Promise<unknown>;
@@ -1237,7 +1271,7 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
   it("[v0.60.0] 반대로 새 타점이 직전 타점과 같거나 더 낮으면(정상적인 하락 재진입) 평소대로 진입한다(회귀 없음 확인)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       eng.saveAutoTradeSettings({ maxPositions: 3 });
       const engAny = eng as unknown as EngineInternals & {
         scanScreener: (opts?: unknown) => Promise<unknown>;
@@ -1339,7 +1373,7 @@ describe("[v0.32.0] 알림 — 스크리닝 관찰 확정 + 주문 이벤트", (
   it("stopAutoTrade — 이유가 있을 때만(손실 한도 등 프로그램이 스스로 멈춘 경우) 알림을 낸다, 오너가 직접 누른 중지는 알리지 않는다", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const notifies: NotifyEvent[] = [];
       eng.on("notify", (n: NotifyEvent) => notifies.push(n));
 
@@ -1370,7 +1404,7 @@ describe("[v0.72.0 — 오너 지시 '관찰, 확정된 종목이 나오면 즉�
   it("웹훅 주소를 설정 안 했으면(capri_user_notify_settings 비어있음) 외부로 아무것도 안 보낸다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-discord1-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       logIn(eng);
       const calledUrls: string[] = [];
       const originalFetch = globalThis.fetch;
@@ -1395,7 +1429,7 @@ describe("[v0.72.0 — 오너 지시 '관찰, 확정된 종목이 나오면 즉�
   it("웹훅 주소가 설정돼 있으면 그 주소로 메시지를 담아 POST한다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-discord2-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       logIn(eng);
       let posted: { url: string; body: string } | null = null;
       const originalFetch = globalThis.fetch;
@@ -1426,7 +1460,7 @@ describe("[v0.72.0 — 오너 지시 '관찰, 확정된 종목이 나오면 즉�
   it("디스코드 전송 자체가 실패해도(네트워크 오류) 예외를 던지지 않는다 — 매매 사이클을 막으면 안 됨", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-discord3-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       logIn(eng);
       const originalFetch = globalThis.fetch;
       globalThis.fetch = (async (url: string | URL) => {
@@ -1458,7 +1492,7 @@ describe("[v0.83.0] 개인용 디스코드 웹훅 — getMyNotifySettings/saveMy
   it("로그인 안 한 상태면 null을 반환하고(조회) 저장은 실패 메시지를 준다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-mynotify1-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const got = await eng.getMyNotifySettings();
       expect(got.discordWebhookUrl).toBeNull();
       const saved = await eng.saveMyNotifySettings("https://discord.com/api/webhooks/x/y");
@@ -1471,7 +1505,7 @@ describe("[v0.83.0] 개인용 디스코드 웹훅 — getMyNotifySettings/saveMy
   it("로그인했고 저장된 값이 있으면 그 값을 그대로 돌려준다(남의 설정이 아니라 내 것만)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-mynotify2-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       logIn(eng);
       const originalFetch = globalThis.fetch;
       globalThis.fetch = (async (url: string | URL) => {
@@ -1496,7 +1530,7 @@ describe("[v0.83.0] 개인용 디스코드 웹훅 — getMyNotifySettings/saveMy
   it("저장 시 내 user_id로 upsert(on_conflict=user_id)하고, 다른 사람 설정을 건드리지 않는다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-mynotify3-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       logIn(eng);
       let posted: { url: string; body: string } | null = null;
       const originalFetch = globalThis.fetch;
@@ -1527,7 +1561,7 @@ describe("[v0.83.0] 개인용 디스코드 웹훅 — getMyNotifySettings/saveMy
   it("빈 문자열로 저장하면 알림을 끄는 것(null로 저장)이고, 성공 메시지도 그렇게 안내한다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-mynotify4-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       logIn(eng);
       let posted: { body: string } | null = null;
       const originalFetch = globalThis.fetch;
@@ -1558,7 +1592,7 @@ describe("[v0.33.0] 스크리닝 기준 탭 — 조건별 켜짐/꺼짐 + 수치
   it("공장값은 지금까지의 고정 동작과 완전히 같다(EMA200 ON·구름 ON·꼬리비율 10%·신선도 40분 ON·다음봉확인 ON·ETF제외 ON)", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const s = eng.getSettings();
       expect(s.autoScanEmaTrendEnabled).toBe(true);
       expect(s.autoScanEmaPeriod).toBe(200);
@@ -1576,7 +1610,7 @@ describe("[v0.33.0] 스크리닝 기준 탭 — 조건별 켜짐/꺼짐 + 수치
   it("전부 바꿔 저장하면 재시작(새 엔진 인스턴스)해도 그대로 유지된다", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const saved = eng.saveAutoScanSettings({
         emaTrendEnabled: false,
         emaPeriod: 120,
@@ -1596,7 +1630,7 @@ describe("[v0.33.0] 스크리닝 기준 탭 — 조건별 켜짐/꺼짐 + 수치
       expect(saved.autoScanNextCandleConfirmEnabled).toBe(false);
       expect(saved.autoScanExcludeEtf).toBe(false);
 
-      const eng2 = new ToolEngine(dir, { forceMock: true });
+      const eng2 = mkEngine(dir, { forceMock: true });
       const s2 = eng2.getSettings();
       expect(s2.autoScanEmaTrendEnabled).toBe(false);
       expect(s2.autoScanEmaPeriod).toBe(120);
@@ -1614,7 +1648,7 @@ describe("[v0.33.0] 스크리닝 기준 탭 — 조건별 켜짐/꺼짐 + 수치
   it("EMA 기간은 50~300으로, 도지 꼬리비율은 0~0.4로, 신선도는 10~180분으로 안전 보정된다", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       expect(eng.saveAutoScanSettings({ emaPeriod: 10 }).autoScanEmaPeriod).toBe(50);
       expect(eng.saveAutoScanSettings({ emaPeriod: 500 }).autoScanEmaPeriod).toBe(300);
       // 도지 꼬리비율: 범위 밖 값(0.9)은 상한(0.4)으로 "보정"되지만, 음수(-1)는 애초에 말이
@@ -1632,7 +1666,7 @@ describe("[v0.33.0] 스크리닝 기준 탭 — 조건별 켜짐/꺼짐 + 수치
       expect(eng.saveAutoScanSettings({ dojiMaxGapMinutes: 1 }).autoScanDojiMaxGapMinutes).toBe(5);
       expect(eng.saveAutoScanSettings({ dojiMaxGapMinutes: 999 }).autoScanDojiMaxGapMinutes).toBe(240);
       expect(eng.saveAutoScanSettings({ dojiMaxGapMinutes: 45, dojiMaxGapEnabled: false }).autoScanDojiMaxGapEnabled).toBe(false);
-      const eng2 = new ToolEngine(dir, { forceMock: true });
+      const eng2 = mkEngine(dir, { forceMock: true });
       expect(eng2.getSettings().autoScanDojiMaxGapEnabled).toBe(false);
       expect(eng2.getSettings().autoScanDojiMaxGapMinutes).toBe(45);
     } finally {
@@ -1643,7 +1677,7 @@ describe("[v0.33.0] 스크리닝 기준 탭 — 조건별 켜짐/꺼짐 + 수치
   it("buildAutoScanOpts는 저장된 8개 항목 전부를 scanScreener 옵션으로 그대로 넘긴다(가장 중요한 연동 지점)", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       eng.saveAutoScanSettings({
         count: 45, priceMin: 3, priceMax: 20, bodyRatio: 0.5,
         emaTrendEnabled: false, emaPeriod: 150, cloudEnabled: false,
@@ -1720,7 +1754,7 @@ describe("[v0.40.0→v0.55.0] auto 모드 시드 스냅샷 — 지출로는 안 
   it("처음 호출하면 실계좌 매수가능금액을 조회해 스냅샷으로 저장한다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const engAny = eng as unknown as EngineInternals;
       await engAny.prepareBackend();
       expect(engAny.autoTradeSeedSnapshotUsd).toBeNull(); // 아직 한 번도 조회 안 함
@@ -1735,7 +1769,7 @@ describe("[v0.40.0→v0.55.0] auto 모드 시드 스냅샷 — 지출로는 안 
   it("스냅샷보다 실제 잔고가 낮으면(지출로 줄어든 상황을 흉내) 스냅샷을 그대로 유지한다(v0.40.0 보호 유지)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const engAny = eng as unknown as EngineInternals;
       await engAny.prepareBackend();
       await engAny.resolveSeedUsd(); // 첫 호출 — 스냅샷 $10000으로 채워짐
@@ -1753,7 +1787,7 @@ describe("[v0.40.0→v0.55.0] auto 모드 시드 스냅샷 — 지출로는 안 
   it("[v0.55.0 긴급 수정 — 오너 보고 회귀] 스냅샷보다 실제 잔고가 높아지면(입금) 다음 사이클에 새 값으로 갱신한다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const engAny = eng as unknown as EngineInternals;
       await engAny.prepareBackend();
 
@@ -1772,7 +1806,7 @@ describe("[v0.40.0→v0.55.0] auto 모드 시드 스냅샷 — 지출로는 안 
   it("startAutoTrade()는 스냅샷을 초기화해 '이번 실행'에 새로 조회하게 한다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const engAny = eng as unknown as EngineInternals;
       await engAny.prepareBackend();
       await engAny.resolveSeedUsd();
@@ -1790,7 +1824,7 @@ describe("[v0.40.0→v0.55.0] auto 모드 시드 스냅샷 — 지출로는 안 
   it("getAutoTradeStatus().seedUsdSnapshot는 auto 모드에서 스냅샷 값을, fixed 모드에서 고정값을 그대로 보여준다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const engAny = eng as unknown as EngineInternals;
       await engAny.prepareBackend();
       await engAny.resolveSeedUsd();
@@ -1816,7 +1850,7 @@ describe("[v0.41.0] cancelAutoPosition — 지금 감시 중인 포지션을 사
   it("watching 포지션은 매수 주문 자체를 취소하고 목록·기록에서 즉시 정리한다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const engAny = eng as unknown as EngineInternals;
       // 목 서버 AAPL 현재가(2.05)보다 낮게 걸어 즉시 체결되지 않게(watching 유지) 한다.
       const entryJournal = await eng.placeEntry({ symbol: "AAPL", price: 1.5, quantity: 3 });
@@ -1836,6 +1870,8 @@ describe("[v0.41.0] cancelAutoPosition — 지금 감시 중인 포지션을 사
       const rec = eng.getAutoTradeHistory().find((h) => h.id === `AAPL@1.5@${enteredAtMs}`);
       expect(rec?.status).toBe("closed_manual");
       expect(rec?.note).toContain("직접 취소");
+      eng.stopAllStrength(); // [v0.90.0] placeEntry가 자동으로 켠 체결강도 추적 정리(위와 동일 이유)
+      await eng.stopMock(); // 가짜 토스 서버도 정리(위 "[v0.60.0]" 테스트 주석 참고)
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1844,7 +1880,7 @@ describe("[v0.41.0] cancelAutoPosition — 지금 감시 중인 포지션을 사
   it("이미 사라진(존재하지 않는) 포지션을 취소하려 하면 실패로 알려준다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const res = await eng.cancelAutoPosition("GHOST", 1, Date.now());
       expect(res.ok).toBe(false);
       expect(res.message).toContain("사라진");
@@ -1863,7 +1899,7 @@ describe("[v0.41.0] cancelAutoPosition — 지금 감시 중인 포지션을 사
   it("[v0.60.0] 취소 시도 중 조건주문이 이미 COMPLETED(익절/손절로 종료)인 걸 확인하면, 실패 대신 '정리'로 처리해 목록에서 뺀다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       // 1) 실제 매수 체결 → OCO(조건주문) 등록까지 실제 흐름 그대로 태워 진짜 conditionalOrderId를 얻는다.
       const entry = await eng.placeEntry({ symbol: "AAPL", price: 2.1, quantity: 3 });
       const buyOrderId = (entry.detail as { tossOrderId: string }).tossOrderId;
@@ -1901,6 +1937,15 @@ describe("[v0.41.0] cancelAutoPosition — 지금 감시 중인 포지션을 사
 
       const rec = eng.getAutoTradeHistory().find((h) => h.id === `AAPL@2.1@${enteredAtMs}`);
       expect(rec?.status).toBe("closed_win"); // 익절가(2.5) 돌파로 발동됐으므로
+      eng.stopAllStrength(); // [v0.90.0] placeEntry가 자동으로 켠 체결강도 추적 정리(위와 동일 이유)
+      // [v0.90.0] 가짜 토스 서버를 확실히 닫는다 — 안 닫으면 다음 테스트가 새 가짜 서버를
+      //   띄우는 사이 아직 안 닫힌 이 서버가 process.env.TOSS_BASE_URL(전역 변수라 모든 엔진이
+      //   공유)을 다시 가리키게 만들어, 다음 테스트가 엉뚱한(이 테스트의) 가짜 서버로 요청을
+      //   보낼 수 있다 — 예전엔 매번 동기 디스크 저장이 끼어들며 생긴 "우연한 지연"이 이
+      //   경합을 가려 왔는데, 저장이 비동기(디바운스)로 바뀌며 다음 테스트가 더 빨리 시작돼
+      //   경합이 실제로 드러났다(이 테스트 바로 다음의 "[v0.60.1]" 테스트가 간헐적으로
+      //   실패하던 원인 — 실제 배포본은 엔진이 하나뿐이라 이 경합 자체가 없다).
+      await eng.stopMock();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1918,7 +1963,7 @@ describe("[v0.41.0] cancelAutoPosition — 지금 감시 중인 포지션을 사
   it("[v0.60.1] 취소 시도 중 조건주문 자체가 토스에 없음(404 conditional-order-not-found)을 확인하면, 재확인 없이 바로 '정리'로 처리한다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       // [단순화] watching→active 부트스트랩(reconcile의 "재시작 후 복구" 경로, registerOcoForFilled
       // 재시도 로직까지 거침)을 타지 않고, placeOco로 직접 진짜 conditionalOrderId를 발급받아
       // "active" 포지션을 곧바로 구성한다 — 이 테스트가 실제로 검증하려는 건 reconcile/cancel의
@@ -1951,6 +1996,7 @@ describe("[v0.41.0] cancelAutoPosition — 지금 감시 중인 포지션을 사
       const rec = eng.getAutoTradeHistory().find((h) => h.id === `AAPL@2.1@${enteredAtMs}`);
       expect(rec?.status).toBe("closed_manual");
       expect(rec?.note).toContain("이미 없었음");
+      await eng.stopMock(); // [v0.90.0] 가짜 토스 서버 정리(위 "[v0.60.0]" 테스트 주석 참고)
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1959,7 +2005,7 @@ describe("[v0.41.0] cancelAutoPosition — 지금 감시 중인 포지션을 사
   it("[v0.60.1] reconcileAutoPositions 정기 재확인 때도 조건주문 404(not-found)를 만나면, 3회를 기다리지 않고 즉시 자리를 비운다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const ocoEntry = await eng.placeOco({
         symbol: "AAPL", quantity: 3, tpTrigger: 2.5, tpPrice: 2.5, slTrigger: 1.8, slPrice: 1.79, expireDate: "2026-12-30",
       });
@@ -1987,6 +2033,7 @@ describe("[v0.41.0] cancelAutoPosition — 지금 감시 중인 포지션을 사
       const rec = eng.getAutoTradeHistory().find((h) => h.id === `AAPL@2.1@${enteredAtMs}`);
       expect(rec?.status).toBe("closed_manual");
       expect(rec?.note).toContain("존재하지 않아");
+      await eng.stopMock(); // [v0.90.0] 가짜 토스 서버 정리(위 "[v0.60.0]" 테스트 주석 참고)
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -2003,7 +2050,7 @@ describe("[v0.41.0] cancelAutoPosition — 지금 감시 중인 포지션을 사
   it("[v0.61.8] 조건주문이 사라졌는데 실계좌엔 여전히 보유 중이면 강한 경고(알림 포함)를 남긴다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const ocoEntry = await eng.placeOco({
         symbol: "AAPL", quantity: 3, tpTrigger: 2.5, tpPrice: 2.5, slTrigger: 1.8, slPrice: 1.79, expireDate: "2026-12-30",
       });
@@ -2035,6 +2082,7 @@ describe("[v0.41.0] cancelAutoPosition — 지금 감시 중인 포지션을 사
       const notified = await notifyPromise;
       expect(notified.title).toContain("보호장치 없이 보유 중");
       expect(notified.symbol).toBe("AAPL");
+      await eng.stopMock(); // [v0.90.0] 가짜 토스 서버 정리(위 "[v0.60.0]" 테스트 주석 참고)
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -2055,7 +2103,7 @@ describe("[v0.45.0] AutoTradeHistoryEntry.criteriaSnapshot — 진입 시점 설
   it("addAutoTradeHistory에 넘긴 스냅샷이 getAutoTradeHistory()에 그대로 저장된다", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       const engAny = eng as unknown as EngineInternals;
       const enteredAtMs = Date.now();
       const pos: AutoPosition = {
@@ -2104,13 +2152,13 @@ describe("[v0.61.8] 진입 타점 분할 설정(autoTradeEntryLevel)", () => {
   it("공장값은 1분할이고, saveAutoTradeSettings로 2분할을 저장하면 재시작해도 유지된다", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       expect(eng.getSettings().autoTradeEntryLevel).toBe(1);
 
       const saved = eng.saveAutoTradeSettings({ entryLevel: 2 });
       expect(saved.autoTradeEntryLevel).toBe(2);
 
-      const eng2 = new ToolEngine(dir, { forceMock: true });
+      const eng2 = mkEngine(dir, { forceMock: true });
       expect(eng2.getSettings().autoTradeEntryLevel).toBe(2);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -2120,7 +2168,7 @@ describe("[v0.61.8] 진입 타점 분할 설정(autoTradeEntryLevel)", () => {
   it("entryLevel을 안 주거나 1/2가 아닌 값을 주면 이전 값을 그대로 유지한다", () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
-      const eng = new ToolEngine(dir, { forceMock: true });
+      const eng = mkEngine(dir, { forceMock: true });
       eng.saveAutoTradeSettings({ entryLevel: 2 });
       // @ts-expect-error — 런타임 방어(원격 명령 등 외부 입력이 잘못된 값을 보낼 수 있음) 검증
       const after = eng.saveAutoTradeSettings({ entryLevel: 3, maxPositions: 5 });
