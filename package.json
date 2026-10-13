@@ -1,7 +1,7 @@
 {
   "name": "kyle-bot",
   "private": true,
-  "version": "0.90.0",
+  "version": "0.91.0",
   "description": "Capri 매매도구 — Capri매매기법 계산기 + 토스 조건주문 (v0.2: 주문 잠금/드라이런)",
   "author": "hun100b",
   "type": "module",
@@ -19,7 +19,6 @@
     "app:dist": "npm run dist:mac",
     "icon": "node scripts/make-icon.mjs",
     "ship": "node scripts/ship.mjs",
-    "relay": "tsx scripts/relay.mjs",
     "web:dev": "vite --config vite.web.config.ts",
     "web:check": "tsc -p tsconfig.web.json --noEmit",
     "web:build": "npm run web:check && vite build --config vite.web.config.ts && node scripts/stamp-sw.mjs",
@@ -34,7 +33,6 @@
     "@supabase/supabase-js": "^2.110.6",
     "electron-updater": "^6.8.9",
     "luxon": "^3.7.2",
-    "qrcode": "^1.5.4",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },

@@ -34,6 +34,8 @@ contextBridge.exposeInMainWorld("kyletool", {
   getNotifySettings: () => ipcRenderer.invoke("tool:notify:get"),
   saveNotifySettings: (url) => ipcRenderer.invoke("tool:notify:save", url),
   getMyNotifySettings: () => ipcRenderer.invoke("tool:notify:getMine"),
+  testTossConnection: () => ipcRenderer.invoke("tool:toss:testConnection"), // [v0.91.0]
+  sendMyDiscordTest: () => ipcRenderer.invoke("tool:notify:testMine"), //      [v0.91.0]
   saveMyNotifySettings: (url) => ipcRenderer.invoke("tool:notify:saveMine", url),
   authOAuth: (provider) => ipcRenderer.invoke("tool:auth:oauth", provider),
   // [v0.59.0] 폰 원격 조종 — 명령 보내기/조회 + PC 생존신호 조회(실행은 항상 PC가 자동으로 한다)
@@ -169,14 +171,7 @@ contextBridge.exposeInMainWorld("kyletool", {
 
   // 연습 모드 전용
   // [폰에서 쓰기] 집 PC 릴레이 + 인터넷 터널 제어
-  phoneStart: () => ipcRenderer.invoke("phone:start"),
-  phoneStop: () => ipcRenderer.invoke("phone:stop"),
-  phoneStatus: () => ipcRenderer.invoke("phone:status"),
-  onPhoneState: (cb) => {
-    const h = (_e, v) => cb(v);
-    ipcRenderer.on("phone:state", h);
-    return () => ipcRenderer.removeListener("phone:state", h);
-  },
+  isDesktop: true, // [v0.91.0] 데스크톱 앱 표식 — 예전엔 phoneStart 유무로 "데스크톱 vs 웹(폰)"을 가렸다(폰 QR 삭제로 전용 표식 도입)
   mockSetPrice: (symbol, price) => ipcRenderer.invoke("tool:mockSetPrice", symbol, price),
 
   // 실시간 저널 구독

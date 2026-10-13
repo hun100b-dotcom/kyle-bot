@@ -167,6 +167,8 @@ export function installKyleTool(): ToolEngine {
     getNotifySettings: () => e.getNotifySettings(),
     saveNotifySettings: (url: string) => e.saveNotifySettings(url),
     getMyNotifySettings: () => e.getMyNotifySettings(),
+    testTossConnection: () => e.testTossConnection(), // [v0.91.0]
+    sendMyDiscordTest: () => e.sendMyDiscordTest(), //   [v0.91.0]
     saveMyNotifySettings: (url: string) => e.saveMyNotifySettings(url),
     // [v0.59.0→v0.60.0] 소셜 로그인(구글만 — 카카오는 오너 요청으로 제거) — 웹은 전체
     //   페이지 이동(리다이렉트) 방식. 돌아온 뒤 처리는 이 파일 아래

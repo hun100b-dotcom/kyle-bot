@@ -14,9 +14,6 @@ import { app, BrowserWindow, ipcMain, Menu, shell } from "electron";
 import { join } from "node:path";
 import { existsSync, writeFileSync } from "node:fs";
 import { ToolEngine } from "./tool-engine";
-import { startRelay, type RelayHandle } from "./relay"; //   [폰 연동] 집 PC 릴레이
-import { startTunnel, type TunnelHandle } from "./tunnel"; // [폰 연동] 인터넷 터널
-import QRCode from "qrcode"; //                              [폰 연동] 접속 주소 QR
 import electronUpdater from "electron-updater";
 import { prepareMacSelfUpdate, scheduleMacSelfUpdateSwap } from "./mac-self-update"; // [v0.60.0] 맥 직접교체 자동업데이트
 
@@ -435,80 +432,7 @@ async function runVerification(shotPath: string): Promise<void> {
   }
 }
 
-// =============================================================================
-// [폰에서 쓰기] 집 PC 릴레이 + 인터넷 터널
-// -----------------------------------------------------------------------------
-// 토스 키는 '허용된 IP'에서만 쓸 수 있어 클라우드 서버로는 막힌다(403). 집 PC는 허용돼 있다.
-// 그래서 이 앱이 켜져 있는 동안 **집 PC가 폰의 중계소**가 된다:
-//     폰(웹앱) → 터널(임시 https 주소) → 이 앱의 릴레이 → 토스
-// 화면에는 접속 주소와 QR을 띄워, 사장님이 폰으로 스캔만 하면 되게 한다.
-// =============================================================================
-let relay: RelayHandle | null = null;
-let tunnel: TunnelHandle | null = null;
-let phoneState: { status: string; url: string | null; qr: string | null; error: string | null } = {
-  status: "꺼짐",
-  url: null,
-  qr: null,
-  error: null,
-};
-
-const WEB_APP_URL = "https://hun100b-dotcom.github.io/capri-web/";
-
-/** 화면에 현재 상태를 알려 준다(진행 상황이 실시간으로 보이게) */
-function pushPhoneState(): void {
-  win?.webContents.send("phone:state", phoneState);
-}
-
-/** 폰 연결 켜기: 릴레이 → 터널 → 주소/QR 생성 */
-async function startPhoneAccess(): Promise<typeof phoneState> {
-  if (relay && tunnel && phoneState.url) return phoneState; // 이미 켜져 있으면 그대로
-
-  try {
-    phoneState = { status: "릴레이 준비 중…", url: null, qr: null, error: null };
-    pushPhoneState();
-    if (!relay) relay = await startRelay(8790);
-
-    phoneState.status = "인터넷 주소 만드는 중… (처음이면 프로그램을 내려받느라 1~2분)";
-    pushPhoneState();
-    if (!tunnel) {
-      tunnel = await startTunnel(relay.port, join(app.getPath("userData"), "bin"), (msg) => {
-        phoneState.status = msg;
-        pushPhoneState();
-      });
-    }
-
-    // 폰이 열 최종 주소(웹앱 + 릴레이 주소를 ?api= 로 전달)
-    const api = `${tunnel.publicUrl}/r/${relay.token}`;
-    const url = `${WEB_APP_URL}?api=${encodeURIComponent(api)}`;
-    phoneState = {
-      status: "연결됨 — 폰에서 QR을 찍으세요",
-      url,
-      qr: await QRCode.toDataURL(url, { width: 320, margin: 1 }),
-      error: null,
-    };
-  } catch (e) {
-    phoneState = {
-      status: "실패",
-      url: null,
-      qr: null,
-      error: e instanceof Error ? e.message : String(e),
-    };
-  }
-  pushPhoneState();
-  return phoneState;
-}
-
-/** 폰 연결 끄기 */
-async function stopPhoneAccess(): Promise<typeof phoneState> {
-  tunnel?.stop();
-  tunnel = null;
-  await relay?.stop();
-  relay = null;
-  phoneState = { status: "꺼짐", url: null, qr: null, error: null };
-  pushPhoneState();
-  return phoneState;
-}
-
+// [v0.91.0] "폰에서 쓰기"(QR 릴레이·터널)는 오너 결정으로 삭제했다 — 폰은 로그인만으로 상태 미러·원격 명령·동기화 기록을 쓴다.
 /** 화면 요청(window.kyletool.*) ↔ 엔진 연결 */
 // =============================================================================
 // [v0.59.0→v0.60.0] 소셜 로그인(구글만 — 카카오는 오너 요청으로 제거) 팝업 — 데스크톱 전용
@@ -587,6 +511,8 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:notify:save", (_ev, url: string) => e.saveNotifySettings(url));
   // [v0.83.0] 개인용 디스코드 알림(로그인한 사람 누구나 자기 웹훅 등록)
   ipcMain.handle("tool:notify:getMine", () => e.getMyNotifySettings());
+  ipcMain.handle("tool:toss:testConnection", () => e.testTossConnection()); // [v0.91.0] 튜토리얼 연결 테스트
+  ipcMain.handle("tool:notify:testMine", () => e.sendMyDiscordTest()); //        [v0.91.0] 튜토리얼 디스코드 테스트
   ipcMain.handle("tool:notify:saveMine", (_ev, url: string) => e.saveMyNotifySettings(url));
   ipcMain.handle("tool:auth:oauth", (_ev, provider: "google") => startOAuthPopup(e, provider));
   // [v0.59.0] 폰 원격 조종 — 명령 보내기/조회 + PC 생존신호 조회. 명령 "실행"(폴링 루프)은
@@ -708,11 +634,6 @@ function registerIpc(e: ToolEngine): void {
 
   ipcMain.handle("tool:mockSetPrice", (_ev, symbol: string, price: number) => e.mockSetPrice(symbol, price));
 
-  // --- [폰에서 쓰기] 릴레이/터널 제어 ---
-  ipcMain.handle("phone:start", () => startPhoneAccess());
-  ipcMain.handle("phone:stop", () => stopPhoneAccess());
-  ipcMain.handle("phone:status", () => phoneState);
-
   // --- 자동 업데이트: 화면 버튼 → updater 동작 (전부 실패해도 안전) ---
   ipcMain.handle("update:download", async () => {
     try {
@@ -769,8 +690,6 @@ function registerIpc(e: ToolEngine): void {
 //   (업데이트 재시작 경로는 prepareForRestart()가 이미 같은 이유로 호출 — 평소 종료도 똑같이 챙긴다).
 app.on("before-quit", () => {
   engine?.flushAllFileSavesSync();
-  tunnel?.stop();
-  void relay?.stop();
 });
 
 app.whenReady().then(async () => {

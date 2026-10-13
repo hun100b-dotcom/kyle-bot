@@ -832,6 +832,10 @@ interface KyletoolBridge {
   saveNotifySettings(url: string): Promise<{ ok: boolean; message: string }>;
   /** [v0.83.0] 개인용 디스코드 알림 — 로그인한 사람 누구나 자기 웹훅을 등록/조회한다. */
   getMyNotifySettings(): Promise<{ discordWebhookUrl: string | null }>;
+  /** [v0.91.0] 튜토리얼: 저장된 토스 키로 키 인증·시세·계좌를 차례로 시험(읽기 전용). */
+  testTossConnection(): Promise<{ ok: boolean; stage: string; message: string; action?: string; steps: Array<{ name: string; ok: boolean }> }>;
+  /** [v0.91.0] 튜토리얼: 내 디스코드 웹후크로 테스트 메시지 전송. */
+  sendMyDiscordTest(): Promise<{ ok: boolean; message: string }>;
   saveMyNotifySettings(url: string): Promise<{ ok: boolean; message: string }>;
   /** [v0.59.0→v0.60.0] 소셜 로그인(구글만 — 카카오는 오너 요청으로 제거). Supabase에
    *  provider가 설정돼 있어야 실제로 동작한다. */
@@ -1093,10 +1097,8 @@ interface KyletoolBridge {
   }>;
 
   // [폰에서 쓰기] 집 PC 릴레이 + 인터넷 터널 (웹앱에서는 없을 수 있어 선택 항목)
-  phoneStart?(): Promise<PhoneState>;
-  phoneStop?(): Promise<PhoneState>;
-  phoneStatus?(): Promise<PhoneState>;
-  onPhoneState?(cb: (v: PhoneState) => void): () => void;
+  /** [v0.91.0] 데스크톱 앱에서만 true(웹/폰은 없음) — 화면이 "PC냐 폰이냐"를 가르는 표식. */
+  isDesktop?: boolean;
   onJournal(cb: (entry: JournalEntry) => void): () => void;
   onNotify(cb: (entry: NotifyEvent) => void): () => void;
 

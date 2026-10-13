@@ -19,6 +19,7 @@ import TodayReport from "./TodayReport"; // [v0.9.1] 오늘의 매매 리포트 
 import { useTabOrder } from "./useTabOrder"; // [v0.9.2] 탭 순서 드래그로 변경
 import { useLab } from "./useLab"; //                         [v0.65.0] 매매연구소 상태
 import { LabLiveTab, LabSignalsTab, LabCompareTab } from "./LabTabs"; // [v0.65.0] 매매연구소 화면
+import Tutorial, { openTutorial } from "./Tutorial"; //                  [v0.91.0] 튜토리얼(시작 가이드) — 마법사 + 상시 알약
 import SyncBanner from "./SyncBanner"; //                                [v0.88.0] 클라우드 동기화 상태 띠(PC·폰 공통)
 import { LabResultTab } from "./LabResult"; //                         [v0.66.0] 결과 요약
 import { restoreInputsFromSaved } from "../lib/split-restore"; // [v0.9.3] 옛 기록도 계산기로 불러오기
@@ -631,28 +632,10 @@ function App() {
   const [status, setStatus] = useState<ToolStatus | null>(null);
   const [tab, setTab] = useState<TabId>("calc");
   /** 웹앱(폰)인가? — 데스크톱에만 있는 '폰 연결' 기능 유무로 구분한다 */
-  const isWebApp = !window.kyletool.phoneStart;
-  /** [v0.60.5 — 오너 실사용 보고 "감시 중 포지션에 '폰 연결이 안 돼 있습니다' 경고가 84회
-   *  연속으로 쌓임"] 웹(폰)에서 QR 중계 연결이 안 돼 있으면 토스를 직접 호출하는 어떤
-   *  폴링도(reconcileAutoPositionsNow 등) 절대 성공할 수 없는데, 예전엔 이 사실을 모르고
-   *  20초마다 계속 시도해 실패만 쌓았다. 데스크톱(메서드 자체가 없음)이면 항상 true로
-   *  간주해 기존 동작을 그대로 둔다. */
-  const [hasTossRelay, setHasTossRelay] = useState(true);
-  useEffect(() => {
-    if (!isWebApp) return; // 데스크톱은 항상 true(기본값 유지) — 확인할 필요 없음
-    const check = () => void window.kyletool.hasTossRelay?.().then(setHasTossRelay).catch(() => setHasTossRelay(false));
-    check(); // 페이지 열릴 때 한 번 즉시 확인
-    // [v0.72.0 긴급 수정 — 오너 보고 "매매기록 탭이 전부 작동 안 함"] 예전엔 딱 한 번만 확인하고
-    //   끝이라, 페이지를 열어 둔 채로 집 PC가 꺼지면(또는 터널이 끊기면) 이 값이 영원히 옛 값(대개
-    //   true)에 멈춰 있었다 — 그 뒤로 켜지는 모든 탭이 "연결된 척"하다 조용히 실패했다. 이제는
-    //   30초마다(주문현황 탭의 자동새로고침과 같은 주기) 다시 확인해, PC가 꺼지거나 다시 켜져도
-    //   새로고침 없이 몇십 초 안에 화면이 저절로 맞는 상태로 돌아온다.
-    const timer = setInterval(check, 30_000);
-    return () => clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  /** 지금 이 세션이 토스를 직접(실시간) 호출해도 되는가 — 데스크톱은 항상, 웹은 중계 연결됐을 때만. */
-  const canReconcileLive = !isWebApp || hasTossRelay;
+  const isWebApp = !window.kyletool.isDesktop; // [v0.91.0] 예전엔 !phoneStart(폰 QR 삭제로 전용 표식 isDesktop 도입)
+  /** 지금 이 세션이 토스를 직접(실시간) 호출해도 되는가 — 데스크톱은 항상. 웹(폰)은 [v0.91.0 폰 QR 중계 삭제] 이후 직접 호출 경로가 없다
+   *  (폰은 상태 미러·원격 명령·동기화 기록으로만 동작 — 예전 hasTossRelay 폴링은 제거). */
+  const canReconcileLive = !isWebApp;
   // [v0.9.2] 탭 순서(드래그로 변경, 이 기기에 저장)
   // [v0.27.0] 이제 드래그로 순서를 바꾸는 건 '그룹'(4개) — 리프 탭은 그룹 안에서 고정 순서.
   const { order: groupOrder, dragProps, isDragging } = useTabOrder(TOP_GROUPS);
@@ -661,15 +644,6 @@ function App() {
   const [reportBusy, setReportBusy] = useState(false);
   const [reportPeriod, setReportPeriod] = useState<PeriodKind>("today");
   const [reportDate, setReportDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
-
-  // [폰에서 쓰기] 집 PC 릴레이 + 터널 상태(데스크톱 앱에서만 동작 — 웹앱에는 이 기능이 없다)
-  const [phone, setPhone] = useState<PhoneState | null>(null);
-  const [phoneBusy, setPhoneBusy] = useState(false);
-  useEffect(() => {
-    if (!window.kyletool.phoneStatus) return; // 웹앱에서는 이 기능이 없다
-    void window.kyletool.phoneStatus().then(setPhone);
-    return window.kyletool.onPhoneState?.(setPhone);
-  }, []);
 
   /** [v0.9.1] 오늘의 리포트 불러오기(탭을 열 때마다 새로 계산 — 늘 최신) */
   const loadReport = useCallback(
@@ -741,7 +715,8 @@ function App() {
   const [showAllAutoScanResults, setShowAllAutoScanResults] = useState(false);
   // [v0.14.0] 손익 색 관습: false=미국식(이익 초록/손실 빨강, 기본), true=한국식(이익 빨강/손실 파랑).
   //   화면 전용 취향이라 이 기기에만 저장(localStorage). CSS 토큰(data-pnl) 한 곳만 바꾸면 전체가 뒤집힌다.
-  const [pnlKr, setPnlKr] = useState<boolean>(() => {
+  //   [v0.91.0] 설정 탭의 "화면 표시" 카드(토글)는 삭제 — 저장값이 있으면 그대로 따르고, 없으면 미국식(기본).
+  const [pnlKr] = useState<boolean>(() => {
     try { return localStorage.getItem("capri-pnl") === "kr"; } catch { return false; }
   });
   // [v0.15.0] 데스크톱 2컬럼(두 탭 나란히). 폰/좁은 화면은 기존 단일 컬럼 그대로(회귀 금지).
@@ -3226,6 +3201,21 @@ ${msg}
     await refreshStatus();
   }
 
+  /** [v0.91.0] 튜토리얼 안내: 해당 탭으로 이동한 뒤 강조할 요소(data-tt)에 잠깐 파란 테두리를 깜빡인다. */
+  function tutorialGoTo(t: string, target?: string) {
+    const leaf = t as TabId;
+    setTab(leaf);
+    activateTab(leaf);
+    if (!target) return;
+    window.setTimeout(() => {
+      const el = document.querySelector<HTMLElement>(`[data-tt="${target}"]`);
+      if (!el) return;
+      el.classList.add("tt-spot");
+      try { el.scrollIntoView({ behavior: "smooth", block: "center" }); } catch { /* 무시 */ }
+      window.setTimeout(() => el.classList.remove("tt-spot"), 8000);
+    }, 450);
+  }
+
   if (!status) return <div className="loading">Capri 매매도구를 불러오는 중…</div>;
   const isMock = status.mode === "mock";
   // [v0.56.0] "서버 로그" 탭 — 카테고리 토글이 비어 있으면 전체, 아니면 고른 것만(최신이 위).
@@ -3454,11 +3444,24 @@ ${msg}
           >
             {effectiveKillSwitch ? "🔴 비상 정지 중" : "🛑 비상 정지"}
           </button>
+          <button className="mini" onClick={() => openTutorial()} title="처음 쓰는 분을 위한 단계별 시작 가이드(언제든 다시 열 수 있어요)">🎓 튜토리얼</button>
         </div>
       </header>
 
       {/* [v0.88.0] 클라우드 동기화 상태 — PC는 로컬 파일, 폰은 클라우드를 읽어서 "폰 기록이 9월에서 멈춘 것"을 PC가 몰랐다. 양쪽에서 같은 사실을 항상 보여준다. */}
       <SyncBanner isWebApp={isWebApp} loggedIn={authState.loggedIn} />
+
+      {/* [v0.91.0] 튜토리얼 — 첫 로그인 직후 한 번 자동으로 열리고, 꺼도 알약·헤더 버튼·설정 탭에서 언제든 다시 열린다 */}
+      <Tutorial
+        isDesktop={!isWebApp}
+        email={authState.email}
+        loggedIn={authState.loggedIn}
+        accountStatus={authState.accountStatus}
+        settings={settings}
+        autoStatus={autoStatus}
+        goToTab={tutorialGoTo}
+        onSettingsChanged={() => { void (async () => { setSettings(await window.kyletool.getSettings()); await refreshStatus(); })(); }}
+      />
 
       {/* [v0.44.0] 시스템 휴무 시간대(05:00~17:00 KST, 또는 휴장) 배너 — 탭·자동매매 켜짐 여부와
           무관하게 항상 보인다(수동 도구도 이 시간대엔 막히므로 오너가 항상 알 수 있어야 함). */}
@@ -4468,7 +4471,7 @@ ${msg}
               </p>
             </details>
 
-            <div className="settings-block">
+            <div className="settings-block" data-tt="tt-auto-start">
               <div className="form-row">
                 <button
                   className={`btn ${effectiveAutoEnabled ? "btn-kill kill-on" : "btn-start"}`}
@@ -4510,7 +4513,7 @@ ${msg}
                 </p>
               )}
 
-              <h3>한도 설정 (전부 직접 수정 가능)</h3>
+              <h3 data-tt="tt-auto-limits">한도 설정 (전부 직접 수정 가능)</h3>
               <div className="form-row">
                 <label>최대 보유 종목 수
                   <input type="text" inputMode="numeric" value={autoForm.maxPositions} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxPositions: e.target.value })} placeholder="3" />
@@ -5103,7 +5106,7 @@ ${msg}
           자동매매의 실제 5분 사이클 스캔과 [자동 스크리너] 탭의 [🔄 지금 새로고침]에 곧바로 반영된다. */}
       {paneTab === "screenCriteria" && (
         <main className="grid">
-          <section className="card wide">
+          <section className="card wide" data-tt="tt-screen-criteria">
             <h2>스크리닝 기준 <span className="hint">(조건 전부를 한 곳에서 켜고 끄거나 수치 조절)</span></h2>
             <details className="explain">
               <summary>❓ 조건은 어떻게 켜고 끄나요?</summary>
@@ -6162,14 +6165,23 @@ ${msg}
               [v0.20.0 #4 설정 재정비] 설정 탭을 '자주 쓰는 것 위 / 진단은 아래·접기'
               6그룹으로 재배치했다. 각 기능의 로직·핸들러·저장 방식은 그대로 두고,
               카드 순서·그룹 헤더·일부 라벨/안내문(직관화)만 손질했다.
-              순서(위→아래): ① 폰에서 쓰기 → ② 토스 연결 → ③ 동기화 → ④ 화면 표시
-                            → ⑤ 주문 기본값·안전 옵션 → ⑥ 고급·진단(접힘)
+              순서(위→아래): ① 토스 연결 → ② 계정·동기화 → ③ 내 디스코드 알림 → ④ 주문 기본값·안전 옵션
+              [v0.91.0] "폰에서 쓰기"(QR)·"화면 표시" 카드는 오너 결정으로 삭제했다.
               === '동기화'는 예전엔 두 곳(매매이력·토스키)에 흩어져 '동기화'라는 말이
                   두 번 나와 헷갈렸다 → ③ 한 카드 안에 ①매매이력 ②토스키 로 나눠 통합. ═══ */}
 
           {/* [v0.60.0 — 오너 요청 "배포 버전을 앱에서 확인 가능하게"] 화면 오른쪽 아래 구석에
               아주 작고 흐리게(opacity 0.35) 떠 있는 버전 표시가 있긴 했지만, 눈에 띄지 않아
               오너가 못 찾았다 — [설정] 탭 맨 위에 크고 분명하게 하나 더 둔다. */}
+          {/* [v0.91.0] 튜토리얼은 꺼도 언제든 다시 켤 수 있다 — 설정 탭 / 헤더 / 왼쪽 아래 알약 세 군데 */}
+          <section className="card wide">
+            <h2>🎓 시작 가이드(튜토리얼)</h2>
+            <p className="hint">처음 쓰는 분을 위한 단계별 안내예요. 토스 키 입력부터 디스코드·자동매매 설정까지 따라 하면 됩니다. 중간에 닫았어도 여기서(또는 위쪽 🎓 버튼, 왼쪽 아래 알약에서) 언제든 이어서 할 수 있어요.</p>
+            <div className="form-row">
+              <button className="btn btn-start" onClick={() => openTutorial()}>🎓 튜토리얼 열기</button>
+              <button className="mini" onClick={() => openTutorial("welcome")}>처음부터 보기</button>
+            </div>
+          </section>
           {appVer && (
             <section className="card wide">
               <h2>ℹ️ 버전 정보</h2>
@@ -6177,66 +6189,11 @@ ${msg}
             </section>
           )}
 
-          {/* ── ① 폰에서 쓰기 (데스크톱 앱에서만 보임 — 웹앱엔 이 기능 없음) ── */}
-          {window.kyletool.phoneStart && (
-            <section className="card wide">
-              <h2>📱 폰에서 쓰기</h2>
-              <details className="explain">
-                <summary>❓ 어떻게 연결되나요?</summary>
-                <p className="hint">
-                  이 PC를 <b>중계소</b> 삼아 폰에서도 카프리를 씁니다. 토스는 <b>등록된 인터넷 주소에서만</b> 열려서,
-                  이 PC(주소가 이미 허용됨)를 거쳐 가는 방식이에요.
-                  <br />
-                  아래 [폰 연결 켜기]를 누르고 <b>폰 카메라로 QR을 찍으면</b> 끝 — 폰에서도 시세·주문까지 다 됩니다.
-                </p>
-              </details>
-              <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <button
-                  className="btn"
-                  disabled={phoneBusy}
-                  onClick={async () => {
-                    setPhoneBusy(true);
-                    try {
-                      setPhone(phone?.url ? await window.kyletool.phoneStop!() : await window.kyletool.phoneStart!());
-                    } finally {
-                      setPhoneBusy(false);
-                    }
-                  }}
-                >
-                  {phoneBusy ? "준비 중…" : phone?.url ? "폰 연결 끄기" : "폰 연결 켜기"}
-                </button>
-                <span className="hint">상태: {phone?.status ?? "꺼짐"}</span>
-              </div>
-              {phone?.error && <p className="err">⚠ {phone.error}</p>}
-              {phone?.qr && (
-                <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap", marginTop: 12 }}>
-                  <img src={phone.qr} alt="폰 접속 QR" width={200} height={200} style={{ borderRadius: 8 }} />
-                  <div style={{ minWidth: 0 }}>
-                    <p className="hint" style={{ margin: "0 0 6px" }}>
-                      폰 카메라로 QR을 찍으세요. (또는 아래 주소를 폰 인터넷 창에 붙여넣기)
-                    </p>
-                    <input readOnly value={phone.url ?? ""} onFocus={(e) => e.currentTarget.select()} style={{ width: "100%" }} />
-                    <button
-                      className="mini"
-                      style={{ marginTop: 6 }}
-                      onClick={() => navigator.clipboard.writeText(phone.url ?? "")}
-                    >
-                      주소 복사
-                    </button>
-                    <p className="hint" style={{ marginTop: 8 }}>
-                      ⚠️ <b>이 앱을 끄거나 PC가 꺼지면</b> 폰에서 조회·주문이 멈춥니다. 주소는 켤 때마다 새로 만들어집니다.
-                    </p>
-                  </div>
-                </div>
-              )}
-            </section>
-          )}
-
           {/* ── ② 토스 연결 (모드 · 실주문 · 토스 키 · 계좌) ──
               이 4가지는 '토스에 연결하고, 진짜 주문을 낼지'를 정하는 한 덩어리다.
               모드·키·계좌는 아래 [연결 정보 저장] 한 버튼으로 함께 저장(saveSettings),
               실주문 켜기는 즉시 저장(독립)이라 위치만 같이 두고 로직은 그대로. */}
-          <section className="card wide">
+          <section className="card wide" data-tt="tt-keys">
             <h2>🔑 토스 연결</h2>
             <p className="hint">
               토스 증권에 연결하는 부분이에요. <b>토스 키를 넣어야</b> 시세·잔고·주문이 됩니다.
@@ -6341,7 +6298,7 @@ ${msg}
           {/* [v0.83.0 — 오너 지시] 개인용 디스코드 알림 — 운영자 전용이 아니라 로그인한
               사람 누구나(그룹원 각자) 자기 웹훅을 등록할 수 있다. 위 "☁️ 계정" 섹션처럼
               isOwner로 가리지 않는다. */}
-          <section className="card wide">
+          <section className="card wide" data-tt="tt-discord">
             <h2>🔔 내 디스코드 알림</h2>
             <p className="hint">
               스크리닝 확정/관찰 신호, 보호 가드 결과(조건주문 재등록·시장가 매도 등)를
@@ -6366,30 +6323,17 @@ ${msg}
             {myDiscordMsg && <p className={myDiscordMsg.startsWith("✅") ? "ok" : "hint"}>{myDiscordMsg}</p>}
           </section>
 
-          {/* ── ④ 화면 표시 — 손익 색 관습(미국식/한국식) ── */}
-          <section className="card wide">
-            <h2>🎨 화면 표시</h2>
-            <label className="radio" style={{ cursor: "pointer" }}>
-              <input type="checkbox" checked={pnlKr} onChange={(e) => setPnlKr(e.target.checked)} />
-              <span>손익 색 <b>한국식</b>으로 (이익 = <b style={{ color: "#f87171" }}>빨강</b> · 손실 = <b style={{ color: "#5b9dff" }}>파랑</b>)</span>
-            </label>
-            <p className="hint">
-              끄면 미국식(이익 = 초록 · 손실 = 빨강, 기본). 색과 함께 <b>부호(+/−)</b>도 늘 표시되어 헷갈리지 않습니다.
-              이 설정은 <b>이 기기</b>에만 저장됩니다(폰·PC 각각).
-            </p>
-          </section>
-
           {/* ── ⑤ 주문 기본값 · 안전 옵션 ──
               한 번 정해 두면 잘 안 바꾸는 값들 + 원할 때만 켜는 보조 안전장치. 아래쪽에 모음. */}
           <section className="card wide">
             <h2>⚙️ 주문 기본값 · 안전 옵션</h2>
-            <p className="hint">한 번 정해 두면 자주 안 바꾸는 값들이에요. 원할 때만 손보세요.</p>
+            <p className="hint">한 번 정해 두면 자주 안 바꾸는 값들이에요. 원할 때만 손보세요. 각 항목 제목 옆 <b>( )</b>에 <b>어디에 적용되는지</b> 적어 뒀어요.</p>
 
             {/* [v0.8.3] 기본 손익비 설정 */}
             <div className="settings-block">
-              <h3>기본 익절% / 손절% (계산기 시작값)</h3>
+              <h3>기본 익절% / 손절% <span className="hint">(🤖 <b>자동매매가 실제로 쓰는 값</b> + 메뉴얼 계산기 시작값 — 자동매매 탭에는 이 입력칸이 없어요)</span></h3>
               <p className="hint">
-                계산기 <b>익절%·손절% 칸에 처음 채워질 값</b>을 정해 둡니다. 앱을 껐다 켜거나 종목을 바꿔도 유지돼요
+                자동매매가 진입할 때 <b>익절·손절 가격을 계산하는 기준 %</b>이자, 계산기 <b>익절%·손절% 칸에 처음 채워질 값</b>입니다. 앱을 껐다 켜거나 종목을 바꿔도 유지돼요
                 (계산할 때 그때그때 고치는 건 여전히 가능). 지금 값: <b>익절 {settings.defaultTpPct ?? 2}% / 손절 {settings.defaultSlPct ?? 10}%</b>
               </p>
               <div className="form-row">
@@ -6407,10 +6351,11 @@ ${msg}
 
             {/* [v0.3.0] 세션별 시드 비율 설정 */}
             <div className="settings-block">
-              <h3>장별 매수 비율 (진입 수량 자동 제안)</h3>
+              <h3>장별 매수 비율 (진입 수량 자동 제안) <span className="hint">(✋ <b>메뉴얼 계산기의 수량 제안에만</b> 적용 — 자동매매는 [자동매매 현황]의 '종목당 투입 비율'을 씁니다)</span></h3>
               <p className="hint">
                 장(프리마켓·데이마켓·본장)마다 <b>가진 돈의 몇 %로 살지</b> 정해 둡니다. 계산기가 지금이 어느 장인지
                 자동으로 보고 <b>살 수량을 제안</b>해요(강제 아님 — 다른 수량을 넣어도 그대로 나갑니다).
+                <b> 자동매매에는 영향이 없어요</b> — 자동매매의 투입 비율은 [🤖 자동매매 → 자동매매 현황]에서 따로 정합니다.
               </p>
               <div className="form-row">
                 <label>데이마켓 %
@@ -6423,7 +6368,7 @@ ${msg}
                   <input type="text" inputMode="decimal" value={seedForm.regular} onChange={(e) => isNumericDraft(e.target.value) && setSeedForm({ ...seedForm, regular: e.target.value })} placeholder="50" />
                 </label>
               </div>
-              <p className="hint">몇 %의 '기준 금액'을 무엇으로 볼지:</p>
+              <p className="hint">몇 %의 '기준 금액'을 무엇으로 볼지 <b>(✋ 메뉴얼 수량 제안 + 🤖 자동매매 시드 <u>공통</u> — 여기서 바꾸면 자동매매의 기준 금액도 바뀝니다)</b>:</p>
               <label className="radio">
                 <input type="radio" checked={seedForm.basis === "auto"} onChange={() => setSeedForm({ ...seedForm, basis: "auto" })} />
                 <b>계좌의 살 수 있는 돈(예수금)으로 자동</b> — 지금 계좌 달러 잔고 기준 (기본)
@@ -6448,7 +6393,7 @@ ${msg}
 
             {/* [v0.20.0] 주문 편의·안전 옵션 — 원할 때만 켜는 보조 기능 */}
             <div className="settings-block">
-              <h3>보조 안전 옵션 (원할 때만 켜기)</h3>
+              <h3>보조 안전 옵션 (원할 때만 켜기) <span className="hint">(오입력 방지·휴무 시간대는 ✋ 메뉴얼 주문과 🤖 자동매매 진입 <b>공통</b>, 확인 팝업 건너뛰기는 ✋ 메뉴얼 주문 전용)</span></h3>
               <p className="hint">
                 평소엔 <b>앱이 주문을 막지 않습니다.</b> 아래는 실수를 줄이려고 <b>원할 때만</b> 켜는 보조 기능이에요.
               </p>

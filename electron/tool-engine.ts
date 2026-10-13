@@ -97,12 +97,14 @@ import {
   cancelOrder,
   cancelConditionalOrder,
   clearTokenCache,
+  getAccessToken,
   makeClientOrderId,
   type ConditionalOrderResponse,
   type OrderResponse,
 } from "../lib/toss";
 import { createMockTossServer } from "../mocks/toss-mock";
 import { canAutoEnter, isLossLimitBreached, volScaledInvestPct } from "../lib/auto-risk";
+import { classifyTossError, CONNECTION_STEP_NAMES, type ConnectionTestResult } from "../lib/connection-test"; // [v0.91.0] 튜토리얼 연결 테스트
 import { evaluateRestart, isMarkerFresh, describeRestart, type RestartBlocker, type RestartMarker } from "../lib/update-policy"; // [v0.70.0] 자동 업데이트 재시작 정책
 import { checkBracketPrices, checkPercentSettings, checkSimpleOrder, type SanityExpect } from "../lib/order-sanity"; // [v0.69.2] 주문 전 정합성 검사
 import { guessWarrantTickers, applyWarrantGate } from "../lib/warrant"; // [v0.36.0] 워런트 의심 종목 감지 / [v0.70.0] 탈락 게이트
@@ -2980,6 +2982,77 @@ export class ToolEngine extends EventEmitter {
       }, 10_000, "discord-webhook");
     } catch {
       /* 알림 실패는 조용히 무시 — 매매 로직엔 영향 없음 */
+    }
+  }
+
+  /**
+   * [v0.91.0 — 튜토리얼 "키 입력 + 연결 테스트"] 저장된 토스 키로 ①키 인증 ②시세 ③계좌를 차례로 시험해 결과를 쉬운 말로 돌려준다.
+   *   주문은 절대 내지 않는다(읽기 전용 조회만). 키·토큰은 결과에 담지 않는다. 연습 모드·키 없음은 시험 대신 안내만 한다.
+   */
+  async testTossConnection(): Promise<ConnectionTestResult> {
+    const steps: ConnectionTestResult["steps"] = [];
+    if (this.mode !== "live") {
+      return {
+        ok: false, stage: "mode", steps,
+        message: "지금은 연습 모드(앱 안의 가짜 서버)라 토스에 연결하지 않습니다.",
+        action: "키를 저장하면서 '실서버 모드'를 고른 뒤 다시 테스트하세요(실서버 모드여도 실주문은 따로 잠겨 있어 안전합니다).",
+      };
+    }
+    if (!process.env.TOSS_CLIENT_ID?.trim() || !process.env.TOSS_CLIENT_SECRET?.trim()) {
+      return { ok: false, stage: "keys", steps, message: "토스 키(Client ID/Secret)가 아직 저장돼 있지 않습니다.", action: "키를 입력하고 [저장]을 먼저 눌러 주세요." };
+    }
+    try {
+      await this.prepareBackend();
+      clearTokenCache();
+      await getAccessToken();
+      steps.push({ name: CONNECTION_STEP_NAMES[0], ok: true });
+    } catch (e) {
+      steps.push({ name: CONNECTION_STEP_NAMES[0], ok: false });
+      const c = classifyTossError(String(e));
+      return { ok: false, stage: c.stage, steps, message: c.message, action: c.action };
+    }
+    try {
+      await getPrice("AAPL");
+      steps.push({ name: CONNECTION_STEP_NAMES[1], ok: true });
+    } catch (e) {
+      steps.push({ name: CONNECTION_STEP_NAMES[1], ok: false });
+      const c = classifyTossError(String(e));
+      return { ok: false, stage: c.stage === "price" ? "price" : c.stage, steps, message: c.message, action: c.action };
+    }
+    try {
+      this.assertAccountReady();
+      await getBuyingPower("USD");
+      steps.push({ name: CONNECTION_STEP_NAMES[2], ok: true });
+    } catch (e) {
+      steps.push({ name: CONNECTION_STEP_NAMES[2], ok: false });
+      const c = classifyTossError(String(e));
+      return { ok: false, stage: "account", steps, message: c.stage === "account" ? c.message : "계좌 정보를 읽지 못했습니다.", action: c.stage === "account" ? c.action : "계좌 번호(보통 1번)를 확인하세요. 계속 안 되면 토스 개발자센터에서 키의 권한(조회)을 확인하세요." };
+    }
+    this.addJournal({ kind: "info", symbol: "-", summary: "✅ 토스 연결 테스트 통과 — 키 인증·시세·계좌 조회 모두 정상." });
+    return { ok: true, stage: "done", steps, message: "연결 성공! 키·시세·계좌 모두 정상입니다." };
+  }
+
+  /**
+   * [v0.91.0 — 튜토리얼 "디스코드 알림"] 내 웹후크로 테스트 한 줄을 보낸다. 주소는 저장돼 있어야 하고, 어디에도 기록하지 않는다.
+   */
+  async sendMyDiscordTest(): Promise<{ ok: boolean; message: string }> {
+    const { discordWebhookUrl } = await this.getMyNotifySettings();
+    if (!discordWebhookUrl) return { ok: false, message: "아직 웹후크 주소를 저장하지 않았습니다. 주소를 붙여넣고 [저장]을 먼저 눌러 주세요." };
+    if (!/^https:\/\/(discord|discordapp)\.com\/api\/webhooks\//.test(discordWebhookUrl)) {
+      return { ok: false, message: "디스코드 웹후크 주소 모양이 아닙니다. 'https://discord.com/api/webhooks/…'로 시작해야 합니다." };
+    }
+    try {
+      const res = await fetchWithTimeout(discordWebhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: "✅ **Capri 알림 테스트** — 이 메시지가 보이면 알림 연결이 정상입니다. (스크리닝 신호·보호 가드 결과가 이 채널로 옵니다.)" }),
+      }, 10_000, "discord-test");
+      if (res.ok) return { ok: true, message: "테스트 메시지를 보냈습니다. 디스코드 채널을 확인해 보세요!" };
+      if (res.status === 404) return { ok: false, message: "디스코드가 이 주소를 찾지 못했습니다(삭제됐거나 주소가 틀림). 웹후크를 새로 만들어 붙여넣어 주세요." };
+      if (res.status === 401 || res.status === 403) return { ok: false, message: "디스코드가 이 주소의 사용을 거부했습니다. 웹후크를 새로 만들어 주세요." };
+      return { ok: false, message: `디스코드가 오류로 응답했습니다(HTTP ${res.status}). 잠시 뒤 다시 시도하세요.` };
+    } catch {
+      return { ok: false, message: "디스코드에 연결하지 못했습니다. 인터넷 연결을 확인하고 다시 시도하세요." };
     }
   }
 
