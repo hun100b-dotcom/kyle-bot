@@ -22,7 +22,7 @@ import { join } from "node:path";
 import { DateTime } from "luxon";
 import { getSession, getSessionStart, getMarketStatus, isOrderFrozen, isInDailyPauseWindow, type Session } from "../lib/session";
 import { calcSplit3, calcSplit3Level, calcOrderbook, calcCandle, roundPrice, getTick, type SplitOrder } from "../lib/calc";
-import { encryptSecret, decryptSecret, encryptJson, decryptJson } from "../lib/keysync"; // [v0.8.0] 키 기기 간 동기화(클라이언트 암호화) + [v0.10.0] 매매 이력용
+import { encryptSecret, decryptSecret, encryptJson, decryptJson, deriveDataKey, encryptJsonWithDataKey, decryptJsonAuto } from "../lib/keysync"; // [v0.8.0] 키 기기 간 동기화(클라이언트 암호화) + [v0.10.0] 매매 이력용
 import { classifyTicks, strengthFromTicks, strengthFromVolumes, updateStrengthWindow, isWindowCapped, analyzeStrengthSeries, type Side, type StrengthSignals, type WindowBufferEntry } from "../lib/strength";
 import { buildReportFromRealized, makePeriod, type DailyReport, type PeriodKind } from "../lib/report"; // [v0.9.1] 매매 리포트
 import { matchFifo, mergeFills, coveredSince, shouldReuseCache, type Fill, type RealizedTrade } from "../lib/fills"; // [v0.9.6] 토스 실제 체결내역으로 손익 계산 (+v0.10.1 기간 커버리지 헬퍼)
@@ -1493,6 +1493,22 @@ export class ToolEngine extends EventEmitter {
   //   없어진다(로그인 비밀번호 = 잠금 비밀번호). 앱을 다시 켜면(재로그인 전까지) null이라
   //   자동 동기화가 잠시 쉬는데, 그동안도 로컬에 저장된 값으로는 그대로 동작한다.
   private authPassword: string | null = null;
+  /**
+   * [v0.88.0 — 오너 보고 "폰 기록이 9월까지만 있다"의 진짜 원인과 해결] 암호화 동기화(capri_trades·capri_auto_state·capri_splits)는 예전엔
+   *   위 authPassword가 메모리에 있을 때만 돌았다 — 그런데 앱이 재시작되면(자동 업데이트 포함) 저장된 토큰으로만 로그인이 복원돼 비밀번호가 없다 →
+   *   그때부터 PC는 **조용히 아무것도 안 올렸다**. 이제는 비밀번호에서 한 번 만든 "데이터 키"(비밀번호 자체는 여전히 저장 안 함)를 로컬에 보관해
+   *   재시작해도 계속 올린다(lib/keysync.ts 참고). 키가 아직 없으면(비밀번호를 한 번도 안 넣은 PC) 화면에 "동기화 잠김"을 크게 띄운다.
+   */
+  private authDataKey: string | null = null;
+  private cloudSyncTimer: ReturnType<typeof setInterval> | null = null;
+  private cloudSyncBusy = false;
+  private cloudSyncLockedWarnedAtMs = 0;
+  /** 채널별 마지막 업로드 결과 — 화면의 "마지막 동기화" 표시와 실패 경고에 쓴다(조용히 넘어가지 않기). */
+  private cloudSync: Record<"trades" | "autoState" | "splits", { lastOkMs: number | null; lastTryMs: number | null; lastError: string | null; lastFingerprint: string | null }> = {
+    trades: { lastOkMs: null, lastTryMs: null, lastError: null, lastFingerprint: null },
+    autoState: { lastOkMs: null, lastTryMs: null, lastError: null, lastFingerprint: null },
+    splits: { lastOkMs: null, lastTryMs: null, lastError: null, lastFingerprint: null },
+  };
   // [v0.59.0] capri_accounts.status 캐시(60초) — 승인 대기 화면이 반복 폴링해도
   //   매번 Supabase를 다시 부르지 않게 한다. 로그아웃/로그인하면 자연히 비워진다.
   private accountStatusCache: { status: "pending" | "approved" | "rejected"; atMs: number } | null = null;
@@ -1803,6 +1819,7 @@ export class ToolEngine extends EventEmitter {
     // [v0.8.1] 저장된 로그인 세션 복원(리프레시 토큰만). access token 은 필요 시 갱신한다.
     if (process.env.CAPRI_AUTH_REFRESH) this.authRefreshToken = process.env.CAPRI_AUTH_REFRESH;
     if (process.env.CAPRI_AUTH_EMAIL) this.authEmail = process.env.CAPRI_AUTH_EMAIL;
+    if (process.env.CAPRI_DATA_KEY) this.authDataKey = process.env.CAPRI_DATA_KEY; // [v0.88.0] 비밀번호 대신 데이터 키만 보관(재시작해도 동기화 유지)
   }
 
   getSettings() {
@@ -2280,6 +2297,7 @@ export class ToolEngine extends EventEmitter {
       // --- [v0.8.1] 로그인 세션(리프레시 토큰만 로컬 저장 → 재시작해도 로그인 유지). 비밀번호·마스터 비번은 저장 안 함. ---
       `CAPRI_AUTH_REFRESH=${this.authRefreshToken ?? ""}`,
       `CAPRI_AUTH_EMAIL=${this.authEmail ?? ""}`,
+      `CAPRI_DATA_KEY=${this.authDataKey ?? ""}`, // [v0.88.0] 비밀번호에서 만든 데이터 키(비밀번호 자체가 아님)
       "",
     ].join("\n");
     // 환경변수에도 반영(다음 loadEnv 없이도 일관되게)
@@ -2484,8 +2502,7 @@ export class ToolEngine extends EventEmitter {
       // [v0.8.2] 서버에 자동확인이 걸려 있어 가입하면 보통 바로 세션이 온다 → 즉시 로그인 상태.
       if (data.access_token) {
         this.applySession(data);
-        this.authPassword = password; // [v0.24.0] 이번 로그인 비밀번호를 그대로 잠금 열쇠로 재사용
-        this.persistEnv(); // 세션 저장(재시작해도 로그인 유지). 비밀번호는 저장하지 않는다.
+        await this.adoptPassword(password); // [v0.24.0→v0.88.0] 잠금 열쇠(비밀번호 + 데이터 키) 확보 + 세션 저장(비밀번호 자체는 저장 안 함)
         return { ok: true, needsConfirm: false, message: "가입·로그인 완료되었습니다." };
       }
       // 혹시 세션이 안 오면(설정 변경 등) 같은 자격증명으로 바로 로그인 시도.
@@ -2516,8 +2533,7 @@ export class ToolEngine extends EventEmitter {
         return { ok: false, message: msg };
       }
       this.applySession(data);
-      this.authPassword = password; // [v0.24.0] 이번 로그인 비밀번호를 그대로 잠금 열쇠로 재사용
-      this.persistEnv(); // refresh 토큰·이메일 저장(재시작 후에도 로그인 유지). 비밀번호는 저장하지 않는다.
+      await this.adoptPassword(password); // [v0.24.0→v0.88.0] 잠금 열쇠(비밀번호 + 데이터 키) 확보 + refresh 토큰·이메일 저장(비밀번호 자체는 저장 안 함)
 
       // 자동 동기화: 이 기기에 키가 없으면 클라우드에서 받아오고, 매매 이력도 함께 받아온다.
       let extra = "";
@@ -2540,6 +2556,9 @@ export class ToolEngine extends EventEmitter {
       });
       // [v0.56.0] "그룹 전체 실시간 동기화" — 로그인한 순간부터 3분마다 자동으로 올리고/받아온다.
       this.startGroupSyncLoop();
+      // [v0.88.0] 암호화 개인 기록(체결·자동매매·삼분할)도 지금 바로 올리고, 이후 주기적으로 확인·재시도한다.
+      void this.syncPushAll().catch(() => undefined);
+      this.startCloudSyncLoop();
 
       return { ok: true, message: `로그인되었습니다(${this.authEmail}).${extra}` };
     } catch (e) {
@@ -2559,6 +2578,8 @@ export class ToolEngine extends EventEmitter {
     this.authUserId = null;
     this.authExpiresAtMs = 0;
     this.authPassword = null; // [v0.24.0] 메모리에서만 들고 있던 비밀번호도 지운다
+    this.authDataKey = null; // [v0.88.0] 데이터 키도 지운다(다음 로그인 계정과 섞이지 않게)
+    this.stopCloudSyncLoop();
     this.accountStatusCache = null; // [v0.59.0] 다음 로그인 계정과 섞이지 않게 비운다
     this.persistEnv();
     return { ok: true };
@@ -4547,7 +4568,7 @@ export class ToolEngine extends EventEmitter {
     // [v0.61.7 — ③ 전수조사 중간-2] 로그인 상태면 다른 기기도 곧바로 볼 수 있게 클라우드에도
     //   올려 둔다(persistAutoTradeHistory와 같은 패턴 — 15초 쓰로틀, 실패해도 조용히 무시).
     const longEnough = Date.now() - (this.lastSplitsPushAtMs ?? 0) > 15_000;
-    if (longEnough && this.authPassword) {
+    if (longEnough && this.syncKeyReady()) {
       void this.syncPushSplits().catch(() => {
         /* 업로드 실패는 조용히 넘어간다 */
       });
@@ -5592,7 +5613,7 @@ export class ToolEngine extends EventEmitter {
     //   · 로그인 상태(authPassword 있음)일 때만 동작, 실패해도 조용히 무시(로컬은 이미 저장됨).
     //   · 15초에 한 번으로 제한 — 상태 전이마다(watching→active→종료) 매번 올리면 과함.
     const longEnough = Date.now() - (this.lastAutoStatePushAtMs ?? 0) > 15_000;
-    if (longEnough && this.authPassword) {
+    if (longEnough && this.syncKeyReady()) {
       void this.syncPushAutoState().catch(() => {
         /* 업로드 실패는 조용히 넘어간다 */
       });
@@ -5806,27 +5827,253 @@ export class ToolEngine extends EventEmitter {
   //   지금은 토스 키(capri_secrets)와 완전히 같은 방식 — capri_trades 표에 RLS로
   //   저장한다. 비밀번호는 로그인 비밀번호(authPassword) 하나뿐이다.
 
+  // ==========================================================================
+  // [v0.88.0] 클라우드 동기화 — 열쇠 관리 · 상태 표시 · 자동 재시도
+  // ==========================================================================
+
+  /** 비밀번호를 받았을 때(로그인·잠금 해제): 메모리에 비밀번호 + 로컬에 데이터 키(비밀번호 아님)를 두고 세션과 함께 저장한다. */
+  private async adoptPassword(password: string): Promise<void> {
+    this.authPassword = password;
+    try {
+      if (this.authUserId) this.authDataKey = await deriveDataKey(password, this.authUserId);
+    } catch {
+      /* 비밀번호가 짧은 등 — 키를 못 만들면 이번 세션은 비밀번호로만 동작 */
+    }
+    this.persistEnv();
+  }
+
+  /** 암호화 동기화에 쓸 열쇠가 있는가(데이터 키 또는 비밀번호). */
+  private syncKeyReady(): boolean {
+    return !!(this.authDataKey || (this.authPassword && this.authUserId));
+  }
+
+  private async currentDataKey(): Promise<string | null> {
+    if (this.authDataKey) return this.authDataKey;
+    if (this.authPassword && this.authUserId) {
+      this.authDataKey = await deriveDataKey(this.authPassword, this.authUserId);
+      this.persistEnv();
+      return this.authDataKey;
+    }
+    return null;
+  }
+
+  private async encryptForSync(data: unknown) {
+    const dk = await this.currentDataKey();
+    if (!dk) throw new Error("동기화 키가 없습니다.");
+    return encryptJsonWithDataKey(data, dk);
+  }
+
+  private async decryptFromSync<T>(rec: { ciphertext: string; salt: string; iv: string }): Promise<T> {
+    try {
+      return await decryptJsonAuto<T>(rec, { password: this.authPassword, dataKey: this.authDataKey, userId: this.authUserId });
+    } catch (e) {
+      if (String(e).includes("NEED_KEY")) throw new Error("이 기록은 예전 방식으로 잠겨 있어 로그인 비밀번호가 필요합니다(비밀번호를 한 번 입력하면 풀립니다).");
+      throw e;
+    }
+  }
+
+  /** 채널별 업로드 결과를 기록한다. 실패면 저널에도 남기고(같은 사유는 1시간에 한 번 알림) 호출부에 {ok:false}를 돌려준다 — 조용히 넘어가지 않는다. */
+  private recordSync(channel: "trades" | "autoState" | "splits", ok: boolean, error: string | null, fingerprint?: string): { ok: boolean; message: string } {
+    const st = this.cloudSync[channel];
+    st.lastTryMs = Date.now();
+    if (ok) {
+      st.lastOkMs = Date.now();
+      st.lastError = null;
+      if (fingerprint != null) st.lastFingerprint = fingerprint;
+      return { ok: true, message: "" };
+    }
+    const label = channel === "trades" ? "체결 이력" : channel === "autoState" ? "자동매매 기록" : "삼분할 기록";
+    const first = st.lastError !== error;
+    st.lastError = error;
+    if (first) {
+      this.addJournal({ kind: "info", symbol: "-", summary: `⚠️ 클라우드 동기화 실패(${label}): ${error} — 폰에서 최신 기록이 안 보일 수 있습니다. 자동으로 다시 시도합니다.`, notify: true, notifyTitle: "⚠️ 클라우드 동기화 실패" });
+    }
+    return { ok: false, message: error ?? "실패" };
+  }
+
+  private syncLockedResult(channel: "trades" | "autoState" | "splits"): { ok: boolean; message: string } {
+    const msg = "동기화 키가 없어 올리지 못했습니다 — 로그인 비밀번호를 한 번 입력해 주세요(화면 상단 '동기화 잠김' 안내).";
+    const st = this.cloudSync[channel];
+    st.lastTryMs = Date.now();
+    st.lastError = msg;
+    return { ok: false, message: msg };
+  }
+
+  private fillsFingerprint(): string {
+    const last = this.savedFills[this.savedFills.length - 1];
+    return `${this.savedFills.length}:${last ? last.atMs : 0}`;
+  }
+  private historyFingerprint(): string {
+    let h = 0;
+    for (const e of this.autoTradeHistory) h = (h * 31 + (e.status.length + (e.exitedAt ? e.exitedAt.length : 0) + Math.round((e.pnlUsd ?? 0) * 100))) | 0;
+    return `${this.autoTradeHistory.length}:${h}`;
+  }
+
+  /** 모든 암호화 채널을 지금 올린다(로그인 직후·잠금 해제 직후·주기 점검에서 호출). */
+  async syncPushAll(): Promise<{ ok: boolean; message: string }> {
+    if (!this.syncKeyReady()) {
+      this.syncLockedResult("trades");
+      return { ok: false, message: "동기화 키가 없습니다." };
+    }
+    const safe = async (p: Promise<{ ok: boolean; message?: string }>): Promise<{ ok: boolean; skipped: boolean }> => {
+      try {
+        const x = await p;
+        return { ok: x.ok, skipped: !x.ok && /올릴 .*없습니다/.test(x.message ?? "") }; // 올릴 기록 자체가 없는 채널은 실패가 아니다
+      } catch {
+        return { ok: false, skipped: false };
+      }
+    };
+    const r = [await safe(this.syncPushTrades()), await safe(this.syncPushAutoState()), await safe(this.syncPushSplits())];
+    const mark = (x: { ok: boolean; skipped: boolean }) => (x.ok ? "✓" : x.skipped ? "(올릴 것 없음)" : "✗");
+    return { ok: r.every((x) => x.ok || x.skipped), message: `체결 ${mark(r[0])} · 자동매매 ${mark(r[1])} · 삼분할 ${mark(r[2])}` };
+  }
+
+  /**
+   * [오너 요청] PC·폰 어디서든 "마지막 동기화 시각"을 볼 수 있게 — 클라우드에 실제로 올라가 있는 각 채널의 updated_at을 직접 읽는다.
+   *   (이 기기의 업로드 시도 결과도 함께 돌려줘서, PC는 "내가 못 올리는 중"을, 폰은 "PC가 낡았다"를 바로 알 수 있다.)
+   */
+  async getSyncStatus(): Promise<{
+    loggedIn: boolean;
+    locked: boolean;
+    channels: Array<{ key: string; label: string; cloudUpdatedAtMs: number | null; lastOkMs: number | null; lastTryMs: number | null; lastError: string | null; ageHours: number | null; stale: boolean }>;
+    worstAgeHours: number | null;
+    summary: string;
+  }> {
+    const token = await this.ensureAccessToken();
+    const chans: Array<{ key: "trades" | "autoState" | "splits"; table: string; label: string }> = [
+      { key: "autoState", table: "capri_auto_state", label: "자동매매 기록" },
+      { key: "trades", table: "capri_trades", label: "체결 이력(리포트·분석)" },
+      { key: "splits", table: "capri_splits", label: "삼분할 기록" },
+    ];
+    const out: Array<{ key: string; label: string; cloudUpdatedAtMs: number | null; lastOkMs: number | null; lastTryMs: number | null; lastError: string | null; ageHours: number | null; stale: boolean }> = [];
+    for (const c of chans) {
+      let cloud: number | null = null;
+      if (token) {
+        try {
+          const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/${c.table}?select=updated_at`, { headers: this.authRestHeaders(token) }, 8_000, c.table);
+          if (res.ok) {
+            const rows = (await res.json()) as Array<{ updated_at: string }>;
+            if (rows[0]?.updated_at) cloud = Date.parse(rows[0].updated_at);
+          }
+        } catch {
+          /* 조회 실패 — null로 표시 */
+        }
+      }
+      const st = this.cloudSync[c.key];
+      const ageHours = cloud != null ? Math.round(((Date.now() - cloud) / 3_600_000) * 10) / 10 : null;
+      // "낡음": 클라우드 기록이 24시간 넘게 갱신 안 됨(자동매매·체결이 매일 생기는 계정 기준 — 데이터가 없는 채널은 이 판단에서 제외)
+      const hasLocal = c.key === "trades" ? this.savedFills.length > 0 : c.key === "autoState" ? this.autoTradeHistory.length > 0 : this.splits.length > 0;
+      out.push({ key: c.key, label: c.label, cloudUpdatedAtMs: cloud, lastOkMs: st.lastOkMs, lastTryMs: st.lastTryMs, lastError: st.lastError, ageHours, stale: hasLocal && (cloud == null || (ageHours ?? 0) > 24) });
+    }
+    const ages = out.map((o) => o.ageHours).filter((x): x is number => x != null);
+    const worst = ages.length ? Math.max(...ages) : null;
+    const locked = !this.syncKeyReady();
+    const stale = out.some((o) => o.stale);
+    const anyLocal = this.savedFills.length > 0 || this.autoTradeHistory.length > 0 || this.splits.length > 0;
+    const summary = !token ? "로그인이 필요합니다." : locked && anyLocal ? "🔒 동기화 잠김 — 이 기기가 클라우드(폰)로 기록을 올리지 못하고 있습니다. 로그인 비밀번호를 한 번 입력해 주세요." : stale ? "⚠️ 클라우드 기록이 24시간 넘게 갱신되지 않았습니다." : "✅ 클라우드 동기화 정상";
+    return { loggedIn: !!token, locked: locked && anyLocal, channels: out, worstAgeHours: worst, summary }; // 올릴 기록이 아직 없는 기기는 '잠김'으로 보지 않는다
+  }
+
+  /**
+   * [잠금 해제] 로그인 비밀번호를 한 번 받아 데이터 키를 만들어 보관하고 곧바로 전부 올린다(소급 동기화 — 그동안 쌓인 로컬 기록 전체).
+   *   비밀번호가 틀리면 Supabase 로그인이 실패해 아무것도 바뀌지 않는다. 비밀번호 자체는 저장하지 않는다.
+   */
+  async unlockSync(password: string): Promise<{ ok: boolean; message: string }> {
+    if (!this.authEmail) return { ok: false, message: "먼저 로그인하세요." };
+    const r = await this.authSignIn(this.authEmail, password); // 비밀번호 검증 + 키 생성 + 받기(병합) + 올리기를 한 번에
+    if (!r.ok) return r;
+    const pushed = await this.syncPushAll();
+    return { ok: pushed.ok, message: pushed.ok ? `잠금을 풀고 전부 올렸습니다 — ${pushed.message}` : `잠금은 풀렸지만 일부 올리기에 실패했습니다 — ${pushed.message}` };
+  }
+
+  /** 주기 점검(5분): 키가 있으면 바뀐 채널을 올리고, 마지막 성공이 오래됐으면(1시간) 변화가 없어도 다시 올린다. 키가 없으면 하루 한 번 저널·알림으로 알린다. */
+  private async cloudSyncTick(): Promise<void> {
+    if (this.cloudSyncBusy) return;
+    this.cloudSyncBusy = true;
+    try {
+      if (!(this.authAccessToken || this.authRefreshToken)) return;
+      if (!this.syncKeyReady()) {
+        if (Date.now() - this.cloudSyncLockedWarnedAtMs > 24 * 3_600_000 && (this.savedFills.length > 0 || this.autoTradeHistory.length > 0)) {
+          this.cloudSyncLockedWarnedAtMs = Date.now();
+          this.addJournal({ kind: "info", symbol: "-", summary: "🔒 클라우드 동기화 잠김 — 이 PC에 동기화 키가 없어 폰으로 기록을 못 올리고 있습니다. 화면 상단 안내에서 로그인 비밀번호를 한 번 입력해 주세요.", notify: true, notifyTitle: "🔒 폰 동기화 잠김" });
+        }
+        return;
+      }
+      const now = Date.now();
+      const stale = (c: "trades" | "autoState" | "splits") => now - (this.cloudSync[c].lastOkMs ?? 0) > 3_600_000;
+      if (this.savedFills.length > 0 && (this.cloudSync.trades.lastFingerprint !== this.fillsFingerprint() || stale("trades"))) await this.syncPushTrades().catch(() => undefined);
+      if (this.autoTradeHistory.length > 0 && (this.cloudSync.autoState.lastFingerprint !== this.historyFingerprint() || stale("autoState"))) await this.syncPushAutoState().catch(() => undefined);
+      if (this.splits.length > 0 && (this.cloudSync.splits.lastFingerprint !== String(this.splits.length) || stale("splits"))) await this.syncPushSplits().catch(() => undefined);
+    } finally {
+      this.cloudSyncBusy = false;
+    }
+  }
+
+  startCloudSyncLoop(): void {
+    if (this.cloudSyncTimer) return;
+    if (!(this.authAccessToken || this.authRefreshToken)) return; // 로그인 안 돼 있으면 시작 안 함
+    setTimeout(() => void this.cloudSyncTick(), 20_000); // 시작 직후 한 번(재시작 뒤 밀린 것 바로 올리기)
+    this.cloudSyncTimer = setInterval(() => void this.cloudSyncTick(), 5 * 60_000);
+  }
+
+  stopCloudSyncLoop(): void {
+    if (this.cloudSyncTimer) {
+      clearInterval(this.cloudSyncTimer);
+      this.cloudSyncTimer = null;
+    }
+  }
+
+  /** 내 계정의 그룹 공유(평문) 기록을 받아 자동매매 기록에 병합한다 — 암호화 채널이 낡았을 때의 안전망(폰이 PC 열쇠 없이도 최신 기록을 보게). */
+  private async mergeOwnGroupHistory(): Promise<number> {
+    const token = await this.ensureAccessToken();
+    if (!token || !this.authUserId) return 0;
+    const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_trades?user_id=eq.${this.authUserId}&select=history`, { headers: this.authRestHeaders(token) }, 10_000, "capri_group_trades");
+    if (!res.ok) return 0;
+    const rows = (await res.json()) as Array<{ history: unknown }>;
+    const remote = Array.isArray(rows[0]?.history) ? (rows[0].history as AutoTradeHistoryEntry[]) : [];
+    if (remote.length === 0) return 0;
+    const before = this.autoTradeHistory.length;
+    this.autoTradeHistory = mergeAutoHistory(this.autoTradeHistory, remote);
+    this.persistAutoTradeHistory();
+    // 실제로 자동매매를 돌리는 중인 기기(PC)에서는 "지금 감시 중" 목록을 기록으로 덮어쓰지 않는다(폰·조회 전용 기기에서만 다시 만든다).
+    if (!this.autoTradeEnabled) {
+      this.autoTradePositions = derivePositionsFromHistory(this.autoTradeHistory);
+      this.saveAutoPositions();
+    }
+    return this.autoTradeHistory.length - before;
+  }
+
+  private async pullOwnGroupHistoryFallback(why: string): Promise<{ ok: boolean; message: string; count?: number }> {
+    try {
+      const added = await this.mergeOwnGroupHistory();
+      return { ok: added >= 0 && this.autoTradeHistory.length > 0, message: `${why} — 대신 그룹 공유 기록에서 ${added}건을 보강했습니다.`, count: this.autoTradeHistory.length };
+    } catch (e) {
+      return { ok: false, message: `${why}: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+
   /**
    * syncPushTrades — 저장된 매매 이력을 암호화해 내 계정(capri_trades) 행에 올린다.
    */
   async syncPushTrades(): Promise<{ ok: boolean; message: string; count?: number }> {
     const token = await this.ensureAccessToken();
     if (!token) return { ok: false, message: "먼저 로그인하세요." };
-    if (!this.authPassword) return { ok: false, message: "다시 로그인해야 동기화할 수 있습니다(비밀번호는 저장해 두지 않아요)." };
+    if (!this.syncKeyReady()) return this.syncLockedResult("trades");
     if (this.savedFills.length === 0) return { ok: false, message: "올릴 매매 이력이 없습니다." };
 
     try {
-      const rec = await encryptJson(toSyncPayload(this.savedFills, Date.now()), this.authPassword);
+      const rec = await this.encryptForSync(toSyncPayload(this.savedFills, Date.now()));
       const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_trades?on_conflict=user_id`, {
         method: "POST",
         headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
         body: JSON.stringify({ user_id: this.authUserId, ciphertext: rec.ciphertext, salt: rec.salt, iv: rec.iv, updated_at: new Date().toISOString() }),
       }, 10_000, "capri_trades");
-      if (!res.ok) return { ok: false, message: `클라우드 저장 실패(HTTP ${res.status}).` };
+      if (!res.ok) return this.recordSync("trades", false, `클라우드 저장 실패(HTTP ${res.status}).`);
       this.lastSyncPushAtMs = Date.now();
+      this.recordSync("trades", true, null, this.fillsFingerprint());
       return { ok: true, message: `매매 이력 ${this.savedFills.length}건을 올렸습니다(암호화됨).`, count: this.savedFills.length };
     } catch (e) {
-      return { ok: false, message: `올리기 실패: ${e instanceof Error ? e.message : String(e)}` };
+      return this.recordSync("trades", false, `올리기 실패: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -5837,7 +6084,7 @@ export class ToolEngine extends EventEmitter {
   async syncPullTrades(): Promise<{ ok: boolean; message: string; count?: number }> {
     const token = await this.ensureAccessToken();
     if (!token) return { ok: false, message: "먼저 로그인하세요." };
-    if (!this.authPassword) return { ok: false, message: "다시 로그인해야 매매 이력을 받을 수 있습니다(비밀번호는 저장해 두지 않아요)." };
+    if (!this.syncKeyReady()) return { ok: false, message: "동기화 키가 없어 매매 이력을 받을 수 없습니다(로그인 비밀번호를 한 번 입력하면 풀립니다)." };
 
     try {
       const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_trades?select=ciphertext,salt,iv`, {
@@ -5848,7 +6095,7 @@ export class ToolEngine extends EventEmitter {
       if (!rows || rows.length === 0) {
         return { ok: false, message: "내 계정에 저장된 매매 이력이 없습니다." };
       }
-      const payload = await decryptJson<TradeSyncPayload>(rows[0], this.authPassword); // 틀린 비번이면 여기서 실패
+      const payload = await this.decryptFromSync<TradeSyncPayload>(rows[0]); // 틀린 비번/키면 여기서 실패
       if (!isSyncPayload(payload)) return { ok: false, message: "받은 데이터 형식이 올바르지 않습니다." };
 
       const before = this.savedFills.length;
@@ -5875,21 +6122,22 @@ export class ToolEngine extends EventEmitter {
   async syncPushSplits(): Promise<{ ok: boolean; message: string; count?: number }> {
     const token = await this.ensureAccessToken();
     if (!token) return { ok: false, message: "먼저 로그인하세요." };
-    if (!this.authPassword) return { ok: false, message: "다시 로그인해야 동기화할 수 있습니다(비밀번호는 저장해 두지 않아요)." };
+    if (!this.syncKeyReady()) return this.syncLockedResult("splits");
     if (this.splits.length === 0) return { ok: false, message: "올릴 삼분할 기록이 없습니다." };
 
     try {
-      const rec = await encryptJson(toSplitsSyncPayload(this.splits, Date.now()), this.authPassword);
+      const rec = await this.encryptForSync(toSplitsSyncPayload(this.splits, Date.now()));
       const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_splits?on_conflict=user_id`, {
         method: "POST",
         headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
         body: JSON.stringify({ user_id: this.authUserId, ciphertext: rec.ciphertext, salt: rec.salt, iv: rec.iv, updated_at: new Date().toISOString() }),
       }, 10_000, "capri_splits");
-      if (!res.ok) return { ok: false, message: `클라우드 저장 실패(HTTP ${res.status}).` };
+      if (!res.ok) return this.recordSync("splits", false, `클라우드 저장 실패(HTTP ${res.status}).`);
       this.lastSplitsPushAtMs = Date.now();
+      this.recordSync("splits", true, null, String(this.splits.length));
       return { ok: true, message: `삼분할 기록 ${this.splits.length}건을 올렸습니다(암호화됨).`, count: this.splits.length };
     } catch (e) {
-      return { ok: false, message: `올리기 실패: ${e instanceof Error ? e.message : String(e)}` };
+      return this.recordSync("splits", false, `올리기 실패: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -5897,7 +6145,7 @@ export class ToolEngine extends EventEmitter {
   async syncPullSplits(): Promise<{ ok: boolean; message: string; count?: number }> {
     const token = await this.ensureAccessToken();
     if (!token) return { ok: false, message: "먼저 로그인하세요." };
-    if (!this.authPassword) return { ok: false, message: "다시 로그인해야 삼분할 기록을 받을 수 있습니다(비밀번호는 저장해 두지 않아요)." };
+    if (!this.syncKeyReady()) return { ok: false, message: "동기화 키가 없어 삼분할 기록을 받을 수 없습니다(로그인 비밀번호를 한 번 입력하면 풀립니다)." };
 
     try {
       const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_splits?select=ciphertext,salt,iv`, {
@@ -5908,7 +6156,7 @@ export class ToolEngine extends EventEmitter {
       if (!rows || rows.length === 0) {
         return { ok: false, message: "내 계정에 저장된 삼분할 기록이 없습니다." };
       }
-      const payload = await decryptJson<SplitsSyncPayload>(rows[0], this.authPassword); // 틀린 비번이면 여기서 실패
+      const payload = await this.decryptFromSync<SplitsSyncPayload>(rows[0]); // 틀린 비번/키면 여기서 실패
       if (!isSplitsSyncPayload(payload)) return { ok: false, message: "받은 데이터 형식이 올바르지 않습니다." };
 
       const before = this.splits.length;
@@ -5939,23 +6187,24 @@ export class ToolEngine extends EventEmitter {
   async syncPushAutoState(): Promise<{ ok: boolean; message: string; count?: number }> {
     const token = await this.ensureAccessToken();
     if (!token) return { ok: false, message: "먼저 로그인하세요." };
-    if (!this.authPassword) return { ok: false, message: "다시 로그인해야 동기화할 수 있습니다(비밀번호는 저장해 두지 않아요)." };
+    if (!this.syncKeyReady()) return this.syncLockedResult("autoState");
     if (this.autoTradeHistory.length === 0) {
       return { ok: false, message: "올릴 자동매매 기록이 없습니다." };
     }
 
     try {
-      const rec = await encryptJson(toAutoStateSyncPayload(this.autoTradeHistory, Date.now()), this.authPassword);
+      const rec = await this.encryptForSync(toAutoStateSyncPayload(this.autoTradeHistory, Date.now()));
       const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_auto_state?on_conflict=user_id`, {
         method: "POST",
         headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
         body: JSON.stringify({ user_id: this.authUserId, ciphertext: rec.ciphertext, salt: rec.salt, iv: rec.iv, updated_at: new Date().toISOString() }),
       }, 10_000, "capri_auto_state");
-      if (!res.ok) return { ok: false, message: `클라우드 저장 실패(HTTP ${res.status}).` };
+      if (!res.ok) return this.recordSync("autoState", false, `클라우드 저장 실패(HTTP ${res.status}).`);
       this.lastAutoStatePushAtMs = Date.now();
+      this.recordSync("autoState", true, null, this.historyFingerprint());
       return { ok: true, message: `자동매매 기록 ${this.autoTradeHistory.length}건을 올렸습니다(암호화됨).`, count: this.autoTradeHistory.length };
     } catch (e) {
-      return { ok: false, message: `올리기 실패: ${e instanceof Error ? e.message : String(e)}` };
+      return this.recordSync("autoState", false, `올리기 실패: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -5967,7 +6216,7 @@ export class ToolEngine extends EventEmitter {
   async syncPullAutoState(): Promise<{ ok: boolean; message: string; count?: number }> {
     const token = await this.ensureAccessToken();
     if (!token) return { ok: false, message: "먼저 로그인하세요." };
-    if (!this.authPassword) return { ok: false, message: "다시 로그인해야 자동매매 기록을 받을 수 있습니다(비밀번호는 저장해 두지 않아요)." };
+    if (!this.syncKeyReady()) return this.pullOwnGroupHistoryFallback("동기화 키가 없어 암호화 기록은 못 받았습니다");
 
     try {
       const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_auto_state?select=ciphertext,salt,iv`, {
@@ -5976,10 +6225,12 @@ export class ToolEngine extends EventEmitter {
       if (!res.ok) return { ok: false, message: `클라우드 조회 실패(HTTP ${res.status}).` };
       const rows = (await res.json()) as Array<{ ciphertext: string; salt: string; iv: string }>;
       if (!rows || rows.length === 0) {
-        return { ok: false, message: "내 계정에 저장된 자동매매 기록이 없습니다." };
+        return this.pullOwnGroupHistoryFallback("내 계정에 저장된 암호화 자동매매 기록이 없습니다");
       }
-      const payload = await decryptJson<AutoStateSyncPayload>(rows[0], this.authPassword); // 틀린 비번이면 여기서 실패
+      const payload = await this.decryptFromSync<AutoStateSyncPayload>(rows[0]); // 틀린 비번/키면 여기서 실패
       if (!isAutoStateSyncPayload(payload)) return { ok: false, message: "받은 데이터 형식이 올바르지 않습니다." };
+      // [v0.88.0] 암호화 기록이 낡았을 수 있다(PC가 못 올린 기간) — 같은 계정의 그룹 공유(평문, 3분마다 갱신) 기록도 함께 병합해 최신으로 맞춘다.
+      await this.mergeOwnGroupHistory().catch(() => 0);
 
       const before = this.autoTradeHistory.length;
       this.autoTradeHistory = mergeAutoHistory(this.autoTradeHistory, payload.history);
@@ -6671,7 +6922,7 @@ export class ToolEngine extends EventEmitter {
     //   · 5분에 한 번으로 제한 — 너무 잦은 업로드 방지.
     const changed = this.savedFills.length !== before;
     const longEnough = Date.now() - (this.lastSyncPushAtMs ?? 0) > 5 * 60_000;
-    if (changed && longEnough && this.authPassword) {
+    if (changed && longEnough && this.syncKeyReady()) {
       void this.syncPushTrades().catch(() => {
         /* 업로드 실패는 조용히 넘어간다 */
       });
@@ -6862,7 +7113,7 @@ export class ToolEngine extends EventEmitter {
 
     // ①-B [v0.10.0] 토스 조회가 안 됐고(회사·PC 꺼짐) 로그인 상태면,
     //     클라우드에 올려 둔 매매 이력을 받아 온다 → 홈 연결 없이도 리포트가 채워진다.
-    if (source !== "live" && this.authPassword) {
+    if (source !== "live" && this.syncKeyReady()) {
       try {
         await this.syncPullTrades();
       } catch {
@@ -6934,7 +7185,7 @@ export class ToolEngine extends EventEmitter {
         /* 연결 없으면 저장본으로 */
       }
     }
-    if (source !== "live" && this.authPassword) {
+    if (source !== "live" && this.syncKeyReady()) {
       try { await this.syncPullTrades(); } catch { /* 실패해도 저장본으로 */ }
     }
     const realized = matchFifo(this.savedFills, this.lastAvgCost);
@@ -6999,7 +7250,7 @@ export class ToolEngine extends EventEmitter {
         /* 연결 없으면 저장본으로 */
       }
     }
-    if (source !== "live" && this.authPassword) {
+    if (source !== "live" && this.syncKeyReady()) {
       try { await this.syncPullTrades(); } catch { /* 실패해도 저장본으로 */ }
     }
     if (this.savedFills.length === 0) source = "none";

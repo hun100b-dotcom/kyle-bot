@@ -138,3 +138,69 @@ export async function decryptJson<T>(rec: { ciphertext: string; salt: string; iv
   }
   return JSON.parse(dec.decode(plainBuf)) as T;
 }
+
+// =============================================================================
+// [v0.88.0] "데이터 키" 방식 — 비밀번호를 저장하지 않고도 PC가 계속 올릴 수 있게 한다
+// -----------------------------------------------------------------------------
+// [사고 원인(2026-10-13 확인)] 위 encryptJson/decryptJson은 매번 "로그인 비밀번호"로 잠근다. 그런데 PC 앱은 재시작하면 비밀번호 없이
+//   저장된 토큰(refresh token)으로만 로그인을 복원한다 → 비밀번호가 메모리에 없다 → 암호화 동기화(capri_trades·capri_auto_state·
+//   capri_splits)가 **조용히 통째로 건너뛰어졌다**(자동 업데이트·재시작이 잦을수록 더). 폰은 새로 비밀번호를 치고 로그인하니 읽기는 되는데,
+//   PC가 안 올린 데이터는 9월에서 멈춰 있었다.
+// [해결] 비밀번호로부터 **고정 솔트(계정 id)로 한 번 만든 32바이트 "데이터 키"**로 잠근다. PC는 비밀번호를 한 번 입력받을 때 이 키만 로컬에 저장하고
+//   (비밀번호 자체는 여전히 저장 안 함), 그 뒤로는 재시작해도 이 키로 계속 올린다. 폰은 로그인 때 친 비밀번호에서 같은 키를 다시 만들어 푼다.
+//   레코드의 salt 칸이 "k1"이면 이 방식, 아니면 예전 방식(레코드마다 다른 솔트 — 비밀번호가 있어야 풀림).
+// =============================================================================
+
+const DATAKEY_SALT_PREFIX = "capri-datakey-v1:";
+export const DATA_KEY_SCHEME = "k1";
+
+/** 비밀번호 + 계정 id → 데이터 키(base64 32바이트). 같은 입력이면 항상 같은 값(어느 기기에서든). */
+export async function deriveDataKey(password: string, userId: string): Promise<string> {
+  if (!password || password.length < 6) throw new Error("비밀번호는 6자 이상이어야 합니다.");
+  if (!userId) throw new Error("계정 정보가 없습니다.");
+  const baseKey = await subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await subtle.deriveBits({ name: "PBKDF2", salt: enc.encode(DATAKEY_SALT_PREFIX + userId), iterations: PBKDF2_ITERATIONS, hash: "SHA-256" }, baseKey, 256);
+  return toB64(bits);
+}
+
+async function importDataKey(dataKeyB64: string) {
+  return subtle.importKey("raw", fromB64(dataKeyB64), { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+}
+
+/** 데이터 키로 아무 JSON이나 암호화한다(레코드 salt = "k1"). */
+export async function encryptJsonWithDataKey(data: unknown, dataKeyB64: string): Promise<EncryptedRecord> {
+  const iv = webcrypto.getRandomValues(new Uint8Array(IV_BYTES));
+  const key = await importDataKey(dataKeyB64);
+  const ctBuf = await subtle.encrypt({ name: "AES-GCM", iv }, key, enc.encode(JSON.stringify(data)));
+  return { ciphertext: toB64(ctBuf), salt: DATA_KEY_SCHEME, iv: toB64(iv) };
+}
+
+/** 레코드가 데이터 키 방식인가. */
+export function isDataKeyRecord(rec: { salt: string }): boolean {
+  return rec.salt === DATA_KEY_SCHEME;
+}
+
+/**
+ * 어떤 방식으로 잠겼든 푼다. k1이면 데이터 키(또는 비밀번호+userId로 다시 만든 키), 예전 방식이면 비밀번호가 필요하다.
+ *   필요한 열쇠가 없으면 "NEED_KEY" 예외(호출부가 '잠김' 표시를 띄우는 데 쓴다).
+ */
+export async function decryptJsonAuto<T>(
+  rec: { ciphertext: string; salt: string; iv: string },
+  keys: { password?: string | null; dataKey?: string | null; userId?: string | null },
+): Promise<T> {
+  let plainBuf: ArrayBuffer;
+  if (isDataKeyRecord(rec)) {
+    let dk = keys.dataKey ?? null;
+    if (!dk && keys.password && keys.userId) dk = await deriveDataKey(keys.password, keys.userId);
+    if (!dk) throw new Error("NEED_KEY");
+    const key = await importDataKey(dk);
+    try {
+      plainBuf = await subtle.decrypt({ name: "AES-GCM", iv: fromB64(rec.iv) }, key, fromB64(rec.ciphertext));
+    } catch {
+      throw new Error("복호화 실패 — 동기화 키가 맞지 않거나 데이터가 손상됐습니다.");
+    }
+    return JSON.parse(dec.decode(plainBuf)) as T;
+  }
+  if (!keys.password) throw new Error("NEED_KEY");
+  return decryptJson<T>(rec, keys.password);
+}

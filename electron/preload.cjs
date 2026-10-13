@@ -162,6 +162,9 @@ contextBridge.exposeInMainWorld("kyletool", {
   cancelOrder: (id) => ipcRenderer.invoke("tool:orders:cancel", id),
   cancelConditional: (id) => ipcRenderer.invoke("tool:orders:cancelConditional", id),
   cancelAutoPosition: (symbol, entry, enteredAtMs) => ipcRenderer.invoke("tool:auto:cancelPosition", symbol, entry, enteredAtMs),
+  getSyncStatus: () => ipcRenderer.invoke("tool:cloudsync:status"), // [v0.88.0]
+  unlockSync: (password) => ipcRenderer.invoke("tool:cloudsync:unlock", password),
+  syncPushAll: () => ipcRenderer.invoke("tool:cloudsync:pushAll"),
   dismissUnprotected: (symbol) => ipcRenderer.invoke("tool:auto:dismissUnprotected", symbol), // [v0.69.4]
 
   // 연습 모드 전용

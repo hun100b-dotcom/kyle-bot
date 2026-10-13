@@ -19,6 +19,7 @@ import TodayReport from "./TodayReport"; // [v0.9.1] 오늘의 매매 리포트 
 import { useTabOrder } from "./useTabOrder"; // [v0.9.2] 탭 순서 드래그로 변경
 import { useLab } from "./useLab"; //                         [v0.65.0] 매매연구소 상태
 import { LabLiveTab, LabSignalsTab, LabCompareTab } from "./LabTabs"; // [v0.65.0] 매매연구소 화면
+import SyncBanner from "./SyncBanner"; //                                [v0.88.0] 클라우드 동기화 상태 띠(PC·폰 공통)
 import { LabResultTab } from "./LabResult"; //                         [v0.66.0] 결과 요약
 import { restoreInputsFromSaved } from "../lib/split-restore"; // [v0.9.3] 옛 기록도 계산기로 불러오기
 import { calcSplit3Level } from "../lib/calc"; // [v0.69.6] 후보별 계획 타점(1·1.5·2분할) 표시
@@ -3435,6 +3436,9 @@ ${msg}
           </button>
         </div>
       </header>
+
+      {/* [v0.88.0] 클라우드 동기화 상태 — PC는 로컬 파일, 폰은 클라우드를 읽어서 "폰 기록이 9월에서 멈춘 것"을 PC가 몰랐다. 양쪽에서 같은 사실을 항상 보여준다. */}
+      <SyncBanner isWebApp={isWebApp} loggedIn={authState.loggedIn} />
 
       {/* [v0.44.0] 시스템 휴무 시간대(05:00~17:00 KST, 또는 휴장) 배너 — 탭·자동매매 켜짐 여부와
           무관하게 항상 보인다(수동 도구도 이 시간대엔 막히므로 오너가 항상 알 수 있어야 함). */}

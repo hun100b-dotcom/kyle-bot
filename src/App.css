@@ -1415,3 +1415,10 @@ body:has(.update-banner) .topbar {
 .rs-legend summary { cursor: pointer; font-weight: 700; padding: 4px 0; }
 .rs-legend ul { margin: 6px 0 4px 18px; padding: 0; font-size: 12.5px; line-height: 1.75; color: var(--muted); }
 .rs-legend b { color: var(--text); }
+
+/* [v0.88.0] 클라우드 동기화 상태 띠 */
+.sync-banner { margin: 6px 12px; padding: 8px 14px; border-radius: var(--r-sm); border: 1px solid var(--border-strong); font-size: 13px; line-height: 1.6; }
+.sync-banner.ok { border-color: var(--green); background: rgba(61, 220, 151, 0.05); }
+.sync-banner.bad { border-color: var(--red); background: rgba(255, 107, 129, 0.10); }
+.sync-banner .form-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.sync-banner .form-row input { flex: 1; min-width: 180px; }

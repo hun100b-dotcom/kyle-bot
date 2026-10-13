@@ -676,6 +676,10 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:grouptrades:pull", () => e.syncPullGroupHistory());
   // [v0.56.0] "그룹 전체 실시간 동기화" — 로그인 상태면 3분마다 자동으로 push+pull을 돈다.
   //   화면이 켜질 때마다(마운트 시) 불러도 안전(이미 돌고 있으면 아무 일도 안 함).
+  // [v0.88.0] 클라우드 동기화 상태 조회 / 잠금 해제(로그인 비밀번호 한 번 입력 → 데이터 키 보관 + 밀린 기록 전부 올리기)
+  ipcMain.handle("tool:cloudsync:status", () => e.getSyncStatus());
+  ipcMain.handle("tool:cloudsync:unlock", (_ev, password: string) => e.unlockSync(String(password ?? "")));
+  ipcMain.handle("tool:cloudsync:pushAll", () => e.syncPushAll());
   ipcMain.handle("tool:groupsync:ensure", () => { e.startGroupSyncLoop(); return { ok: true }; });
   e.on("groupSync", (members) => win?.webContents.send("tool:groupSyncEvent", members));
   // [v0.56.0] 그룹 채팅 — 가입 허용목록 전원이 실명으로 함께 쓰는 대화방.
@@ -878,6 +882,8 @@ app.whenReady().then(async () => {
   // [v0.71.0] 보호 감사 루프 — "자동매매가 꺼져 있어도" 이미 산 종목의 조건주문(OCO)이
   //   사라지지 않았는지 계속 확인한다(위 engine.ts의 protectionAuditTimer 필드 주석 참고).
   //   위 원격 조종 루프와 똑같은 재시도 패턴(로그인 전엔 조용히 무시, 15초마다 재시도).
+  engine.startCloudSyncLoop(); // [v0.88.0] 암호화 개인 기록 주기 업로드(재시작 뒤 밀린 것 포함)
+  setInterval(() => engine?.startCloudSyncLoop(), 15_000);
   engine.startProtectionAuditLoop();
   setInterval(() => engine?.startProtectionAuditLoop(), 15_000);
 

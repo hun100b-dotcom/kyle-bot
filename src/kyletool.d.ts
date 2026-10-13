@@ -185,6 +185,8 @@ interface AutoPosition {
 
 /** [v0.26.0] 자동매매 현황판. */
 /** [v0.69.0] 보호주문 없이 남은 보유 종목 — 봇이 보호가 걸릴 때까지 반복 시도 중 */
+interface SyncChannel { key: string; label: string; cloudUpdatedAtMs: number | null; lastOkMs: number | null; lastTryMs: number | null; lastError: string | null; ageHours: number | null; stale: boolean }
+interface SyncStatus { loggedIn: boolean; locked: boolean; channels: SyncChannel[]; worstAgeHours: number | null; summary: string }
 interface UnprotectedPos {
   fillPrice?: number | null;
   symbol: string; entry: number; tp: number; sl: number; quantity: number; enteredAtMs: number;
@@ -1056,6 +1058,11 @@ interface KyletoolBridge {
   /** [v0.41.0] 자동매매가 지금 감시 중인 포지션 하나를 즉시 직접 취소한다. */
   cancelAutoPosition(symbol: string, entry: number, enteredAtMs: number): Promise<{ ok: boolean; message: string }>;
   /** [v0.69.4] 보호 복구(봇이 계속 보호주문을 다시 거는 중)를 중단하고 일정 시간 직접 관리로 전환. */
+  /** [v0.88.0] 클라우드 동기화 상태(채널별 클라우드 갱신 시각·이 기기 업로드 결과) — PC·폰 공통. */
+  getSyncStatus(): Promise<SyncStatus>;
+  /** [v0.88.0] 로그인 비밀번호를 한 번 입력해 동기화 키를 만들고 밀린 기록을 전부 올린다. */
+  unlockSync(password: string): Promise<{ ok: boolean; message: string }>;
+  syncPushAll(): Promise<{ ok: boolean; message: string }>;
   dismissUnprotected(symbol: string): Promise<{ ok: boolean; message: string }>;
 
   mockSetPrice(symbol: string, price: number): Promise<boolean>;
