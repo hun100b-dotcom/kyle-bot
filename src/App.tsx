@@ -1019,6 +1019,14 @@ function App() {
   //   위젯용. 수익률·평가손익은 보유(holdingsView)에서 가져온다(자동매매 엔진 자체는 진입가만
   //   알고 실시간 시세·손익 계산은 안 하므로 — 이미 있는 API를 재사용, 새 엔진 로직 불필요).
   const [autoPosHold, setAutoPosHold] = useState<HoldingRow[]>([]);
+  // [v0.89.0 — 오너 보고 "이미 보유 중인 DCX가 관찰로 뜬다"] 위 autoPosHold는 자동매매가
+  //   켜져 있을 때만(상단 로테이션 위젯용) 갱신된다 — 자동매매가 꺼져 있으면 실계좌 보유
+  //   현황을 전혀 모르는 채로 "자동 스크리너" 표의 진입됨/미진입 판정을 내려, 로컬 추적
+  //   포지션(autoTradePositions)에만 없을 뿐 실제로는 보유 중인 종목(수동 매수, 다른 기기의
+  //   자동매매 진입 등 — 백엔드 알림 억제 로직은 이미 v0.85.0부터 이런 경우까지 정확히
+  //   본다)이 "미진입"으로 잘못 표시됐다. 자동매매 켜짐 여부와 무관하게, 스캔 결과가
+  //   있는 동안엔 항상 실계좌 보유 현황을 따로 가져와 이 표만을 위해 쓴다.
+  const [screenerHeldSymbols, setScreenerHeldSymbols] = useState<Set<string>>(new Set());
   const [tickerIdx, setTickerIdx] = useState(0);
   // [v0.30.0] "자동매매기록" 탭 — 자동매매가 낸 매매 전체 이력(영속 로그).
   const [autoHistory, setAutoHistory] = useState<AutoTradeHistoryEntry[]>([]);
@@ -1621,6 +1629,18 @@ function App() {
     const id = setInterval(poll, 15_000);
     return () => clearInterval(id);
   }, [autoStatus?.enabled, autoStatus?.positions.length]);
+
+  // [v0.89.0] "자동 스크리너" 표의 진입됨/미진입 판정용 실계좌 보유 현황 — 위 위젯용 폴링과
+  //   달리 자동매매가 꺼져 있어도, 스캔 결과(lastScan)가 화면에 떠 있는 동안엔 계속 받아온다
+  //   (자동매매를 켜야만 실계좌 보유를 아는 건 이 표의 목적과 안 맞음 — 꺼져 있을 때 "지금
+  //   새로고침"으로 미리보기만 해도 이미 보유 중인 종목은 정확히 표시돼야 한다).
+  useEffect(() => {
+    if (!autoStatus?.lastScan) { setScreenerHeldSymbols(new Set()); return; }
+    const poll = () => void window.kyletool.holdingsView().then((hv) => setScreenerHeldSymbols(new Set(hv.items.map((h) => h.symbol)))).catch(() => {});
+    poll();
+    const id = setInterval(poll, 20_000);
+    return () => clearInterval(id);
+  }, [autoStatus?.lastScan]);
 
   // [v0.44.0] 시스템 휴무 시간대 배너용 — 탭·자동매매 켜짐 여부와 무관하게 항상 30초마다 확인한다
   //   (수동 도구도 이 시간대엔 막히므로, 자동매매가 꺼져 있어도 오너가 알고 있어야 한다).
@@ -4881,7 +4901,10 @@ ${msg}
 
             {autoStatus?.lastScan && (() => {
               const run = autoStatus.lastScan;
-              const activeSymbols = new Set(autoStatus.positions.map((p) => p.symbol));
+              // [v0.89.0] 로컬 추적 포지션(autoStatus.positions) + 실계좌 실보유(screenerHeldSymbols,
+              //   수동 매수·다른 기기 진입 등 로컬엔 없어도 실제로는 들고 있는 경우) 합집합으로
+              //   판정한다 — 둘 중 하나만 보면 "이미 보유 중인데 미진입으로 보이는" 혼란이 재발한다.
+              const activeSymbols = new Set([...autoStatus.positions.map((p) => p.symbol), ...screenerHeldSymbols]);
               const cand = run.results.filter((r) => r.status === "confirmed" || r.status === "watch");
               return (
                 <>
