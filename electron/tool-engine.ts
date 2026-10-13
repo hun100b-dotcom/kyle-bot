@@ -8737,10 +8737,26 @@ export class ToolEngine extends EventEmitter {
         return;
       }
 
+      // [v0.32.0] 로컬 기록(이 기기가 아는 것)과 실계좌 보유(다른 기기가 넣었을 수도 있는 것)를
+      //   합쳐서 "이미 잡고 있는 종목"으로 취급 — 둘 중 하나만 보면 다른 기기가 방금 넣은 종목에
+      //   또 진입할 수 있다.
+      // [v0.85.0 — 오너 긴급 보고 "이미 진입되어있는 종목인데 관찰·확정이 또 뜨거든, 어제처럼
+      //   물려있는 종목을 제멋대로 손절할 수 있잖아"] 아래로 옮겨서 알림(관찰/확정) 단계보다
+      //   먼저 계산한다 — 예전엔 이 줄이 candidates 바로 위(알림을 다 보낸 "다음")에 있어서,
+      //   이미 보유 중인 종목도 "확정" 디스코드·OS 알림이 매 사이클 그대로 나갔다(진입 자체는
+      //   candidates에서 걸러져 실제로 안 나갔지만, 오너 눈에는 "이미 들고 있는 종목을 또
+      //   건드리려는 것"처럼 보였다). 실제 매도/손절(auditUnprotectedHoldings→runGuard)은
+      //   이 스캔 결과와 완전히 별개 경로(autoTradeHistory의 실제 매수 기록만 봄)라 지금도
+      //   알림만으로 주문이 나가진 않지만, "이미 보유 중인데 왜 또 확정이라고 뜨나"는 오너가
+      //   매번 직접 판단해야 하는 혼란이자 신뢰 문제라 — 알림 자체를 원천에서 막는다.
+      const activeSymbols = new Set([...this.autoTradePositions.map((p) => p.symbol), ...realHeldSymbols]);
+
       // [v0.32.0 — 오너 요청: "종목 탐색 성공 시 관찰 확정 알림"] 이번 스캔에서 새로 "확정
       //   (confirmed)"이 된 종목만 골라 알린다(매 5분 스캔마다 여전히 확정 상태인 종목까지
       //   반복 알리면 알림 피로만 쌓이므로, 직전 스캔엔 없었는데 이번에 새로 나타난 것만).
-      const newlyConfirmed = newlyConfirmedSymbols(run.results, this.autoScanNotifiedConfirmed);
+      // [v0.85.0] 이미 보유 중(activeSymbols)인 종목은 애초에 "새로 확정"으로 치지 않는다 —
+      //   다시 안 보유하게 되면(청산되면) 그때 비로소 "새로 확정"으로 알린다.
+      const newlyConfirmed = newlyConfirmedSymbols(run.results, this.autoScanNotifiedConfirmed).filter((sym) => !activeSymbols.has(sym));
       for (const sym of newlyConfirmed) {
         const r = run.results.find((x) => x.symbol === sym);
         const priceTxt = r?.price != null ? `$${r.price}` : "확인 불가";
@@ -8761,25 +8777,24 @@ export class ToolEngine extends EventEmitter {
         );
       }
       // 다음 비교 기준을 이번 스캔으로 교체(빠졌다가 나중에 재확정되면 그때 다시 알림).
-      this.autoScanNotifiedConfirmed = new Set(run.results.filter((r) => r.status === "confirmed").map((r) => r.symbol));
+      // [v0.85.0] activeSymbols는 애초에 이 집합에 안 넣는다 — 그래야 나중에 청산되고 나서도
+      //   "이미 알렸던 종목"으로 착각해 새 알림을 또 막아버리지 않는다.
+      this.autoScanNotifiedConfirmed = new Set(run.results.filter((r) => r.status === "confirmed" && !activeSymbols.has(r.symbol)).map((r) => r.symbol));
 
       // [v0.72.0 — 오너 지시 "관찰, 확정된 종목이 나오면 즉시 디스코드로 알림"] "확정"은 이미
       //   위에서(OS 알림+디스코드) 알리고 있었다 — "관찰(watch, 다음 봉 확인 대기 중)"도 같은
       //   원리로 새로 생긴 것만 디스코드로 알린다. 관찰은 아직 최종 신호가 아니라서(다음 봉
       //   확인 전) OS 알림(notify)까지는 안 울리던 자리였는데, 디스코드는 "지금 뭔가 움직이기
       //   시작했다"는 더 이른 신호로 의미가 있어 오너가 명시적으로 요청했다.
-      const newlyWatched = newlyWatchedSymbols(run.results, this.autoScanNotifiedWatch);
+      // [v0.85.0] 확정과 같은 이유로 이미 보유 중인 종목은 "관찰"도 알리지 않는다.
+      const newlyWatched = newlyWatchedSymbols(run.results, this.autoScanNotifiedWatch).filter((sym) => !activeSymbols.has(sym));
       for (const sym of newlyWatched) {
         const r = run.results.find((x) => x.symbol === sym);
         const priceTxt = r?.price != null ? `$${r.price}` : "확인 불가";
         void this.sendDiscordAlert(`🟡 **관찰**: ${sym} (현재가 ${priceTxt}) — 도지 패턴 발생, 다음 5분봉 확인 중입니다.`);
       }
-      this.autoScanNotifiedWatch = new Set(run.results.filter((r) => r.status === "watch").map((r) => r.symbol));
+      this.autoScanNotifiedWatch = new Set(run.results.filter((r) => r.status === "watch" && !activeSymbols.has(r.symbol)).map((r) => r.symbol));
 
-      // [v0.32.0] 로컬 기록(이 기기가 아는 것)과 실계좌 보유(다른 기기가 넣었을 수도 있는 것)를
-      //   합쳐서 "이미 잡고 있는 종목"으로 취급 — 둘 중 하나만 보면 다른 기기가 방금 넣은 종목에
-      //   또 진입할 수 있다.
-      const activeSymbols = new Set([...this.autoTradePositions.map((p) => p.symbol), ...realHeldSymbols]);
       const candidates = run.results.filter((r) => r.status === "confirmed" && !activeSymbols.has(r.symbol));
       const commissionRate = await this.resolveCommissionRate();
       // [오너 지시 2026-09-25 정정] "최대 투입 비율"은 종목 1개당 배정 시드 비율이다 — 종목 수로

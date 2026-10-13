@@ -889,6 +889,111 @@ describe("[v0.32.0→v0.39.0] 중복진입 방지 — 여러 기기가 동시에
     }
   });
 
+  // [v0.85.0 — 오너 긴급 보고 "이미 진입되어있는 종목인데 관찰·확정이 또 뜨거든, 어제처럼
+  //   물려있는 종목을 제멋대로 손절할 수 있잖아"] 위 테스트가 확인한 "진입 시도는 안 한다"와는
+  //   별개로, 예전엔 "확정" 디스코드·OS 알림은 활성 심볼 필터(activeSymbols) 계산보다 먼저 돌아
+  //   이미 보유 중인 종목도 매 사이클 그대로 "확정" 알림이 나갔다(실제 매도/주문은 안 나갔지만,
+  //   오너 눈엔 "이미 들고 있는 종목을 또 건드리려는 것"처럼 보이는 혼란이었다). 이제는 알림
+  //   자체가 안 나가야 한다.
+  it("[v0.85.0] 확정 종목이 이미 실계좌에 보유 중이면 '확정' 디스코드/OS 알림 자체를 보내지 않는다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.saveAutoTradeSettings({ maxPositions: 3 });
+      const engAny = eng as unknown as EngineInternals & {
+        scanScreener: (opts?: unknown) => Promise<unknown>;
+        authAccessToken: string | null; authExpiresAtMs: number; authUserId: string | null;
+      };
+      engAny.authAccessToken = "test-access-token"; // sendDiscordAlert가 웹훅 설정을 조회하려면 로그인 상태가 필요
+      engAny.authExpiresAtMs = Date.now() + 3_600_000;
+      engAny.authUserId = "test-user-id";
+      engAny.scanScreener = async () => ({
+        scannedAt: "09-28 20:11:58", total: 1, priceMin: 1, priceMax: 9, excludedEtf: 0,
+        results: [{
+          rank: 1, symbol: "AAPL", price: 2.5, ema200: 2, prevClose: 2.1, cloudTop: 1.9,
+          priceInBand: true, aboveEma: true, aboveCloud: true, status: "confirmed",
+          sessionHigh: 2.6, proximityPct: -3, n1m: 300, n5m: 60, evidence: null,
+        }],
+      });
+      let discordPosted: string | null = null;
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+        const u = String(url);
+        if (u.includes("capri_user_notify_settings")) {
+          return new Response(JSON.stringify([{ discord_webhook_url: "https://discord.com/api/webhooks/fake/token" }]), { status: 200 });
+        }
+        if (u.includes("discord.com/api/webhooks")) {
+          discordPosted = String(init?.body ?? "");
+          return new Response(null, { status: 204 });
+        }
+        return originalFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        freezeKst(2026, 7, 16, 23, 0);
+        engAny.autoTradeEnabled = true;
+        await engAny.autoTradeTick();
+        // AAPL(목 서버 고정 실계좌 보유)이 "확정"으로 나왔지만, 이미 보유 중이라 디스코드로는
+        // 전혀 안 나가야 한다 — 진입 시도를 안 하는 것(위 테스트)과 별개로 알림 자체가 공백이어야 함.
+        expect(discordPosted).toBeNull();
+        // 그래도 "왜 진입 안 했는지" 사유는 화면(스킵 사유)에 그대로 남아야 한다(투명성 유지).
+        expect(eng.getAutoTradeStatus().skipReasons.AAPL).toContain("이미");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // [v0.85.0] 위와 같은 원리를 "관찰"(watch, 도지 발생 직후·다음 봉 확인 전 단계)에도 적용한다 —
+  //   관찰은 skipReasons 대상이 아니므로(confirmed만 그 루프에 들어감) 디스코드 알림 공백만으로
+  //   검증한다.
+  it("[v0.85.0] 관찰 종목이 이미 실계좌에 보유 중이면 '관찰' 디스코드 알림을 보내지 않는다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      eng.saveAutoTradeSettings({ maxPositions: 3 });
+      const engAny = eng as unknown as EngineInternals & {
+        scanScreener: (opts?: unknown) => Promise<unknown>;
+        authAccessToken: string | null; authExpiresAtMs: number; authUserId: string | null;
+      };
+      engAny.authAccessToken = "test-access-token";
+      engAny.authExpiresAtMs = Date.now() + 3_600_000;
+      engAny.authUserId = "test-user-id";
+      engAny.scanScreener = async () => ({
+        scannedAt: "09-28 20:11:58", total: 1, priceMin: 1, priceMax: 9, excludedEtf: 0,
+        results: [{
+          rank: 1, symbol: "AAPL", price: 2.5, ema200: 2, prevClose: 2.1, cloudTop: 1.9,
+          priceInBand: true, aboveEma: true, aboveCloud: true, status: "watch",
+          sessionHigh: 2.6, proximityPct: -3, n1m: 300, n5m: 60, evidence: null,
+        }],
+      });
+      let discordPosted: string | null = null;
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+        const u = String(url);
+        if (u.includes("capri_user_notify_settings")) {
+          return new Response(JSON.stringify([{ discord_webhook_url: "https://discord.com/api/webhooks/fake/token" }]), { status: 200 });
+        }
+        if (u.includes("discord.com/api/webhooks")) {
+          discordPosted = String(init?.body ?? "");
+          return new Response(null, { status: 204 });
+        }
+        return originalFetch(url as never, init);
+      }) as typeof fetch;
+      try {
+        freezeKst(2026, 7, 16, 23, 0);
+        engAny.autoTradeEnabled = true;
+        await engAny.autoTradeTick();
+        expect(discordPosted).toBeNull(); // AAPL은 이미 보유 중이므로 "관찰" 알림도 나가면 안 됨
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   // ===========================================================================
   // [v0.60.0 긴급수정 — 오너 실사용 보고: "스크리너에 종료·탈락 종목(SDEV, BIYA 등)이 계속
   //   남는다 — 새로고침해도 실제 상태로 안 바뀐다"] 원인: freeSlots<=0(자리가 꽉 참)이면
