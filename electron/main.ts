@@ -145,6 +145,53 @@ async function loadRenderer(target: BrowserWindow): Promise<void> {
 //   절대 죽지 않는다 — 모든 호출을 try/catch로 감싼다.
 // =============================================================================
 let updateReadyToInstall = false;
+let pendingUpdateVersion: string | null = null;
+let restartInProgress = false;
+
+// =============================================================================
+// [v0.87.0] ★ 업데이트 적용·재시작 정책 — 오너 확정(2026-10-13, 재논의 대상 아님. CLAUDE.md "업데이트 정책" 참고)
+// -----------------------------------------------------------------------------
+//   자동매매가 돌고 있어도, 포지션을 보유 중이어도 업데이트를 적용하고 재시작한다(OCO는 토스 서버에 있어 앱이 꺼져도 살아 있다).
+//   미루는 순간은 딱 두 곳 — ① 주문 전송 후 응답을 못 받은 구간(in-flight) ② 매수 체결 확인 ~ OCO 등록 완료 전 구간 — 둘 다 길어야
+//   수 초~수십 초이고 "그 순간 죽으면 주문 상태가 깨지기 때문"이지 조심해서가 아니다. 지나가면 바로 재시작한다.
+//   (v0.79.0: 유휴 조건 제거 / v0.86.0: 자동매매 조건 제거 + 자동 재개 / v0.87.0: 위 두 구간 구분 + 15초 폴링 + 맥 동일 적용 + 직전·직후 기록)
+//   윈도우·맥 공통 진입점이다 — 다운로드 완료 즉시·15초마다·수동 버튼 모두 이 함수를 거친다.
+// =============================================================================
+async function tryApplyUpdate(source: string): Promise<{ started: boolean; reason?: string }> {
+  if (!updateReadyToInstall && !macSwapReadyToInstall) return { started: false, reason: "적용할 업데이트가 아직 준비되지 않았습니다." };
+  if (restartInProgress) return { started: false, reason: "이미 재시작 중입니다." };
+  const decision = engine?.getRestartDecision();
+  if (decision && !decision.ok) {
+    const why = decision.active.map((b) => b.label).join(", ");
+    console.log(`[capri][update] 재시작 보류(${source}) — 진행 중: ${why}`);
+    return { started: false, reason: `진행 중인 주문 처리(${why})가 끝나는 대로 재시작합니다.` };
+  }
+  restartInProgress = true;
+  try {
+    // 재시작 직전: 새 주문을 잠시 막고(방금 확인한 안전한 순간을 지키려고), 상태 저장 + 자동매매 재개 표시 + 기록(저널·디스코드).
+    engine?.setRestartFrozen(true);
+    await engine?.prepareForRestart({ toVersion: pendingUpdateVersion });
+    // 준비하는 몇 초 사이에 주문이 시작됐다면(드문 경우) 포기하고 다음 폴링에서 다시 시도한다.
+    const again = engine?.getRestartDecision();
+    if (again && !again.ok) {
+      engine?.setRestartFrozen(false);
+      restartInProgress = false;
+      return { started: false, reason: "재시작 준비 중 주문 처리가 시작돼 잠시 더 기다립니다." };
+    }
+    console.log(`[capri][update] 업데이트 적용을 위해 재시작합니다(${source}).`);
+    if (process.platform === "darwin") {
+      app.quit(); // before-quit 훅(scheduleMacSelfUpdateSwap)이 번들 교체 후 재실행한다.
+    } else {
+      autoUpdater.quitAndInstall(true, true); // 확인창 없이(silent) 설치하고 곧바로 다시 실행
+    }
+    return { started: true };
+  } catch (err) {
+    console.error("[capri][update] 재시작 시도 실패(다음 폴링에서 다시 시도):", err);
+    engine?.setRestartFrozen(false);
+    restartInProgress = false;
+    return { started: false, reason: String(err) };
+  }
+}
 
 function setupAutoUpdater(): void {
   // [v0.58.0] 묻지 않고 자동으로 받고, 앱을 끌 때는 자동으로 적용한다.
@@ -178,9 +225,11 @@ function setupAutoUpdater(): void {
   });
 
   // 다운로드 완료: 재시작 대기 상태로 기록하고, 아래 무음 재시작 타이머가 조용히 적용한다.
-  autoUpdater.on("update-downloaded", () => {
+  autoUpdater.on("update-downloaded", (info) => {
     updateReadyToInstall = true;
+    pendingUpdateVersion = info?.version ?? pendingUpdateVersion;
     win?.webContents.send("update:downloaded");
+    void tryApplyUpdate("다운로드 완료"); // [v0.87.0] 기다리지 않고 바로(두 구간만 피해서)
   });
 
   // 오류가 나도 조용히 넘어간다(앱은 계속 동작). 화면엔 참고용으로만 알림.
@@ -205,26 +254,11 @@ function setupAutoUpdater(): void {
     }
   }, 30 * 60_000);
 
-  // [v0.79.0→v0.86.0] 무음 재시작 — 5분마다 업데이트가 준비됐는지만 확인해 조용히 적용한다.
-  //   예전엔 "자동매매가 지금 켜져 있지 않음"도 같이 확인해, 켜져 있으면 절대 재시작하지
-  //   않았다(실계좌 매매 도중 앱이 꺼지는 사고 방지가 목적). [v0.86.0 — 오너 명시적 지시
-  //   "자동매매 중에도 업데이트 발생 시 재시작하고 자동매매 그대로 이어가도록"] 그 조건을
-  //   없앴다 — 대신 재시작 직전에 engine.prepareForUpdateRestart()로 "지금 켜져 있었다"는
-  //   표시만 남기고, 다음 실행이 그 표시를 보고 자동매매를 스스로 다시 켠다(ToolEngine
-  //   생성자 참고). "재시작 중 감시가 끊기면 어떻게 되나"는 이미 있던 안전장치
-  //   (reconcileAutoPositions의 재시작 복구 경로, startAutoTrade의 포지션 이어받기)가
-  //   그대로 처리한다 — 이 경로는 원래도 "앱이 예기치 못하게 꺼졌다가 켜졌을 때"를 위해
-  //   있던 것이라 새로운 위험이 아니라, 이미 검증된 경로를 의도적으로 한 번 더 타는 것뿐이다.
-  //   실패해도(quitAndInstall이 예외를 던져도) 조용히 무시하고 다음 주기에 다시 시도한다.
+  // [v0.87.0] 적용 대기 폴링 — 15초마다 두 구간(주문 in-flight, 체결~OCO 등록 전)이 비었는지 보고, 비면 바로 재시작한다.
+  //   (v0.86.0까지는 5분 주기에 구간 구분 없이 재시작했다 — 체결~OCO 등록 사이에 죽을 수 있었다.)
   setInterval(() => {
-    if (!updateReadyToInstall) return;
-    try {
-      engine?.prepareForUpdateRestart(); // 지금 켜져 있으면 "재시작 후 다시 켜 달라" 표시
-      autoUpdater.quitAndInstall(true, true); // 확인창 없이(silent) 재시작까지(force run after)
-    } catch {
-      /* 조용히 무시 — 다음 5분 주기에 다시 시도 */
-    }
-  }, 5 * 60_000);
+    void tryApplyUpdate("폴링").catch(() => undefined);
+  }, 15_000);
 }
 
 // =============================================================================
@@ -317,6 +351,7 @@ async function runMacAutoUpdateCycle(): Promise<void> {
     if (ready) {
       scheduleMacSelfUpdateSwap(ready);
       macSwapReadyToInstall = true;
+      pendingUpdateVersion = ready.version; // [v0.87.0] 재시작 기록(이전→새 버전)용
       win?.webContents.send("update:macSwapReady", { version: ready.version });
       return; // 직접 교체가 준비됐으니 dmg 차선책은 필요 없다
     }
@@ -688,10 +723,10 @@ function registerIpc(e: ToolEngine): void {
   //   "버튼을 눌러도 반응이 없다"는 것처럼 보였다(update:download는 이미 v0.27.1에서
   //   같은 방식으로 고쳐 놨었는데 install 쪽은 빠져 있었음). 다운로드 실패 처리와 동일한
   //   패턴으로 맞춘다 — try/catch로 감싸 결과를 화면에 그대로 돌려준다.
-  ipcMain.handle("update:install", () => {
+  ipcMain.handle("update:install", async () => {
     try {
-      setImmediate(() => autoUpdater.quitAndInstall());
-      return { ok: true };
+      const r = await tryApplyUpdate("수동 버튼"); // [v0.87.0] 버튼도 같은 정책 — 막혀 있으면 곧 자동으로 이어서 적용된다
+      return r.started ? { ok: true } : { ok: true, error: r.reason };
     } catch (err) {
       return { ok: false, error: String(err) };
     }
@@ -709,10 +744,10 @@ function registerIpc(e: ToolEngine): void {
   //   끈다. 종료 훅(scheduleMacSelfUpdateSwap이 이미 걸어 둔 before-quit)이 알아서
   //   교체 스크립트를 띄운다 — Windows의 quitAndInstall과 달리 Squirrel을 전혀 안 타므로
   //   여기서 autoUpdater를 부를 필요가 없다(오히려 부르면 서명 불일치로 실패한다).
-  ipcMain.handle("update:installMacSwap", () => {
+  ipcMain.handle("update:installMacSwap", async () => {
     try {
-      setImmediate(() => app.quit());
-      return { ok: true };
+      const r = await tryApplyUpdate("수동 버튼(맥)"); // [v0.87.0] 같은 정책
+      return r.started ? { ok: true } : { ok: true, error: r.reason };
     } catch (err) {
       return { ok: false, error: String(err) };
     }
@@ -821,6 +856,25 @@ app.whenReady().then(async () => {
   engine.startRemoteControlLoop();
   setInterval(() => engine?.startRemoteControlLoop(), 15_000);
 
+  // [v0.87.0] 업데이트 재시작 직후 복구 — "재시작 기록" 표식이 있으면 한 번: 이전/새 버전 기록 → 실계좌↔OCO 대조 → 보호 없는 종목 재보호 → 디스코드·저널 기록.
+  //   (자동매매 자동 재개는 ToolEngine 생성자가 v0.86.0 방식으로 이미 한다.) 토스 연결·로그인이 아직이면 15초마다(최대 20분) 다시 시도하고,
+  //   표식이 없으면(평소 실행) 아무 일도 안 한다.
+  {
+    let tries = 0;
+    const tryResume = async () => {
+      tries++;
+      let r: string = "none";
+      try {
+        r = (await engine?.resumeAfterRestart()) ?? "none";
+      } catch (err) {
+        console.error("[capri][resume] 재시작 복구 중 오류(다시 시도):", err);
+        r = "pending";
+      }
+      if (r === "pending" && tries < 80) setTimeout(() => void tryResume(), 15_000);
+    };
+    setTimeout(() => void tryResume(), 3_000);
+  }
+
   // [v0.71.0] 보호 감사 루프 — "자동매매가 꺼져 있어도" 이미 산 종목의 조건주문(OCO)이
   //   사라지지 않았는지 계속 확인한다(위 engine.ts의 protectionAuditTimer 필드 주석 참고).
   //   위 원격 조종 루프와 똑같은 재시도 패턴(로그인 전엔 조용히 무시, 15초마다 재시도).
@@ -850,15 +904,8 @@ app.whenReady().then(async () => {
       //   5분마다 "자동매매가 꺼져 있으면" 스스로 app.quit()한다. 종료 훅
       //   (scheduleMacSelfUpdateSwap이 runMacAutoUpdateCycle에서 이미 걸어 둠)이 그
       //   quit 과정에서 번들 교체+재실행까지 알아서 끝낸다.
-      setInterval(() => {
-        if (!macSwapReadyToInstall) return;
-        if (engine?.getAutoTradeStatus().enabled) return; // 자동매매 중엔 절대 재시작 안 함
-        try {
-          app.quit();
-        } catch {
-          /* 조용히 무시 — 다음 5분 주기에 다시 시도 */
-        }
-      }, 5 * 60_000);
+      // [v0.87.0] 맥도 같은 정책 — 위 15초 폴링(tryApplyUpdate)이 macSwapReadyToInstall을 보고 비는 순간 app.quit() → 종료 훅이 교체·재실행.
+      //   (v0.86.0은 이 맥 루프에 "자동매매 중엔 절대 재시작 안 함"이 남아 있었다 — 제거.)
     }
   }
 

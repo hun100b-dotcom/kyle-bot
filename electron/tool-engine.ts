@@ -102,6 +102,7 @@ import {
 } from "../lib/toss";
 import { createMockTossServer } from "../mocks/toss-mock";
 import { canAutoEnter, isLossLimitBreached, volScaledInvestPct } from "../lib/auto-risk";
+import { evaluateRestart, isMarkerFresh, describeRestart, type RestartBlocker, type RestartMarker } from "../lib/update-policy"; // [v0.70.0] 자동 업데이트 재시작 정책
 import { checkBracketPrices, checkPercentSettings, checkSimpleOrder, type SanityExpect } from "../lib/order-sanity"; // [v0.69.2] 주문 전 정합성 검사
 import { guessWarrantTickers, applyWarrantGate } from "../lib/warrant"; // [v0.36.0] 워런트 의심 종목 감지 / [v0.70.0] 탈락 게이트
 
@@ -3532,14 +3533,14 @@ export class ToolEngine extends EventEmitter {
         detail: { ...spec, clientOrderId },
       });
     }
-    const o = await createOrder({
+    const o = await this.inflight(`매수 주문 전송 ${symbol}`, () => createOrder({
       symbol,
       side: "BUY",
       orderType: "LIMIT",
       price: spec.price,
       quantity: spec.quantity,
       clientOrderId,
-    });
+    }));
     // 주문이 실제로 접수된 뒤에 근거를 남긴다(실패한 주문의 근거는 남기지 않는다).
     this.saveRationale(spec.rationale, {
       clientOrderId,
@@ -3613,7 +3614,7 @@ export class ToolEngine extends EventEmitter {
         detail: { ...spec, clientOrderId },
       });
     }
-    const c = await createConditionalOrder({
+    const c = await this.inflight(`OCO 등록 ${symbol}`, () => createConditionalOrder({
       symbol,
       type: "OCO",
       quantity: spec.quantity,
@@ -3623,7 +3624,7 @@ export class ToolEngine extends EventEmitter {
       second: { orderSide: "SELL", triggerPrice: spec.slTrigger, orderPrice: spec.slPrice },
       // [B5] 멱등키: 네트워크 재시도로 조건주문이 두 번 등록되는 걸 막는다(진입 주문과 동일 원칙).
       clientOrderId,
-    });
+    }));
     this.saveRationale(spec.rationale, {
       clientOrderId,
       kind: "oco",
@@ -3720,7 +3721,7 @@ export class ToolEngine extends EventEmitter {
         detail: { ...spec, clientOrderId },
       });
     }
-    const c = await createConditionalOrder({
+    const c = await this.inflight(`OTO 등록 ${symbol}`, () => createConditionalOrder({
       symbol,
       type: "OTO",
       quantity: spec.quantity,
@@ -3729,7 +3730,7 @@ export class ToolEngine extends EventEmitter {
       first: { orderSide: "BUY", triggerPrice: spec.entryTrigger, orderPrice: spec.entryPrice },
       second: { orderSide: "SELL", triggerPrice: spec.tpTrigger, orderPrice: spec.tpPrice },
       clientOrderId,
-    });
+    }));
     this.saveRationale(spec.rationale, {
       clientOrderId,
       kind: "oto",
@@ -3854,7 +3855,7 @@ export class ToolEngine extends EventEmitter {
 
     let o: OrderResponse;
     try {
-      o = await createOrder({ symbol, side: "BUY", orderType: "LIMIT", price: spec.price, quantity: spec.quantity, clientOrderId });
+      o = await this.inflight(`매수 주문 전송 ${symbol}`, () => createOrder({ symbol, side: "BUY", orderType: "LIMIT", price: spec.price, quantity: spec.quantity, clientOrderId }));
     } catch (e) {
       // [v0.60.3 긴급 — 오너 실사용 보고: "매수 주문이 토스에 실제로 접수됐는데 카프리가
       //   추적을 포기해버림(주문은 그대로 남는데 카프리 혼자 사라짐)"] createOrder 요청
@@ -3983,6 +3984,16 @@ export class ToolEngine extends EventEmitter {
    *   - 그래도 전부 실패하면 예전처럼 저널+알림으로 오너에게 직접 확인을 요청한다.
    */
   private async registerOcoForFilled(
+    symbol: string,
+    quantity: number,
+    specIn: Parameters<ToolEngine["registerOcoForFilledInner"]>[2],
+    fillPrice?: number | null,
+  ): Promise<WatchAndBracketResult> {
+    // [v0.70.0] 매수 체결 확인 ~ OCO 등록 완료 전 구간 — 이 순간 앱이 꺼지면 보호 없는 포지션이 생기므로 업데이트 재시작을 미룬다(길어야 수십 초).
+    return this.windowGuard("oco-window", `체결 확인 → OCO 등록 ${symbol}`, () => this.registerOcoForFilledInner(symbol, quantity, specIn, fillPrice));
+  }
+
+  private async registerOcoForFilledInner(
     symbol: string,
     quantity: number,
     specIn: { price?: number; tpTrigger: number; tpPrice: number; slTrigger: number; slPrice: number; expireDate: string; rationale?: RationaleInput; autoPlan?: AutoPlan; strictPlan?: boolean },
@@ -4255,7 +4266,7 @@ export class ToolEngine extends EventEmitter {
     }
     let cancelResult: OrderResponse;
     try {
-      cancelResult = await cancelOrder(tossOrderId);
+      cancelResult = await this.inflight(`주문 취소 ${symbol}`, () => cancelOrder(tossOrderId));
     } catch (e) {
       this.addJournal({
         kind: "info",
@@ -4340,7 +4351,7 @@ export class ToolEngine extends EventEmitter {
     if (this.isDryRun()) {
       return this.addJournal({ kind: "dryrun", symbol: "-", summary: `[드라이런] 주문 취소 ${orderId} (실제 전송 안 함)` });
     }
-    const o = await cancelOrder(orderId);
+    const o = await this.inflight("주문 취소", () => cancelOrder(orderId));
     return this.addJournal({ kind: "cancel", symbol: o.symbol ?? "-", summary: `주문 취소 ${orderId} → ${o.status}` });
   }
 
@@ -4350,7 +4361,7 @@ export class ToolEngine extends EventEmitter {
     if (this.isDryRun()) {
       return this.addJournal({ kind: "dryrun", symbol: "-", summary: `[드라이런] 조건주문 취소 ${id} (실제 전송 안 함)` });
     }
-    await cancelConditionalOrder(id);
+    await this.inflight("조건주문 취소", () => cancelConditionalOrder(id));
     return this.addJournal({ kind: "cancel", symbol: "-", summary: `조건주문 취소 ${id}` });
   }
 
@@ -8136,7 +8147,7 @@ export class ToolEngine extends EventEmitter {
         //   포함) 이 복구 경로가 이어받는데, 여기엔 "체결됐나/취소됐나" 확인만 있고 **시간이 지나면 취소하는 로직이 없어** 미체결 주문이 장 마감까지 남았다.
         //   → 감시시간(+2분)이 지났는데 아직 안 끝났으면 여기서 취소를 요청한다(취소 결과는 다음 사이클 확인이 filled·부분체결·cancelled 별로 처리).
         try {
-          await cancelOrder(pos.buyOrderId);
+          await this.inflight(`주문 취소 ${pos.symbol}`, () => cancelOrder(pos.buyOrderId as string));
           this.addJournal({
             kind: "info", symbol: pos.symbol,
             summary: `⏱ ${pos.symbol}: 감시시간(${this.autoTradeWatchMinutes}분)이 지나도 미체결인 매수 주문(앱 재시작 등으로 놓친 건)을 취소 요청했습니다 — 다음 확인 때 결과를 처리합니다.`,
@@ -8240,7 +8251,7 @@ export class ToolEngine extends EventEmitter {
     for (const o of open) {
       if (o.side !== "BUY" || !autoIds.has(o.tossOrderId) || tracked.has(o.tossOrderId)) continue;
       try {
-        await cancelOrder(o.tossOrderId);
+        await this.inflight(`고아 주문 취소 ${o.symbol ?? ""}`, () => cancelOrder(o.tossOrderId));
         cancelled++;
         this.addJournal({
           kind: "cancel", symbol: o.symbol ?? "-",
@@ -8310,6 +8321,121 @@ export class ToolEngine extends EventEmitter {
     return added;
   }
 
+  // ==========================================================================
+  // [v0.87.0] 자동 업데이트 재시작 정책 — 오너 확정(2026-10-13, 재논의 대상 아님): 자동매매·보유 포지션이 있어도 업데이트를 적용하고 재시작한다.
+  //   미루는 순간은 딱 두 곳: ① 주문 전송 후 응답을 못 받은 구간(in-flight) ② 매수 체결 확인 ~ OCO 등록 완료 전(+가드가 주문 내는 중).
+  //   (v0.86.0은 "자동매매 중에도 재시작 + 자동 재개"까지만 했고 이 두 구간을 구분하지 않았다 — 체결~OCO 등록 사이에 죽으면 보호 없는 포지션이 생길 수 있었다.)
+  //   근거·규칙: lib/update-policy.ts, CLAUDE.md "업데이트 정책".
+  // ==========================================================================
+  private restartBlockers = new Map<number, RestartBlocker>();
+  private restartBlockerSeq = 0;
+  /** true면 새 주문 전송을 막는다(재시작 직전 몇 초) — 방금 확인한 "안전한 순간"에 새 주문이 끼어들지 못하게. */
+  private restartFrozen = false;
+
+  private addRestartBlocker(kind: RestartBlocker["kind"], label: string): number {
+    const id = ++this.restartBlockerSeq;
+    this.restartBlockers.set(id, { kind, label, sinceMs: Date.now() });
+    return id;
+  }
+  private removeRestartBlocker(id: number): void {
+    this.restartBlockers.delete(id);
+  }
+
+  /** 주문 전송(응답 받을 때까지)을 in-flight로 표시한다. 재시작 직전(frozen)이면 새 주문을 시작하지 않는다. */
+  private async inflight<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    if (this.restartFrozen) throw new Error("앱 업데이트 재시작 직전이라 주문을 잠시 보류했습니다(몇 초 뒤 자동으로 다시 시도됩니다).");
+    return this.windowGuard("inflight", label, fn);
+  }
+  private async windowGuard<T>(kind: RestartBlocker["kind"], label: string, fn: () => Promise<T>): Promise<T> {
+    const id = this.addRestartBlocker(kind, label);
+    try {
+      return await fn();
+    } finally {
+      this.removeRestartBlocker(id);
+    }
+  }
+
+  /** 지금 재시작해도 되는가(데스크톱 main이 호출). 막는 구간이 있으면 그 이름과 함께 돌려준다. */
+  getRestartDecision(): ReturnType<typeof evaluateRestart> {
+    return evaluateRestart([...this.restartBlockers.values()], Date.now());
+  }
+  setRestartFrozen(on: boolean): void {
+    this.restartFrozen = on;
+  }
+
+  private restartMarkerPath(): string {
+    return join(this.userDataDir, "kylebot-restart-record.json");
+  }
+
+  /**
+   * [재시작 직전] main.ts의 tryApplyUpdate가 안전한 순간을 확인한 뒤 부른다.
+   *   ① 자동매매 재개 표시(v0.86.0 prepareForUpdateRestart — 그대로 재사용) ② 포지션·기록·보호 대기를 디스크에 저장
+   *   ③ "재시작 기록" 표식 저장(이전/새 버전·당시 포지션 — 재시작 후 기록과 대조에 쓴다) ④ 저널 + 디스코드에 기록(전송 완료까지 기다림).
+   */
+  async prepareForRestart(info: { toVersion?: string | null }): Promise<RestartMarker> {
+    this.prepareForUpdateRestart();
+    this.saveAutoPositions();
+    this.persistAutoTradeHistory();
+    const marker: RestartMarker = {
+      atMs: Date.now(),
+      fromVersion: this.appVersion ?? "?",
+      toVersion: info.toVersion ?? null,
+      autoTradeWasOn: this.autoTradeEnabled,
+      positions: this.autoTradePositions.map((p) => ({ symbol: p.symbol, status: p.status, quantity: p.quantity })),
+      unprotected: this.autoUnprotected.map((u) => u.symbol),
+    };
+    try {
+      writeFileSync(this.restartMarkerPath(), JSON.stringify(marker, null, 2), "utf8");
+    } catch {
+      /* 표식 저장 실패 — 재시작은 계속(복구는 포지션 파일과 5분 사이클이 이어받는다) */
+    }
+    const line = `🔄 업데이트 적용을 위해 재시작합니다 — v${marker.fromVersion} → v${marker.toVersion ?? "새 버전"} · 자동매매 ${marker.autoTradeWasOn ? "켜짐(재시작 후 자동으로 다시 켭니다)" : "꺼짐"} · 보유/대기 ${marker.positions.length}종목${marker.positions.length ? " (" + marker.positions.map((p) => `${p.symbol} ${p.quantity}주 ${p.status === "active" ? "보호중" : "매수대기"}`).join(", ") + ")" : ""}`;
+    this.addJournal({ kind: "info", symbol: "-", summary: line });
+    await Promise.race([this.sendDiscordAlert(line), new Promise((r) => setTimeout(r, 4000))]).catch(() => undefined);
+    return marker;
+  }
+
+  /**
+   * [재시작 직후] 표식이 있으면 한 번만: ①이전/새 버전 기록 ②실계좌 보유↔등록 OCO **대조(reconcile)** ③보호 없는 종목 즉시 재보호(독립 감사 + 가드)
+   *   ④기록(저널 + 디스코드). 자동매매 자동 재개는 생성자(v0.86.0)가 이미 했다 — 여기선 그 결과를 확인해 기록한다.
+   *   토스 연결이 아직이면 "pending"(호출부가 15초 뒤 다시 부른다).
+   */
+  async resumeAfterRestart(): Promise<"none" | "pending" | "done" | "expired"> {
+    const path = this.restartMarkerPath();
+    if (!existsSync(path)) return "none";
+    let marker: RestartMarker;
+    try {
+      marker = JSON.parse(readFileSync(path, "utf8")) as RestartMarker;
+    } catch {
+      try { renameSync(path, path + ".bad"); } catch { /* 무시 */ }
+      return "none";
+    }
+    const drop = () => { try { renameSync(path, path + ".done"); } catch { /* 무시 */ } };
+    if (!isMarkerFresh(marker, Date.now())) {
+      drop();
+      this.addJournal({ kind: "info", symbol: "-", summary: "🔄 오래된 재시작 기록 표식을 무시했습니다(30분 초과)." });
+      return "expired";
+    }
+    try {
+      await this.prepareBackend();
+      this.assertAccountReady();
+      await getBuyingPower("USD"); // 토스 연결·인증 확인(실패하면 아직 준비 안 된 것)
+    } catch {
+      return "pending";
+    }
+    const line = describeRestart(marker, this.appVersion ?? "?");
+    await this.reconcileAutoPositions().catch(() => undefined); // 실계좌 보유 ↔ 등록 OCO 대조
+    await this.auditUnprotectedHoldings().catch(() => 0); // 보호 없는 종목 찾기
+    if (this.autoUnprotected.length > 0) this.scheduleGuard(1000); // → 가드가 즉시 재보호
+    drop();
+    const resumed = marker.autoTradeWasOn && this.autoTradeEnabled;
+    const tail = marker.autoTradeWasOn ? (resumed ? "자동매매가 다시 켜져 이어서 돌고 있습니다." : "⚠️ 자동매매가 켜져 있었는데 지금 꺼져 있습니다 — 확인해 주세요.") : "자동매매는 꺼져 있었으므로 그대로 둡니다.";
+    const summary = `✅ 재시작 복구 완료 — ${tail} 실계좌↔조건주문 대조${this.autoUnprotected.length ? `, 보호 복구 중 ${this.autoUnprotected.length}종목(${this.autoUnprotected.map((u) => u.symbol).join(", ")})` : " 이상 없음"}.`;
+    this.addJournal({ kind: "info", symbol: "-", summary: `${line}\n${summary}`, notify: true, notifyTitle: "🔄 업데이트 재시작 완료" });
+    await Promise.race([this.sendDiscordAlert(`${line}\n${summary}`), new Promise((r) => setTimeout(r, 4000))]).catch(() => undefined);
+    return "done";
+  }
+
   private scheduleGuard(delayMs: number): void {
     if (this.guardTimer || this.autoUnprotected.length === 0) return;
     // [v0.69.1] 점검 도중 예외(저장 실패 등)가 처리되지 않은 프라미스 거부로 새어 앱/테스트를 흔들지 않게 막고, 타이머가 프로세스 종료를 붙잡지 않게 한다.
@@ -8321,6 +8447,7 @@ export class ToolEngine extends EventEmitter {
   async runGuard(): Promise<void> {
     if (this.guardBusy || this.autoUnprotected.length === 0) return;
     this.guardBusy = true;
+    const guardToken = this.addRestartBlocker("guard", "보호 가드 점검(보호주문·시장가 매도 가능)"); // [v0.70.0]
     try {
       if (this.isDryRun()) return; // 드라이런엔 실제 보유가 없다
       await this.prepareBackend();
@@ -8472,6 +8599,7 @@ export class ToolEngine extends EventEmitter {
         }
       }
     } finally {
+      this.removeRestartBlocker(guardToken);
       this.guardBusy = false;
       if (this.autoUnprotected.length > 0) this.scheduleGuard(this.guardIntervalMs);
       void this.pushLiveState(true);
@@ -9469,14 +9597,14 @@ export class ToolEngine extends EventEmitter {
         detail: { ...spec, clientOrderId },
       });
     }
-    const o = await createOrder({
+    const o = await this.inflight(`매도 주문 전송 ${symbol}`, () => createOrder({
       symbol,
       side: "SELL",
       orderType: spec.orderType,
       price: spec.orderType === "LIMIT" ? spec.price : undefined,
       quantity: spec.quantity,
       clientOrderId,
-    });
+    }));
     void this.recordExit(symbol, spec.price ?? null, "manual", this.currentMode()); // [v0.7.0] 청산 체결강도+결과 자동 기록
     return this.addJournal({
       kind: "entry",

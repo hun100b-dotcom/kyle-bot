@@ -3365,7 +3365,7 @@ ${msg}
               "연결됨"이라 다 됐나 싶지만 실제로는 새 기능이 아직 없는 옛 코드다. 폰에서
               PC 버전과 지금 이 화면(appVer) 버전을 바로 대조해, 다르면 바로 보이게 한다. */}
           {isWebApp && pcConnected && pcAppVersion && appVer && pcAppVersion !== appVer && (
-            <span className="badge badge-dry" title="PC가 자동매매를 켜 둔 채라 재시작(업데이트 적용)을 못 하고 있을 수 있습니다 — 자동매매를 끄면 PC가 5분 안에 스스로 최신 버전으로 업데이트합니다.">
+            <span className="badge badge-dry" title="PC가 새 버전을 받는 중이거나 주문 처리 중이라 잠시 미뤄진 상태일 수 있습니다 — 자동매매 중이어도 PC는 몇 초~몇 분 안에 스스로 최신 버전으로 재시작하고 자동매매를 이어갑니다(오너 확정 정책).">
               ⚠️ PC 버전 다름(PC: v{pcAppVersion} / 이 화면: v{appVer})
             </span>
           )}
@@ -6947,7 +6947,7 @@ ${msg}
       {update && (
         <div className="update-banner">
           <span>
-            🎉 v{update.version} {updateReady ? "— 받기 완료(자동매매 꺼지면 곧 자동 적용)" : updateProgress != null ? `— 받는 중 ${updateProgress}%` : "감지됨"}
+            🎉 v{update.version} {updateReady ? "— 받기 완료(곧 자동 적용·재시작 — 자동매매 중이어도 진행, 끝나면 자동매매도 이어서 켜집니다)" : updateProgress != null ? `— 받는 중 ${updateProgress}%` : "감지됨"}
           </span>
           {updateReady && (
             <button className="btn" onClick={startInstallUpdate} disabled={updateInstalling}>
@@ -6988,7 +6988,7 @@ ${msg}
           재시작이 보류될 뿐, 이 버튼 자체는 급할 때 바로 끄고 싶을 때 쓰는 선택지다. */}
       {macSwap && (
         <div className="update-banner" style={update ? { top: 64 } : undefined}>
-          <span>🍎 새 버전(v{macSwap.version})이 준비됐어요 — 자동매매 꺼지면 곧 자동으로 적용돼요.</span>
+          <span>🍎 새 버전(v{macSwap.version})이 준비됐어요 — 곧 자동으로 종료·교체·재실행돼요(자동매매 중이어도 진행, 주문 처리 중인 몇 초만 미룹니다).</span>
           <button className="btn" onClick={doInstallMacSwap} disabled={macSwapBusy}>
             {macSwapBusy ? "적용 중…" : "↻ 지금 바로 재시작"}
           </button>
