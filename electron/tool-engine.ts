@@ -1401,6 +1401,14 @@ export class ToolEngine extends EventEmitter {
   //   안전 구멍을 만들었다(오너가 실제로 겪음: "껐다 키거나 업데이트하면 기록이 사라짐 — 실제
   //   토스엔 주문이 남아있는데"). 이제 포지션 목록은 파일로 저장하고 재시작해도 그대로 이어받는다.
   private autoTradeEnabled = false;
+  /** [v0.86.0 — 오너 지시 "자동매매 중에도 업데이트 발생 시 재시작해서 자동매매 그대로 이어가도록"]
+   *  위 "마스터 스위치는 절대 저장 안 함" 원칙의 **유일한 예외**다. 일반적인 종료(오너가 직접 끄거나,
+   *  그냥 앱을 닫는 경우)는 여전히 이 플래그와 무관하게 다음 실행이 항상 꺼진 채로 시작한다 —
+   *  이 플래그는 main.ts가 "지금 업데이트 때문에 내가 스스로(quitAndInstall) 재시작시킨다"는
+   *  그 순간에만 true로 세팅되고(prepareForUpdateRestart 참고), 다음 생성자 실행에서 딱 한 번
+   *  읽혀 자동매매를 다시 켠 뒤 즉시 false로 되돌아간다(소비형 — 그 다음 재시작부터는 다시
+   *  일반 원칙이 적용됨). */
+  private autoResumeAfterUpdatePending = false;
   private autoTradeTimer: ReturnType<typeof setInterval> | null = null;
   private autoTradeTickBusy = false; // 한 사이클이 겹쳐 실행되지 않게
   /** [v0.61.6 — ③ 전수조사 낮음-1] 느린 네트워크에서 한 틱이 8초를 넘기면 다음 타이머와
@@ -1626,6 +1634,17 @@ export class ToolEngine extends EventEmitter {
     //   이 기능의 "저장이 재시작해도 유지되는지"는 tests/system-pause.test.ts가 .env 파일 내용을
     //   직접 읽어 검증한다(새 엔진의 getSettings()로는 검증할 수 없음 — 매번 강제로 꺼지므로).
     if (opts?.forceMock) this.systemPauseEnabled = false;
+    // [v0.86.0] 위 systemPauseEnabled와 같은 이유로(process.env 테스트 간 오염 방지) 테스트
+    //   엔진은 이 플래그도 무조건 끈 채로 시작한다 — 안 그러면 "일반 종료인 척 꾸민" 다른
+    //   테스트가 먼저 persistEnv()로 true를 process.env에 남겨 놓으면, 전혀 무관한 다음
+    //   forceMock 테스트가 자기도 모르게 자동매매를 자동으로 시작시킬 수 있다.
+    if (opts?.forceMock) this.autoResumeAfterUpdatePending = false;
+    // [v0.86.0] 생성자가 끝나는 시점의 "진짜" 값을 process.env에도 즉시 되돌려 놓는다(파일에
+    //   아직 한 번도 안 써진 상태라도) — 위 두 줄(loadEnv 복원 → forceMock 덮어쓰기)을 전부
+    //   거친 뒤의 값이라, 이 한 줄만으로 "이 엔진 인스턴스가 사라진 뒤에도 process.env에
+    //   낡은 값이 남아 다음 엔진(같은 테스트 프로세스 안의 또 다른 생성)을 오염시키는" 경로를
+    //   원천 차단한다. persistEnv()가 실제로 호출되는지와 무관하게 항상 최신 상태를 보장한다.
+    process.env.AUTO_RESUME_AFTER_UPDATE = this.autoResumeAfterUpdatePending ? "true" : "false";
     this.loadJournal();
     this.loadRationales();
     this.loadSplits();
@@ -1640,6 +1659,14 @@ export class ToolEngine extends EventEmitter {
     if (this.autoUnprotected.length > 0 && !opts?.forceMock) this.scheduleGuard(30_000);
     // 신호 기록 모드는 주문을 내지 않는 읽기 전용이라 켜 둔 상태를 재시작해도 유지한다(테스트용 forceMock은 자동 시작 안 함).
     if (this.labEnabled && !opts?.forceMock) this.startLabTimer();
+    // [v0.86.0] 업데이트로 인한 재시작이면 자동매매를 그대로 이어서 켠다(소비형 — 한 번 쓰면 꺼짐).
+    //   startAutoTrade()는 v0.30.1부터 "감시 중이던 포지션을 이어받는" 경로라 재시작 복구와 이미
+    //   궁합이 맞는다(이 함수를 새로 만들지 않고 그대로 재사용).
+    if (this.autoResumeAfterUpdatePending && !opts?.forceMock) {
+      this.autoResumeAfterUpdatePending = false;
+      this.persistEnv();
+      this.startAutoTrade();
+    }
   }
 
   // --------------------------------------------------------------------------
@@ -1692,6 +1719,8 @@ export class ToolEngine extends EventEmitter {
     // [v0.61.8] 저장된 진입 타점 분할(1~2) 복원.
     const ael = Number(process.env.AUTO_ENTRY_LEVEL);
     if (ael === 1 || ael === 1.5 || ael === 2) this.autoTradeEntryLevel = ael;
+    // [v0.86.0] 업데이트로 인한 재시작이면("일반 종료"는 저장 자체가 안 되므로 해당 없음) 복원.
+    if (process.env.AUTO_RESUME_AFTER_UPDATE === "true") this.autoResumeAfterUpdatePending = true;
     // [v0.65.0] 매매연구소 설정 복원
     if (process.env.LAB_ENABLED === "true") this.labEnabled = true;
     const lrc = Number(process.env.LAB_RANK_COUNT);
@@ -2205,6 +2234,7 @@ export class ToolEngine extends EventEmitter {
       `AUTO_MAX_INVEST_PCT=${this.autoTradeMaxInvestPct}`,
       `AUTO_WATCH_MINUTES=${this.autoTradeWatchMinutes}`, // [v0.42.0] 장기간 미체결 자동취소 기준(분)
       `AUTO_ENTRY_LEVEL=${this.autoTradeEntryLevel}`, // [v0.61.8] 진입 타점 분할(1~2)
+      `AUTO_RESUME_AFTER_UPDATE=${this.autoResumeAfterUpdatePending}`, // [v0.86.0] 업데이트 재시작 전용 소비형 플래그(일반 종료엔 무관)
       `LAB_ENABLED=${this.labEnabled}`, // [v0.65.0] 매매연구소
       `LAB_RANK_COUNT=${this.labRankCount}`,
       `LAB_RANK_MIGRATED=${this.labRankMigrated || process.env.LAB_RANK_MIGRATED === "1" ? "1" : "0"}`,
@@ -2253,6 +2283,7 @@ export class ToolEngine extends EventEmitter {
     ].join("\n");
     // 환경변수에도 반영(다음 loadEnv 없이도 일관되게)
     process.env.LIVE_ORDERS = this.liveOrdersEnabled ? "true" : "false";
+    process.env.AUTO_RESUME_AFTER_UPDATE = this.autoResumeAfterUpdatePending ? "true" : "false"; // [v0.86.0]
     writeFileSync(this.envPath, lines, "utf8");
     chmodSync(this.envPath, 0o600);
   }
@@ -7600,6 +7631,21 @@ export class ToolEngine extends EventEmitter {
     });
     void this.pushLiveState(true); // [v0.61.0] "꺼짐" 전환을 폰이 바로 볼 수 있게 즉시 올린다
     return this.getAutoTradeStatus();
+  }
+
+  /**
+   * [v0.86.0 — 오너 지시 "자동매매 중에도 업데이트 발생 시 재시작해서 자동매매 그대로 이어가도록"]
+   *   main.ts가 electron-updater의 조용한 재시작(quitAndInstall)을 호출하기 **직전에만** 부른다.
+   *   지금 자동매매가 켜져 있으면 "다음에 켜질 때 자동으로 다시 켜 달라"는 일회용 표시(플래그)를
+   *   남긴다. 꺼져 있으면 아무것도 하지 않는다(재개할 것 자체가 없음 — 괜히 켜면 오너가 끈 걸
+   *   되돌리는 셈이 된다). 이 메서드를 안 부르고 그냥 종료/재시작하면(오너가 직접 끄는 경우,
+   *   예기치 못한 충돌 등) 플래그가 안 남으므로 "마스터 스위치는 저장 안 함" 원칙이 그대로
+   *   적용된다 — 이건 업데이트 재시작 전용 통로다.
+   */
+  prepareForUpdateRestart(): void {
+    if (!this.autoTradeEnabled) return;
+    this.autoResumeAfterUpdatePending = true;
+    this.persistEnv();
   }
 
   getAutoTradeStatus(): AutoTradeStatus {

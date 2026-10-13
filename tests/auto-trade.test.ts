@@ -25,7 +25,7 @@ import { join } from "node:path";
 import { Settings, DateTime } from "luxon";
 import {
   ToolEngine, computeSeedQty, newlyConfirmedSymbols, newlyWatchedSymbols, summarizeConfirmEvidence, applyScreenGates, findDirectionConflict,
-  type AutoPosition, type JournalEntry, type NotifyEvent, type ScreenResult, type AutoTradeHistoryEntry, type ScreenEvidence,
+  type AutoPosition, type JournalEntry, type NotifyEvent, type ScreenResult, type AutoTradeHistoryEntry, type ScreenEvidence, type AutoTradeStatus,
 } from "../electron/tool-engine";
 import { volScaledInvestPct } from "../lib/auto-risk";
 
@@ -335,6 +335,73 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // [v0.86.0 — 오너 명시적 지시 "자동매매 중에도 업데이트 발생 시 재시작하고 자동매매 그대로
+  //   이어가도록"] 위 "켜짐은 절대 저장 안 함" 원칙의 **유일한 예외**. main.ts가 업데이트를
+  //   적용하려고 스스로 재시작시키기 직전에만 prepareForUpdateRestart()를 부르는데, 이 셋은
+  //   그 경로를 검증한다. 아래 "재시작"은 같은 폴더로 새 ToolEngine을 만드는 것으로 흉내낸다
+  //   (실제로는 새 프로세스가 같은 .env 파일을 다시 읽음). 자동 재개 로직 자체가
+  //   `!opts?.forceMock`일 때만 동작하므로(테스트 간 process.env 오염 방지, 위 systemPauseEnabled
+  //   와 같은 이유), "재시작 후" 엔진은 forceMock 없이 만든다.
+  describe("[v0.86.0] prepareForUpdateRestart — 업데이트로 인한 재시작 시 자동매매 이어가기", () => {
+    type ResumeInternals = {
+      autoTradeEnabled: boolean;
+      startAutoTrade: () => AutoTradeStatus;
+      stopAutoTrade: (reason?: string) => AutoTradeStatus;
+      prepareForUpdateRestart: () => void;
+    };
+
+    it("자동매매가 켜진 상태에서 호출하면, 재시작해도 자동매매가 스스로 다시 켜진다", () => {
+      const dir = mkdtempSync(join(tmpdir(), "kyle-resume-"));
+      try {
+        const eng1 = new ToolEngine(dir, { forceMock: true }) as unknown as ResumeInternals;
+        eng1.startAutoTrade();
+        expect(eng1.autoTradeEnabled).toBe(true);
+        eng1.prepareForUpdateRestart(); // main.ts가 quitAndInstall 직전에 부르는 것과 동일
+        eng1.stopAutoTrade(); // (테스트 정리용 — 실제 흐름은 프로세스가 그냥 종료됨. 플래그는 이미 파일에 남았으므로 무관)
+
+        const eng2 = new ToolEngine(dir) as unknown as ResumeInternals; // forceMock 없이 — "재시작"
+        expect(eng2.autoTradeEnabled).toBe(true); // 오너가 다시 누르지 않아도 자동으로 이어져야 함
+        eng2.stopAutoTrade();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("자동매매가 꺼진 상태에서 호출하면 아무 표시도 남기지 않는다(재개할 게 없으므로)", () => {
+      const dir = mkdtempSync(join(tmpdir(), "kyle-resume-"));
+      try {
+        const eng1 = new ToolEngine(dir, { forceMock: true }) as unknown as ResumeInternals;
+        expect(eng1.autoTradeEnabled).toBe(false);
+        eng1.prepareForUpdateRestart(); // 꺼진 채였으니 조용히 아무 일도 없어야 함
+
+        const eng2 = new ToolEngine(dir) as unknown as ResumeInternals;
+        expect(eng2.autoTradeEnabled).toBe(false);
+        eng2.stopAutoTrade();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("표시는 한 번 쓰면 소비된다 — 그다음 '평범한' 재시작에는 영향을 주지 않는다", () => {
+      const dir = mkdtempSync(join(tmpdir(), "kyle-resume-"));
+      try {
+        const eng1 = new ToolEngine(dir, { forceMock: true }) as unknown as ResumeInternals;
+        eng1.startAutoTrade();
+        eng1.prepareForUpdateRestart();
+        eng1.stopAutoTrade();
+
+        const eng2 = new ToolEngine(dir) as unknown as ResumeInternals; // 1차 재시작 — 자동으로 다시 켜짐
+        expect(eng2.autoTradeEnabled).toBe(true);
+        eng2.stopAutoTrade(); // 오너가 직접(또는 그냥) 끔 — 이번엔 prepareForUpdateRestart를 안 부름
+
+        const eng3 = new ToolEngine(dir) as unknown as ResumeInternals; // 2차 재시작 — 이번엔 자동으로 켜지면 안 됨
+        expect(eng3.autoTradeEnabled).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   it("[v0.42.0] 미체결 자동취소 기준(분) — 저장 시 1~60분으로 보정된다", () => {
