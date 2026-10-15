@@ -25,8 +25,11 @@ const STORE_KEY = "capri-tab-order";
 /**
  * useTabOrder — 탭 순서 상태 + 드래그 핸들러를 돌려준다.
  * @param allTabs 앱이 가진 모든 탭(기본 순서)
+ * @param storageKey [v0.95.0] 저장 위치(localStorage 키). 기본값은 예전부터 쓰던 메인(1단 그룹) 탭 키라
+ *   이 인자를 안 주면 기존 동작과 완전히 같다. 하위 탭(2단)처럼 "같은 화면에서 여러 번" 이 훅을 쓰려면
+ *   (그룹마다 서로 다른 하위 탭 목록) 그룹별로 다른 키를 줘서 저장이 서로 안 섞이게 해야 한다.
  */
-export function useTabOrder<T extends string>(allTabs: readonly T[]) {
+export function useTabOrder<T extends string>(allTabs: readonly T[], storageKey: string = STORE_KEY) {
   /** 저장된 순서를 읽되, 현재 존재하는 탭들과 맞춘다(빠진 건 뒤에 붙이고, 없어진 건 제거) */
   const normalize = useCallback(
     (saved: string[] | null): T[] => {
@@ -40,7 +43,7 @@ export function useTabOrder<T extends string>(allTabs: readonly T[]) {
 
   const [order, setOrder] = useState<T[]>(() => {
     try {
-      return normalize(JSON.parse(localStorage.getItem(STORE_KEY) ?? "null"));
+      return normalize(JSON.parse(localStorage.getItem(storageKey) ?? "null"));
     } catch {
       return [...allTabs];
     }
@@ -64,11 +67,11 @@ export function useTabOrder<T extends string>(allTabs: readonly T[]) {
 
   const persist = useCallback((next: T[]) => {
     try {
-      localStorage.setItem(STORE_KEY, JSON.stringify(next));
+      localStorage.setItem(storageKey, JSON.stringify(next));
     } catch {
       /* 저장 실패해도 이번 세션 순서는 그대로 쓴다 */
     }
-  }, []);
+  }, [storageKey]);
 
   /** 두 탭의 자리를 바꾼다 */
   const moveTab = useCallback((from: T, to: T) => {

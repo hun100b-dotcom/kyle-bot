@@ -648,6 +648,17 @@ function App() {
   // [v0.9.2] 탭 순서(드래그로 변경, 이 기기에 저장)
   // [v0.27.0] 이제 드래그로 순서를 바꾸는 건 '그룹'(4개) — 리프 탭은 그룹 안에서 고정 순서.
   const { order: groupOrder, dragProps, isDragging } = useTabOrder(TOP_GROUPS);
+  // [v0.95.0 — 오너 요청] 하위 탭(2단)도 드래그로 순서 변경. 그룹마다 하위 탭 구성이 전부 달라서
+  //   (메뉴얼 3개·자동매매 6개·매매연구소 5개…) 훅을 그룹 수만큼 고정으로 불러 두고(React 훅은
+  //   조건부로 부를 수 없다) 저장 키도 그룹별로 나눈다 — 안 그러면 그룹끼리 순서가 하나의 저장
+  //   공간에서 뒤섞인다. GROUP_CHILDREN[g]는 모듈 스코프 상수라 참조가 매 렌더 고정이라 훅 내부
+  //   효과가 불필요하게 다시 돌지 않는다.
+  const subOrderManual = useTabOrder(GROUP_CHILDREN.manual, "capri-tab-order:sub:manual");
+  const subOrderAuto = useTabOrder(GROUP_CHILDREN.auto, "capri-tab-order:sub:auto");
+  const subOrderLab = useTabOrder(GROUP_CHILDREN.lab, "capri-tab-order:sub:lab");
+  const subOrderStatus = useTabOrder(GROUP_CHILDREN.status, "capri-tab-order:sub:status");
+  const subOrderSettings = useTabOrder(GROUP_CHILDREN.settings, "capri-tab-order:sub:settings");
+  const subTabOrderByGroup = { manual: subOrderManual, auto: subOrderAuto, lab: subOrderLab, status: subOrderStatus, settings: subOrderSettings };
   // [v0.9.1] 매매 리포트 + [v0.9.2] 기간 선택(오늘/1주일/1개월/날짜)
   const [report, setReport] = useState<DailyReport | null>(null);
   const [reportBusy, setReportBusy] = useState(false);
@@ -3585,19 +3596,29 @@ ${msg}
           </button>
         ))}
       </nav>
-      {GROUP_CHILDREN[TAB_GROUP[tab]].length > 1 && (
-        <nav className="subtabs">
-          {GROUP_CHILDREN[TAB_GROUP[tab]].map((t) => (
-            <button
-              key={t}
-              className={tab === t ? "subtab active" : "subtab"}
-              onClick={() => { setTab(t); activateTab(t); }}
-            >
-              {TAB_LABEL[t]}
-            </button>
-          ))}
-        </nav>
-      )}
+      {GROUP_CHILDREN[TAB_GROUP[tab]].length > 1 && (() => {
+        const sub = subTabOrderByGroup[TAB_GROUP[tab]];
+        return (
+          <nav className="subtabs">
+            {sub.order.map((t) => (
+              <button
+                key={t}
+                className={tab === t ? "subtab active" : "subtab"}
+                title="좌우로 끌면 하위 탭 순서를 바꿀 수 있어요"
+                {...sub.dragProps(t)}
+                onClick={() => {
+                  // 끌어서 순서를 바꾼 직후에는 탭 이동이 되지 않게 한다(메인 탭 그룹과 같은 규칙).
+                  if (sub.isDragging()) return;
+                  setTab(t);
+                  activateTab(t);
+                }}
+              >
+                {TAB_LABEL[t]}
+              </button>
+            ))}
+          </nav>
+        );
+      })()}
       </>
       )}
 

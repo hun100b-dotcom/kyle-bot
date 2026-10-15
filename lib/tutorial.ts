@@ -102,6 +102,19 @@ export interface TutorialStored {
 
 export const TUTORIAL_STORED_DEFAULT: TutorialStored = { visited: [], connectionOk: false, autoOpened: false, pillHidden: false, lastStep: null };
 
+/** [v0.95.0][버그 수정] 저장 상태에 patch(값 그대로, 또는 "이전 상태 → patch" 함수)를 반영한다.
+ *  화면(Tutorial.tsx)의 patchStored가 이 함수로 React의 함수형 setState처럼 "직전 결과 위에 이어붙이게" 한다.
+ *  예전엔 매번 "그 틱이 시작될 때의" 오래된 상태를 기준으로 next를 계산했는데, 한 핸들러 안에서
+ *  patchStored를 두 번 부르면(예: "다음" 버튼의 go() — markVisited(현재 단계) 직후 lastStep을 또 갱신)
+ *  두 번째 호출이 첫 번째 호출의 변경(visited 추가)을 그대로 덮어써 버렸다 — "다음"을 눌러도 방문
+ *  체크가 저장되지 않고 사라지던 버그의 원인. 항상 직전 patch가 반영된 prev를 넘겨 받아야 이게 안 생긴다. */
+export function applyTutorialPatch(
+  prev: TutorialStored,
+  patch: Partial<TutorialStored> | ((prev: TutorialStored) => Partial<TutorialStored>),
+): TutorialStored {
+  return { ...prev, ...(typeof patch === "function" ? patch(prev) : patch) };
+}
+
 export function tutorialStorageKey(email: string | null | undefined): string {
   return `capri-tutorial-v1:${(email ?? "anon").toLowerCase()}`;
 }

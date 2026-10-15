@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  TUTORIAL_STEPS, computeProgress, parseTutorialStored, shouldAutoOpen, tutorialStorageKey, TUTORIAL_STORED_DEFAULT, type TutorialSnapshot,
+  TUTORIAL_STEPS, computeProgress, parseTutorialStored, shouldAutoOpen, tutorialStorageKey, TUTORIAL_STORED_DEFAULT, applyTutorialPatch, type TutorialSnapshot,
 } from "../lib/tutorial";
 import { classifyTossError } from "../lib/connection-test";
 import { ToolEngine } from "../electron/tool-engine";
@@ -72,6 +72,47 @@ describe("lib/tutorial — 저장 상태·자동 열림", () => {
     expect(shouldAutoOpen({ ...s, hasKeys: true }, TUTORIAL_STORED_DEFAULT)).toBe(false); // 이미 설정한 사람
     expect(shouldAutoOpen({ ...s, loggedIn: false }, TUTORIAL_STORED_DEFAULT)).toBe(false);
     expect(shouldAutoOpen({ ...s, approved: false }, TUTORIAL_STORED_DEFAULT)).toBe(false);
+  });
+});
+
+describe("[v0.95.0][버그 수정] applyTutorialPatch — '다음'을 눌러도 방문 체크(visited)가 사라지던 버그", () => {
+  // 실제 버그: Tutorial.tsx의 go()(= "다음 →" 버튼)는 markVisited(현재 단계) 직후 바로 lastStep 갱신을
+  // 한 번 더 한다. 예전엔 두 호출이 똑같이 "리렌더 전의 옛 상태"를 기준으로 next를 계산해서, 두 번째
+  // 호출이 첫 번째 호출의 visited 추가를 덮어써 사라졌다. 아래는 React의 함수형 setState가 실제로 하는
+  // 것처럼 "직전 결과를 다음 입력으로" 체이닝해, 그 순서를 그대로 흉내 낸 테스트다.
+  it("객체 patch는 이전 상태 위에 그대로 병합된다", () => {
+    const next = applyTutorialPatch(TUTORIAL_STORED_DEFAULT, { pillHidden: true, lastStep: "mode" });
+    expect(next).toEqual({ ...TUTORIAL_STORED_DEFAULT, pillHidden: true, lastStep: "mode" });
+  });
+
+  it("함수 patch는 '그 시점의' prev를 받아 계산한다", () => {
+    const withWelcome = applyTutorialPatch(TUTORIAL_STORED_DEFAULT, { visited: ["welcome"] });
+    const next = applyTutorialPatch(withWelcome, (prev) => ({ visited: [...prev.visited, "mode"] }));
+    expect(next.visited).toEqual(["welcome", "mode"]);
+  });
+
+  it("markVisited(함수 patch) 다음에 lastStep만 바꾸는 객체 patch가 와도(go()와 똑같은 순서) 방문 체크가 살아남는다", () => {
+    // 1) go()의 markVisited("welcome") — 함수 patch
+    let s = applyTutorialPatch(TUTORIAL_STORED_DEFAULT, (prev) => (prev.visited.includes("welcome") ? {} : { visited: [...prev.visited, "welcome"], lastStep: "welcome" }));
+    // 2) go()가 바로 이어서 부르는 lastStep 갱신 — 객체 patch(버그 당시엔 이게 1)을 덮어썼다)
+    s = applyTutorialPatch(s, { lastStep: "account" });
+    expect(s.visited).toEqual(["welcome"]); // ← 예전엔 여기가 []였다(사라짐)
+    expect(s.lastStep).toBe("account");
+  });
+
+  it("이미 방문한 단계를 다시 markVisited해도 중복 추가되지 않는다", () => {
+    const once = applyTutorialPatch(TUTORIAL_STORED_DEFAULT, (prev) => (prev.visited.includes("welcome") ? {} : { visited: [...prev.visited, "welcome"], lastStep: "welcome" }));
+    const twice = applyTutorialPatch(once, (prev) => (prev.visited.includes("welcome") ? {} : { visited: [...prev.visited, "welcome"], lastStep: "welcome" }));
+    expect(twice.visited).toEqual(["welcome"]);
+  });
+
+  it("여러 단계를 '다음'으로 차례로 지나가도(go() 체인 시뮬레이션) 전부 누적된다", () => {
+    let s = TUTORIAL_STORED_DEFAULT;
+    for (const id of ["welcome", "account", "keysPrep"] as const) {
+      s = applyTutorialPatch(s, (prev) => (prev.visited.includes(id) ? {} : { visited: [...prev.visited, id], lastStep: id }));
+      s = applyTutorialPatch(s, { lastStep: id }); // go()가 매번 추가로 부르는 두 번째 patch
+    }
+    expect(s.visited).toEqual(["welcome", "account", "keysPrep"]);
   });
 });
 
