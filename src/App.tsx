@@ -123,9 +123,9 @@ const AUTO_HIST_STATUS_LABEL: Record<AutoTradeHistoryEntry["status"], string> = 
 /** [관찰종목 이력] 결과(outcome) 배지 라벨. */
 const WATCH_OUTCOME_LABEL: Record<WatchOutcome, string> = {
   watching: "🟡 관찰 중",
-  confirmed: "🔴 확정 졸업",
+  confirmed: "🔴 확정", // [v0.96.0] "확정 졸업" → "확정"(용어 정리 — 오너 지적: 표현이 가벼움)
   disqualified: "⚪ 탈락",
-  dropped_from_scan: "❔ 순위 밖(사유 불명)",
+  dropped_from_scan: "⚫ 순위 밖(사유 불명)", // [v0.96.0] 물음표 이모지 대신 다른 상태와 같은 동그라미 아이콘으로 통일
 };
 
 /** [v0.56.0] "서버 로그" 탭 카테고리 토글 순서 + 아이콘. */
@@ -1027,10 +1027,15 @@ function App() {
   const [autoHistory, setAutoHistory] = useState<AutoTradeHistoryEntry[]>([]);
   const [autoHistoryBusy, setAutoHistoryBusy] = useState(false);
   // [관찰종목 이력 — 오너 요청] 관찰(watch)로 잡힌 종목이 그 뒤 확정/탈락(사유)/순위밖으로 끝났는지.
-  const [watchHistory, setWatchHistory] = useState<WatchHistoryEntry[]>([]);
+  const [watchHistory, setWatchHistory] = useState<(WatchHistoryEntry & { link: WatchTradeLink })[]>([]);
   const [watchHistorySummary, setWatchHistorySummary] = useState<WatchHistorySummary | null>(null);
   const [watchHistoryBusy, setWatchHistoryBusy] = useState(false);
   const [watchHistoryOutcomeFilter, setWatchHistoryOutcomeFilter] = useState<"" | WatchOutcome>("");
+  // [v0.96.0 — 고도화] 종목 검색(클라이언트 필터, outcome과 동일 방식) + 기간(서버 재조회 — 요약
+  //   통계가 기간에 따라 달라지므로) + "더 보기"(표시 개수, 필터 바뀌면 300으로 리셋).
+  const [watchHistorySymbolFilter, setWatchHistorySymbolFilter] = useState("");
+  const [watchHistoryPeriodHours, setWatchHistoryPeriodHours] = useState<number | null>(null); // null=전체
+  const [watchHistoryShowCount, setWatchHistoryShowCount] = useState(300);
   // [v0.64.0] 자동매매기록을 토스 실제 체결과 대조한 결과(id → 결과). 탭을 열 때는 안 불러오고
   //   "🔄 토스 체결과 대조" 버튼을 눌러야만 조회한다(매번 자동으로 부르면 토스 요청이 불필요하게
   //   늘어난다 — report()/tradeAnalysis()도 같은 원칙으로 버튼 눌러야만 동작).
@@ -1222,16 +1227,20 @@ function App() {
     }
   }
 
-  /** [관찰종목 이력] 탭을 열 때 · [🔄 새로고침]을 누를 때 둘 다 호출. */
-  async function loadWatchHistory() {
+  /** [관찰종목 이력] 탭을 열 때 · [🔄 새로고침]을 누를 때 · 기간 필터를 바꿀 때 호출.
+   *  [v0.96.0] 기간(periodHours)은 서버에서 다시 집계해야 한다(요약 통계 자체가 기간별로 달라짐) —
+   *  종목 검색·결과 필터는 이미 받아온 rows를 화면에서 그대로 거르면 되므로 여기서 다시 안 부른다. */
+  async function loadWatchHistory(periodHours: number | null = watchHistoryPeriodHours) {
     setWatchHistoryBusy(true);
     try {
+      const sinceMs = periodHours != null ? Date.now() - periodHours * 3600_000 : undefined;
       const [rows, summary] = await Promise.all([
-        window.kyletool.getWatchHistory?.() ?? Promise.resolve([]),
-        window.kyletool.getWatchHistorySummary?.() ?? Promise.resolve(null),
+        window.kyletool.getWatchHistory?.({ sinceMs }) ?? Promise.resolve([]),
+        window.kyletool.getWatchHistorySummary?.(sinceMs) ?? Promise.resolve(null),
       ]);
       setWatchHistory(rows ?? []);
       setWatchHistorySummary(summary ?? null);
+      setWatchHistoryShowCount(300);
     } finally {
       setWatchHistoryBusy(false);
     }
@@ -5177,9 +5186,11 @@ ${msg}
               <p className="hint">
                 자동 스크리너는 5분마다 결과를 통째로 새로 계산해서, "관찰" 상태였던 종목이 다음 스캔에
                 어떻게 됐는지는 예전엔 화면에서 사라지면 알 방법이 없었어요. 이 탭은 "관찰"로 처음 잡힌
-                순간부터 <b>확정으로 졸업</b>했는지, <b>탈락</b>했는지(구체적 사유 포함), 아니면{" "}
-                <b>거래량 순위 밖으로 벗어났는지</b>를 끝까지 따라가 기록합니다. 스크리닝 기준(도지 몸통·
-                거래량 배수·EMA 이격도 등)을 완화할지 강화할지 판단할 근거 자료예요.
+                순간부터 <b>확정</b>됐는지, <b>탈락</b>했는지(구체적 사유 포함), 아니면{" "}
+                <b>거래량 순위 밖으로 벗어났는지</b>를 끝까지 따라가 기록합니다. 거기서 한 걸음 더 —{" "}
+                <b>확정된 종목이 실제로 매수까지 이어졌는지, 그 매매 성적이 어땠는지</b>까지 연결해서
+                보여줘, 스크리닝 기준(도지 몸통·거래량 배수·EMA 이격도 등)을 완화할지 강화할지 숫자로
+                판단할 수 있게 합니다.
               </p>
             </details>
 
@@ -5190,10 +5201,42 @@ ${msg}
                 <div className="lab-cards">
                   <div className="lab-card"><b>{watchHistorySummary.total}</b><span>누적 관찰 시작</span></div>
                   <div className="lab-card"><b>{watchHistorySummary.watching}</b><span>지금 관찰 중</span></div>
-                  <div className="lab-card"><b>{watchHistorySummary.confirmed}</b><span>확정으로 졸업</span></div>
+                  <div className="lab-card"><b>{watchHistorySummary.confirmed}</b><span>확정</span></div>
                   <div className="lab-card"><b>{watchHistorySummary.disqualified}</b><span>탈락(사유 있음)</span></div>
                   <div className="lab-card"><b>{watchHistorySummary.droppedFromScan}</b><span>거래량 순위 밖(사유 불명)</span></div>
+                  <div className="lab-card">
+                    <b>{watchHistorySummary.confirmToEntryRatePct != null ? `${watchHistorySummary.confirmToEntryRatePct}%` : "—"}</b>
+                    <span>확정→매수 전환율 ({watchHistorySummary.confirmedEntered}/{watchHistorySummary.confirmed}건)</span>
+                  </div>
+                  <div className="lab-card">
+                    <b className={pnlClass(watchHistorySummary.tradeNetPnlUsd)}>
+                      {watchHistorySummary.tradeNetPnlUsd >= 0 ? "+" : ""}${watchHistorySummary.tradeNetPnlUsd.toFixed(2)}
+                    </b>
+                    <span>그 매매들의 순손익 (승 {watchHistorySummary.tradeWinCount}·패 {watchHistorySummary.tradeLossCount})</span>
+                  </div>
                 </div>
+
+                {watchHistorySummary.total > 0 && (
+                  <>
+                    <h3>관찰 → 매수 → 성적 흐름 <span className="hint">(확정된 신호가 실제로 돈이 되는지 한눈에)</span></h3>
+                    <div className="lab-funnel">
+                      {[
+                        { label: "관찰 시작", count: watchHistorySummary.total },
+                        { label: "확정", count: watchHistorySummary.confirmed },
+                        { label: "실제 매수 시도", count: watchHistorySummary.confirmedEntered },
+                        { label: "매수 후 익절", count: watchHistorySummary.tradeWinCount },
+                      ].map(({ label, count }) => (
+                        <div key={label} className="lab-funnel-row">
+                          <span className="lab-funnel-label">{label}</span>
+                          <span className="lab-funnel-bar">
+                            <i style={{ width: `${Math.max(2, (count / watchHistorySummary.total) * 100)}%` }} />
+                          </span>
+                          <b className="lab-funnel-n">{count}</b>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
 
                 {watchHistorySummary.topReasons.length > 0 && (
                   <>
@@ -5216,6 +5259,21 @@ ${msg}
 
             <div className="form-row">
               <button className="mini" disabled={watchHistoryBusy} onClick={() => void loadWatchHistory()}>🔄 새로고침</button>
+              <label>기간
+                <select
+                  value={watchHistoryPeriodHours ?? ""}
+                  onChange={(e) => {
+                    const v = e.target.value ? Number(e.target.value) : null;
+                    setWatchHistoryPeriodHours(v);
+                    void loadWatchHistory(v);
+                  }}
+                >
+                  <option value="">전체</option>
+                  <option value={24}>최근 24시간</option>
+                  <option value={24 * 7}>최근 7일</option>
+                  <option value={24 * 30}>최근 30일</option>
+                </select>
+              </label>
               <label>결과 필터
                 <select value={watchHistoryOutcomeFilter} onChange={(e) => setWatchHistoryOutcomeFilter(e.target.value as WatchOutcome | "")}>
                   <option value="">전체</option>
@@ -5225,35 +5283,66 @@ ${msg}
                   <option value="dropped_from_scan">순위 밖</option>
                 </select>
               </label>
+              <label>종목 검색
+                <input
+                  type="text"
+                  value={watchHistorySymbolFilter}
+                  onChange={(e) => setWatchHistorySymbolFilter(e.target.value)}
+                  placeholder="예) AAPL"
+                  style={{ width: 100 }}
+                />
+              </label>
             </div>
 
             {watchHistory.length === 0 && !watchHistoryBusy && (
               <p className="hint">아직 쌓인 기록이 없습니다. 자동매매(또는 자동 스크리너)가 한 번 이상 돌면 여기 쌓입니다.</p>
             )}
 
-            {watchHistory.length > 0 && (
-              <div className="lab-scroll">
-                <table className="result-table screen-table lab-table">
-                  <thead>
-                    <tr><th>종목</th><th>관찰 시작(KST)</th><th>결과</th><th>걸린 시간</th><th>사유</th></tr>
-                  </thead>
-                  <tbody>
-                    {watchHistory
-                      .filter((h) => !watchHistoryOutcomeFilter || h.outcome === watchHistoryOutcomeFilter)
-                      .slice(0, 300)
-                      .map((h) => (
-                        <tr key={h.id} className="screen-row">
-                          <td><b>{h.symbol}</b>{h.watchedPrice != null && <span className="hint small"> ${h.watchedPrice}</span>}</td>
-                          <td>{new Date(h.watchedAtMs).toLocaleString("ko-KR", { timeZone: "Asia/Seoul", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}</td>
-                          <td>{WATCH_OUTCOME_LABEL[h.outcome]}</td>
-                          <td>{h.resolvedAtMs != null ? `${Math.max(0, Math.round((h.resolvedAtMs - h.watchedAtMs) / 60000))}분` : "진행 중"}</td>
-                          <td className="hint small">{h.reasons.length > 0 ? h.reasons.join(" · ") : "—"}</td>
-                        </tr>
-                      ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+            {watchHistory.length > 0 && (() => {
+              const symbolQuery = watchHistorySymbolFilter.trim().toUpperCase();
+              const filtered = watchHistory.filter(
+                (h) =>
+                  (!watchHistoryOutcomeFilter || h.outcome === watchHistoryOutcomeFilter) &&
+                  (!symbolQuery || h.symbol.toUpperCase().includes(symbolQuery)),
+              );
+              const shown = filtered.slice(0, watchHistoryShowCount);
+              return (
+                <>
+                  <p className="hint small">표시 {shown.length} / 전체 {filtered.length}건</p>
+                  <div className="lab-scroll">
+                    <table className="result-table screen-table lab-table">
+                      <thead>
+                        <tr><th>종목</th><th>관찰 시작(KST)</th><th>결과</th><th>관찰 기간</th><th>실제 진입</th><th>사유</th></tr>
+                      </thead>
+                      <tbody>
+                        {shown.map((h) => (
+                          <tr key={h.id} className="screen-row">
+                            <td><b>{h.symbol}</b>{h.watchedPrice != null && <span className="hint small"> ${h.watchedPrice}</span>}</td>
+                            <td>{new Date(h.watchedAtMs).toLocaleString("ko-KR", { timeZone: "Asia/Seoul", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}</td>
+                            <td>{WATCH_OUTCOME_LABEL[h.outcome]}</td>
+                            <td>{h.resolvedAtMs != null ? fmtDuration(h.resolvedAtMs - h.watchedAtMs) : "진행 중"}</td>
+                            <td className="hint small">
+                              {h.outcome !== "confirmed" ? "—" : h.link.tradeStatus != null ? (
+                                <>
+                                  {AUTO_HIST_STATUS_LABEL[h.link.tradeStatus]}
+                                  {h.link.pnlUsd != null && (
+                                    <span className={pnlClass(h.link.pnlUsd)}> {h.link.pnlUsd >= 0 ? "+" : ""}${h.link.pnlUsd.toFixed(2)}</span>
+                                  )}
+                                </>
+                              ) : "🚫 매수로 안 이어짐"}
+                            </td>
+                            <td className="hint small">{h.reasons.length > 0 ? h.reasons.join(" · ") : "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {filtered.length > shown.length && (
+                    <button className="mini" onClick={() => setWatchHistoryShowCount((n) => n + 300)}>더 보기 (+300)</button>
+                  )}
+                </>
+              );
+            })()}
           </section>
         </main>
       )}

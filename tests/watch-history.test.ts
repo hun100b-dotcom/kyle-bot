@@ -3,14 +3,21 @@
 //   확인할 수 있는 곳이 필요 + 그에 대한 분석도" — 전부 순수 함수라 실제 스캔·ToolEngine 없이 검증한다.
 // =============================================================================
 import { describe, it, expect } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   bucketMissReason,
   summarizeMissReasons,
   updateWatchHistory,
+  linkWatchToTrade,
+  buildTradesBySymbol,
   WATCH_HISTORY_MAX,
+  ToolEngine,
   type ScreenResult,
   type ScreenRun,
   type WatchHistoryEntry,
+  type AutoTradeHistoryEntry,
 } from "../electron/tool-engine";
 
 type RunOpts = Pick<ScreenRun, "emaTrendEnabled" | "cloudEnabled" | "nextCandleConfirmEnabled" | "dojiMaxGapMinutes">;
@@ -33,6 +40,27 @@ function mkResult(overrides: Partial<ScreenResult> = {}): ScreenResult {
     n1m: 1200,
     n5m: 240,
     evidence: null,
+    ...overrides,
+  };
+}
+
+/** [v0.96.0] linkWatchToTrade 테스트용 — id에 `@${enteredAtMs}`를 심어(실제 엔진의 addAutoTradeHistory와
+ *  같은 형태) 진입 접수 시각을 알아볼 수 있게 한다. */
+function mkTrade(symbol: string, enteredAtMs: number, overrides: Partial<AutoTradeHistoryEntry> = {}): AutoTradeHistoryEntry {
+  return {
+    id: `${symbol}@10@${enteredAtMs}`,
+    symbol,
+    entry: 10,
+    tp: 11,
+    sl: 9,
+    quantity: 10,
+    enteredAt: "10-01 10:00:00",
+    status: "active",
+    exitedAt: null,
+    exitPrice: null,
+    pnlUsd: null,
+    pnlPct: null,
+    note: "",
     ...overrides,
   };
 }
@@ -204,5 +232,123 @@ describe("updateWatchHistory — 관찰 생애주기 갱신", () => {
     expect(history.length).toBeLessThanOrEqual(WATCH_HISTORY_MAX);
     expect(history.some((h) => h.symbol === "STILL" && h.outcome === "watching")).toBe(true); // 관찰 중인 건 안 잘림
     expect(history.some((h) => h.symbol === "S0")).toBe(false); // 가장 오래된 종료 기록부터 잘림
+  });
+});
+
+describe("[v0.96.0] linkWatchToTrade — 확정된 관찰이 실제 매수로 이어졌는지 연결", () => {
+  const T0 = 1_700_000_000_000;
+  const confirmedEntry = (overrides: Partial<WatchHistoryEntry> = {}): WatchHistoryEntry => ({
+    id: "ABCD:1", symbol: "ABCD", watchedAtMs: T0 - 600_000, watchedPrice: 5,
+    lastSeenAtMs: T0, resolvedAtMs: T0, outcome: "confirmed", reasons: ["근거"], reasonBuckets: [],
+    ...overrides,
+  });
+
+  it("confirmed가 아니면(watching/disqualified/dropped) 트레이드가 있어도 연결하지 않는다", () => {
+    for (const outcome of ["watching", "disqualified", "dropped_from_scan"] as const) {
+      const entry = confirmedEntry({ outcome, resolvedAtMs: outcome === "watching" ? null : T0 });
+      const trades = buildTradesBySymbol([mkTrade("ABCD", T0 + 1000)]);
+      expect(linkWatchToTrade(entry, trades, 300_000)).toEqual({ traded: false, tradeStatus: null, pnlUsd: null });
+    }
+  });
+
+  it("확정 직후(기간 안) 접수된 같은 종목 매매를 찾아 상태·손익을 돌려준다", () => {
+    const trade = mkTrade("ABCD", T0 + 2000, { status: "closed_win", pnlUsd: 12.3 });
+    const trades = buildTradesBySymbol([trade]);
+    expect(linkWatchToTrade(confirmedEntry(), trades, 300_000)).toEqual({ traded: true, tradeStatus: "closed_win", pnlUsd: 12.3 });
+  });
+
+  it("확정되기 '전'에 접수된 매매는 이 확정이 유발한 게 아니므로 연결하지 않는다(이미 보유 중이던 종목)", () => {
+    const trades = buildTradesBySymbol([mkTrade("ABCD", T0 - 1000)]); // 확정(T0)보다 이전
+    expect(linkWatchToTrade(confirmedEntry(), trades, 300_000)).toEqual({ traded: false, tradeStatus: null, pnlUsd: null });
+  });
+
+  it("매수 시도 시간창(windowMs)을 넘겨 접수된 매매는 별개 기회로 보고 연결하지 않는다", () => {
+    const trades = buildTradesBySymbol([mkTrade("ABCD", T0 + 400_000)]); // 300_000ms 창을 넘김
+    expect(linkWatchToTrade(confirmedEntry(), trades, 300_000)).toEqual({ traded: false, tradeStatus: null, pnlUsd: null });
+  });
+
+  it("같은 종목에 여러 매매 후보가 있으면 확정 이후 가장 빨리 접수된 것을 고른다", () => {
+    const trades = buildTradesBySymbol([
+      mkTrade("ABCD", T0 + 200_000, { status: "closed_loss", pnlUsd: -3 }), // 더 늦게 접수됨
+      mkTrade("ABCD", T0 + 5_000, { status: "closed_win", pnlUsd: 7 }), // 가장 빠름 — 이게 선택돼야 함
+    ]);
+    expect(linkWatchToTrade(confirmedEntry(), trades, 300_000)).toEqual({ traded: true, tradeStatus: "closed_win", pnlUsd: 7 });
+  });
+
+  it("아직 청산 전(보유 중)이면 tradeStatus는 있고 pnlUsd는 null이다", () => {
+    const trades = buildTradesBySymbol([mkTrade("ABCD", T0 + 1000, { status: "active", pnlUsd: null })]);
+    expect(linkWatchToTrade(confirmedEntry(), trades, 300_000)).toEqual({ traded: true, tradeStatus: "active", pnlUsd: null });
+  });
+
+  it("다른 종목의 매매는 연결하지 않는다 + 대소문자를 구분하지 않는다", () => {
+    const trades = buildTradesBySymbol([mkTrade("WXYZ", T0 + 1000), mkTrade("abcd", T0 + 2000, { status: "closed_win", pnlUsd: 1 })]);
+    expect(linkWatchToTrade(confirmedEntry(), trades, 300_000)).toEqual({ traded: true, tradeStatus: "closed_win", pnlUsd: 1 });
+  });
+
+  it("매수 기록이 전혀 없으면 연결되지 않는다", () => {
+    expect(linkWatchToTrade(confirmedEntry(), buildTradesBySymbol([]), 300_000)).toEqual({ traded: false, tradeStatus: null, pnlUsd: null });
+  });
+});
+
+describe("[v0.96.0] buildTradesBySymbol — 종목별로 묶기", () => {
+  it("같은 종목 여러 건을 하나의 배열로 묶고, 대소문자를 구분하지 않는 키를 쓴다", () => {
+    const m = buildTradesBySymbol([mkTrade("abcd", 1), mkTrade("ABCD", 2), mkTrade("wxyz", 3)]);
+    expect(m.get("ABCD")).toHaveLength(2);
+    expect(m.get("WXYZ")).toHaveLength(1);
+    expect(m.get("NONE")).toBeUndefined();
+  });
+
+  it("빈 배열을 주면 빈 Map을 돌려준다", () => {
+    expect(buildTradesBySymbol([]).size).toBe(0);
+  });
+});
+
+describe("[v0.96.0] ToolEngine.getWatchHistorySummary/getWatchHistory — 확정→매수 연결 집계", () => {
+  it("confirmed 중 몇 건이 실제 매수로 이어졌는지, 그 승/패·순손익을 집계하고 표(link)에도 반영한다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-watch-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const x = eng as unknown as { watchHistory: WatchHistoryEntry[]; autoTradeHistory: AutoTradeHistoryEntry[] };
+      const T0 = 1_700_000_000_000;
+      x.watchHistory = [
+        { id: "A:1", symbol: "AAAA", watchedAtMs: T0 - 600_000, watchedPrice: 5, lastSeenAtMs: T0, resolvedAtMs: T0, outcome: "confirmed", reasons: ["근거"], reasonBuckets: [] },
+        { id: "B:1", symbol: "BBBB", watchedAtMs: T0 - 600_000, watchedPrice: 5, lastSeenAtMs: T0, resolvedAtMs: T0, outcome: "confirmed", reasons: ["근거"], reasonBuckets: [] },
+        { id: "C:1", symbol: "CCCC", watchedAtMs: T0 - 600_000, watchedPrice: 5, lastSeenAtMs: T0, resolvedAtMs: T0, outcome: "confirmed", reasons: ["근거"], reasonBuckets: [] },
+        { id: "D:1", symbol: "DDDD", watchedAtMs: T0, watchedPrice: 5, lastSeenAtMs: T0, resolvedAtMs: T0, outcome: "disqualified", reasons: ["가격대 벗어남"], reasonBuckets: ["가격대 벗어남"] },
+      ];
+      x.autoTradeHistory = [
+        mkTrade("AAAA", T0 + 1000, { status: "closed_win", pnlUsd: 10 }), // 확정→매수→승
+        mkTrade("BBBB", T0 + 1000, { status: "closed_loss", pnlUsd: -4 }), // 확정→매수→패
+        // CCCC는 확정됐지만 매수 기록이 전혀 없음(게이트 거부 등으로 추정 — 사유는 모름)
+      ];
+      const summary = eng.getWatchHistorySummary();
+      expect(summary.confirmed).toBe(3);
+      expect(summary.confirmedEntered).toBe(2);
+      expect(summary.confirmedNotEntered).toBe(1);
+      expect(summary.confirmToEntryRatePct).toBeCloseTo(66.7, 1);
+      expect(summary.tradeWinCount).toBe(1);
+      expect(summary.tradeLossCount).toBe(1);
+      expect(summary.tradeNetPnlUsd).toBe(6);
+
+      const rows = eng.getWatchHistory();
+      expect(rows.find((r) => r.symbol === "AAAA")?.link).toEqual({ traded: true, tradeStatus: "closed_win", pnlUsd: 10 });
+      expect(rows.find((r) => r.symbol === "CCCC")?.link).toEqual({ traded: false, tradeStatus: null, pnlUsd: null });
+      expect(rows.find((r) => r.symbol === "DDDD")?.link).toEqual({ traded: false, tradeStatus: null, pnlUsd: null }); // disqualified는 애초에 대상 아님
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("확정이 하나도 없으면 전환율은 null, 매매 집계는 전부 0이다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-watch-"));
+    try {
+      const eng = new ToolEngine(dir, { forceMock: true });
+      const summary = eng.getWatchHistorySummary();
+      expect(summary.confirmToEntryRatePct).toBeNull();
+      expect(summary.confirmedEntered).toBe(0);
+      expect(summary.tradeNetPnlUsd).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

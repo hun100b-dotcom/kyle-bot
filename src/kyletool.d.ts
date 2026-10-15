@@ -679,6 +679,13 @@ interface WatchHistoryEntry {
   reasonBuckets: string[];
 }
 interface WatchHistoryFilter { symbol?: string; outcome?: WatchOutcome; sinceMs?: number }
+/** [v0.96.0] confirmed 기록이 실제 매수로 이어졌는지(및 그 성적) — electron/tool-engine.ts의
+ *  WatchTradeLink와 같은 모양. */
+interface WatchTradeLink {
+  traded: boolean;
+  tradeStatus: AutoTradeHistoryEntry["status"] | null;
+  pnlUsd: number | null;
+}
 interface WatchHistorySummary {
   total: number;
   watching: number;
@@ -686,6 +693,12 @@ interface WatchHistorySummary {
   disqualified: number;
   droppedFromScan: number;
   topReasons: { label: string; count: number }[];
+  confirmedEntered: number;
+  confirmedNotEntered: number;
+  confirmToEntryRatePct: number | null;
+  tradeWinCount: number;
+  tradeLossCount: number;
+  tradeNetPnlUsd: number;
 }
 
 /** [v0.25.0] 탐색 종목 차트 캔들/전체 */
@@ -1005,8 +1018,9 @@ interface KyletoolBridge {
   saveLabSettings?(input: { enabled?: boolean; rankCount?: number; dojiBodyMaxPct?: number; bodyMinPct?: number; volRatioMin?: number; minRangePct?: number }): Promise<LabStatus>;
   labScanNow?(): Promise<LabStatus>;
   labReset?(): Promise<LabStatus>;
-  /** [관찰종목 이력] 관찰(watch)로 잡혔던 종목이 확정/탈락(사유)/순위밖으로 끝났는지 생애주기 조회. */
-  getWatchHistory?(filter?: WatchHistoryFilter): Promise<WatchHistoryEntry[]>;
+  /** [관찰종목 이력] 관찰(watch)로 잡혔던 종목이 확정/탈락(사유)/순위밖으로 끝났는지 생애주기 조회.
+   *  [v0.96.0] confirmed 행은 link에 실제 매수 연결 결과(체결·손익)가 함께 온다. */
+  getWatchHistory?(filter?: WatchHistoryFilter): Promise<(WatchHistoryEntry & { link: WatchTradeLink })[]>;
   /** [관찰종목 이력] 스크리닝 기준 재검토용 — 탈락 사유별 건수 집계(sinceMs 생략 시 전체 기간). */
   getWatchHistorySummary?(sinceMs?: number): Promise<WatchHistorySummary>;
   getLabSummary?(filter?: LabQueryFilter): Promise<LabSummary>;

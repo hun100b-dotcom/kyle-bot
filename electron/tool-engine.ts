@@ -604,6 +604,61 @@ export function updateWatchHistory(
   return next;
 }
 
+/** [v0.96.0 — 오너 요청 "확정된 종목이 실제로 매수까지 이어졌는지, 성적이 어땠는지가 보여야
+ *   유의미하다"] 확정(confirmed) 관찰 기록 하나가 실제 매수 시도(AutoTradeHistoryEntry)로
+ *   이어졌는지 찾은 결과. `traded`는 "주문이 접수됐는가"(체결 여부와 무관 — 체결 전/취소/보호주문
+ *   실패까지 포함한 `tradeStatus`로 구분), `pnlUsd`는 청산까지 끝나 손익이 확정된 경우만 값이 있다. */
+export interface WatchTradeLink {
+  traded: boolean;
+  tradeStatus: AutoTradeHistoryEntry["status"] | null;
+  pnlUsd: number | null;
+}
+
+const WATCH_TRADE_NOT_LINKED: WatchTradeLink = { traded: false, tradeStatus: null, pnlUsd: null };
+
+/**
+ * linkWatchToTrade — 확정된 관찰 기록 하나를, 그 확정 직후(windowMs 이내) 같은 종목으로 접수된 가장
+ *   빠른 실제 매수 기록과 잇는다(순수 함수 — 아무것도 쓰지 않고 기존 두 기록만 읽어 비교한다. 주문·
+ *   진입·게이트 로직은 전혀 건드리지 않음). `tradesBySymbol`은 호출부가 `autoTradeHistory`(최대
+ *   500건)를 종목별로 한 번만 `Map`으로 묶어 넘긴다 — 관찰 기록(최대 2000건)마다 전체를 다시 훑지
+ *   않기 위함. `AutoTradeHistoryEntry.id`가 `${symbol}@${entry}@${enteredAtMs}` 형태인 기존 관례
+ *   (lib/auto-report.ts의 buildAutoReport와 동일)를 그대로 재사용해 진입 접수 시각을 뽑는다.
+ *   [한계] 확정됐지만 못 들어간 이유(최대 종목수·손실한도·예산부족 등 게이트 거부)는
+ *   `autoTradeSkipReasons`가 사이클마다 메모리에서만 초기화되는 비영속 값이라 여기선 알 수 없다 —
+ *   "매수로 안 이어짐"까지만 정직하게 표시한다(추측으로 사유를 채우지 않음, dropped_from_scan과
+ *   같은 원칙).
+ */
+export function linkWatchToTrade(
+  entry: Pick<WatchHistoryEntry, "symbol" | "outcome" | "resolvedAtMs">,
+  tradesBySymbol: Map<string, AutoTradeHistoryEntry[]>,
+  windowMs: number,
+): WatchTradeLink {
+  if (entry.outcome !== "confirmed" || entry.resolvedAtMs == null) return WATCH_TRADE_NOT_LINKED;
+  const candidates = tradesBySymbol.get(entry.symbol.toUpperCase()) ?? [];
+  let best: AutoTradeHistoryEntry | null = null;
+  let bestEnteredMs = Infinity;
+  for (const t of candidates) {
+    const idMs = Number(t.id.split("@").pop());
+    if (!Number.isFinite(idMs) || idMs <= 1e12) continue; // id 형식이 다르면(옛 기록 등) 매칭 포기
+    if (idMs < entry.resolvedAtMs || idMs - entry.resolvedAtMs > windowMs) continue; // 확정 전이거나 너무 늦게 들어간 건 별개 기회
+    if (idMs < bestEnteredMs) { bestEnteredMs = idMs; best = t; }
+  }
+  return best ? { traded: true, tradeStatus: best.status, pnlUsd: best.pnlUsd } : WATCH_TRADE_NOT_LINKED;
+}
+
+/** [v0.96.0] watchHistory 전체를 한 번에 연결할 때 쓰는 헬퍼 — autoTradeHistory를 종목별 Map으로
+ *   한 번만 묶어 linkWatchToTrade를 반복 호출한다(엔진의 getWatchHistory/getWatchHistorySummary가 공용). */
+export function buildTradesBySymbol(autoTradeHistory: AutoTradeHistoryEntry[]): Map<string, AutoTradeHistoryEntry[]> {
+  const m = new Map<string, AutoTradeHistoryEntry[]>();
+  for (const t of autoTradeHistory) {
+    const key = t.symbol.toUpperCase();
+    const arr = m.get(key);
+    if (arr) arr.push(t);
+    else m.set(key, [t]);
+  }
+  return m;
+}
+
 /**
  * [v0.33.0 — 스크리닝 기준 탭] 도지 패턴 판정(watch/confirmed/none) + 하드 게이트(가격대·EMA·
  *   구름) + "다음 봉 확인" 켜짐 여부를 합쳐 최종 상태를 정한다. scanScreener 안에 묻혀 있던
@@ -5335,7 +5390,10 @@ export class ToolEngine extends EventEmitter {
   }
 
   /** [관찰종목 이력] 화면용 조회 — 최근 시작순, 종목·결과·기간으로 필터. */
-  getWatchHistory(f?: { symbol?: string; outcome?: WatchOutcome; sinceMs?: number }): WatchHistoryEntry[] {
+  getWatchHistory(f?: { symbol?: string; outcome?: WatchOutcome; sinceMs?: number }): (WatchHistoryEntry & { link: WatchTradeLink })[] {
+    // [v0.96.0] confirmed 기록이 실제 매수로 이어졌는지(및 그 성적)를 화면이 매번 다시 계산하지
+    // 않도록, 조회 시점에 한 번만 연결해 함께 돌려준다(저장 데이터 자체는 그대로 — 계산은 읽을 때).
+    const tradesBySymbol = buildTradesBySymbol(this.autoTradeHistory);
     return this.watchHistory
       .filter(
         (h) =>
@@ -5343,12 +5401,14 @@ export class ToolEngine extends EventEmitter {
           (!f?.outcome || h.outcome === f.outcome) &&
           (f?.sinceMs == null || h.watchedAtMs >= f.sinceMs),
       )
-      .sort((a, b) => b.watchedAtMs - a.watchedAtMs);
+      .sort((a, b) => b.watchedAtMs - a.watchedAtMs)
+      .map((h) => ({ ...h, link: linkWatchToTrade(h, tradesBySymbol, ToolEngine.AUTO_TRADE_INTERVAL_MS) }));
   }
 
-  /** [관찰종목 이력 — 스크리닝 기준 재검토용] 탈락 사유별 건수 집계. src/App.tsx의
-   *  tallyMissReasons(스캔 1회 안에서만 집계)와 달리 쌓인 전체 이력을 보므로, 기간을 넓게 두고
-   *  "어느 조건이 꾸준히 병목인지"를 판단하는 데 쓴다. */
+  /** [관찰종목 이력 — 스크리닝 기준 재검토용] 탈락 사유별 건수 집계 + [v0.96.0] 확정이 실제 매수로
+   *  얼마나 이어졌는지(및 그 매매 성적). src/App.tsx의 tallyMissReasons(스캔 1회 안에서만 집계)와
+   *  달리 쌓인 전체 이력을 보므로, 기간을 넓게 두고 "스크리닝 기준이 실제로 돈이 되는 신호를
+   *  내는지"를 판단하는 데 쓴다. */
   getWatchHistorySummary(sinceMs?: number): {
     total: number;
     watching: number;
@@ -5356,6 +5416,12 @@ export class ToolEngine extends EventEmitter {
     disqualified: number;
     droppedFromScan: number;
     topReasons: { label: string; count: number }[];
+    confirmedEntered: number; // [v0.96.0] 확정 → 실제 매수 주문까지 접수된 건수(체결 여부와 무관)
+    confirmedNotEntered: number; // 확정됐지만 끝내 매수로 안 이어진 건수(사유는 과거 기록엔 없음)
+    confirmToEntryRatePct: number | null; // confirmedEntered ÷ confirmed × 100
+    tradeWinCount: number; // 그 매매들 중 청산 손익이 양수로 끝난 건수
+    tradeLossCount: number; // 음수로 끝난 건수
+    tradeNetPnlUsd: number; // 청산 손익이 확정된 것들의 합(보유 중·미체결은 제외)
   } {
     const rows = sinceMs != null ? this.watchHistory.filter((h) => h.watchedAtMs >= sinceMs) : this.watchHistory;
     const counts: Record<string, number> = {};
@@ -5363,16 +5429,27 @@ export class ToolEngine extends EventEmitter {
       if (h.outcome !== "disqualified") continue;
       for (const bucket of h.reasonBuckets) counts[bucket] = (counts[bucket] ?? 0) + 1;
     }
+    const confirmed = rows.filter((h) => h.outcome === "confirmed");
+    const tradesBySymbol = buildTradesBySymbol(this.autoTradeHistory);
+    const links = confirmed.map((h) => linkWatchToTrade(h, tradesBySymbol, ToolEngine.AUTO_TRADE_INTERVAL_MS));
+    const entered = links.filter((l) => l.traded);
+    const pnls = entered.map((l) => l.pnlUsd).filter((p): p is number => p != null);
     return {
       total: rows.length,
       watching: rows.filter((h) => h.outcome === "watching").length,
-      confirmed: rows.filter((h) => h.outcome === "confirmed").length,
+      confirmed: confirmed.length,
       disqualified: rows.filter((h) => h.outcome === "disqualified").length,
       droppedFromScan: rows.filter((h) => h.outcome === "dropped_from_scan").length,
       topReasons: Object.entries(counts)
         .map(([label, count]) => ({ label, count }))
         .sort((a, b) => b.count - a.count)
         .slice(0, 20),
+      confirmedEntered: entered.length,
+      confirmedNotEntered: confirmed.length - entered.length,
+      confirmToEntryRatePct: confirmed.length > 0 ? Math.round((entered.length / confirmed.length) * 1000) / 10 : null,
+      tradeWinCount: pnls.filter((p) => p > 0).length,
+      tradeLossCount: pnls.filter((p) => p < 0).length,
+      tradeNetPnlUsd: Math.round(pnls.reduce((s, p) => s + p, 0) * 100) / 100,
     };
   }
 
