@@ -179,4 +179,34 @@ describe("화면 — 렌더 스모크", () => {
     expect(html).toContain("연결 테스트");
     expect(html).toMatch(/<button[^>]*disabled[^>]*>🔌 연결 테스트/);
   });
+
+  it("[버그 수정] 저장된 모드가 '연습'이면 라디오도 연습이 기본 선택된다(예전엔 저장값과 무관하게 항상 '실서버'로 시작했다)", () => {
+    const mockHtml = renderToString(<Tutorial {...props} defaultOpenStep="keysInput" settings={{ ...props.settings, mode: "mock" }} />);
+    const mockRadios = mockHtml.match(/<input type="radio"[^>]*\/?>/g) ?? [];
+    expect(mockRadios.length).toBe(2); // [0]=실서버 모드, [1]=연습 모드 (마크업 순서 고정)
+    expect(mockRadios[0]).not.toMatch(/checked/);
+    expect(mockRadios[1]).toMatch(/checked/);
+
+    const liveHtml = renderToString(<Tutorial {...props} defaultOpenStep="keysInput" settings={{ ...props.settings, mode: "live" }} />);
+    const liveRadios = liveHtml.match(/<input type="radio"[^>]*\/?>/g) ?? [];
+    expect(liveRadios[0]).toMatch(/checked/);
+    expect(liveRadios[1]).not.toMatch(/checked/);
+  });
+
+  it("키 입력 단계: 설정 탭에서 이미 연결 테스트를 했어도 이 화면에서 다시 눌러야 체크된다는 안내가 있다", () => {
+    const html = renderToString(<Tutorial {...props} defaultOpenStep="keysInput" />);
+    expect(html.replace(/<[^>]+>/g, "")).toContain("여기서 한 번 더 눌러야");
+  });
+
+  it("'확인함(visited)'으로만 완료되는 정보 단계(welcome·keysPrep·mode·autoSettings)는 완료 조건을 화면 문장으로 적어 둔다", () => {
+    for (const id of ["welcome", "keysPrep", "mode", "autoSettings"] as const) {
+      const html = renderToString(<Tutorial {...props} defaultOpenStep={id} />);
+      expect(html.replace(/<[^>]+>/g, "")).toContain("완료로 표시돼요");
+    }
+  });
+
+  it("닫혀 있을 때(기본 상태)는 '그 화면으로 이동' 안내 칩이 보이지 않는다", () => {
+    const html = renderToString(<Tutorial {...props} />);
+    expect(html).not.toContain("tt-guide-chip");
+  });
 });

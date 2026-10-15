@@ -3201,7 +3201,11 @@ ${msg}
     await refreshStatus();
   }
 
-  /** [v0.91.0] 튜토리얼 안내: 해당 탭으로 이동한 뒤 강조할 요소(data-tt)에 잠깐 파란 테두리를 깜빡인다. */
+  /** [v0.91.0→실시간 안내 보강] 튜토리얼 안내: 해당 탭으로 이동한 뒤 강조할 요소(data-tt)에 파란 테두리를 띄운다.
+   *   [오너 지적] 예전엔 8초면 사라져서 처음 쓰는 사람이 "어디를 봐야 하는지" 놓치기 쉬웠다. 이제는
+   *   ① 그 요소를 직접 클릭하거나 ② Tutorial.tsx의 안내 칩에서 "확인했어요"/마법사 재진입으로 끝낼 때까지
+   *   계속 켜져 있고, 둘 다 놓쳐도 2분 뒤엔 스스로 꺼진다(화면에 테두리가 영원히 남지 않게 하는 안전장치).
+   *   "확인했어요" 쪽은 capri-tutorial-spot-clear 이벤트로 신호를 보낸다(Tutorial.tsx TUTORIAL_SPOT_CLEAR_EVENT와 짝). */
   function tutorialGoTo(t: string, target?: string) {
     const leaf = t as TabId;
     setTab(leaf);
@@ -3212,7 +3216,16 @@ ${msg}
       if (!el) return;
       el.classList.add("tt-spot");
       try { el.scrollIntoView({ behavior: "smooth", block: "center" }); } catch { /* 무시 */ }
-      window.setTimeout(() => el.classList.remove("tt-spot"), 8000);
+      let done = false;
+      const clear = () => {
+        if (done) return;
+        done = true;
+        el.classList.remove("tt-spot");
+        window.removeEventListener("capri-tutorial-spot-clear", clear);
+      };
+      window.addEventListener("capri-tutorial-spot-clear", clear);
+      el.addEventListener("click", clear, { once: true });
+      window.setTimeout(clear, 120_000); // 안전장치: 아무도 안 끄면 2분 뒤 스스로 정리
     }, 450);
   }
 

@@ -1,11 +1,15 @@
 // =============================================================================
-// src/Tutorial.tsx — [v0.91.0] 튜토리얼 모드: 단계별 마법사 + 상시 체크리스트 알약
+// src/Tutorial.tsx — [v0.91.0→실시간 안내 보강] 튜토리얼 모드: 단계별 마법사 + 상시 체크리스트 알약
 // -----------------------------------------------------------------------------
 // [왜] 메뉴가 많아 처음 쓰는 사람은 "무엇부터 어떻게 설정하는지" 모른다. 첫 로그인 직후 한 번 마법사가 열려
 //   토스 키 → 연결 테스트 → 연습/실서버 → 디스코드 → 자동매매 설정 살펴보기 → 스크리닝 → 시작 순으로 안내한다.
 //   · 꺼도(실수로 닫아도) 화면 왼쪽 아래 🎓 알약·헤더 [🎓 튜토리얼]·설정 탭 항목으로 언제든 다시 켠다.
-//   · 단계 완료는 실제 상태에서 자동 판정(lib/tutorial.ts) — 사용자가 체크하지 않는다.
-//   · 숫자(손절폭·투입 비율 등)는 권하지 않는다 — 항목 설명 + 해당 화면 안내만.
+//   · 단계 완료는 실제 상태에서 자동 판정(lib/tutorial.ts) — 사용자가 체크하지 않는다. 자동 판정 조건은
+//     각 단계 본문에 "▫️/✅ ..." 한 줄로 항상 적어 둔다(오너 지적 — "체크가 안 되는데 뭘 해야 되는지 안 나와 있다").
+//   · [실시간 안내 보강] "그 화면으로 이동해서 보기"를 누르면 예전엔 파란 테두리가 8초만 반짝이고 사라졌다 —
+//     이제는 실제 화면에 작은 안내 칩이 계속 떠 있고(guiding 상태), 테두리도 ① 사용자가 그 요소를 클릭하거나
+//     ② "확인했어요"를 누르거나 ③ 그 단계가 실제로 완료될 때까지 안 사라진다(길어도 2분 뒤엔 스스로 정리 —
+//     electron/../src/App.tsx의 tutorialGoTo 참고). 신규 팀원이 "지금 뭘 봐야 하는지"를 화면에서 바로 알 수 있게.
 //   · 애니메이션은 CSS(@keyframes)만 쓰고, "동작 줄이기" 설정이면 꺼진다(App.css 참고).
 // [연결] 다른 곳에서 여는 법: window.dispatchEvent(new CustomEvent("capri-tutorial-open", { detail: { step? } }))
 // =============================================================================
@@ -26,6 +30,10 @@ export const TUTORIAL_OPEN_EVENT = "capri-tutorial-open";
 export function openTutorial(step?: TutorialStepId): void {
   window.dispatchEvent(new CustomEvent(TUTORIAL_OPEN_EVENT, { detail: { step } }));
 }
+
+/** [실시간 안내 보강] "그 화면으로 이동해서 보기"로 켠 화면 강조(data-tt)를 꺼 달라는 신호.
+ *  App.tsx의 tutorialGoTo가 이 이벤트를 듣고 테두리를 지운다(마법사를 다시 열거나 "확인했어요"를 누르면 보낸다). */
+export const TUTORIAL_SPOT_CLEAR_EVENT = "capri-tutorial-spot-clear";
 
 export interface TutorialProps {
   isDesktop: boolean;
@@ -147,6 +155,9 @@ export default function Tutorial(p: TutorialProps) {
   const [stepId, setStepId] = useState<TutorialStepId>(p.defaultOpenStep ?? "welcome");
   const [dir, setDir] = useState<"fwd" | "back">("fwd");
   const [discordSaved, setDiscordSaved] = useState(false);
+  // [실시간 안내 보강] "그 화면으로 이동해서 보기"를 누른 뒤 — 실제 화면에 계속 떠 있는 작은 안내 칩.
+  //   예전엔 파란 테두리가 8초 만에 사라져서, 처음 쓰는 사람이 "어디를 봐야 하는지" 놓치기 쉬웠다.
+  const [guiding, setGuiding] = useState(false);
   const storedRef = useRef(stored);
   storedRef.current = stored;
 
@@ -229,8 +240,20 @@ export default function Tutorial(p: TutorialProps) {
     markVisited(cur.id);
     patchStored({ lastStep: cur.id });
     setOpen(false); // 화면을 가리지 않게 접고, 알약의 "이어하기"로 돌아온다
+    setGuiding(true); // 실제 화면에 안내 칩을 띄운다(아래 "실시간 안내 칩" 참고)
     p.goToTab(cur.tab, cur.target);
   };
+  /** 안내 칩을 끄고, 실제 화면의 파란 테두리도 같이 끄라고 App.tsx에 알린다. */
+  const dismissGuiding = useCallback(() => {
+    setGuiding(false);
+    window.dispatchEvent(new CustomEvent(TUTORIAL_SPOT_CLEAR_EVENT));
+  }, []);
+  // 마법사를 다시 열면(어느 경로로든) 안내 칩·화면 테두리는 더 필요 없다 — 마법사 자체가 그 역할을 한다.
+  useEffect(() => { if (open) dismissGuiding(); }, [open, dismissGuiding]);
+  // 안내 중이던 단계가 실제로 완료되면(예: 연결 테스트 성공, 자동매매 켜짐) 안내 칩이 할 일을 다 한 것 — 스스로 끈다.
+  useEffect(() => {
+    if (guiding && progress.done[cur.id]) dismissGuiding();
+  }, [guiding, progress.done, cur.id, dismissGuiding]);
 
   // Esc로 닫기, ←/→ 이동
   useEffect(() => {
@@ -252,10 +275,22 @@ export default function Tutorial(p: TutorialProps) {
 
   return (
     <>
-      {/* ── 상시 알약 + 체크리스트 ── */}
-      {!open && !stored.pillHidden && (
+      {/* ── 상시 알약 + 체크리스트 + 실시간 안내 칩 ── */}
+      {!open && (guiding || !stored.pillHidden) && (
         <div className="tt-pill-wrap" data-tt-pill>
-          {listOpen && (
+          {/* [실시간 안내 보강] "그 화면으로 이동해서 보기"를 누르면 여기 뜬다. 알약을 숨겨 둔 사람에게도 보인다 —
+              지금 막 특정 화면을 보라고 안내하는 중이라 상시 알약과는 다르게 취급한다(사라지는 조건도 다름). */}
+          {guiding && (
+            <div className="tt-guide-chip" role="status" aria-live="polite">
+              <div className="tt-list-head"><b>{cur.icon} {cur.title}</b><button className="mini ghost" onClick={dismissGuiding} aria-label="닫기">✕</button></div>
+              <p className="hint small">화면에 파란 테두리로 표시된 곳을 확인하세요. 할 일을 마치면 이 칩은 저절로 사라져요.</p>
+              <div className="tt-list-foot">
+                <button className="mini ghost" onClick={dismissGuiding}>✓ 확인했어요</button>
+                <button className="mini active" onClick={() => setOpen(true)}>🎓 가이드로 돌아가기</button>
+              </div>
+            </div>
+          )}
+          {listOpen && !stored.pillHidden && (
             <div className="tt-list" role="dialog" aria-label="시작 가이드 체크리스트">
               <div className="tt-list-head"><b>시작 가이드</b><button className="mini ghost" onClick={() => setListOpen(false)} aria-label="닫기">✕</button></div>
               <ul>
@@ -274,10 +309,12 @@ export default function Tutorial(p: TutorialProps) {
               </div>
             </div>
           )}
-          <button className={progress.allDone ? "tt-pill all" : "tt-pill"} onClick={() => setListOpen((v) => !v)} aria-expanded={listOpen}>
-            <Ring done={progress.doneCount} total={progress.total} />
-            <span>{pillLabel}</span>
-          </button>
+          {!stored.pillHidden && (
+            <button className={progress.allDone ? "tt-pill all" : "tt-pill"} onClick={() => setListOpen((v) => !v)} aria-expanded={listOpen}>
+              <Ring done={progress.doneCount} total={progress.total} />
+              <span>{pillLabel}</span>
+            </button>
+          )}
         </div>
       )}
 
@@ -349,6 +386,7 @@ function StepBody({ id, p, progress, discordSaved, onDiscordChanged, onConnectio
             <li><b>③ 언제든 🛑 비상 정지</b> — 화면 위쪽 버튼. 신규 주문을 잠그고 미체결·조건주문을 취소해요.</li>
           </ul>
           <p className="hint">총 {progress.total}단계 · 10분 안팎. 중간에 닫아도 <b>왼쪽 아래 🎓</b>에서 이어서 할 수 있어요.</p>
+          <p className="tt-status">{progress.done.welcome ? "✅ 확인했어요." : "▫️ 이 단계는 읽기만 하면 돼요 — 아래 [다음 →] 버튼을 누르면 완료로 표시돼요."}</p>
         </div>
       );
     case "account":
@@ -370,6 +408,7 @@ function StepBody({ id, p, progress, discordSaved, onDiscordChanged, onConnectio
             <li><b>🌐 허용 IP</b> — 토스 키에는 <u>'허용된 IP'</u> 설정이 있어서, <b>이 PC의 인터넷 주소(공인 IP)</b>가 등록돼 있어야 해요. 안 돼 있으면 "허용하지 않습니다" 오류가 나요(다음 단계의 연결 테스트가 알려 줘요).</li>
           </ul>
           <p className="hint">개발자센터 화면 구성은 토스 쪽에서 바뀔 수 있어요. 막히면 토스 안내를 따라 주세요. 내 공인 IP는 인터넷 검색창에 "내 IP"라고 검색하면 보여요.</p>
+          <p className="tt-status">{progress.done.keysPrep ? "✅ 완료." : "▫️ 이 단계는 읽기만 하면 돼요 — 아래 [다음 →] 버튼을 누르거나(또는 다음 단계에서 키를 저장하면) 완료로 표시돼요."}</p>
         </div>
       );
     case "keysInput":
@@ -384,6 +423,7 @@ function StepBody({ id, p, progress, discordSaved, onDiscordChanged, onConnectio
             <li><b>실주문 켜기</b> — [설정 → 토스 연결]의 <u>"진짜 돈으로 주문 나가게 허용"</u>. 켤 때 한 번 더 확인해요. <b>충분히 연습한 뒤, 소액으로 먼저</b> 해 보세요.</li>
           </ul>
           <p className="hint">⚠️ 이 가이드는 <b>실주문을 대신 켜 주지 않아요</b> — 위치만 알려 드려요.</p>
+          <p className="tt-status">{progress.done.mode ? "✅ 확인했어요." : "▫️ 이 단계는 읽기만 하면 돼요 — 아래 [다음 →] 버튼을 누르면 완료로 표시돼요."}</p>
         </div>
       );
     case "discord":
@@ -401,6 +441,7 @@ function StepBody({ id, p, progress, discordSaved, onDiscordChanged, onConnectio
             <li><b>진입 타점</b> — 1분할(얕은 눌림) · 1.5분할 · 2분할(더 깊이 눌렸을 때)</li>
             <li><b>익절·손절 %</b> — <u>[설정 → 주문 기본값]</u>에서 정해요(자동매매가 이 값을 써요)</li>
           </ul>
+          <p className="tt-status">{progress.done.autoSettings ? "✅ 확인했어요." : "▫️ 이 단계는 읽기만 하면 돼요 — 아래 [다음 →] 버튼을 누르면 완료로 표시돼요."}</p>
         </div>
       );
     }
@@ -436,7 +477,9 @@ function KeysForm({ p, hasKeys, onConnectionOk }: { p: TutorialProps; hasKeys: b
   const [id, setId] = useState("");
   const [secret, setSecret] = useState("");
   const [account, setAccount] = useState("1");
-  const [mode, setMode] = useState<"mock" | "live">(p.settings?.mode === "live" ? "live" : "live");
+  // [버그 수정] 예전엔 두 갈래가 다 "live"라 저장된 모드가 "연습"이어도 이 칸은 항상 "실서버"로 시작했다
+  //   — 그대로 [저장]을 누르면 모르는 새 연습 모드가 실서버로 바뀔 수 있어 위험했다. 지금 저장된 값을 그대로 따른다.
+  const [mode, setMode] = useState<"mock" | "live">(p.settings?.mode === "live" ? "live" : "mock");
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; message: string; action?: string; steps: Array<{ name: string; ok: boolean }> } | null>(null);
@@ -477,8 +520,14 @@ function KeysForm({ p, hasKeys, onConnectionOk }: { p: TutorialProps; hasKeys: b
         <label>Client Secret<input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder={p.settings?.hasClientSecret ? "(저장됨 — 바꿀 때만 입력)" : ""} autoComplete="off" /></label>
         <label>계좌 번호 <span className="hint">(보통 1)</span><input value={account} onChange={(e) => setAccount(e.target.value)} placeholder="1" /></label>
         <div className="tt-radios">
-          <label className="radio"><input type="radio" checked={mode === "live"} onChange={() => setMode("live")} /> <b>실서버 모드</b> (연결 테스트에 필요 · 실주문은 따로 잠겨 있어요)</label>
-          <label className="radio"><input type="radio" checked={mode === "mock"} onChange={() => setMode("mock")} /> <b>연습 모드</b> (키 없이 가짜 서버)</label>
+          <label className="radio">
+            <input type="radio" checked={mode === "live"} onChange={() => setMode("live")} />
+            <span className="tt-radio-text"><b>실서버 모드</b><small className="hint">연결 테스트에 필요 · 실주문은 따로 잠겨 있어요</small></span>
+          </label>
+          <label className="radio">
+            <input type="radio" checked={mode === "mock"} onChange={() => setMode("mock")} />
+            <span className="tt-radio-text"><b>연습 모드</b><small className="hint">키 없이 가짜 서버</small></span>
+          </label>
         </div>
       </div>
       <p className="tt-actions">
@@ -487,6 +536,10 @@ function KeysForm({ p, hasKeys, onConnectionOk }: { p: TutorialProps; hasKeys: b
         {busy && <span className="hint">처리 중…</span>}
       </p>
       {msg && <p className={msg.startsWith("✅") ? "ok" : "err"}>{msg}</p>}
+      <p className="tt-status">
+        {hasKeys ? "✅ 키가 저장돼 있어요." : "▫️ 아직 키가 저장되지 않았어요."}
+        {" "}이 단계는 위 <b>[🔌 연결 테스트]</b>를 여기서 직접 눌러 <b>성공</b>해야 완료로 표시돼요 — 설정 탭에서 이미 테스트해 본 적이 있어도, 체크 표시를 위해서는 여기서 한 번 더 눌러야 해요.
+      </p>
       {result && (
         <div className={result.ok ? "tt-result ok" : "tt-result bad"} role="status">
           <ul className="tt-steps">

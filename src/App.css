@@ -1456,7 +1456,12 @@ body:has(.update-banner) .topbar {
 .tt-form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
 .tt-form input[type="text"], .tt-form input[type="password"], .tt-form input:not([type]) { padding: 9px 12px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--panel2); color: var(--text); font: inherit; }
 .tt-radios { display: flex; flex-direction: column; gap: 4px; }
-.tt-radios label.radio { flex-direction: row; align-items: center; gap: 8px; color: var(--text); }
+.tt-radios label.radio { flex-direction: row; align-items: flex-start; gap: 8px; color: var(--text); }
+.tt-radios label.radio input { margin-top: 3px; flex: none; }
+/* [레이아웃 버그 수정] 긴 괄호 설명을 굵은 제목과 같은 줄에 붙여 두면 좁은 칸에서 "요)"처럼 한 글자만
+   남고 끊어졌다(오너 스크린샷으로 확인). 제목·설명을 세로로 나눠 각자 온전한 줄로 접히게 한다. */
+.tt-radio-text { display: flex; flex-direction: column; gap: 2px; }
+.tt-radio-text small { color: var(--muted); }
 .tt-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .tt-result { margin-top: 8px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--border-strong); }
 .tt-result.ok { border-color: var(--green); background: rgba(61,220,151,.07); }
@@ -1495,6 +1500,10 @@ body:has(.update-banner) .topbar {
 .tt-list li.next button { color: var(--text); font-weight: 700; background: rgba(76,130,251,.12); }
 .tt-list li.done button { color: var(--muted); }
 .tt-list-foot { display: flex; justify-content: space-between; gap: 8px; padding: 8px 4px 2px; }
+/* [실시간 안내 보강] "그 화면으로 이동해서 보기" 이후 뜨는 작은 안내 칩 — tt-list와 같은 패널 디자인을 재사용 */
+.tt-guide-chip { width: 290px; max-width: calc(100vw - 32px); background: var(--panel); border: 1px solid var(--blue); border-radius: var(--r-md); box-shadow: var(--sh-float); padding: 10px; animation: tt-rise .22s ease-out; }
+.tt-guide-chip .tt-list-head { padding-bottom: 6px; }
+.tt-guide-chip p { margin: 0 6px 8px; }
 /* 완료 축하 */
 .tt-confetti { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
 .tt-confetti i { position: absolute; top: -10px; width: 8px; height: 14px; border-radius: 2px; background: var(--amber); animation: tt-confetti 2.2s ease-in forwards; }
