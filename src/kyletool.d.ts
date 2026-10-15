@@ -566,7 +566,15 @@ interface AutoReport {
   runId: string;
   generatedAtMs: number;
   live: boolean;
-  overview: { startedAtMs: number; endedAtMs: number; uptimeMs: number; loopCount: number; scanCount: number; endReason: string };
+  overview: {
+    startedAtMs: number;
+    endedAtMs: number;
+    uptimeMs: number;
+    loopCount: number;
+    scanCount: number;
+    endReason: string;
+    carriedPositions: number; // [v0.94.0] 시작할 때 이어받은(이미 보유·감시 중이던) 포지션 수
+  };
   money: {
     startAssetsUsd: number | null;
     endAssetsUsd: number | null;
@@ -590,6 +598,7 @@ interface AutoReport {
     avgHoldMs: number | null;
     cancelled: number;
     ocoFailed: number;
+    carriedOverCount: number; // [v0.94.0] 이번 실행 시작 전에 진입해 이어받은 매매 수
   };
   positions: { openAtEnd: Array<{ symbol: string; status: string; entry: number; quantity: number }> };
   system: { apiTimeouts: number; apiRetries: number; apiFailures: number; cycleErrors: number };

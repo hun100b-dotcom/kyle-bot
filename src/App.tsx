@@ -6854,8 +6854,22 @@ ${msg}
                     <tr><td>운용 시간</td><td>{DateTime.fromMillis(r.overview.startedAtMs).setZone("Asia/Seoul").toFormat("yyyy-MM-dd HH:mm")} ~ {r.live ? "진행 중" : DateTime.fromMillis(r.overview.endedAtMs).setZone("Asia/Seoul").toFormat("yyyy-MM-dd HH:mm")} (총 {fmtDuration(r.overview.uptimeMs)})</td></tr>
                     <tr><td>사이클·스크리닝 횟수</td><td>{r.overview.loopCount}회 중 스크리닝 {r.overview.scanCount}회</td></tr>
                     <tr><td>종료 사유</td><td>{r.overview.endReason}</td></tr>
+                    {r.overview.carriedPositions > 0 && (
+                      <tr><td>시작할 때 이어받은 포지션</td><td>{r.overview.carriedPositions}개 (이전 실행에서 이미 보유·감시 중이던 포지션)</td></tr>
+                    )}
                     <tr><th colSpan={2}>② 수익·자산</th></tr>
-                    <tr><td>시작 → 종료 자산(추정)</td><td>{r.money.startAssetsUsd != null ? `$${r.money.startAssetsUsd.toFixed(2)}` : "—"} → {r.money.endAssetsUsd != null ? `$${r.money.endAssetsUsd.toFixed(2)}` : "—"}</td></tr>
+                    <tr>
+                      <td>시작 → 종료 자산(추정)</td>
+                      <td>
+                        {r.money.startAssetsUsd != null ? `$${r.money.startAssetsUsd.toFixed(2)}` : "—"} → {r.money.endAssetsUsd != null ? `$${r.money.endAssetsUsd.toFixed(2)}` : "—"}
+                        {r.overview.carriedPositions > 0 && (
+                          <>
+                            {" "}
+                            <span className="hint">⚠️ 시작 자산은 매수가능금액 스냅샷입니다 — 이어받은 포지션이 이미 일부를 쓰고 있었을 수 있어 작게 보일 수 있고, 그래서 수익률(%)이 실제보다 크게 나올 수 있어요.</span>
+                          </>
+                        )}
+                      </td>
+                    </tr>
                     <tr><td>실현 손익(총 / 수수료 추정 / 순)</td><td className={pnlClass(r.money.realizedNetUsd)}>{r.money.realizedGrossUsd >= 0 ? "+" : ""}${r.money.realizedGrossUsd.toFixed(2)} / {r.money.estFeesUsd != null ? `$${r.money.estFeesUsd.toFixed(2)}` : "추정 불가"} / <b>{r.money.realizedNetUsd >= 0 ? "+" : ""}${r.money.realizedNetUsd.toFixed(2)}{r.money.returnPct != null ? ` (${r.money.returnPct}%)` : ""}</b></td></tr>
                     <tr><td>최대 낙폭(MDD)</td><td>${r.money.mddUsd.toFixed(2)}{r.money.mddPct != null ? ` (${r.money.mddPct}%)` : ""}</td></tr>
                     <tr><td>슬리피지</td><td>{r.money.slippage}</td></tr>
@@ -6863,7 +6877,18 @@ ${msg}
                     <tr><td>총 매매(청산 완료)</td><td>{r.trades.total}건 (이익 {r.trades.wins} / 손실 {r.trades.losses})</td></tr>
                     <tr><td>승률</td><td>{r.trades.winRatePct != null ? `${r.trades.winRatePct}%` : "—"}</td></tr>
                     <tr><td>손익비(총이익÷총손실)</td><td>{r.trades.profitFactorLabel} <span className="hint">(이익 ${r.trades.grossProfitUsd.toFixed(2)} / 손실 ${r.trades.grossLossUsd.toFixed(2)})</span></td></tr>
-                    <tr><td>평균 보유 시간</td><td>{r.trades.avgHoldMs != null ? fmtDuration(r.trades.avgHoldMs) : "—"}</td></tr>
+                    <tr>
+                      <td>평균 보유 시간</td>
+                      <td>
+                        {r.trades.avgHoldMs != null ? fmtDuration(r.trades.avgHoldMs) : "—"}
+                        {r.trades.carriedOverCount > 0 && (
+                          <>
+                            {" "}
+                            <span className="hint">⚠️ 이전 실행에서 이어받은 매매 {r.trades.carriedOverCount}건 포함(진입이 이번 운용 시작보다 앞섬) — 그래서 운용 시간보다 길게 나올 수 있어요.</span>
+                          </>
+                        )}
+                      </td>
+                    </tr>
                     <tr><th colSpan={2}>④ 포지션·시스템</th></tr>
                     <tr><td>종료 시점 보유·대기</td><td>{r.positions.openAtEnd.length === 0 ? "없음" : r.positions.openAtEnd.map((p) => `${p.symbol}(${p.status === "active" ? "보유" : "대기"} $${p.entry}×${p.quantity})`).join(", ")}</td></tr>
                     <tr><td>오류 로그 요약</td><td>타임아웃 {r.system.apiTimeouts} · 자동 재시도 {r.system.apiRetries} · 요청 실패 {r.system.apiFailures} · 사이클 예외 {r.system.cycleErrors}</td></tr>

@@ -72,6 +72,7 @@ export interface AutoReport {
     loopCount: number;
     scanCount: number;
     endReason: string; //  실행 중이면 "실행 중"
+    carriedPositions: number; // [v0.94.0] 시작할 때 이어받은(이미 보유·감시 중이던) 포지션 수
   };
   money: {
     startAssetsUsd: number | null;
@@ -96,6 +97,7 @@ export interface AutoReport {
     avgHoldMs: number | null; //    진입 접수 → 청산 평균 시간
     cancelled: number; //           미체결 취소(매매 아님)
     ocoFailed: number; //           익절·손절 등록 실패 기록
+    carriedOverCount: number; // [v0.94.0] 이번 실행 시작 전에 진입해 이어받은 매매 수(평균 보유시간이 가동시간을 넘을 수 있는 이유)
   };
   positions: { openAtEnd: AutoRunPositionSnapshot[] };
   system: AutoRunErrors;
@@ -127,7 +129,14 @@ export function buildAutoReport(
   const windowEnd = live ? nowMs : endMs + 60_000; // 종료 직후 기록 지연 1분 여유
 
   // ── 이 실행 기간에 청산된 매매만 골라낸다(청산 시각 기준) ──
-  type T = { exitMs: number; holdMs: number | null; pnl: number; fee: number | null; slip: number | null };
+  type T = {
+    exitMs: number;
+    holdMs: number | null;
+    pnl: number;
+    fee: number | null;
+    slip: number | null;
+    carriedOver: boolean; // [v0.94.0] 진입이 "이번 실행 시작"보다 앞섬 = 이전 실행에서 이어받은 매매
+  };
   const trades: T[] = [];
   let cancelled = 0;
   let ocoFailed = 0;
@@ -143,9 +152,21 @@ export function buildAutoReport(
     const enteredMs = Number.isFinite(idMs) && idMs > 1e12 ? idMs : parseKstNoYear(h.enteredAt, run.startedAtMs);
     const fee =
       run.commissionRate != null ? run.commissionRate * (h.entry * h.quantity + (h.exitPrice ?? h.entry) * h.quantity) : null;
-    trades.push({ exitMs, holdMs: enteredMs != null ? Math.max(0, exitMs - enteredMs) : null, pnl: h.pnlUsd, fee, slip: h.slippagePct ?? null });
+    // [v0.94.0] 진입 시각이 이번 실행 시작보다 앞서면 "이어받은 매매" — 보유시간이 가동시간을 넘는 원인이자
+    // (오너가 실제로 겪은 사례: GENK·KMRK가 이전 실행에서 진입해 있다가 이번 리포트의 청산 통계에 섞여
+    //  평균 보유시간이 가동시간보다 길게 나왔다) 시작 자산(매수가능금액)이 이미 줄어 있었을 가능성의 신호다.
+    const carriedOver = enteredMs != null && enteredMs < run.startedAtMs;
+    trades.push({
+      exitMs,
+      holdMs: enteredMs != null ? Math.max(0, exitMs - enteredMs) : null,
+      pnl: h.pnlUsd,
+      fee,
+      slip: h.slippagePct ?? null,
+      carriedOver,
+    });
   }
   trades.sort((a, b) => a.exitMs - b.exitMs);
+  const carriedOverCount = trades.filter((t) => t.carriedOver).length;
 
   // ── 수익 ──
   const gross = trades.reduce((s, t) => s + t.pnl, 0);
@@ -192,6 +213,17 @@ export function buildAutoReport(
       : "슬리피지는 실제 체결가를 조회한 청산이 없어 측정하지 못했습니다(v0.63.0부터 기록 시작).",
     "종료 시점 자산은 '시작 시드 + 실현 순손익'이며 계좌 실제 잔고 조회값이 아닙니다.",
   ];
+  // [v0.94.0] 아래 두 가지는 원인이 서로 다르므로 조건을 따로 둔다(같은 실행에서 둘 다 뜰 수도 있음).
+  if (run.carriedPositions > 0) {
+    notes.push(
+      `이번 실행을 시작할 때 이미 보유·감시 중이던 포지션이 ${run.carriedPositions}개 있었습니다. 그 포지션들이 매수 가능 금액을 이미 일부 쓰고 있었을 수 있어, 시작 자산(시드)이 계좌 전체 자산보다 작게 보이고 그 결과 수익률(%)이 실제보다 크게 나올 수 있습니다.`,
+    );
+  }
+  if (carriedOverCount > 0) {
+    notes.push(
+      `이번 리포트에 포함된 매매 중 ${carriedOverCount}건은 이번 실행이 시작되기 전에 진입해 이어받은 매매입니다(실제 진입 시각부터 보유시간을 계산). 그래서 평균 보유 시간이 이번 실행의 가동 시간보다 길게 나올 수 있습니다.`,
+    );
+  }
 
   return {
     runId: run.id,
@@ -204,6 +236,7 @@ export function buildAutoReport(
       loopCount: run.loopCount,
       scanCount: run.scanCount,
       endReason: live ? "실행 중" : run.endReason ?? "알 수 없음",
+      carriedPositions: run.carriedPositions,
     },
     money: {
       startAssetsUsd: start != null ? round2(start) : null,
@@ -228,6 +261,7 @@ export function buildAutoReport(
       avgHoldMs: holds.length > 0 ? Math.round(holds.reduce((s, x) => s + x, 0) / holds.length) : null,
       cancelled,
       ocoFailed,
+      carriedOverCount,
     },
     positions: { openAtEnd: run.openPositions.map((p) => ({ ...p })) },
     system: { ...run.errors },
@@ -261,9 +295,12 @@ export function reportToMarkdown(r: AutoReport): string {
   lines.push(`- 운용 시간: ${kst(o.startedAtMs)} ~ ${r.live ? "진행 중" : kst(o.endedAtMs)} (총 ${fmtDuration(o.uptimeMs)})`);
   lines.push(`- 5분 사이클 실행: ${o.loopCount}회 (그중 스크리닝 ${o.scanCount}회)`);
   lines.push(`- 종료 사유: ${o.endReason}`);
+  if (o.carriedPositions > 0) lines.push(`- 시작할 때 이어받은(이미 보유·감시 중이던) 포지션: ${o.carriedPositions}개`);
   lines.push("");
   lines.push("## ② 수익·자산");
-  lines.push(`- 시작 자산(시드): ${usd(m.startAssetsUsd)} → 종료 자산(추정): ${usd(m.endAssetsUsd)}`);
+  lines.push(
+    `- 시작 자산(시드): ${usd(m.startAssetsUsd)} → 종료 자산(추정): ${usd(m.endAssetsUsd)}${o.carriedPositions > 0 ? " (시작 자산은 매수가능금액 스냅샷이며, 이어받은 포지션이 이미 일부를 쓰고 있었을 수 있음)" : ""}`,
+  );
   lines.push(`- 실현 손익(총): ${usd(m.realizedGrossUsd, true)} / 수수료 추정: ${usd(m.estFeesUsd)} / 순손익: ${usd(m.realizedNetUsd, true)}${m.returnPct != null ? ` (${m.returnPct >= 0 ? "+" : ""}${m.returnPct}%)` : ""}`);
   lines.push(`- 최대 낙폭(MDD): ${usd(m.mddUsd)}${m.mddPct != null ? ` (${m.mddPct}%)` : ""}`);
   lines.push(`- 슬리피지: ${m.slippage}`);
@@ -272,7 +309,9 @@ export function reportToMarkdown(r: AutoReport): string {
   lines.push(`- 총 매매(청산 완료): ${t.total}건 (익절·이익 ${t.wins} / 손절·손실 ${t.losses})`);
   lines.push(`- 승률: ${t.winRatePct != null ? `${t.winRatePct}%` : "—"}`);
   lines.push(`- 손익비(Profit Factor = 총이익 ÷ 총손실): ${t.profitFactorLabel} (총이익 ${usd(t.grossProfitUsd)} / 총손실 ${usd(t.grossLossUsd)})`);
-  lines.push(`- 평균 보유 시간(진입 접수→청산): ${t.avgHoldMs != null ? fmtDuration(t.avgHoldMs) : "—"}`);
+  lines.push(
+    `- 평균 보유 시간(진입 접수→청산): ${t.avgHoldMs != null ? fmtDuration(t.avgHoldMs) : "—"}${t.carriedOverCount > 0 ? ` (이전 실행에서 이어받은 매매 ${t.carriedOverCount}건 포함 — 운용 시간보다 길게 나올 수 있음)` : ""}`,
+  );
   lines.push(`- 참고: 미체결 취소 ${t.cancelled}건 · 보호주문(익절·손절) 등록 실패 기록 ${t.ocoFailed}건`);
   lines.push("");
   lines.push("## ④ 포지션·시스템");

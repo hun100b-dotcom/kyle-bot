@@ -172,6 +172,45 @@ describe("[v0.62.1] 자동매매 리포트 — 매매 통계·손익·MDD 계산
   });
 });
 
+describe("[v0.94.0] 이어받은 포지션/매매 — '평균보유시간 > 운용시간', '시작자산이 작아 보임' 오해 방지", () => {
+  // 실사례(오너 리포트): GENK가 이전 실행에서 진입해 있다가 이번 실행 청산 통계에 섞여
+  // 평균 보유시간(23분)이 이번 실행의 가동시간(약 15분)보다 길게 나왔다 — 아래는 그 구조를 재현한 최소 케이스.
+  it("실행 시작 전에 진입한 매매는 carriedOverCount로 잡히고, 실제 진입시각 기준 보유시간이 운용시간을 넘을 수 있다", () => {
+    const hist: ReportHistoryEntry[] = [
+      // 시작(22:00)보다 20분 전(21:40)에 진입해 시작 10분 뒤(22:10)에 청산 → 실제 보유 30분
+      trade("OLDPOS", "closed_win", 5, "2026-10-01 22:10:00", "2026-10-01 21:40:00"),
+    ];
+    const r = buildAutoReport(run({ endedAtMs: kstMs("2026-10-01 22:10:00") }), hist, NOW);
+    expect(r.trades.total).toBe(1);
+    expect(r.trades.carriedOverCount).toBe(1);
+    expect(r.trades.avgHoldMs).toBe(30 * 60_000);
+    expect(r.overview.uptimeMs).toBe(10 * 60_000); // 가동시간은 10분뿐인데
+    expect(r.trades.avgHoldMs! > r.overview.uptimeMs).toBe(true); // 보유시간(30분)이 더 길다 — 바로 그 현상
+    expect(r.notes.some((n) => n.includes("이어받은 매매"))).toBe(true);
+  });
+
+  it("시작할 때 이미 보유 중이던 포지션(carriedPositions)이 있으면 시작자산이 작게 보일 수 있다는 안내가 뜬다", () => {
+    const r = buildAutoReport(run({ carriedPositions: 2 }), [], NOW);
+    expect(r.overview.carriedPositions).toBe(2);
+    expect(r.notes.some((n) => n.includes("이미 보유·감시 중이던 포지션이 2개"))).toBe(true);
+  });
+
+  it("이어받은 매매·포지션이 전혀 없으면(기본값 0) 관련 안내문이 추가되지 않는다", () => {
+    const r = buildAutoReport(run(), [trade("AAA", "closed_win", 30, "2026-10-01 23:10:00")], NOW);
+    expect(r.trades.carriedOverCount).toBe(0);
+    expect(r.overview.carriedPositions).toBe(0);
+    expect(r.notes.some((n) => n.includes("이어받은"))).toBe(false);
+  });
+
+  it("마크다운에 이어받은 포지션 수·매매 건수가 운용개요/매매통계 줄에 함께 표시된다", () => {
+    const hist: ReportHistoryEntry[] = [trade("OLDPOS", "closed_win", 5, "2026-10-01 22:10:00", "2026-10-01 21:40:00")];
+    const r = buildAutoReport(run({ carriedPositions: 1, endedAtMs: kstMs("2026-10-01 22:10:00") }), hist, NOW);
+    const md = reportToMarkdown(r);
+    expect(md).toContain("시작할 때 이어받은(이미 보유·감시 중이던) 포지션: 1개");
+    expect(md).toContain("이전 실행에서 이어받은 매매 1건 포함");
+  });
+});
+
 describe("[v0.62.1] 엔진 — 자동매매 켬/끔이 실행(run) 기록으로 남는다", () => {
   it("켜고 끄면 종료 사유가 담긴 실행 기록이 파일에 저장되고, 리포트로 조회된다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-report-"));
