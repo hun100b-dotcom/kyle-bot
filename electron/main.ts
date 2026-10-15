@@ -554,6 +554,8 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:autoTrade:history", () => e.getAutoTradeHistory());
   ipcMain.handle("tool:autoTrade:reports", () => e.getAutoReports()); // [v0.62.1] 자동매매 리포트
   // [v0.65.0] 매매연구소(신호 기록 모드)
+  ipcMain.handle("tool:watchHistory:list", (_ev, filter) => e.getWatchHistory(filter));
+  ipcMain.handle("tool:watchHistory:summary", (_ev, sinceMs) => e.getWatchHistorySummary(sinceMs));
   ipcMain.handle("tool:lab:status", () => e.getLabStatus());
   ipcMain.handle("tool:lab:save", (_ev, input) => e.saveLabSettings(input));
   ipcMain.handle("tool:lab:scanNow", () => e.labScanNow());

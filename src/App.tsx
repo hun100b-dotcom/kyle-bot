@@ -44,7 +44,7 @@ import { summarizeAutoHistory, summarizeGroupHistory, summarizeByCriteria, autoH
 //   묻혀 있었다. 오너 요청("그룹원 관리 탭을 통해 승인·수기등록·근황 파악, 채팅까지")에 따라
 //   독립 탭으로 빼고, 그룹원 근황 현황판·채팅을 새로 추가했다. 같은 이유로 "기록"(journal, 예전엔
 //   설정 하위)도 "서버 로그"로 이름을 바꿔 독립 탭으로 뺐다(카테고리 토글 필터 추가, 아래 참고).
-const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "autoControl", "autoScan", "screenCriteria", "autoHistory", "autoReport", "research", "labResult", "labLive", "labSignals", "labCompare", "orders", "groupManage", "changelog", "journal", "settings"] as const;
+const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "autoControl", "autoScan", "watchHistory", "screenCriteria", "autoHistory", "autoReport", "research", "labResult", "labLive", "labSignals", "labCompare", "orders", "groupManage", "changelog", "journal", "settings"] as const;
 type TabId = (typeof ALL_TABS)[number];
 
 /** [v0.27.0] 상단 1단 — 매매방식·성격으로 묶은 그룹. 그룹 버튼을 누르면 하위 탭(2단)이 펼쳐진다. */
@@ -53,7 +53,7 @@ const TOP_GROUP_LABEL: Record<TopGroupId, string> = { manual: "메뉴얼", auto:
 /** 그룹 순서(드래그로 바뀔 수 있는 기본값) + 그룹별 하위 탭 목록(이 순서로 서브탭이 뜬다). */
 const GROUP_CHILDREN: Record<TopGroupId, TabId[]> = {
   manual: ["calc", "screener", "splits"],
-  auto: ["autoControl", "autoScan", "screenCriteria", "autoHistory", "autoReport"],
+  auto: ["autoControl", "autoScan", "watchHistory", "screenCriteria", "autoHistory", "autoReport"],
   // [v0.65.0 — 오너 지시] 매매연구는 자동매매 하위 탭에서 대분류로 올려 비중을 높이고, 신호 기록 모드 탭들을 같은 그룹에 신설
   lab: ["labResult", "labLive", "labSignals", "labCompare", "research"], // [v0.66.0] 결과 요약을 맨 앞에
   status: ["report", "strength", "orders", "groupManage", "changelog", "journal"],
@@ -63,7 +63,7 @@ const TOP_GROUPS: TopGroupId[] = ["manual", "auto", "lab", "status", "settings"]
 /** 리프 탭 → 소속 그룹(역방향 조회용). */
 const TAB_GROUP: Record<TabId, TopGroupId> = {
   calc: "manual", screener: "manual", splits: "manual",
-  autoControl: "auto", autoScan: "auto", screenCriteria: "auto", autoHistory: "auto", autoReport: "auto", research: "lab", labResult: "lab", labLive: "lab", labSignals: "lab", labCompare: "lab",
+  autoControl: "auto", autoScan: "auto", watchHistory: "auto", screenCriteria: "auto", autoHistory: "auto", autoReport: "auto", research: "lab", labResult: "lab", labLive: "lab", labSignals: "lab", labCompare: "lab",
   report: "status", strength: "status", orders: "status", groupManage: "status", changelog: "status", journal: "status",
   settings: "settings",
 };
@@ -77,6 +77,7 @@ const TAB_LABEL: Record<TabId, string> = {
   strength: "매매분석",
   autoControl: "자동매매 현황",
   autoScan: "자동 스크리너",
+  watchHistory: "관찰 이력",
   screenCriteria: "스크리닝 기준",
   autoHistory: "자동매매기록",
   autoReport: "📑 자동매매 리포트",
@@ -117,6 +118,14 @@ const AUTO_HIST_STATUS_LABEL: Record<AutoTradeHistoryEntry["status"], string> = 
   cancelled: "⏱ 장시간 미체결 자동취소",
   oco_failed: "⚠️ 보호주문 등록 실패",
   dryrun: "🧪 드라이런(연습)",
+};
+
+/** [관찰종목 이력] 결과(outcome) 배지 라벨. */
+const WATCH_OUTCOME_LABEL: Record<WatchOutcome, string> = {
+  watching: "🟡 관찰 중",
+  confirmed: "🔴 확정 졸업",
+  disqualified: "⚪ 탈락",
+  dropped_from_scan: "❔ 순위 밖(사유 불명)",
 };
 
 /** [v0.56.0] "서버 로그" 탭 카테고리 토글 순서 + 아이콘. */
@@ -1006,6 +1015,11 @@ function App() {
   // [v0.30.0] "자동매매기록" 탭 — 자동매매가 낸 매매 전체 이력(영속 로그).
   const [autoHistory, setAutoHistory] = useState<AutoTradeHistoryEntry[]>([]);
   const [autoHistoryBusy, setAutoHistoryBusy] = useState(false);
+  // [관찰종목 이력 — 오너 요청] 관찰(watch)로 잡힌 종목이 그 뒤 확정/탈락(사유)/순위밖으로 끝났는지.
+  const [watchHistory, setWatchHistory] = useState<WatchHistoryEntry[]>([]);
+  const [watchHistorySummary, setWatchHistorySummary] = useState<WatchHistorySummary | null>(null);
+  const [watchHistoryBusy, setWatchHistoryBusy] = useState(false);
+  const [watchHistoryOutcomeFilter, setWatchHistoryOutcomeFilter] = useState<"" | WatchOutcome>("");
   // [v0.64.0] 자동매매기록을 토스 실제 체결과 대조한 결과(id → 결과). 탭을 열 때는 안 불러오고
   //   "🔄 토스 체결과 대조" 버튼을 눌러야만 조회한다(매번 자동으로 부르면 토스 요청이 불필요하게
   //   늘어난다 — report()/tradeAnalysis()도 같은 원칙으로 버튼 눌러야만 동작).
@@ -1194,6 +1208,21 @@ function App() {
       setAutoHistory(await window.kyletool.autoTradeHistory());
     } finally {
       setAutoHistoryBusy(false);
+    }
+  }
+
+  /** [관찰종목 이력] 탭을 열 때 · [🔄 새로고침]을 누를 때 둘 다 호출. */
+  async function loadWatchHistory() {
+    setWatchHistoryBusy(true);
+    try {
+      const [rows, summary] = await Promise.all([
+        window.kyletool.getWatchHistory?.() ?? Promise.resolve([]),
+        window.kyletool.getWatchHistorySummary?.() ?? Promise.resolve(null),
+      ]);
+      setWatchHistory(rows ?? []);
+      setWatchHistorySummary(summary ?? null);
+    } finally {
+      setWatchHistoryBusy(false);
     }
   }
 
@@ -1473,6 +1502,8 @@ function App() {
     // [v0.84.0] 자동매매 현황·스크리닝 기준 탭을 열 때마다 PC 입력칸도 엔진 실제값으로 재동기화한다
     //   (위 resyncPcFormsFromEngine 주석 참고 — 폰에서 바꾼 값이 PC 화면엔 안 보이던 버그 수정).
     else if (t === "autoControl" || t === "autoScan") { void window.kyletool.autoTradeStatus().then(setAutoStatus); void resyncPcFormsFromEngine(); }
+    // [관찰종목 이력] 탭을 열 때 최신 이력을 불러온다.
+    else if (t === "watchHistory") void loadWatchHistory();
     else if (t === "screenCriteria") void resyncPcFormsFromEngine();
     // [v0.30.0] 자동매매기록 탭을 열 때 최신 기록을 불러온다.
     // [v0.33.0] 매매연구 탭도 같은 기록(autoHistory)을 재료로 통계를 내므로 똑같이 불러온다.
@@ -5107,6 +5138,101 @@ ${msg}
                 </>
               );
             })()}
+          </section>
+        </main>
+      )}
+
+      {/* ===== 🤖 자동매매 → 관찰 이력 (오너 요청: "관찰된 종목이 어떻게 탈락·확정됐는지 확인할 수
+          있는 곳이 필요 + 그에 대한 분석도") =====
+          자동 스크리너는 5분마다 결과를 통째로 덮어써서, "관찰(watch)"로 잡힌 종목이 다음 스캔에
+          확정됐는지 탈락했는지(왜) 추적할 길이 없었다. electron/tool-engine.ts의 watchHistory/
+          updateWatchHistory가 그 생애주기만 별도로 영속 기록하고, 여기서는 그걸 보여주기만 한다. */}
+      {paneTab === "watchHistory" && (
+        <main className="grid">
+          <section className="card wide">
+            <h2>관찰 이력 <span className="hint">(관찰(watch)로 잡힌 종목이 그 뒤 확정됐는지 탈락했는지 — 왜)</span></h2>
+            <details className="explain">
+              <summary>❓ 이 화면은 무엇을 보여주나요?</summary>
+              <p className="hint">
+                자동 스크리너는 5분마다 결과를 통째로 새로 계산해서, "관찰" 상태였던 종목이 다음 스캔에
+                어떻게 됐는지는 예전엔 화면에서 사라지면 알 방법이 없었어요. 이 탭은 "관찰"로 처음 잡힌
+                순간부터 <b>확정으로 졸업</b>했는지, <b>탈락</b>했는지(구체적 사유 포함), 아니면{" "}
+                <b>거래량 순위 밖으로 벗어났는지</b>를 끝까지 따라가 기록합니다. 스크리닝 기준(도지 몸통·
+                거래량 배수·EMA 이격도 등)을 완화할지 강화할지 판단할 근거 자료예요.
+              </p>
+            </details>
+
+            {watchHistoryBusy && !watchHistorySummary && <p className="hint">불러오는 중…</p>}
+
+            {watchHistorySummary && (
+              <>
+                <div className="lab-cards">
+                  <div className="lab-card"><b>{watchHistorySummary.total}</b><span>누적 관찰 시작</span></div>
+                  <div className="lab-card"><b>{watchHistorySummary.watching}</b><span>지금 관찰 중</span></div>
+                  <div className="lab-card"><b>{watchHistorySummary.confirmed}</b><span>확정으로 졸업</span></div>
+                  <div className="lab-card"><b>{watchHistorySummary.disqualified}</b><span>탈락(사유 있음)</span></div>
+                  <div className="lab-card"><b>{watchHistorySummary.droppedFromScan}</b><span>거래량 순위 밖(사유 불명)</span></div>
+                </div>
+
+                {watchHistorySummary.topReasons.length > 0 && (
+                  <>
+                    <h3>탈락 사유 병목 <span className="hint">(누적 전체 기간 — 어느 조건이 꾸준히 발목을 잡는지)</span></h3>
+                    <div className="lab-funnel">
+                      {watchHistorySummary.topReasons.map(({ label, count }) => (
+                        <div key={label} className="lab-funnel-row">
+                          <span className="lab-funnel-label">{label}</span>
+                          <span className="lab-funnel-bar">
+                            <i style={{ width: `${Math.max(2, (count / watchHistorySummary.topReasons[0].count) * 100)}%` }} />
+                          </span>
+                          <b className="lab-funnel-n">{count}</b>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+
+            <div className="form-row">
+              <button className="mini" disabled={watchHistoryBusy} onClick={() => void loadWatchHistory()}>🔄 새로고침</button>
+              <label>결과 필터
+                <select value={watchHistoryOutcomeFilter} onChange={(e) => setWatchHistoryOutcomeFilter(e.target.value as WatchOutcome | "")}>
+                  <option value="">전체</option>
+                  <option value="watching">관찰 중</option>
+                  <option value="confirmed">확정</option>
+                  <option value="disqualified">탈락</option>
+                  <option value="dropped_from_scan">순위 밖</option>
+                </select>
+              </label>
+            </div>
+
+            {watchHistory.length === 0 && !watchHistoryBusy && (
+              <p className="hint">아직 쌓인 기록이 없습니다. 자동매매(또는 자동 스크리너)가 한 번 이상 돌면 여기 쌓입니다.</p>
+            )}
+
+            {watchHistory.length > 0 && (
+              <div className="lab-scroll">
+                <table className="result-table screen-table lab-table">
+                  <thead>
+                    <tr><th>종목</th><th>관찰 시작(KST)</th><th>결과</th><th>걸린 시간</th><th>사유</th></tr>
+                  </thead>
+                  <tbody>
+                    {watchHistory
+                      .filter((h) => !watchHistoryOutcomeFilter || h.outcome === watchHistoryOutcomeFilter)
+                      .slice(0, 300)
+                      .map((h) => (
+                        <tr key={h.id} className="screen-row">
+                          <td><b>{h.symbol}</b>{h.watchedPrice != null && <span className="hint small"> ${h.watchedPrice}</span>}</td>
+                          <td>{new Date(h.watchedAtMs).toLocaleString("ko-KR", { timeZone: "Asia/Seoul", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}</td>
+                          <td>{WATCH_OUTCOME_LABEL[h.outcome]}</td>
+                          <td>{h.resolvedAtMs != null ? `${Math.max(0, Math.round((h.resolvedAtMs - h.watchedAtMs) / 60000))}분` : "진행 중"}</td>
+                          <td className="hint small">{h.reasons.length > 0 ? h.reasons.join(" · ") : "—"}</td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </section>
         </main>
       )}

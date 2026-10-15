@@ -656,6 +656,29 @@ interface ScreenRun {
   excludeEtf: boolean;
 }
 
+/** [관찰종목 이력] 관찰(watch) 신호 하나의 생애주기(electron/tool-engine.ts와 같은 모양의 복제). */
+type WatchOutcome = "watching" | "confirmed" | "disqualified" | "dropped_from_scan";
+interface WatchHistoryEntry {
+  id: string;
+  symbol: string;
+  watchedAtMs: number;
+  watchedPrice: number | null;
+  lastSeenAtMs: number;
+  resolvedAtMs: number | null;
+  outcome: WatchOutcome;
+  reasons: string[];
+  reasonBuckets: string[];
+}
+interface WatchHistoryFilter { symbol?: string; outcome?: WatchOutcome; sinceMs?: number }
+interface WatchHistorySummary {
+  total: number;
+  watching: number;
+  confirmed: number;
+  disqualified: number;
+  droppedFromScan: number;
+  topReasons: { label: string; count: number }[];
+}
+
 /** [v0.25.0] 탐색 종목 차트 캔들/전체 */
 interface ScreenChartCandle {
   time: string;
@@ -973,6 +996,10 @@ interface KyletoolBridge {
   saveLabSettings?(input: { enabled?: boolean; rankCount?: number; dojiBodyMaxPct?: number; bodyMinPct?: number; volRatioMin?: number; minRangePct?: number }): Promise<LabStatus>;
   labScanNow?(): Promise<LabStatus>;
   labReset?(): Promise<LabStatus>;
+  /** [관찰종목 이력] 관찰(watch)로 잡혔던 종목이 확정/탈락(사유)/순위밖으로 끝났는지 생애주기 조회. */
+  getWatchHistory?(filter?: WatchHistoryFilter): Promise<WatchHistoryEntry[]>;
+  /** [관찰종목 이력] 스크리닝 기준 재검토용 — 탈락 사유별 건수 집계(sinceMs 생략 시 전체 기간). */
+  getWatchHistorySummary?(sinceMs?: number): Promise<WatchHistorySummary>;
   getLabSummary?(filter?: LabQueryFilter): Promise<LabSummary>;
   getLabSignal?(id: string): Promise<{ signal: LabSignalFull; trades: LabTrade[] } | null>;
   getLabBreakdown?(key: string, dim: LabBreakdownDim, filter?: LabQueryFilter): Promise<LabBreakdownRow[]>;

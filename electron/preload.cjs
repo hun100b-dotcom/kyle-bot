@@ -79,6 +79,8 @@ contextBridge.exposeInMainWorld("kyletool", {
   autoTradeHistory: () => ipcRenderer.invoke("tool:autoTrade:history"),
   getAutoReports: () => ipcRenderer.invoke("tool:autoTrade:reports"), // [v0.62.1] 자동매매 리포트
   // [v0.65.0] 매매연구소(신호 기록 모드)
+  getWatchHistory: (filter) => ipcRenderer.invoke("tool:watchHistory:list", filter),
+  getWatchHistorySummary: (sinceMs) => ipcRenderer.invoke("tool:watchHistory:summary", sinceMs),
   getLabStatus: () => ipcRenderer.invoke("tool:lab:status"),
   saveLabSettings: (input) => ipcRenderer.invoke("tool:lab:save", input),
   labScanNow: () => ipcRenderer.invoke("tool:lab:scanNow"),

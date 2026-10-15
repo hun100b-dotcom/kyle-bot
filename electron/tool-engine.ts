@@ -496,6 +496,115 @@ export function summarizeConfirmEvidence(ev: ScreenEvidence | null): string {
 }
 
 /**
+ * [관찰종목 이력 — 오너 지시 "관찰된 종목이 어떻게 탈락/확정됐는지 확인할 수 있는 곳이 필요"]
+ *   이 종목이 지금 "watch/confirmed"가 못 된 이유를 전부 모은다. src/App.tsx의 missReasons()와
+ *   완전히 같은 판정 순서를 쓰지만(두 곳이 같은 ScreenResult.evidence.filters/defenseReasons/
+ *   warrantWarning을 보고 같은 결론을 내야 하므로), 여기 따로 둔 이유는 화면이 꺼져 있을 때도,
+ *   그리고 그 스캔 결과 자체가 다음 사이클에 지워진 뒤에도 "그때 왜 탈락했는지" 사유 문장만은
+ *   영구히 남아야 하기 때문이다(아래 updateWatchHistory가 이 함수를 "그 순간"에 호출해 결과를
+ *   WatchHistoryEntry.reasons에 그대로 박아 둔다 — 나중에 다시 계산하지 않는다).
+ */
+export function summarizeMissReasons(
+  r: ScreenResult,
+  run: Pick<ScreenRun, "emaTrendEnabled" | "cloudEnabled" | "nextCandleConfirmEnabled" | "dojiMaxGapMinutes">,
+): string[] {
+  const reasons: string[] = [];
+  if (!r.priceInBand) reasons.push(`가격대 벗어남 (현재가 ${r.price != null ? `$${r.price.toFixed(2)}` : "—"})`);
+  if (run.emaTrendEnabled && !r.aboveEma) reasons.push("EMA200 아래");
+  if (run.cloudEnabled && !r.aboveCloud) reasons.push("이치모쿠 구름 아래/속");
+  if (r.evidence) {
+    const f = r.evidence.filters;
+    if (!f.firstDoji) reasons.push("최고점 이후 음봉 도지 없음");
+    else if (!f.bothWicks) reasons.push("도지에 꼬리가 한쪽만(망치형·유성형)");
+    else if (f.dojiNearHigh === false) reasons.push(`도지가 최고점에서 너무 한참 뒤에 생김(${r.evidence.gapFromHighMinutes ?? "?"}분 간격 — ${run.dojiMaxGapMinutes}분 초과)`);
+    else if (!f.recentDoji) reasons.push("도지 발생이 너무 오래전(20분 초과 — 신뢰 불가)");
+    else if (run.nextCandleConfirmEnabled && !f.nextBearish) reasons.push("도지 다음 봉이 음봉 아님(패턴 미완성)");
+  }
+  for (const d of r.defenseReasons ?? []) reasons.push(d);
+  if (r.warrantWarning) reasons.push(r.warrantWarning);
+  return reasons;
+}
+
+/**
+ * [관찰종목 이력] "탈락 사유 병목 분석"용 안정된 분류명 — summarizeMissReasons의 상세 문장(가격 등
+ *   매번 바뀌는 숫자가 섞여 있어 그대로 집계하면 사실상 전부 제각각 1건씩이 된다)과는 별도로,
+ *   src/App.tsx의 tallyMissReasons와 같은 분류 기준을 그대로 재사용해 "그때그때 바뀌지 않는 이름"만
+ *   뽑는다. 같은 ScreenResult를 보고 두 함수가 따로 도는 게 아니라, summarizeMissReasons가 이미
+ *   만든 상세 문장을 그대로 분류하므로 두 결과가 어긋날 일이 없다(문장 접두어로만 판별).
+ */
+export function bucketMissReason(reason: string): string {
+  if (reason.startsWith("가격대 벗어남")) return "가격대 벗어남";
+  if (reason.startsWith("도지에 꼬리가 한쪽만")) return "도지 꼬리 한쪽만(망치형 등)";
+  if (reason.startsWith("도지가 최고점에서 너무 한참 뒤")) return "도지가 최고점 한참 뒤";
+  if (reason.startsWith("도지 발생이 너무 오래전")) return "도지 발생 20분 초과(신선도 불합격)";
+  if (reason.startsWith("EMA 이격도")) return "EMA 이격도 미달";
+  if (reason.startsWith("EMA가 상승") || reason.startsWith("EMA 기울기")) return "EMA 상승 중 아님";
+  if (reason.startsWith("ATR") || reason.includes("변동성")) return "변동성 과다/계산 불가";
+  if (reason.includes("워런트")) return "워런트 저가 탈락";
+  return reason; // EMA200 아래·이치모쿠 구름 아래/속·최고점 이후 음봉 도지 없음·패턴 미완성 등은 이미 고정 문구
+}
+
+/** 관찰(watch) 신호 하나의 생애주기 — 언제 관찰이 시작됐고 어떻게 끝났는지를 담는다.
+ *   "watching"(관찰 중) → "confirmed"(확정으로 졸업) · "disqualified"(스캔엔 남았지만 조건
+ *   미달로 탈락, 사유 있음) · "dropped_from_scan"(이번 스캔 결과에 아예 없음 — 거래량 순위
+ *   밖으로 벗어난 것으로 추정되나 정확한 사유는 알 수 없음, 추측으로 메우지 않고 정직하게 둠). */
+export type WatchOutcome = "watching" | "confirmed" | "disqualified" | "dropped_from_scan";
+export interface WatchHistoryEntry {
+  id: string; //              `${symbol}:${watchedAtMs}` — 같은 종목이 나중에 다시 관찰되면 새 id로 별개 기록
+  symbol: string;
+  watchedAtMs: number; //     처음 "관찰(watch)"로 잡힌 시각
+  watchedPrice: number | null;
+  lastSeenAtMs: number; //    마지막으로 이 종목이 스캔 결과에 보였던 시각(관찰 중이면 스캔마다 갱신)
+  resolvedAtMs: number | null; // outcome이 "watching"이 아니게 된 시각(아직 관찰 중이면 null)
+  outcome: WatchOutcome;
+  reasons: string[]; //       disqualified(탈락 사유들, 상세)·confirmed(확정 근거 한 줄) — watching/dropped는 각각 빈 배열/추정 안내 한 줄
+  reasonBuckets: string[]; // disqualified일 때만 — bucketMissReason으로 정규화한 분류명(병목 집계용, getWatchHistorySummary가 씀)
+}
+
+export const WATCH_HISTORY_MAX = 2000;
+
+/**
+ * updateWatchHistory — 이번 스캔 결과로 관찰 이력을 갱신한다(순수 함수 — 엔진은 반환값을 그대로
+ *   저장만 한다, 테스트도 실제 스캔 없이 가짜 ScreenResult로 가능). 상한을 넘으면 "아직 관찰 중"인
+ *   건 전부 보존하고, 끝난 기록 중 오래된 것부터 자른다(관찰 중인 걸 지우면 그 종목의 결말을
+ *   영영 못 보게 되므로 최우선 보존).
+ */
+export function updateWatchHistory(
+  history: WatchHistoryEntry[],
+  results: ScreenResult[],
+  run: Pick<ScreenRun, "emaTrendEnabled" | "cloudEnabled" | "nextCandleConfirmEnabled" | "dojiMaxGapMinutes">,
+  nowMs: number,
+): WatchHistoryEntry[] {
+  const bySymbol = new Map(results.map((r) => [r.symbol, r]));
+  let next: WatchHistoryEntry[] = history.map((h) => {
+    if (h.outcome !== "watching") return h; // 이미 끝난 기록은 그대로(재계산·재작성 안 함 — 그 순간의 사유를 영구 보존)
+    const r = bySymbol.get(h.symbol);
+    if (!r) {
+      return {
+        ...h, resolvedAtMs: nowMs, outcome: "dropped_from_scan", reasonBuckets: [],
+        reasons: ["이번 스캔의 거래량 상위 종목 목록에서 더 이상 보이지 않습니다(순위 밖으로 벗어난 것으로 추정 — 정확한 사유는 확인할 수 없습니다)."],
+      };
+    }
+    if (r.status === "watch") return { ...h, lastSeenAtMs: nowMs }; // 계속 관찰 중 — 최신 시각만 갱신
+    if (r.status === "confirmed") return { ...h, resolvedAtMs: nowMs, outcome: "confirmed", reasons: [summarizeConfirmEvidence(r.evidence)], reasonBuckets: [] };
+    const reasons = summarizeMissReasons(r, run);
+    return { ...h, resolvedAtMs: nowMs, outcome: "disqualified", reasons, reasonBuckets: reasons.map(bucketMissReason) };
+  });
+  for (const r of results) {
+    if (r.status !== "watch") continue;
+    if (next.some((h) => h.symbol === r.symbol && h.outcome === "watching")) continue; // 이미 관찰 중으로 기록됨
+    next = [...next, { id: `${r.symbol}:${nowMs}`, symbol: r.symbol, watchedAtMs: nowMs, watchedPrice: r.price, lastSeenAtMs: nowMs, resolvedAtMs: null, outcome: "watching", reasons: [], reasonBuckets: [] }];
+  }
+  if (next.length > WATCH_HISTORY_MAX) {
+    const watching = next.filter((h) => h.outcome === "watching");
+    const resolved = next.filter((h) => h.outcome !== "watching").sort((a, b) => (a.resolvedAtMs ?? 0) - (b.resolvedAtMs ?? 0));
+    const keepResolved = resolved.slice(Math.max(0, resolved.length - Math.max(0, WATCH_HISTORY_MAX - watching.length)));
+    next = [...keepResolved, ...watching].sort((a, b) => a.watchedAtMs - b.watchedAtMs);
+  }
+  return next;
+}
+
+/**
  * [v0.33.0 — 스크리닝 기준 탭] 도지 패턴 판정(watch/confirmed/none) + 하드 게이트(가격대·EMA·
  *   구름) + "다음 봉 확인" 켜짐 여부를 합쳐 최종 상태를 정한다. scanScreener 안에 묻혀 있던
  *   이 결정 로직을 순수 함수로 빼서, 실제 스캔(네트워크·캔들 계산) 없이도 "토글을 끄면 실제로
@@ -1472,6 +1581,11 @@ export class ToolEngine extends EventEmitter {
   private autoScanNotifiedConfirmed = new Set<string>();
   /** [v0.72.0] 위와 같은 목적, "관찰(watch)" 상태용 — 디스코드 즉시 알림에 쓴다. */
   private autoScanNotifiedWatch = new Set<string>();
+  /** [관찰종목 이력 — 오너 요청] 관찰(watch) 신호마다 언제 시작돼 어떻게 끝났는지(확정/탈락 사유/순위
+   *  밖) 영속 기록. 스크리닝 결과(run.results)는 매 사이클 통째로 덮어써지지만, 이 배열은 그 사이클이
+   *  지나가기 전에 "그때의 결론"을 떼어 내 영구히 보존한다(아래 scanScreener 호출부 참고). */
+  private watchHistory: WatchHistoryEntry[] = [];
+  private watchHistoryPath = "";
   private static readonly AUTO_TRADE_INTERVAL_MS = 5 * 60_000; // "기본적으로 5분마다"(오너 지시)
   /** [v0.29.0→v0.42.0] 자동매매 진입 주문의 체결 감시 최대 시간 — 오너 요청(2026-09-25) "장시간
    *  미체결 대책": 수동 버튼(기본 15분, 사람이 지켜보며 직접 판단)보다 짧게 잡아, 5분 사이클 기준
@@ -1631,6 +1745,7 @@ export class ToolEngine extends EventEmitter {
     this.autoPositionsPath = join(userDataDir, "kylebot-auto-positions.json"); // [v0.30.1] 감시 중 포지션(긴급수정)
     this.autoRunsPath = join(userDataDir, "kylebot-auto-runs.json"); // [v0.62.1] 자동매매 실행 기록(리포트 원본)
     this.labPath = join(userDataDir, "kylebot-lab.json"); // [v0.65.0] 매매연구소 신호 로우
+    this.watchHistoryPath = join(userDataDir, "kylebot-watch-history.json"); // [관찰종목 이력]
     this.loadEnv();
     // [v0.68.1] 거래량 순위 기본값이 60→120으로 바뀌었는데, 이미 저장돼 있던 값(옛 기본값 60)은 그대로 남아 오너 화면의 수집이 계속 느렸다.
     //   "옛 기본값 그대로(60)"인 경우에만 한 번 120으로 올리고 화면에 알린다(직접 다른 값으로 바꾼 사람은 건드리지 않음).
@@ -1675,6 +1790,7 @@ export class ToolEngine extends EventEmitter {
     this.loadAutoPositions(); // [v0.30.1] 감시 중 포지션(긴급수정 — 재시작해도 이어받기)
     this.loadAutoRuns(); // [v0.62.1] 자동매매 실행 기록
     this.loadLab(); // [v0.65.0] 매매연구소 신호 로우
+    this.loadWatchHistory(); // [관찰종목 이력]
     // [v0.69.0] 재시작 전에 보호 못 받던 종목이 남아 있으면 30초 뒤부터 가드가 이어서 처리한다.
     if (this.autoUnprotected.length > 0 && !opts?.forceMock) this.scheduleGuard(30_000);
     // 신호 기록 모드는 주문을 내지 않는 읽기 전용이라 켜 둔 상태를 재시작해도 유지한다(테스트용 forceMock은 자동 시작 안 함).
@@ -5193,6 +5309,71 @@ export class ToolEngine extends EventEmitter {
       this.labSignals = [];
       this.labAttempts = {};
     }
+  }
+
+  // ==========================================================================
+  // [관찰종목 이력 — 오너 요청 "스크리닝 기준 재검토를 위해 관찰 종목도 기록 누적이 필요"]
+  // -----------------------------------------------------------------------------
+  // 자동 스크리너는 5분마다 통째로 덮어써지는 스냅샷(autoTradeLastScan)만 남겨서, "관찰(watch)"로
+  // 잡혔던 종목이 다음에 확정됐는지 탈락했는지(왜) 추적할 길이 없었다. 여기서는 그 생애주기만
+  // 별도로 영속 기록한다 — 계산은 전부 순수 함수(updateWatchHistory, 위쪽)가 하고, 엔진은
+  // scanScreener 처리부(아래 autoTradeTick)에서 호출해 결과를 저장만 한다.
+  // ==========================================================================
+
+  private loadWatchHistory(): void {
+    try {
+      if (!existsSync(this.watchHistoryPath)) return;
+      const d = JSON.parse(readFileSync(this.watchHistoryPath, "utf8")) as { entries?: WatchHistoryEntry[] };
+      this.watchHistory = Array.isArray(d.entries) ? d.entries : [];
+    } catch {
+      this.watchHistory = [];
+    }
+  }
+
+  private persistWatchHistory(): void {
+    this.scheduleFileSave("watchHistory", this.watchHistoryPath, () => ({ entries: this.watchHistory }));
+  }
+
+  /** [관찰종목 이력] 화면용 조회 — 최근 시작순, 종목·결과·기간으로 필터. */
+  getWatchHistory(f?: { symbol?: string; outcome?: WatchOutcome; sinceMs?: number }): WatchHistoryEntry[] {
+    return this.watchHistory
+      .filter(
+        (h) =>
+          (!f?.symbol || h.symbol.toUpperCase() === f.symbol.toUpperCase()) &&
+          (!f?.outcome || h.outcome === f.outcome) &&
+          (f?.sinceMs == null || h.watchedAtMs >= f.sinceMs),
+      )
+      .sort((a, b) => b.watchedAtMs - a.watchedAtMs);
+  }
+
+  /** [관찰종목 이력 — 스크리닝 기준 재검토용] 탈락 사유별 건수 집계. src/App.tsx의
+   *  tallyMissReasons(스캔 1회 안에서만 집계)와 달리 쌓인 전체 이력을 보므로, 기간을 넓게 두고
+   *  "어느 조건이 꾸준히 병목인지"를 판단하는 데 쓴다. */
+  getWatchHistorySummary(sinceMs?: number): {
+    total: number;
+    watching: number;
+    confirmed: number;
+    disqualified: number;
+    droppedFromScan: number;
+    topReasons: { label: string; count: number }[];
+  } {
+    const rows = sinceMs != null ? this.watchHistory.filter((h) => h.watchedAtMs >= sinceMs) : this.watchHistory;
+    const counts: Record<string, number> = {};
+    for (const h of rows) {
+      if (h.outcome !== "disqualified") continue;
+      for (const bucket of h.reasonBuckets) counts[bucket] = (counts[bucket] ?? 0) + 1;
+    }
+    return {
+      total: rows.length,
+      watching: rows.filter((h) => h.outcome === "watching").length,
+      confirmed: rows.filter((h) => h.outcome === "confirmed").length,
+      disqualified: rows.filter((h) => h.outcome === "disqualified").length,
+      droppedFromScan: rows.filter((h) => h.outcome === "dropped_from_scan").length,
+      topReasons: Object.entries(counts)
+        .map(([label, count]) => ({ label, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 20),
+    };
   }
 
   private persistLab(): void {
@@ -9358,6 +9539,12 @@ export class ToolEngine extends EventEmitter {
         void this.sendDiscordAlert(`🟡 **관찰**: ${sym} (현재가 ${priceTxt}) — 도지 패턴 발생, 다음 5분봉 확인 중입니다.`);
       }
       this.autoScanNotifiedWatch = new Set(run.results.filter((r) => r.status === "watch" && !activeSymbols.has(r.symbol)).map((r) => r.symbol));
+
+      // [관찰종목 이력] 보유 여부와 무관하게 "패턴이 실제로 어떻게 됐는지"만 본다(activeSymbols로
+      //   거르지 않음 — 이미 들고 있어도 확정은 확정, 탈락은 탈락이고, 그게 바로 스크리닝 기준
+      //   자체를 재검토하려는 이 기록의 목적이다. 실제 진입 여부는 autoTradeHistory가 따로 맡는다).
+      this.watchHistory = updateWatchHistory(this.watchHistory, run.results, run, Date.now());
+      this.persistWatchHistory();
 
       const candidates = run.results.filter((r) => r.status === "confirmed" && !activeSymbols.has(r.symbol));
       const commissionRate = await this.resolveCommissionRate();

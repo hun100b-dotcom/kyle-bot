@@ -225,6 +225,8 @@ export function installKyleTool(): ToolEngine {
     autoTradeHistory: () => Promise.resolve(e.getAutoTradeHistory()),
     getAutoReports: () => e.getAutoReports(), // [v0.62.1] 폰은 로컬 기록이 없어 PC가 올린 미러에서 읽는다
     // [v0.65.0] 매매연구소 — 폰의 로컬 엔진에는 데이터가 없으므로 화면은 PC가 올린 미러(getLiveState().lab)를 보고, 켜기/끄기만 원격 명령으로 보낸다.
+    getWatchHistory: (filter?: Parameters<typeof e.getWatchHistory>[0]) => Promise.resolve(e.getWatchHistory(filter)),
+    getWatchHistorySummary: (sinceMs?: Parameters<typeof e.getWatchHistorySummary>[0]) => Promise.resolve(e.getWatchHistorySummary(sinceMs)),
     getLabStatus: () => Promise.resolve(e.getLabStatus()),
     saveLabSettings: (input: Parameters<typeof e.saveLabSettings>[0]) => Promise.resolve(e.saveLabSettings(input)),
     labScanNow: () => e.labScanNow(),
