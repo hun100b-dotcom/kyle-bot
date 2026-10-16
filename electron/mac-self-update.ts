@@ -61,12 +61,23 @@ export function isNewerVersion(a: string, b: string): boolean {
   return false;
 }
 
-/** 이 아키텍처(arm64/x64)에 맞는 자동업데이트용 zip 자산을 고른다. */
+/**
+ * 이 아키텍처(arm64/x64)에 맞는 자동업데이트용 zip 자산을 고른다.
+ *
+ * [universal 폴백이 왜 있나 — v0.97.0]
+ *   사람이 받는 설치팩(.pkg)은 두 칩을 한 파일에 담은 universal로 바꿨다. 자동업데이트용
+ *   zip은 용량 때문에 칩별로 그대로 두지만, 나중에 누군가 zip까지 universal로 바꾸면
+ *   `-arm64-mac.zip`이 사라져 **자동업데이트가 조용히 멈춘다**(찾는 이름이 없으니 null →
+ *   준비 실패 → 영원히 옛 버전에 머무름). 그 사고를 구조적으로 막으려고, 칩별 파일을 못
+ *   찾으면 universal을 받아들인다 — universal은 어느 칩에서도 실행되므로 안전한 폴백이다.
+ */
 export function pickMacZipAsset(assets: ReleaseAsset[], arch: string): ReleaseAsset | null {
+  const zips = assets.filter((a) => a.name.endsWith("-mac.zip"));
   const wantArm = arch === "arm64";
-  return (
-    assets.find((a) => a.name.endsWith("-mac.zip") && (wantArm ? a.name.includes("-arm64") : !a.name.includes("-arm64"))) ?? null
+  const exact = zips.find((a) =>
+    wantArm ? a.name.includes("-arm64") : !a.name.includes("-arm64") && !a.name.includes("-universal"),
   );
+  return exact ?? zips.find((a) => a.name.includes("-universal")) ?? null;
 }
 
 /**

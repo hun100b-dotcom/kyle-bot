@@ -64,6 +64,32 @@ describe("pickMacZipAsset", () => {
   it("맞는 zip이 없으면 null", () => {
     expect(pickMacZipAsset([{ name: "Capri-0.60.0.dmg", browser_download_url: "x" }], "arm64")).toBeNull();
   });
+
+  // [v0.97.0] 사람이 받는 설치팩을 universal(.pkg)로 바꾸면서 생긴 폴백 — 자세한 이유는
+  //   electron/mac-self-update.ts 의 pickMacZipAsset 주석 참고. 요지: 나중에 zip까지
+  //   universal로 바꿔도 자동업데이트가 조용히 멈추면 안 된다.
+  describe("universal 폴백", () => {
+    const universalOnly: ReleaseAsset[] = [
+      { name: "Capri-0.97.0-universal-mac.zip", browser_download_url: "https://x/u.zip" },
+      { name: "Capri-0.97.0-universal.pkg", browser_download_url: "https://x/u.pkg" },
+      { name: "latest-mac.yml", browser_download_url: "https://x/latest-mac.yml" },
+    ];
+
+    it("칩별 zip이 없으면 universal zip을 고른다(두 칩 모두)", () => {
+      expect(pickMacZipAsset(universalOnly, "arm64")?.name).toBe("Capri-0.97.0-universal-mac.zip");
+      expect(pickMacZipAsset(universalOnly, "x64")?.name).toBe("Capri-0.97.0-universal-mac.zip");
+    });
+
+    it("칩별 zip이 있으면 그쪽을 우선한다(universal은 폴백일 뿐)", () => {
+      const both: ReleaseAsset[] = [...assets, ...universalOnly];
+      expect(pickMacZipAsset(both, "arm64")?.name).toBe("Capri-0.60.0-arm64-mac.zip");
+      expect(pickMacZipAsset(both, "x64")?.name).toBe("Capri-0.60.0-mac.zip");
+    });
+
+    it("설치팩(.pkg)은 자동업데이트 대상이 아니다(zip만 고른다)", () => {
+      expect(pickMacZipAsset(universalOnly, "arm64")?.name.endsWith(".zip")).toBe(true);
+    });
+  });
 });
 
 describe("parseLatestMacYmlSha512", () => {

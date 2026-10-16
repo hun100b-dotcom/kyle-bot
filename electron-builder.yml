@@ -82,10 +82,28 @@ mac:
     CFBundleDisplayName: Capri
   category: public.app-category.finance
   target:
-    - target: dmg
-      arch: [arm64, x64]         # 사람이 내려받아 설치하는 파일(애플 실리콘 + 인텔)
+    # ★ 사람이 내려받는 파일은 **이 하나뿐**이다 — "올인원 설치팩".
+    #
+    # [왜 dmg를 버리고 pkg로 바꿨나 — 2026-10-16 신규 팀원 사고]
+    #   dmg는 "열고 → 앱을 Applications로 끌어다 놓고 → 우클릭 열기"까지 사람이 해야 하는데,
+    #   그렇게 설치하면 macOS가 붙인 격리 꼬리표(quarantine)가 **앱에 그대로 남는다.**
+    #   애플 실리콘에서 "격리 꼬리표 + 애드혹 서명" 조합은 앱을 띄우다 말고 죽인다 —
+    #   실제로 신규 팀원 M1 맥북에서 로그인 창이 0.4초 뜨고 사라지는 사고가 났다.
+    #   pkg는 설치가 끝난 직후 build/pkg-scripts/postinstall 을 **관리자 권한으로 자동 실행**해
+    #   그 꼬리표를 지우고 서명을 다시 찍는다. 사용자는 더블클릭 말곤 할 일이 없다.
+    #
+    # [왜 universal(하나로 합친 것)인가]
+    #   예전엔 arm64용·Intel용 dmg를 따로 올려서 "내 맥이 어느 쪽인지" 사람이 알아서
+    #   골라야 했고, 잘못 고르면 또 안 됐다. universal은 두 칩용을 한 파일에 담아 **고를
+    #   일이 없다.** 용량은 2배지만, 사람이 받는 건 설치 때 딱 한 번뿐이라 값싼 거래다.
+    - target: pkg
+      arch: [universal]
+    # ★ 자동 업데이트용(맥의 자동 교체는 dmg/pkg가 아니라 zip을 받는다 — mac-self-update.ts).
+    #   이쪽은 칩별로 따로 둔다: 사람이 고르는 게 아니라 앱이 자기 칩에 맞는 걸 알아서
+    #   받으므로 헷갈릴 일이 없고, universal로 만들면 배포할 때마다 2배(230MB)를 내려받게 돼
+    #   하루에 몇 번씩 배포하는 지금 방식에선 낭비가 크다.
     - target: zip
-      arch: [arm64, x64]         # ★ 자동 업데이트용(맥의 electron-updater는 dmg가 아니라 zip을 받는다)
+      arch: [arm64, x64]
   # 애플 개발자 인증서 없음 → 애드혹(ad-hoc, "-") 서명. 첫 실행은 우클릭→열기(README 안내).
   # [주의] 공증(notarize)도 안 한다(유료 계정 필요). 개인 사용에는 우클릭→열기로 충분.
   #
@@ -100,14 +118,22 @@ mac:
   # (Gatekeeper 격리 경고 자체는 애드혹 서명으로는 안 없어짐 — 공증까지 해야 완전히 없어짐).
   identity: "-"
 
-dmg:
-  title: Capri 설치
-  # 설치 창 배치: 왼쪽 앱 아이콘을 오른쪽 Applications 폴더로 끌어다 놓는 표준 형태
-  contents:
-    - x: 140
-      y: 200
-      type: file
-    - x: 400
-      y: 200
-      type: link
-      path: /Applications
+# ---------------- macOS 올인원 설치팩(.pkg) ----------------
+# [무엇이 달라지나] 더블클릭 → "계속 → 설치 → 비밀번호" 끝. 앱을 끌어다 놓을 필요도,
+#   우클릭으로 열 필요도, 터미널을 열 필요도 없다. 설치가 끝나면 아래 postinstall이
+#   격리 꼬리표를 지워 주므로 **첫 실행부터 그냥 열린다.**
+#
+# [남아 있는 유일한 한 단계] 설치팩 자체는 애플 인증서가 없어 미서명이라, 처음 받은
+#   .pkg를 더블클릭하면 "확인되지 않은 개발자" 경고가 뜬다 → **우클릭 → 열기** 한 번이면
+#   통과한다. 이것까지 없애려면 애플 개발자 계정(연 $99)으로 공증(notarize)해야 한다.
+pkg:
+  # 설치 위치를 /Applications 로 못박는다. 아래 postinstall 이 "$2/Capri.app" 을 찾아
+  # 꼬리표를 지우는데, 사용자가 엉뚱한 곳에 설치하면 그 경로를 놓칠 수 있다.
+  installLocation: /Applications
+  allowAnywhere: false         # "원하는 위치에 설치" 선택지 숨김
+  allowCurrentUserHome: false  # "나만 사용" 선택지 숨김(홈 폴더 설치 방지)
+  allowRootDirectory: true     # /Applications 설치만 허용
+  isRelocatable: false         # 이미 다른 곳에 있던 Capri.app 자리로 끌려가지 않게
+  overwriteAction: upgrade     # 기존 버전이 있으면 덮어쓰기(업그레이드)
+  # scripts 기본값이 "build/pkg-scripts" 라 따로 지정하지 않는다 — 그 폴더의
+  # postinstall 이 설치 직후 자동 실행된다(그 파일 맨 위 주석에 이유를 전부 적어 뒀다).

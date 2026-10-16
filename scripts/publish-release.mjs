@@ -109,14 +109,24 @@ function collectAssets() {
         continue;
       }
       if (!assets.some((a) => a.name === name)) assets.push({ name, file });
-      // ② blockmap(차등 업데이트용)이 있으면 함께
-      const bm = findLocalFile(`${name}.blockmap`);
-      if (bm && !assets.some((a) => a.name === `${name}.blockmap`)) {
-        assets.push({ name: `${name}.blockmap`, file: bm });
-      }
+      // ② [v0.97.0] blockmap 업로드 중단 — 릴리스 페이지에서 "쓸모없는 파일"의 주범이었다.
+      //   blockmap은 "차등 업데이트"(달라진 조각만 내려받기) 전용 파일인데, 우리는 그 기능을
+      //   electron/main.ts의 `autoUpdater.disableDifferentialDownload = true` 로 **이미 꺼 뒀다**
+      //   (v0.27.1 — 서명 인증서가 없는 조합에서 차등 다운로드가 실패하는 사고가 반복돼 끈 것).
+      //   즉 아무도 안 쓰는 파일이 매 배포마다 4~6개씩 쌓여 사람이 받을 파일을 가리고 있었다.
     }
     // ③ yml 자체(이게 없으면 업데이트 팝업이 안 뜬다 — 가장 중요한 파일)
     assets.push({ name: yml, file: ymlPath });
+  }
+
+  // ④ [v0.97.0] 맥 올인원 설치팩(.pkg) — latest-mac.yml은 "자동 업데이트용 zip"만 가리키므로
+  //   사람이 받는 이 파일은 yml을 아무리 뒤져도 안 나온다. 여기서 직접 집어넣지 않으면
+  //   **릴리스에 아예 안 올라가서 신규 팀원이 받을 파일이 없어진다.** (dmg 시절에는 dmg가
+  //   latest-mac.yml에 실려 자동으로 따라 올라갔기 때문에 이 처리가 필요 없었다.)
+  for (const f of readdirSync(RELEASE_DIR)) {
+    if (f.endsWith(".pkg") && !assets.some((a) => a.name === f)) {
+      assets.push({ name: f, file: join(RELEASE_DIR, f) });
+    }
   }
   return assets;
 }
@@ -190,21 +200,27 @@ async function main() {
       body: JSON.stringify({
         tag_name: TAG,
         name: `Capri ${TAG}`,
-        // [v0.35.0] "이 응용 프로그램이 이 Mac에서 지원되지 않습니다" 오류(인텔 맥에서 arm64용
-        //   dmg를 잘못 받아 설치하려 할 때 뜨는 macOS 표준 메시지) 재발 방지 — 릴리스 페이지에
-        //   어떤 파일을 받아야 하는지 한 줄로 안내한다. dmg 4종(윈도우 exe 1개 + 맥 arm64/Intel
-        //   각 dmg+zip)이 그냥 나열만 되면 비전공자가 고르기 어렵다.
+        // [v0.97.0] 릴리스 노트를 "받을 파일 딱 2개"로 줄였다.
+        //   예전엔 맥에서 칩(Apple Silicon/Intel)을 사람이 직접 골라야 해서 안내가 길었고,
+        //   그마저도 잘못 고르는 사고가 났다. 이제 맥은 두 칩을 한 파일에 담은 universal
+        //   설치팩(.pkg) 하나뿐이라 고를 일이 없다. 나머지 파일(-mac.zip, latest*.yml)은
+        //   앱이 자동 업데이트할 때 쓰는 것이라 사람은 건드릴 필요가 없다 — 그렇게 적어 둔다.
         body: [
           `Capri ${VERSION} 배포`,
           "",
-          "**다운로드 전 확인하세요**",
-          "- 윈도우: `Capri-Setup-" + VERSION + ".exe`",
-          "- 맥(Apple Silicon, M1/M2/M3 이후): `Capri-" + VERSION + "-arm64.dmg`",
-          "- 맥(Intel, M1 이전): `Capri-" + VERSION + ".dmg`" + " (arm64 표시 없는 쪽)",
-          "- 내 맥이 어느 쪽인지 모르겠다면: 왼쪽 위 🍎 메뉴 → \"이 Mac에 관하여\" → 칩이 " +
-            "\"Apple M...\"이면 Apple Silicon용, \"Intel...\"이면 Intel용을 받으세요.",
-          "- 잘못된 쪽을 받으면 \"이 응용 프로그램이 이 Mac에서 지원되지 않습니다\"라는 오류가 뜹니다" +
-            "(앱이 고장난 게 아니라 파일을 잘못 받은 것 — 위 표에서 맞는 쪽을 다시 받으면 됩니다).",
+          "### 받을 파일은 이것 하나뿐입니다",
+          "",
+          "| 쓰는 컴퓨터 | 받을 파일 |",
+          "| --- | --- |",
+          "| 🍎 맥 (M1·M2·M3·Intel 전부) | `Capri-" + VERSION + "-universal.pkg` |",
+          "| 🪟 윈도우 | `Capri-Setup-" + VERSION + ".exe`|",
+          "",
+          "**맥 설치 방법** — 받은 `.pkg` 파일을 **우클릭 → 열기** → 계속 → 설치 → 맥 비밀번호. 끝입니다.",
+          "(그냥 더블클릭하면 \"확인되지 않은 개발자\" 경고가 뜹니다. **우클릭 → 열기**로 열면 넘어갑니다.)",
+          "",
+          "설치가 끝나면 응용 프로그램에 Capri가 생깁니다. 터미널을 열거나 명령어를 칠 일은 없습니다.",
+          "",
+          "<sub>나머지 파일(`-mac.zip`, `latest.yml`, `latest-mac.yml`)은 앱이 스스로 업데이트할 때 쓰는 파일입니다 — 사람이 받을 필요 없습니다.</sub>",
         ].join("\n"),
         draft: false,
         prerelease: false,

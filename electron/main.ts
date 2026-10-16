@@ -299,10 +299,16 @@ async function checkMacDmgFallback(): Promise<void> {
     const latest = String(rel.tag_name ?? "").replace(/^v/, "");
     if (!latest || !isNewerVersion(latest, current)) return;
 
+    // [v0.97.0] dmg → pkg. 사람이 받는 맥 설치파일은 이제 universal 설치팩(.pkg) 하나뿐이라
+    //   "내 맥이 Apple Silicon인가 Intel인가"를 따질 필요가 없어졌다(electron-builder.yml 참고).
+    //   옛 릴리스에는 .pkg가 없으므로, 못 찾으면 예전 방식(칩별 dmg)으로 한 번 더 찾는다 —
+    //   이 차선책은 "최신 버전을 받을 길이 아예 없어지지 않게" 하려고 있는 것이므로, 옛
+    //   릴리스로 되돌아가는 상황에서도 빈손이 되면 안 된다.
+    const assetList = rel.assets ?? [];
     const wantArm = process.arch === "arm64";
-    const asset = (rel.assets ?? []).find(
-      (a) => a.name.endsWith(".dmg") && (wantArm ? a.name.includes("-arm64") : !a.name.includes("-arm64")),
-    );
+    const asset =
+      assetList.find((a) => a.name.endsWith(".pkg")) ??
+      assetList.find((a) => a.name.endsWith(".dmg") && (wantArm ? a.name.includes("-arm64") : !a.name.includes("-arm64")));
     if (!asset) return;
 
     const dest = join(app.getPath("downloads"), asset.name);

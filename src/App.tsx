@@ -7248,7 +7248,7 @@ ${msg}
           못했을 때만 뜬다(대부분은 위 macSwap 배너로 충분해 이 배너는 안 뜬다). */}
       {macDmg && (
         <div className="update-banner" style={update ? { top: 64 } : undefined}>
-          <span>🍎 맥용 새 버전(v{macDmg.version}) dmg를 받아 놨어요 — {macDmg.fileName}</span>
+          <span>🍎 맥용 새 버전(v{macDmg.version}) 설치팩을 받아 놨어요 — {macDmg.fileName}</span>
           <button className="btn" onClick={() => void window.kyletool.openMacDmg?.()}>
             폴더 열기
           </button>

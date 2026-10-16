@@ -149,18 +149,36 @@ jobs:
       - name: 의존성 설치
         run: npm ci
 
-      - name: 설치파일(dmg+zip, arm64+x64) 빌드(맥 러너에서 처음부터 다시 — 산출물은 작업 간에 공유되지 않음)
+      - name: 설치파일(universal 설치팩 + 칩별 zip) 빌드(맥 러너에서 처음부터 다시 — 산출물은 작업 간에 공유되지 않음)
         run: npm run dist:mac
 
       - name: 애드혹 서명 확인(빌드가 조용히 미서명으로 새어나가지 않았는지)
+        # [v0.97.0] universal 경로 추가 + "하나도 못 찾으면 실패"로 바꿈.
+        #   예전엔 산출물 경로가 바뀌어 앱을 하나도 못 찾아도 for 루프가 0건으로 그냥 통과해서,
+        #   **서명이 빠진 빌드가 조용히 릴리스까지 나갈 수 있었다**(이 단계의 존재 이유가
+        #   무력화되는 구멍). 애플 실리콘에서 미서명 앱은 실행 자체가 거부되므로 꼭 막아야 한다.
         run: |
           set -e
-          for APP in release/mac-arm64/Capri.app release/mac/Capri.app; do
+          FOUND=0
+          for APP in release/mac-universal/Capri.app release/mac-arm64/Capri.app release/mac/Capri.app; do
             if [ -d "$APP" ]; then
               echo "검사: $APP"
               codesign --display --verbose=2 "$APP"
+              FOUND=$((FOUND + 1))
             fi
           done
+          if [ "$FOUND" -eq 0 ]; then
+            echo "::error::서명을 검사할 Capri.app 을 하나도 못 찾았습니다 — 빌드 산출물 경로가 바뀌었는지 확인하세요."
+            exit 1
+          fi
+
+      - name: 올인원 설치팩(.pkg) 생성 확인
+        # 사람이 받는 맥 파일은 이제 이 하나뿐이다. 안 만들어진 채로 릴리스가 나가면
+        # 신규 팀원이 받을 파일이 아예 없어진다 — 그 전에 여기서 멈춘다.
+        run: |
+          set -e
+          ls -1 release/*.pkg
+          echo "✅ 맥 올인원 설치팩 생성 확인"
 
       - name: 릴리스 게시(맥)
         env:
