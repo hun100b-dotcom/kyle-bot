@@ -40,3 +40,9 @@ dist-web/
 
 # Supabase CLI 로컬 캐시(버전 정보 등, 기기마다 다름 — 코드 아님)
 supabase/.temp/
+
+# 실계좌 숫자가 든 로컬 전용 진행 기록 + 키/인증서 파일 (공개 레포 전환 때 추가)
+docs/progress.md
+*.pem
+*.key
+*.p12
