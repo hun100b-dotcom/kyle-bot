@@ -169,6 +169,7 @@ contextBridge.exposeInMainWorld("kyletool", {
   getSyncStatus: () => ipcRenderer.invoke("tool:cloudsync:status"), // [v0.88.0]
   unlockSync: (password) => ipcRenderer.invoke("tool:cloudsync:unlock", password),
   syncPushAll: () => ipcRenderer.invoke("tool:cloudsync:pushAll"),
+  syncAllNow: () => ipcRenderer.invoke("tool:cloudsync:all"), // [v0.98.0] 🔄 전체 동기화(받기→합치기→올리기)
   dismissUnprotected: (symbol) => ipcRenderer.invoke("tool:auto:dismissUnprotected", symbol), // [v0.69.4]
 
   // 연습 모드 전용

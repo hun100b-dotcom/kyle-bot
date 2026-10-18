@@ -1117,6 +1117,8 @@ interface KyletoolBridge {
   /** [v0.88.0] 로그인 비밀번호를 한 번 입력해 동기화 키를 만들고 밀린 기록을 전부 올린다. */
   unlockSync(password: string): Promise<{ ok: boolean; message: string }>;
   syncPushAll(): Promise<{ ok: boolean; message: string }>;
+  /** [v0.98.0] 🔄 전체 동기화 — 클라우드에서 받아 합친 뒤 전부 올린다(변화 없어도). 잠겨 있으면 locked:true. */
+  syncAllNow(): Promise<{ ok: boolean; locked: boolean; busy: boolean; message: string; lines: string[] }>;
   dismissUnprotected(symbol: string): Promise<{ ok: boolean; message: string }>;
 
   mockSetPrice(symbol: string, price: number): Promise<boolean>;

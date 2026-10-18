@@ -250,6 +250,7 @@ export function installKyleTool(): ToolEngine {
     getSyncStatus: () => e.getSyncStatus(), // [v0.88.0]
     unlockSync: (password: string) => e.unlockSync(password),
     syncPushAll: () => e.syncPushAll(),
+    syncAllNow: () => e.syncAllNow(), // [v0.98.0] 🔄 전체 동기화
     dismissUnprotected: async (symbol: string) => e.dismissUnprotected(symbol), // [v0.69.4]
 
     // ── 현황(보유·주문·포지션·근거) ────────────────────────────

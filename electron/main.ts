@@ -614,6 +614,7 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:cloudsync:status", () => e.getSyncStatus());
   ipcMain.handle("tool:cloudsync:unlock", (_ev, password: string) => e.unlockSync(String(password ?? "")));
   ipcMain.handle("tool:cloudsync:pushAll", () => e.syncPushAll());
+  ipcMain.handle("tool:cloudsync:all", () => e.syncAllNow()); // [v0.98.0] 🔄 전체 동기화 버튼
   ipcMain.handle("tool:groupsync:ensure", () => { e.startGroupSyncLoop(); return { ok: true }; });
   e.on("groupSync", (members) => win?.webContents.send("tool:groupSyncEvent", members));
   // [v0.56.0] 그룹 채팅 — 가입 허용목록 전원이 실명으로 함께 쓰는 대화방.

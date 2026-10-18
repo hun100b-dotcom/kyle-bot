@@ -31,6 +31,7 @@ import { reconcileHistoryEntry, enteredAtMsFromId, type HistoryReconcileResult }
 import { buildCycles, analyzeTrades, type TradeCycle, type TradeInsights } from "../lib/trade-analysis"; // [v0.19.0] 매매 사이클 자동추적·분석
 import { toSyncPayload, isSyncPayload, type TradeSyncPayload } from "../lib/trade-sync";
 import { toAutoStateSyncPayload, isAutoStateSyncPayload, mergeAutoHistory, derivePositionsFromHistory, type AutoStateSyncPayload } from "../lib/auto-state-sync"; // [v0.31.0] 자동매매 기록 기기 간 동기화
+import { classifyPullResult } from "../lib/sync-all"; // [v0.98.0] 전체 동기화: 받기 결과 분류(진짜 실패면 올리기 보류)
 import { toSplitsSyncPayload, isSplitsSyncPayload, mergeSplits, type SplitsSyncPayload } from "../lib/splits-sync"; // [v0.61.7] 삼분할 타점 기록 기기 간 동기화
 import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, WICK_MIN_RATIO, DOJI_MAX_AGE_MINUTES, type Candle, type SessionPattern } from "../lib/indicators";
 import { buildAutoReport, type AutoRunRecord, type AutoReport } from "../lib/auto-report"; // [v0.62.1] 자동매매 리포트
@@ -6334,6 +6335,9 @@ export class ToolEngine extends EventEmitter {
     summary: string;
   }> {
     const token = await this.ensureAccessToken();
+    // [v0.98.0] 화면의 동기화 띠가 1분마다 이 함수를 부른다 — 폰(웹)처럼 로그인을 '복원'만 한 세션은 로그인 순간의 시작 경로를 안 타서
+    //   자동 동기화 루프가 한 번도 안 켜졌다. 여기서 (이미 돌고 있으면 아무 일 없이) 켜 둔다.
+    if (token) this.startCloudSyncLoop();
     const chans: Array<{ key: "trades" | "autoState" | "splits"; table: string; label: string }> = [
       { key: "autoState", table: "capri_auto_state", label: "자동매매 기록" },
       { key: "trades", table: "capri_trades", label: "체결 이력(리포트·분석)" },
@@ -6380,7 +6384,91 @@ export class ToolEngine extends EventEmitter {
     return { ok: pushed.ok, message: pushed.ok ? `잠금을 풀고 전부 올렸습니다 — ${pushed.message}` : `잠금은 풀렸지만 일부 올리기에 실패했습니다 — ${pushed.message}` };
   }
 
-  /** 주기 점검(5분): 키가 있으면 바뀐 채널을 올리고, 마지막 성공이 오래됐으면(1시간) 변화가 없어도 다시 올린다. 키가 없으면 하루 한 번 저널·알림으로 알린다. */
+  /**
+   * [v0.98.0 — 오너 지시 "윈도우·폰·맥 기록이 연동이 안 된다. 기본은 자동, 필요시 수동 '전체 동기화' 버튼"]
+   *   세 채널(체결 이력·자동매매 기록·삼분할 기록)을 "먼저 받아서 합친 뒤 → 올리는" 순서로 맞춘다.
+   *
+   * [왜 '받기 → 올리기' 순서인가]
+   *   예전엔 올리기만 주기로 돌았다. 올리기는 클라우드 한 줄을 이 기기의 기록으로 통째로 덮어쓴다 —
+   *   맥이 윈도우 기록을 한 번도 못 받은 채 올리면 윈도우가 올려 둔 기록이 사라질 수 있었다(마지막에 올린 기기가 이기는 구조).
+   *   이제는 올리기 직전에 반드시 받아서 합치므로(합집합) 어느 기기가 먼저 올려도 서로의 기록이 보존된다.
+   *
+   * [안전장치]
+   *   · 받기가 '진짜 실패'(복호화 실패·네트워크 오류)면 그 채널은 올리지 않는다 — 모른 채 덮어쓰는 사고 방지.
+   *     (클라우드에 아직 아무것도 없는 '빈 채널'은 정상이라 그대로 올린다.)
+   *   · 자동매매가 켜져 있는 기기는 "지금 감시 중" 목록을 다시 만들지 않는다(syncPullAutoState 안의 가드) — 실거래 중인 포지션을 건드리지 않는다.
+   *   · force=false(자동)면 바뀐 채널만 올리고, force=true(수동 버튼)면 변화가 없어도 전부 올린다.
+   */
+  private async syncChannels(force: boolean): Promise<Array<{ key: "trades" | "autoState" | "splits"; label: string; added: number; pulled: "ok" | "empty" | "fail"; pushed: "ok" | "skip" | "fail" | "held"; detail: string }>> {
+    const now = Date.now();
+    const stale = (c: "trades" | "autoState" | "splits") => now - (this.cloudSync[c].lastOkMs ?? 0) > 3_600_000;
+    const defs = [
+      { key: "trades" as const, label: "체결 이력", count: () => this.savedFills.length, pull: () => this.syncPullTrades(), push: () => this.syncPushTrades(), fp: () => this.fillsFingerprint() },
+      { key: "autoState" as const, label: "자동매매 기록", count: () => this.autoTradeHistory.length, pull: () => this.syncPullAutoState(), push: () => this.syncPushAutoState(), fp: () => this.historyFingerprint() },
+      { key: "splits" as const, label: "삼분할 기록", count: () => this.splits.length, pull: () => this.syncPullSplits(), push: () => this.syncPushSplits(), fp: () => String(this.splits.length) },
+    ];
+    const out: Array<{ key: "trades" | "autoState" | "splits"; label: string; added: number; pulled: "ok" | "empty" | "fail"; pushed: "ok" | "skip" | "fail" | "held"; detail: string }> = [];
+    for (const d of defs) {
+      const before = d.count();
+      let pr: { ok: boolean; message: string };
+      try {
+        pr = await d.pull();
+      } catch (e) {
+        pr = { ok: false, message: `받기 실패: ${e instanceof Error ? e.message : String(e)}` };
+      }
+      const pulled = classifyPullResult(pr);
+      const added = Math.max(0, d.count() - before);
+      let pushed: "ok" | "skip" | "fail" | "held" = "skip";
+      let detail = pulled === "fail" ? pr.message : "";
+      if (pulled === "fail") {
+        pushed = "held"; // 받지 못한 채 올리면 클라우드의 다른 기기 기록을 덮어쓸 수 있다 → 보류
+      } else if (d.count() > 0 && (force || this.cloudSync[d.key].lastFingerprint !== d.fp() || stale(d.key))) {
+        try {
+          const x = await d.push();
+          pushed = x.ok ? "ok" : "fail";
+          if (!x.ok) detail = x.message;
+        } catch (e) {
+          pushed = "fail";
+          detail = e instanceof Error ? e.message : String(e);
+        }
+      }
+      out.push({ key: d.key, label: d.label, added, pulled, pushed, detail });
+    }
+    return out;
+  }
+
+  /**
+   * [v0.98.0] "🔄 전체 동기화" 수동 버튼의 본체 — 받기(합치기) → 올리기를 지금 즉시, 변화 유무와 상관없이 전부 실행한다.
+   *   자동(5분 주기)과 같은 로직(syncChannels)을 쓰되 force=true. 잠겨 있으면(구글 로그인·재시작 등 데이터 키 없음)
+   *   암호화 기록은 건드릴 수 없으므로 평문 안전망(그룹 공유 기록)만 합치고, 비밀번호 입력이 필요하다고 알린다.
+   */
+  async syncAllNow(): Promise<{ ok: boolean; locked: boolean; busy: boolean; message: string; lines: string[] }> {
+    if (this.cloudSyncBusy) return { ok: false, locked: false, busy: true, message: "이미 동기화가 진행 중입니다. 잠시 후 다시 눌러 주세요.", lines: [] };
+    this.cloudSyncBusy = true;
+    try {
+      const token = await this.ensureAccessToken();
+      if (!token) return { ok: false, locked: false, busy: false, message: "먼저 로그인하세요.", lines: [] };
+      if (!this.syncKeyReady()) {
+        const added = await this.mergeOwnGroupHistory().catch(() => 0);
+        return {
+          ok: false,
+          locked: true,
+          busy: false,
+          message: `🔒 동기화 키가 없어 암호화 기록(체결·삼분할 등)은 맞추지 못했습니다. 로그인 비밀번호를 한 번 입력해 주세요.${added > 0 ? ` (자동매매 기록은 그룹 공유본에서 ${added}건 보강했습니다.)` : ""}`,
+          lines: [],
+        };
+      }
+      const rep = await this.syncChannels(true);
+      void this.syncPushGroupTrades().catch(() => undefined); // 그룹 공유(평문)도 함께 최신으로
+      const lines = rep.map((r) => `${r.label}: 받기 ${r.pulled === "ok" ? `✓ (+${r.added}건)` : r.pulled === "empty" ? "(클라우드에 아직 없음)" : "✗"} · 올리기 ${r.pushed === "ok" ? "✓" : r.pushed === "skip" ? "(올릴 것 없음)" : r.pushed === "held" ? "보류(받기 실패)" : "✗"}${r.detail ? ` — ${r.detail}` : ""}`);
+      const bad = rep.some((r) => r.pulled === "fail" || r.pushed === "fail" || r.pushed === "held");
+      return { ok: !bad, locked: false, busy: false, message: bad ? "⚠️ 일부 채널이 맞춰지지 않았습니다." : "✅ 전체 동기화 완료 — 이 기기의 기록과 클라우드가 같아졌습니다(다른 기기는 몇 분 안에 자동 반영).", lines };
+    } finally {
+      this.cloudSyncBusy = false;
+    }
+  }
+
+  /** 주기 점검(5분): 키가 있으면 [받아서 합치기 → 바뀐 채널 올리기]. 마지막 성공이 오래됐으면(1시간) 변화가 없어도 다시 올린다. 키가 없으면 하루 한 번 저널·알림으로 알린다. */
   private async cloudSyncTick(): Promise<void> {
     if (this.cloudSyncBusy) return;
     this.cloudSyncBusy = true;
@@ -6393,11 +6481,8 @@ export class ToolEngine extends EventEmitter {
         }
         return;
       }
-      const now = Date.now();
-      const stale = (c: "trades" | "autoState" | "splits") => now - (this.cloudSync[c].lastOkMs ?? 0) > 3_600_000;
-      if (this.savedFills.length > 0 && (this.cloudSync.trades.lastFingerprint !== this.fillsFingerprint() || stale("trades"))) await this.syncPushTrades().catch(() => undefined);
-      if (this.autoTradeHistory.length > 0 && (this.cloudSync.autoState.lastFingerprint !== this.historyFingerprint() || stale("autoState"))) await this.syncPushAutoState().catch(() => undefined);
-      if (this.splits.length > 0 && (this.cloudSync.splits.lastFingerprint !== String(this.splits.length) || stale("splits"))) await this.syncPushSplits().catch(() => undefined);
+      // [v0.98.0] 예전엔 여기서 올리기만 했다(받기는 로그인 순간 1회뿐) → 다른 기기의 새 기록이 영영 안 들어왔다. 이제 매 주기 받아서 합친 뒤 올린다.
+      await this.syncChannels(false);
     } finally {
       this.cloudSyncBusy = false;
     }
@@ -6632,8 +6717,12 @@ export class ToolEngine extends EventEmitter {
       // [핵심] "지금 감시 중" 목록도 병합된 기록에서 다시 만든다 — 이 기기가 한 번도 진입시킨
       //   적 없는 포지션이라도, 다른 기기가 올려 둔 기록에 conditionalOrderId/buyOrderId가
       //   있으면 이 기기도 그 번호로 실제 체결·발동 여부를 재확인할 수 있게 된다.
-      this.autoTradePositions = derivePositionsFromHistory(this.autoTradeHistory);
-      this.saveAutoPositions();
+      //   [v0.98.0] 단, 이 기기에서 자동매매가 실제로 켜져 있으면 다시 만들지 않는다 — 이제 이 함수가 5분마다 자동으로도 불리는데,
+      //   실거래 중인 기기의 감시 목록을 기록으로 덮어쓰면 보호주문 관리가 흔들린다(mergeOwnGroupHistory와 같은 원칙).
+      if (!this.autoTradeEnabled) {
+        this.autoTradePositions = derivePositionsFromHistory(this.autoTradeHistory);
+        this.saveAutoPositions();
+      }
       const added = this.autoTradeHistory.length - before;
       return {
         ok: true,
