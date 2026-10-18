@@ -70,7 +70,7 @@ function fakeLab(over: Partial<LabApi> = {}, mirror = false): LabApi {
 describe("[v0.65.0] 매매연구소 화면 렌더링", () => {
   it("신호기록 현황: 상태·설정·깔때기·규칙 설명·내보내기가 나온다", () => {
     const html = renderToString(<LabLiveTab lab={fakeLab()} />);
-    expect(html).toContain("신호 기록 모드");
+    expect(html).toContain("신호기록 현황"); // [v0.99.0] 탭 제목을 실제 탭 이름(TAB_LABEL.labLive)과 통일
     expect(html).toContain("기록 중");
     expect(html).toContain("거래량 순위 몇 위까지 탐색");
     expect(html).toContain("신호 깔때기");

@@ -154,7 +154,10 @@ export default function TodayReport({
                   <b>집 PC에 연결된 상태로 이 화면을 한 번만 열면</b> 그동안의 매매가 이 기기에 저장되고,
                   그 뒤로는 <b>회사에서도·이동 중에도</b> 연결 없이 볼 수 있어요.
                   <br />
-                  (연결하는 법: PC의 Capri에서 <b>설정 → 📱 폰에서 쓰기</b>를 켜고, 폰으로 <b>QR을 찍으면</b> 끝)
+                  {/* [v0.99.0 긴급 수정] "설정 → 📱 폰에서 쓰기"(QR)는 v0.91.0에 삭제된 메뉴다 —
+                      지금은 폰 브라우저에서 PC와 같은 계정으로 웹앱에 로그인하면 끝(Tutorial.tsx
+                      "📱 폰" 설명과 동일 문구로 통일). */}
+                  (연결하는 법: 폰 브라우저에서 PC와 <b>같은 계정으로 로그인</b>하면 끝)
                 </p>
               </details>
             </>
@@ -174,7 +177,7 @@ export default function TodayReport({
             </>
           )}
           <button className="mini" onClick={onRefresh} disabled={busy}>
-            ↻ 새로고침
+            🔄 새로고침
           </button>
         </section>
       </main>
@@ -219,7 +222,7 @@ export default function TodayReport({
           {pnl == null && <span className="hint"> · 수량이 안 남은 옛 기록이라 금액은 생략(수익률만)</span>}
         </div>
         <button className="mini report-refresh" onClick={onRefresh} disabled={busy}>
-          ↻ 새로고침
+          🔄 새로고침
         </button>
       </section>
 
@@ -227,11 +230,11 @@ export default function TodayReport({
       <section className="card wide report-badges">
         <div className="report-badge win">
           <div className="rb-num">{data.tpCount}</div>
-          <div className="rb-label">이익 매도</div>
+          <div className="rb-label">익절</div>
         </div>
         <div className="report-badge loss">
           <div className="rb-num">{data.slCount}</div>
-          <div className="rb-label">손실 매도</div>
+          <div className="rb-label">손절</div>
         </div>
         {data.manualCount > 0 && (
           <div className="report-badge">

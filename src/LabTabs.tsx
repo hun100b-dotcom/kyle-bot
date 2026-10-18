@@ -152,7 +152,9 @@ export function LabLiveTab({ lab }: { lab: LabApi }) {
     <main className="grid">
       <section className="card wide">
         <div className="rs-title">
-          <h2>🔬 신호 기록 모드 <span className="hint">(주문 없음 · 읽기 전용 연구)</span></h2>
+          {/* [v0.99.0] 제목이 실제 탭 이름(App.tsx TAB_LABEL.labLive)·이 파일의 다른 자기참조
+              문구(57·463행 "[신호기록 현황]")와 달리 "신호 기록 모드"로 따로 불리고 있었다 — 통일. */}
+          <h2>🔬 신호기록 현황 <span className="hint">(주문 없음 · 읽기 전용 연구)</span></h2>
           <GuideButton onClick={guide.show} />
         </div>
         <details className="explain">

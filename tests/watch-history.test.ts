@@ -83,8 +83,8 @@ describe("summarizeMissReasons — 탈락 사유 문장 생성", () => {
 
   it("구름 필터도 같은 원칙(꺼지면 집계 제외, 켜지면 집계)", () => {
     const r = mkResult({ status: "none", aboveCloud: false });
-    expect(summarizeMissReasons(r, { ...baseRun, cloudEnabled: false })).not.toContain("이치모쿠 구름 아래/속");
-    expect(summarizeMissReasons(r, baseRun)).toContain("이치모쿠 구름 아래/속");
+    expect(summarizeMissReasons(r, { ...baseRun, cloudEnabled: false })).not.toContain("일목균형표 구름 아래/속");
+    expect(summarizeMissReasons(r, baseRun)).toContain("일목균형표 구름 아래/속");
   });
 
   it("도지 패턴 필터는 우선순위 순으로 하나만 낸다(firstDoji가 false면 그다음은 안 봄)", () => {

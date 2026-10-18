@@ -37,7 +37,7 @@ import { summarizeAutoHistory, summarizeGroupHistory, summarizeByCriteria, autoH
 // [v0.30.0] 자동매매 그룹에 "자동매매기록"(autoHistory) 서브탭 신설 — 오너 요청: 자동매매가 낸
 //   매매의 전체 이력(영속 로그)을 따로 볼 수 있게.
 // [v0.33.0] 자동매매 그룹에 "스크리닝 기준"(screenCriteria) 서브탭 신설 — 오너 요청: 스크리닝
-//   조건들의 활성/비활성·수치를 전부 메뉴얼로 조절하고, 조건별 설명도 펼쳐 볼 수 있게.
+//   조건들의 활성/비활성·수치를 전부 매뉴얼로 조절하고, 조건별 설명도 펼쳐 볼 수 있게.
 // [v0.33.0] 자동매매 그룹에 "매매연구"(research) 서브탭 신설 — 오너 요청: 자동매매기록을 취합해
 //   승률·종목별/시간대별 성적 같은 매매연구를 할 수 있게.
 // [v0.56.0] "그룹원 관리"(groupManage) 탭 신설 — 예전엔 [설정] 안에 가입 승인·이메일 직접 등록이
@@ -49,7 +49,7 @@ type TabId = (typeof ALL_TABS)[number];
 
 /** [v0.27.0] 상단 1단 — 매매방식·성격으로 묶은 그룹. 그룹 버튼을 누르면 하위 탭(2단)이 펼쳐진다. */
 type TopGroupId = "manual" | "auto" | "lab" | "status" | "settings";
-const TOP_GROUP_LABEL: Record<TopGroupId, string> = { manual: "메뉴얼", auto: "🤖 자동매매", lab: "🔬 매매연구소", status: "현황", settings: "설정" };
+const TOP_GROUP_LABEL: Record<TopGroupId, string> = { manual: "매뉴얼", auto: "🤖 자동매매", lab: "🔬 매매연구소", status: "현황", settings: "설정" };
 /** 그룹 순서(드래그로 바뀔 수 있는 기본값) + 그룹별 하위 탭 목록(이 순서로 서브탭이 뜬다). */
 const GROUP_CHILDREN: Record<TopGroupId, TabId[]> = {
   manual: ["calc", "screener", "splits"],
@@ -110,7 +110,7 @@ const TECH_LABEL: Record<string, string> = {
 
 /** [v0.30.0] "자동매매기록" 탭의 상태 배지 라벨. */
 const AUTO_HIST_STATUS_LABEL: Record<AutoTradeHistoryEntry["status"], string> = {
-  watching: "매수 체결 대기중",
+  watching: "매수 체결 대기 중",
   active: "보유 중(익절·손절 등록됨)",
   closed_win: "🟢 익절 종료",
   closed_loss: "🔴 손절 종료",
@@ -252,12 +252,12 @@ function fmtTime(iso: string): string {
 
 /** 일반주문 상태(우리 표준 소문자)를 한국어로. */
 function orderStatusKo(std: string, raw: string | null): string {
-  const map: Record<string, string> = { submitted: "대기", partial: "일부체결", filled: "체결", cancelled: "취소·만료", failed: "거부", unknown: raw ?? "알수없음" };
+  const map: Record<string, string> = { submitted: "대기", partial: "일부체결", filled: "체결", cancelled: "취소·만료", failed: "거부", unknown: raw ?? "알 수 없음" };
   return map[std] ?? (raw ?? std);
 }
 /** 조건주문 그룹 상태 한국어. */
 function condStatusKo(st: string | null): string {
-  return st === "WATCHING" ? "감시중" : st === "COMPLETED" ? "완료" : (st ?? "—");
+  return st === "WATCHING" ? "감시 중" : st === "COMPLETED" ? "완료" : (st ?? "—");
 }
 /** 조건주문 종류(OTO/OCO)를 초보용 한국어 라벨로. 영어 약어를 화면에 그대로 노출하지 않기 위함. */
 function condTypeKo(type: string | null): string {
@@ -265,7 +265,7 @@ function condTypeKo(type: string | null): string {
 }
 /** 조건주문 다리(leg) 상태 한국어 + 배지 색 클래스. */
 function legStatusKo(st: string | null): string {
-  return st === "WATCHING" ? "감시중" : st === "HOLDING" ? "대기" : st === "COMPLETED" ? "완료" : (st ?? "—");
+  return st === "WATCHING" ? "감시 중" : st === "HOLDING" ? "대기" : st === "COMPLETED" ? "완료" : (st ?? "—");
 }
 function legBadge(st: string | null): string {
   return st === "WATCHING" ? "st-submitted" : st === "COMPLETED" ? "st-filled" : "st-hold";
@@ -456,7 +456,7 @@ function ScreenEvidenceView({
       <div className="evid-filters">
         {chip(ev.filters.priceBand, "현재가 $1~9")}
         {chip(ev.filters.aboveEma, "현재가>EMA200", "aboveEma")}
-        {chip(ev.filters.aboveCloud, "현재가>구름top", "aboveCloud")}
+        {chip(ev.filters.aboveCloud, "현재가>구름 위쪽", "aboveCloud")}
         {chip(ev.filters.firstDoji, "최고점 후 첫 음봉 도지")}
         {chip(ev.filters.bothWicks, "위·아래 꼬리 둘 다(망치형 아님)")}
         {chip(ev.filters.recentDoji, "도지 발생 20분 이내", "recentDoji")}
@@ -611,7 +611,7 @@ function ScreenCandleChart({ chart }: { chart: ScreenChart }) {
           <span className="chart-chip"><span className="swatch" style={{ background: "var(--chart-ref-1)" }} />EMA200 ${chart.ema200.toFixed(2)}</span>
         )}
         {chart.cloudTop != null && (
-          <span className="chart-chip"><span className="swatch" style={{ background: "var(--chart-ref-2)" }} />구름top ${chart.cloudTop.toFixed(2)}</span>
+          <span className="chart-chip"><span className="swatch" style={{ background: "var(--chart-ref-2)" }} />구름 위쪽 ${chart.cloudTop.toFixed(2)}</span>
         )}
         {chart.dojiTime && <span className="chart-chip">◆ 도지 {chart.dojiTime}</span>}
         {chart.nextTime && <span className="chart-chip">▸ 다음봉 {chart.nextTime}</span>}
@@ -649,7 +649,7 @@ function App() {
   // [v0.27.0] 이제 드래그로 순서를 바꾸는 건 '그룹'(4개) — 리프 탭은 그룹 안에서 고정 순서.
   const { order: groupOrder, dragProps, isDragging } = useTabOrder(TOP_GROUPS);
   // [v0.95.0 — 오너 요청] 하위 탭(2단)도 드래그로 순서 변경. 그룹마다 하위 탭 구성이 전부 달라서
-  //   (메뉴얼 3개·자동매매 6개·매매연구소 5개…) 훅을 그룹 수만큼 고정으로 불러 두고(React 훅은
+  //   (매뉴얼 3개·자동매매 6개·매매연구소 5개…) 훅을 그룹 수만큼 고정으로 불러 두고(React 훅은
   //   조건부로 부를 수 없다) 저장 키도 그룹별로 나눈다 — 안 그러면 그룹끼리 순서가 하나의 저장
   //   공간에서 뒤섞인다. GROUP_CHILDREN[g]는 모듈 스코프 상수라 참조가 매 렌더 고정이라 훅 내부
   //   효과가 불필요하게 다시 돌지 않는다.
@@ -961,7 +961,7 @@ function App() {
     const p = await Notification.requestPermission();
     setNotifyPermission(p);
   }
-  // [v0.28.0] 자동매매용 스크리너 조건(메뉴얼 스크리너와 같은 4항목) + 수동 새로고침 상태.
+  // [v0.28.0] 자동매매용 스크리너 조건(매뉴얼 스크리너와 같은 4항목) + 수동 새로고침 상태.
   const [autoScanForm, setAutoScanForm] = useState<{ scanCount: string; priceMin: string; priceMax: string }>({
     scanCount: "60",
     priceMin: "1",
@@ -1446,8 +1446,8 @@ function App() {
       setHeldStates((prev) => (prev[state.symbol] ? { ...prev, [state.symbol]: state } : prev));
     });
     // [v0.6.0] 스크리너 진행률 실시간 표시
-    // [v0.28.0] 이 이벤트는 스캔이 메뉴얼 버튼이든 자동매매 5분 사이클이든 상관없이 온다 —
-    //   두 화면(메뉴얼 스크리너·자동 스크리너) 모두 같은 진행률을 각자 보여줄 수 있게 둘 다 갱신.
+    // [v0.28.0] 이 이벤트는 스캔이 매뉴얼 버튼이든 자동매매 5분 사이클이든 상관없이 온다 —
+    //   두 화면(매뉴얼 스크리너·자동 스크리너) 모두 같은 진행률을 각자 보여줄 수 있게 둘 다 갱신.
     const offScr = window.kyletool.onScreenerProgress?.((p) => {
       setScreenProg(p);
       setAutoScanProg(p);
@@ -1863,7 +1863,7 @@ function App() {
     setCalcErr("");
     setResult(null);
     if (tech === "candle" && !candleYang) {
-      if (!silent) setCalcErr("캔들 기법은 '전봉이 양봉'일 때만 씁니다. 확인 체크를 해 주세요.");
+      if (!silent) setCalcErr("캔들 기법은 '전봉이 양봉'일 때만 씁니다. 위 확인란에 체크해 주세요.");
       return;
     }
     // [입력 검증] 계산 시점에만 숫자로 바꾸고, 비었거나 이상하면 한국어로 안내한다.
@@ -2416,7 +2416,7 @@ ${msg}
     }
   }
 
-  /** [v0.43.0] 진행 중인 스크리닝을 취소한다 — [메뉴얼 → 스크리너] 수동 스캔이든, [🤖 자동매매 →
+  /** [v0.43.0] 진행 중인 스크리닝을 취소한다 — [매뉴얼 → 스크리너] 수동 스캔이든, [🤖 자동매매 →
    *  자동 스크리너] 화면에 보이는 자동 사이클(또는 그 수동 새로고침)의 스캔이든 상관없이 어차피
    *  엔진은 한 번에 하나만 스캔하므로 공용 버튼 하나로 처리한다. */
   async function doCancelScan() {
@@ -2451,7 +2451,7 @@ ${msg}
     // ① 하드 게이트(가격대·EMA·구름) 중 놓친 것 — 꺼진 조건은 애초에 탈락 원인이 될 수 없다.
     if (!r.priceInBand) reasons.push(`가격대 벗어남 (현재가 ${r.price != null ? `$${r.price.toFixed(2)}` : "—"})`);
     if (run.emaTrendEnabled && !r.aboveEma) reasons.push("EMA200 아래");
-    if (run.cloudEnabled && !r.aboveCloud) reasons.push("이치모쿠 구름 아래/속");
+    if (run.cloudEnabled && !r.aboveCloud) reasons.push("일목균형표 구름 아래/속");
     // "넘은 하드게이트 수"도 꺼진 조건은 항상 통과로 친다(어차피 안 막으므로) — 정렬(근접순)에 쓰임.
     const passed =
       (r.priceInBand ? 1 : 0) + (!run.emaTrendEnabled || r.aboveEma ? 1 : 0) + (!run.cloudEnabled || r.aboveCloud ? 1 : 0);
@@ -2502,7 +2502,7 @@ ${msg}
       if (r.status !== "none") continue;
       if (!r.priceInBand) bump("가격대 벗어남");
       if (run.emaTrendEnabled && !r.aboveEma) bump("EMA200 아래");
-      if (run.cloudEnabled && !r.aboveCloud) bump("이치모쿠 구름 아래/속");
+      if (run.cloudEnabled && !r.aboveCloud) bump("일목균형표 구름 아래/속");
       if (r.evidence) {
         const f = r.evidence.filters;
         if (!f.firstDoji) bump("최고점 이후 음봉 도지 없음");
@@ -3418,12 +3418,12 @@ ${msg}
             <span className="badge">
               {SESSION_LABEL[status.session]}
               <span className="wide-only"> · 3개 장 모두 주문 가능</span>
-              {status.earlyClose && ` · ⚠ 조기폐장(${status.earlyClose})`}
+              {status.earlyClose && ` · ⚠️ 조기폐장(${status.earlyClose})`}
             </span>
           )}
           {status.orderFrozen && (
             <span className="badge badge-dry">
-              ⚠ 마감 1분 전<span className="wide-only">: 지금은 주문 정정·취소가 안 돼요</span>
+              ⚠️ 마감 1분 전<span className="wide-only">: 지금은 주문 정정·취소가 안 돼요</span>
             </span>
           )}
           {/* [v0.59.0] PC 생존 신호 — "항상 표시"(오너 지시). PC 꺼진 줄 모르고 원격 버튼을
@@ -3554,7 +3554,7 @@ ${msg}
         const idx = tickerIdx % positions.length;
         const p = positions[idx];
         const hRow = autoPosHold.find((h) => h.symbol === p.symbol);
-        const statusLabel = p.status === "active" ? "익절/손절 등록됨" : "매수 체결 대기중";
+        const statusLabel = p.status === "active" ? "익절/손절 등록됨" : "매수 체결 대기 중";
         return (
           <div className="ticker-row">
             <div className="topbar-ticker" title="자동매매로 보유 중인 종목을 돌아가며 보여줍니다(수익률·평가손익·상태)">
@@ -3580,7 +3580,7 @@ ${msg}
       })()}
 
       {/* ===== 탭 2단(2컬럼일 땐 숨김 — 각 패널의 드롭다운으로 탭을 고른다) =====
-          [v0.27.0] 1단: 매매방식·성격으로 묶은 그룹 4개(메뉴얼/자동매매/현황/설정) — 드래그로 순서 변경.
+          [v0.27.0] 1단: 매매방식·성격으로 묶은 그룹 4개(매뉴얼/자동매매/현황/설정) — 드래그로 순서 변경.
           2단(서브탭): 지금 tab이 속한 그룹의 하위 탭이 2개 이상일 때만 뜬다(설정처럼 1개면 안 뜸). */}
       {!showTwoCol && (
       <>
@@ -3690,7 +3690,7 @@ ${msg}
                 : cap && <span className="hint"> · 매수비율 {cap.sessionPct}%</span>}
             </div>
             <button className="mini" disabled={busy} onClick={() => autoLoad(committedSymbol)} title="예수금·시세·수량 다시 불러오기">
-              ↻ 새로고침
+              🔄 새로고침
             </button>
           </div>
 
@@ -3720,7 +3720,7 @@ ${msg}
                   )}
                 </div>
               </div>
-              {quoteErr && <p className="danger small">⚠ 시세를 못 불러왔어요: {quoteErr} — [설정 → 토스 연결]에서 키·계좌를 확인하세요</p>}
+              {quoteErr && <p className="danger small">⚠️ 시세를 못 불러왔어요: {quoteErr} — [설정 → 토스 연결]에서 키·계좌를 확인하세요</p>}
               <div className="hint small">
                 환율{" "}
                 {fx
@@ -3756,7 +3756,7 @@ ${msg}
                   </label>
                   <details className="explain">
                     <summary>❓ 1·2·3차 매수가는 어떻게 계산되나요?</summary>
-                    <span className="hint">직전에 <b>마감된 봉의 종가</b>와 <b>EMA200</b>(가격 200개의 평균을 이은 선) 사이를 3등분해 <b>1·2·3차 매수가</b>를 냅니다. (전봉 종가가 EMA200보다 위여야 계산돼요.)</span>
+                    <span className="hint">직전에 <b>마감된 봉의 종가</b>와 <b>EMA200</b>(최근 200개 가격의 평균을 이어 그린 선) 사이를 3등분해 <b>1·2·3차 매수가</b>를 냅니다. (전봉 종가가 EMA200보다 위여야 계산돼요.)</span>
                   </details>
                 </div>
               )}
@@ -3835,10 +3835,10 @@ ${msg}
                     </div>
                   </>
                 ) : (
-                  <span className="hint">종목을 입력하면 매수비율 제안·주문가능·보유 수량이 자동으로 표시됩니다.</span>
+                  <span className="hint">종목을 입력하면 매수비율 제안·주문가능 수량·보유 수량이 자동으로 표시됩니다.</span>
                 )}
               </div>
-              {calcErr && <p className="danger">⚠ {calcErr}</p>}
+              {calcErr && <p className="danger">⚠️ {calcErr}</p>}
               {isMock && (
                 <div className="form-row mock-box">
                   <span className="hint">🎮 연습: 가짜 서버 현재가</span>
@@ -3891,7 +3891,7 @@ ${msg}
                           <td className="order-cell">
                             <button className="mini btn-buy" disabled={status.killSwitch} onClick={() => confirmEntry(lv)} title="이 가격에 사기만 합니다(지정가 = 가격을 정해 두는 주문)">매수만 (지정가)</button>
                             <button className="mini btn-oto" disabled={status.killSwitch} onClick={() => confirmOto(lv)} title="사자마자 익절 주문까지 자동으로 걸립니다. 손절은 안 걸리니 직접 챙기세요.">매수+익절 자동</button>
-                            <button className="mini btn-oco" disabled={status.killSwitch} onClick={() => openOcoEditor(lv)} title="이미 보유 중일 때, 익절과 손절을 동시에 걸어 둡니다(한쪽 체결되면 다른쪽 자동 취소)">익절+손절 걸기</button>
+                            <button className="mini btn-oco" disabled={status.killSwitch} onClick={() => openOcoEditor(lv)} title="이미 보유 중일 때, 익절과 손절을 동시에 걸어 둡니다(한쪽 체결되면 다른 쪽 자동 취소)">익절+손절 걸기</button>
                             <button className="mini btn-bracket" disabled={status.killSwitch} onClick={() => confirmBracket(lv)} title="매수 후 체결이 확인되면 이 프로그램이 자동으로 익절+손절(OCO)까지 걸어 줍니다(최대 15분 감시, 앱이 켜져 있어야 함)">매수+익절+손절 한번에</button>
                           </td>
                         </tr>
@@ -3949,8 +3949,8 @@ ${msg}
               <p className="hint">
                 거래량 많은 종목을 훑어 <b>매수 후보</b>를 찾아 줍니다(ETF·레버리지·인버스는 제외). 아래 조건을 <b>모두</b> 만족하면 후보예요:
                 <br />① 현재가가 <b>$1~$9</b>
-                <br />② 현재가가 <b>EMA200</b>(가격 200개를 이은 평균선) <b>위</b>
-                <br />③ 현재가가 <b>이치모쿠 구름</b>(추세를 보는 띠) <b>위</b>
+                <br />② 현재가가 <b>EMA200</b>(최근 200개 가격의 평균을 이어 그린 선) <b>위</b>
+                <br />③ 현재가가 <b>일목균형표 구름</b>(추세를 보는 띠) <b>위</b>
                 <br />④ 장 시작 뒤 최고점을 찍은 다음, <b>첫 '음봉 도지'</b> — 위·아래 꼬리가 <b>둘 다</b> 있고 몸통이 작은 봉(한쪽 꼬리만 있는 망치형은 제외)
                 <br />⑤ 그 다음 봉도 <b>음봉</b>(내린 봉)
                 <br /><span className="hint small">※ 도지 뒤에 다시 신고가가 나오면 무효. 캔들은 <b>하이킨아시</b>(노이즈를 줄여 추세를 매끈하게 보는 방식, 트레이딩뷰 'HA'와 같음)로 보고, <b>다 마감된 봉만</b> 판정합니다. 스캔에 1~2분 걸려요.</span>
@@ -3982,9 +3982,12 @@ ${msg}
                     onChange={(e) => setPriceMax(e.target.value)} />
                 </label>
               </div>
+              {/* 하한>상한·음수로 잘못 넣어도 화면엔 실제 스캔 범위(0 이상·작은 값~큰 값)로 — 엔진과 동일하게 교정 */}
+              {/* [v0.99.0 긴급 수정] 이 주석이 바로 아래 문장 중간(종목 중 / 현재가 사이)에 있었던 탓에,
+                  JSX가 그 둘을 서로 다른 텍스트로 쪼개 공백을 못 합쳐 "...종목 중현재가..."처럼 붙어서
+                  보였다 — 주석을 문장 밖으로 빼서 고쳤다(실제 렌더링으로 재현·검증 완료). */}
               <p className="hint" style={{ margin: "4px 0 0" }}>
                 거래량 상위 <b>{Math.min(200, Math.max(10, Math.round(toNum(scanCount) ?? 60)))}종목</b> 중
-                {/* 하한>상한·음수로 잘못 넣어도 화면엔 실제 스캔 범위(0 이상·작은 값~큰 값)로 — 엔진과 동일하게 교정 */}
                 현재가 <b>${Math.min(Math.max(0, toNum(priceMin) ?? 1), Math.max(0, toNum(priceMax) ?? 9))}~${Math.max(Math.max(0, toNum(priceMin) ?? 1), Math.max(0, toNum(priceMax) ?? 9))}</b> 범위를 스캔합니다.
                 많이 스캔할수록 오래 걸립니다.
               </p>
@@ -4148,7 +4151,7 @@ ${msg}
           <section className="card wide">
             <div className="split-list-head">
               <h2>내 삼분할 기록</h2>
-              <button className="mini" onClick={() => void refreshSplits()}>↻ 새로고침</button>
+              <button className="mini" onClick={() => void refreshSplits()}>🔄 새로고침</button>
             </div>
             <details className="explain">
               <summary>❓ 이 기록은 무엇인가요?</summary>
@@ -4281,29 +4284,33 @@ ${msg}
                 <b>체결강도</b>는 방금 사고팔린 양을 비교해 <b>지금 어느 쪽 힘이 센지</b> 보는 숫자예요
                 (매수 ÷ 매도 × 100 → <b>100보다 크면 사는 힘, 작으면 파는 힘 우세</b>).
                 <br />✅ <b>매매하면 자동으로 기록됩니다.</b> 여기엔 <b>지금 보유 중인 종목</b>의 체결강도가 저절로 떠요 — 종목을 눌러 자세히 봅니다.
-                <br /><span className="hint small">실시간 값은 <b>집 PC 연결</b>이 있어야 쌓입니다(폰이면 [폰에서 쓰기]). 연결이 없으면 아래에 안내가 떠요(조용히 실패하지 않아요).
+                <br /><span className="hint small">실시간 값은 <b>집 PC 연결</b>이 있어야 쌓입니다(폰이면 PC와 같은 계정으로 웹앱 로그인). 연결이 없으면 아래에 안내가 떠요(조용히 실패하지 않아요).
                 ※ 방향은 추정치예요(토스가 매수/매도를 직접 주지 않아, 오르며 체결=매수·내리며 체결=매도로 추정). 참고용.</span>
               </p>
             </details>
 
             {/* --- 보유 종목 줄: 새로고침 + (있으면) 종목 칩 --- */}
             <div className="str-controls">
-              <button className="mini" onClick={() => void loadHoldingsStrength()} disabled={strLoading}>↻ 새로고침</button>
+              <button className="mini" onClick={() => void loadHoldingsStrength()} disabled={strLoading}>🔄 새로고침</button>
               {strLoading && <span className="hint">보유 종목 불러오는 중…</span>}
               {!strLoading && !strErr && heldSyms.length > 0 && <span className="hint">보유 {heldSyms.length}종목 · 종목을 눌러 자세히</span>}
             </div>
 
             {/* 연결 없음(보유현황 조회 실패) 안내 — 무음 실패 금지 */}
             {strErr && (
-              <div className="note red" style={{ fontSize: 13 }}>
-                ⚠️ 보유 종목을 불러오지 못했어요. <b>집 PC 연결</b>(폰이면 PC에서 [설정 → 📱 폰에서 쓰기])이 켜져 있어야
+              // [v0.99.0 긴급 수정] "note red"는 App.css에 없는 클래스라 경고색이 전혀 안 먹고 있었다 —
+              //   실재하는 경고 스타일(hint small danger)로 교체. "폰에서 쓰기" 메뉴는 v0.91.0에
+              //   삭제되고 "PC와 같은 계정으로 웹앱 로그인" 방식으로 바뀌었는데 안내문이 그대로 남아
+              //   있었던 것도 함께 고쳤다.
+              <div className="hint small danger" style={{ fontSize: 13 }}>
+                ⚠️ 보유 종목을 불러오지 못했어요. <b>집 PC 연결</b>(폰이면 PC와 같은 계정으로 웹앱 로그인)이 되어 있어야
                 보유 종목과 실시간 체결강도가 자동으로 표시됩니다. <button className="mini" onClick={() => void loadHoldingsStrength()}>다시 시도</button>
               </div>
             )}
 
             {/* 연결은 됐는데 보유가 없음 */}
             {!strLoading && !strErr && heldSyms.length === 0 && (
-              <div className="result-empty hint">보유 중인 (미국) 종목이 없어요. 매수하면 그 종목의 체결강도가 여기 자동으로 표시됩니다.</div>
+              <div className="result-empty hint">보유 중인 미국 종목이 없어요. 매수하면 그 종목의 체결강도가 여기 자동으로 표시됩니다.</div>
             )}
 
             {/* 보유 종목 칩(현재 강도값·색 표시). 클릭하면 아래 상세가 그 종목으로 바뀐다. */}
@@ -4326,7 +4333,7 @@ ${msg}
             )}
 
             {strState?.lastError && heldSyms.length > 0 && (
-              <div className="note red" style={{ fontSize: 13 }}>⚠️ {strSym} 조회 오류: {strState.lastError} (연결이 있으면 다음 주기에 다시 시도합니다)</div>
+              <div className="hint small danger" style={{ fontSize: 13 }}>⚠️ {strSym} 조회 오류: {strState.lastError} (연결이 있으면 다음 주기에 다시 시도합니다)</div>
             )}
 
             {/* ===== 선택 종목 상세(현재값·신호·차트·표) — 보유가 있을 때만 ===== */}
@@ -4426,7 +4433,7 @@ ${msg}
           <section className="card wide">
             <div className="split-list-head">
               <h2>매매분석 <span className="hint small">산 뒤 판 것까지 한 묶음으로 자동 정리</span></h2>
-              <button className="mini" disabled={analysisBusy} onClick={() => void loadAnalysis()}>↻ 새로고침</button>
+              <button className="mini" disabled={analysisBusy} onClick={() => void loadAnalysis()}>🔄 새로고침</button>
             </div>
             <details className="explain">
               <summary>❓ 매매분석은 무엇을 보여주나요?</summary>
@@ -4438,7 +4445,7 @@ ${msg}
 
             {analysis?.source === "cache" && <div className="rp-source">💾 저장해 둔 기록으로 보는 중 · 집 PC에 연결되면 최신으로 갱신돼요</div>}
             {analysis?.source === "none" && (
-              <div className="result-empty hint">아직 저장된 매매가 없어요. 집 PC에 연결된 상태(폰이면 [폰에서 쓰기])로 <b>주문현황·리포트</b>를 한 번 열면 체결 내역이 이 기기에 쌓입니다.</div>
+              <div className="result-empty hint">아직 저장된 매매가 없어요. 집 PC에 연결된 상태(폰이면 PC와 같은 계정으로 웹앱 로그인)로 <b>주문현황·리포트</b>를 한 번 열면 체결 내역이 이 기기에 쌓입니다.</div>
             )}
 
             {analysis && analysis.cycles.length > 0 && (() => {
@@ -4449,7 +4456,7 @@ ${msg}
                   {ins.headline && <div className="insight-card">💡 {ins.headline}</div>}
 
                   {/* 요약 KPI */}
-                  <div className="sum-cards" style={{ marginTop: 12 }}>
+                  <div className="sum-cards cols-4" style={{ marginTop: 12 }}>
                     <div className="sum-card"><span className="sum-k">매매 수</span><b className="sum-v">{ins.n}건</b><span className="sum-sub">{ins.wins}승 {ins.losses}패</span></div>
                     <div className={`sum-card ${pnlClass(ins.winRate != null ? ins.winRate - 50 : null)}`}><span className="sum-k">승률</span><b className="sum-v">{ins.winRate != null ? `${ins.winRate}%` : "—"}</b></div>
                     <div className={`sum-card ${pnlClass(ins.totalPnl)}`}><span className="sum-k">총 실현손익</span><b className="sum-v">{ins.totalPnl >= 0 ? "+" : "−"}${Math.abs(ins.totalPnl).toFixed(2)}</b><span className="sum-sub">평균 {ins.avgPct != null ? `${ins.avgPct >= 0 ? "+" : ""}${ins.avgPct}%` : "—"}</span></div>
@@ -4541,7 +4548,7 @@ ${msg}
                 5분마다 스스로 탐색해 <b>합격 종목을 삼분할 '1분할' 타점으로 자동 매수</b>하고, 체결되면 익절·손절까지
                 자동으로 겁니다. <b>이 프로그램이 켜져 있는 동안만</b> 작동하고, 앱을 끄면 자동매매도 함께 멈춥니다
                 (이미 낸 주문·조건주문은 토스에 그대로 남아 있어요 — 토스 서버가 계속 감시합니다).
-                무엇을 스캔했는지는 <b>[🤖 자동매매 → 스크리닝 결과]</b> 탭에서 자세히 볼 수 있어요.
+                무엇을 스캔했는지는 <b>[🤖 자동매매 → 자동 스크리너]</b> 탭에서 자세히 볼 수 있어요.
               </p>
             </details>
 
@@ -4592,7 +4599,7 @@ ${msg}
                 <label>최대 보유 종목 수
                   <input type="text" inputMode="numeric" value={autoForm.maxPositions} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxPositions: e.target.value })} placeholder="3" />
                 </label>
-                <label>최대손실 한도 (시드 대비 %)
+                <label>최대 손실 한도 (시드 대비 %)
                   <input type="text" inputMode="decimal" value={autoForm.maxLossPct} onChange={(e) => isNumericDraft(e.target.value) && setAutoForm({ ...autoForm, maxLossPct: e.target.value })} placeholder="5" />
                 </label>
                 <label>최대 투입 비율 (시드 대비 %, 종목 1개당 배정 비율)
@@ -4603,7 +4610,9 @@ ${msg}
                 </label>
                 {/* [v0.61.8 — 오너 지시 "1타점으로 잡을지 2타점으로 잡을지 설정"] */}
                 <label>진입 타점 (삼분할 몇 분할 가격에 자동 매수할지)
-                  <select value={autoEntryLevel} onChange={(e) => setAutoEntryLevel(Number(e.target.value) === 2 ? 2 : Number(e.target.value) === 1.5 ? 1.5 : 1)}>
+                  {/* [v0.99.0] 옵션 문구가 길어(특히 1.5분할) 전역 select 기본 폭(130px)에선
+                      선택값이 거의 안 보였다 — 전용 className으로 폭을 넓혔다. */}
+                  <select className="select-wide" value={autoEntryLevel} onChange={(e) => setAutoEntryLevel(Number(e.target.value) === 2 ? 2 : Number(e.target.value) === 1.5 ? 1.5 : 1)}>
                     <option value={1}>1분할(얕은 눌림 — 공장값)</option>
                     <option value={1.5}>1.5분할(1분할과 2분할의 한가운데 — 전봉종가에서 EMA200까지 거리의 절반만큼 눌렸을 때)</option>
                     <option value={2}>2분할(더 깊이 눌렸을 때만 — 보수적)</option>
@@ -4611,7 +4620,7 @@ ${msg}
                 </label>
                 {/* [v0.63.0] 방어 전략 */}
                 <label>🛡 손절 방식
-                  <select value={defenseForm.slMode} onChange={(e) => setDefenseForm({ ...defenseForm, slMode: e.target.value === "ema" ? "ema" : "fixed" })}>
+                  <select className="select-wide" value={defenseForm.slMode} onChange={(e) => setDefenseForm({ ...defenseForm, slMode: e.target.value === "ema" ? "ema" : "fixed" })}>
                     <option value="fixed">고정 % (진입가 대비 — 기존 방식)</option>
                     <option value="ema">EMA 기준 (EMA200 아래로 깨지면 손절)</option>
                   </select>
@@ -4709,7 +4718,7 @@ ${msg}
               <details className="explain">
                 <summary>❓ 알림은 무엇을 알려주나요?</summary>
                 <p className="hint small">
-                  화면을 안 보고 있어도 <b>관찰 확정</b>(스크리닝 통과)과 <b>주문 이벤트</b>(진입·체결·
+                  화면을 안 보고 있어도 <b>관찰·확정</b>(스크리닝 통과)과 <b>주문 이벤트</b>(진입·체결·
                   익절/손절·취소/실패)를 이 기기의 알림으로 받을 수 있습니다(이 앱/탭이 켜져 있는
                   동안만 — 토스 자체 매수·매도 알림과는 별개로, 카프리가 자동매매에서 직접 보는
                   내용을 알려줍니다).
@@ -4766,7 +4775,7 @@ ${msg}
                   <p className="hint">
                     이 기기에 저장돼 있어 앱을 껐다 켜거나 업데이트해도 그대로 남아요. 로그인
                     상태면 <b>다른 기기(PC↔폰)와도 자동으로 동기화</b>됩니다(로그인 직후, 그리고
-                    [설정 → ☁️ 계정 → 지금 다시 동기화]로 언제든). 상태(매수 체결 대기중/익절·
+                    [설정 → ☁️ 계정 → 지금 다시 동기화]로 언제든). 상태(매수 체결 대기 중/익절·
                     손절 등록됨)는 20초마다 자동으로도 다시 확인하지만, 지금 바로 보고 싶으면
                     위 버튼을 누르세요. 그래도 실제 주문 여부의 최종 확인은 항상 [현황 → 주문
                     현황]에서 토스와 직접 하세요 — 그 화면은 이 목록과 무관하게 항상 정확합니다.
@@ -4786,7 +4795,7 @@ ${msg}
                           <td>${p.sl}</td>
                           <td>{p.quantity}</td>
                           <td>
-                            {p.status === "active" ? "익절/손절 등록됨" : "매수 체결 대기중"}
+                            {p.status === "active" ? "익절/손절 등록됨" : "매수 체결 대기 중"}
                             {/* [v0.60.0] 상태 확인이 반복 실패하면(원인은 대부분 이미 종료된 주문을
                                 계속 조회하려는 것) 여기 바로 보이게 한다 — "왜 안 없어지지?"에
                                 대한 답을 화면 자체가 준다. */}
@@ -4824,10 +4833,10 @@ ${msg}
 
       {/* ===== 🤖 자동매매 → 자동 스크리너 (v0.27.0 신규, v0.28.0 설정+수동새로고침 추가) =====
           [오너 지시] 자동매매를 켜면 스크리너에서 스크리닝을 진행하고, 그 결과를 여기서 볼 수 있어야
-          한다 — 설정 탭에 컨트롤만 있고 "탐색→진입" 과정이 안 보이던 문제를 고친다. 메뉴얼 스크리너와의
+          한다 — 설정 탭에 컨트롤만 있고 "탐색→진입" 과정이 안 보이던 문제를 고친다. 매뉴얼 스크리너와의
           차별점: 여기서 조절하는 조건은 "자동매매가 실제로 쓰는 조건"이다(자동매매 5분 사이클이 이
           값을 그대로 읽어 감). 진입 관련 액션은 여전히 없다(자동매매가 스스로 판단·실행, 오너는
-          조건만 정하고 지켜보는 구조 — 분리형 스크리너, 수동 진입용 스캔은 [메뉴얼 → 스크리너]에
+          조건만 정하고 지켜보는 구조 — 분리형 스크리너, 수동 진입용 스캔은 [매뉴얼 → 스크리너]에
           따로 있음). */}
       {paneTab === "autoScan" && (
         <main className="grid">
@@ -5125,7 +5134,7 @@ ${msg}
                           이번 스캔에 실제로 적용된 필터 — 가격대 <b>${run.priceMin}~${run.priceMax}</b> ·
                           도지 몸통상한 <b>{Math.round(run.bodyRatio * 100)}%</b> ·
                           EMA{run.emaPeriod} 위 <b>{run.emaTrendEnabled ? "켜짐" : "꺼짐"}</b> ·
-                          이치모쿠 구름 위 <b>{run.cloudEnabled ? "켜짐" : "꺼짐"}</b> ·
+                          일목균형표 구름 위 <b>{run.cloudEnabled ? "켜짐" : "꺼짐"}</b> ·
                           도지 신선도(최대 {run.dojiMaxAgeMinutes}분) <b>{run.dojiMaxAgeEnabled ? "켜짐" : "꺼짐"}</b> ·
                           고점~도지 간격(최대 {run.dojiMaxGapMinutes ?? 30}분) <b>{(run.dojiMaxGapEnabled ?? true) ? "켜짐" : "꺼짐"}</b> ·
                           EMA 이격도(≥{run.emaMinGapPct ?? 6}%) <b>{run.emaMinGapEnabled ? "켜짐" : "꺼짐"}</b> ·
@@ -5185,11 +5194,11 @@ ${msg}
               <summary>❓ 이 화면은 무엇을 보여주나요?</summary>
               <p className="hint">
                 자동 스크리너는 5분마다 결과를 통째로 새로 계산해서, "관찰" 상태였던 종목이 다음 스캔에
-                어떻게 됐는지는 예전엔 화면에서 사라지면 알 방법이 없었어요. 이 탭은 "관찰"로 처음 잡힌
+                화면에서 사라지면 예전엔 그 뒤 어떻게 됐는지 알 방법이 없었어요. 이 탭은 "관찰"로 처음 잡힌
                 순간부터 <b>확정</b>됐는지, <b>탈락</b>했는지(구체적 사유 포함), 아니면{" "}
                 <b>거래량 순위 밖으로 벗어났는지</b>를 끝까지 따라가 기록합니다. 거기서 한 걸음 더 —{" "}
                 <b>확정된 종목이 실제로 매수까지 이어졌는지, 그 매매 성적이 어땠는지</b>까지 연결해서
-                보여줘, 스크리닝 기준(도지 몸통·거래량 배수·EMA 이격도 등)을 완화할지 강화할지 숫자로
+                보여줘서, 스크리닝 기준(도지 몸통·거래량 배수·EMA 이격도 등)을 완화할지 강화할지 숫자로
                 판단할 수 있게 합니다.
               </p>
             </details>
@@ -5348,7 +5357,7 @@ ${msg}
       )}
 
       {/* ===== 🤖 자동매매 → 스크리닝 기준 (v0.33.0 신규) =====
-          [오너 지시 2026-09-28] "스크리닝 기준 조건들의 수치 및 활성/비활성을 모두 메뉴얼로 설정할 수
+          [오너 지시 2026-09-28] "스크리닝 기준 조건들의 수치 및 활성/비활성을 모두 매뉴얼로 설정할 수
           있도록 하고, 각 조건별 코멘트 + 펼치면 상세 설명도 보이게 해라. 가장 중요한 건 활성/비활성·
           수치가 실 스크리닝에 완벽히 연동되는 것" — 여기서 저장한 값은 electron/tool-engine.ts의
           saveAutoScanSettings → buildAutoScanOpts() → scanScreener()로 그대로 이어져(우회 경로 없음),
@@ -5398,15 +5407,17 @@ ${msg}
             </div>
 
             {/* [v0.45.0 — 오너 요청 "매매진행할 장 선택"] 자동매매가 신규 진입을 시도할 세션을
-                직접 고른다. [🤖 자동매매 → 자동매매 현황]의 "시스템 휴무 시간대(05:00~17:00 KST)"
-                와는 별개의 조건 — 둘 다 켜져 있으면 둘 다 통과해야 진입한다. */}
+                직접 고른다. [⚙️ 설정]의 "시스템 휴무 시간대(05:00~17:00 KST)"
+                와는 별개의 조건 — 둘 다 켜져 있으면 둘 다 통과해야 진입한다.
+                [v0.99.0] 바로 아래 안내문과 이 주석이 "[자동매매 현황]의..."라고 잘못 가리키고
+                있었다(실제 위치는 [설정] 탭) — 둘 다 고쳤다. */}
             <div className="crit-card">
               <div className="crit-head"><b>매매진행할 장(세션) 선택</b></div>
               <details className="explain">
                 <summary>❓ 세션 선택은 어떻게 작동하나요?</summary>
                 <p className="hint">
                   자동매매가 <b>어느 장에서만 신규 진입을 시도할지</b> 고릅니다. 기존 포지션 감시(익절/
-                  손절)는 이 설정과 무관하게 항상 계속됩니다. [자동매매 현황]의 "시스템 휴무 시간대
+                  손절)는 이 설정과 무관하게 항상 계속됩니다. [설정]의 "시스템 휴무 시간대
                   (05:00~17:00 KST)"가 켜져 있으면 그 시간대는 여기서 뭘 켜 두든 항상 멈춰요 — 둘은
                   서로 다른 조건이라 <b>동시에 통과해야</b> 진입합니다.
                 </p>
@@ -5578,7 +5589,7 @@ ${msg}
                 </label>
                 <button className="mini" onClick={() => toggleCritDetail("emaGap")}>{openCritDetail.has("emaGap") ? "▾ 자세히" : "▸ 자세히"}</button>
               </div>
-              <p className="hint">전봉 종가가 EMA200보다 이 % 이상 위에 있는 종목만 후보로(카일 제안 6%).</p>
+              <p className="hint">전봉 종가가 EMA200보다 이 % 이상 위에 있는 종목만 후보로(권장 6%).</p>
               {openCritDetail.has("emaGap") && (
                 <p className="hint crit-detail">
                   EMA200에 바짝 붙어 있는 종목은 조금만 밀려도 EMA 아래로 떨어지기 쉬워요. 이격도는 삼분할 계산과 같은
@@ -5729,7 +5740,7 @@ ${msg}
             </details>
             <div className="form-row">
               <button className="mini" disabled={autoHistoryBusy} onClick={() => void loadAutoHistory()}>
-                {autoHistoryBusy ? "불러오는 중…" : "↻ 새로고침"}
+                {autoHistoryBusy ? "불러오는 중…" : "🔄 새로고침"}
               </button>
               {/* [v0.64.0] 웹(토스 중계 없음)에서는 숨김 — 대조할 방법 자체가 없다. */}
               {canReconcileLive && (
@@ -5898,7 +5909,7 @@ ${msg}
             {researchView === "mine" && (
               <div className="form-row">
                 <button className="mini" disabled={autoHistoryBusy} onClick={() => void loadAutoHistory()}>
-                  {autoHistoryBusy ? "불러오는 중…" : "↻ 새로고침"}
+                  {autoHistoryBusy ? "불러오는 중…" : "🔄 새로고침"}
                 </button>
               </div>
             )}
@@ -5930,11 +5941,11 @@ ${msg}
                   </button>
                   {rawSource === "mine" ? (
                     <button className="mini" disabled={autoHistoryBusy} onClick={() => void loadAutoHistory()}>
-                      {autoHistoryBusy ? "불러오는 중…" : "↻ 새로고침"}
+                      {autoHistoryBusy ? "불러오는 중…" : "🔄 새로고침"}
                     </button>
                   ) : (
                     <button className="mini" disabled={groupResearchBusy} onClick={() => void loadGroupResearch()}>
-                      {groupResearchBusy ? "불러오는 중…" : "↻ 그룹 데이터 새로고침"}
+                      {groupResearchBusy ? "불러오는 중…" : "🔄 그룹 데이터 새로고침"}
                     </button>
                   )}
                 </div>
@@ -6040,7 +6051,7 @@ ${msg}
               <>
                 <div className="form-row">
                   <button className="mini" disabled={groupResearchBusy} onClick={() => void loadGroupResearch()}>
-                    {groupResearchBusy ? "불러오는 중…" : "↻ 그룹 데이터 새로고침"}
+                    {groupResearchBusy ? "불러오는 중…" : "🔄 그룹 데이터 새로고침"}
                   </button>
                   {groupResearchMsg && <span className={groupResearchMsg.startsWith("⚠") ? "err" : "hint"}>{groupResearchMsg}</span>}
                 </div>
@@ -6056,7 +6067,7 @@ ${msg}
                     <>
                       <p className="hint">
                         그룹 {g.memberCount}명의 기록을 실명(로그인 이메일) 그대로 모았습니다 — 비공개 그룹
-                        전원 동의 전제, 비식별화하지 않습니다.
+                        전원이 동의했다는 전제로, 비식별화하지 않습니다.
                       </p>
                       {g.headline && (
                         <p className="hint" style={{ fontSize: 14 }}>💡 <b>{g.headline}</b></p>
@@ -6195,7 +6206,7 @@ ${msg}
         <main className="statusmain">
           {/* --- 공통 도구줄: 새로고침 · 자동갱신 · 상태(미체결/체결) --- */}
           <div className="statusbar">
-            <button className="mini" disabled={posBusy || !canReconcileLive} onClick={() => refreshStatusTab()}>↻ 새로고침</button>
+            <button className="mini" disabled={posBusy || !canReconcileLive} onClick={() => refreshStatusTab()}>🔄 새로고침</button>
             <label className="inline-check" title={canReconcileLive ? undefined : "이 세션은 토스에 직접 연결돼 있지 않아(QR 중계 미연결) 이 탭의 실시간 조회를 쓸 수 없습니다."}>
               <input type="checkbox" checked={autoRefresh} disabled={!canReconcileLive} onChange={(e) => setAutoRefresh(e.target.checked)} /> 30초마다 자동
             </label>
@@ -6242,7 +6253,7 @@ ${msg}
           <section className="card wide">
             <h2>보유 현황 <span className="hint small">{hold?.items.length ? `${hold.items.length}종목` : ""}</span></h2>
             {!hold || hold.items.length === 0 ? (
-              <p className="hint">보유 종목이 없거나 아직 조회 전입니다. [↻ 새로고침]을 눌러 주세요.</p>
+              <p className="hint">보유 종목이 없거나 아직 조회 전입니다. [🔄 새로고침]을 눌러 주세요.</p>
             ) : (
               <div className="hold-list">
                 {hold.items.map((h) => {
@@ -6252,11 +6263,13 @@ ${msg}
                       {/* 1행: 종목명 ... 손익%(큼) */}
                       <div className="hcard-r1">
                         <div className="hcard-name min0">
-                          <b className="hcard-title">
-                            {h.name ?? h.symbol}
-                            {/* [v0.30.0] 오너 요청 — 자동매매로 진입된 종목은 접힌 상태에서도 바로 식별되게 */}
-                            {h.rationale?.source === "auto" && <span className="badge-auto" title="자동매매가 낸 주문입니다">🤖 자동</span>}
-                          </b>
+                          {/* [v0.99.0 긴급 수정] 배지가 종목명과 같은 hcard-title(ellipsis로 잘리는
+                              칸) 안에 있으면, 종목명이 길 때 배지까지 함께 잘려 안 보일 수 있었다 —
+                              "접힌 상태에서도 바로 식별되게"(바로 아래 v0.30.0 의도)가 깨지는 지점이라,
+                              배지를 title 칸 밖(형제 요소)으로 분리해 항상 보이게 했다. */}
+                          <b className="hcard-title">{h.name ?? h.symbol}</b>
+                          {/* [v0.30.0] 오너 요청 — 자동매매로 진입된 종목은 접힌 상태에서도 바로 식별되게 */}
+                          {h.rationale?.source === "auto" && <span className="badge-auto" title="자동매매가 낸 주문입니다">🤖 자동</span>}
                           <span className="hcard-sub">{h.symbol} · {h.marketCountry === "KR" ? "🇰🇷" : "🇺🇸"}</span>
                         </div>
                         <b className={`hcard-pct ${pnlClass(h.pnlRate)}`}>
@@ -6456,7 +6469,7 @@ ${msg}
               <label className="radio">
                 <input type="radio" checked={formMode === "live"} onChange={() => setFormMode("live")} />
                 <b>실서버 모드</b> — 실제 시세·잔고·환율을 봅니다. 단 <b>주문은 아직 잠금</b>(연습만 되고 실제로는
-                안 나감). 소액(1주) 테스트를 사람이 직접 통과시킨 뒤 다음 버전에서 풀립니다.
+                안 나감). 소액(1주) 테스트를 사람이 직접 확인(테스트)한 뒤 다음 버전에서 풀립니다.
               </label>
             </div>
             <div className="settings-block">
@@ -6580,7 +6593,7 @@ ${msg}
 
             {/* [v0.8.3] 기본 손익비 설정 */}
             <div className="settings-block">
-              <h3>기본 익절% / 손절% <span className="hint">(🤖 <b>자동매매가 실제로 쓰는 값</b> + 메뉴얼 계산기 시작값 — 자동매매 탭에는 이 입력칸이 없어요)</span></h3>
+              <h3>기본 익절% / 손절% <span className="hint">(🤖 <b>자동매매가 실제로 쓰는 값</b> + 매뉴얼 계산기 시작값 — 자동매매 탭에는 이 입력칸이 없어요)</span></h3>
               <p className="hint">
                 자동매매가 진입할 때 <b>익절·손절 가격을 계산하는 기준 %</b>이자, 계산기 <b>익절%·손절% 칸에 처음 채워질 값</b>입니다. 앱을 껐다 켜거나 종목을 바꿔도 유지돼요
                 (계산할 때 그때그때 고치는 건 여전히 가능). 지금 값: <b>익절 {settings.defaultTpPct ?? 2}% / 손절 {settings.defaultSlPct ?? 10}%</b>
@@ -6600,7 +6613,7 @@ ${msg}
 
             {/* [v0.3.0] 세션별 시드 비율 설정 */}
             <div className="settings-block">
-              <h3>장별 매수 비율 (진입 수량 자동 제안) <span className="hint">(✋ <b>메뉴얼 계산기의 수량 제안에만</b> 적용 — 자동매매는 [자동매매 현황]의 '종목당 투입 비율'을 씁니다)</span></h3>
+              <h3>장별 매수 비율 (진입 수량 자동 제안) <span className="hint">(✋ <b>매뉴얼 계산기의 수량 제안에만</b> 적용 — 자동매매는 [자동매매 현황]의 '종목당 투입 비율'을 씁니다)</span></h3>
               <p className="hint">
                 장(프리마켓·데이마켓·본장)마다 <b>가진 돈의 몇 %로 살지</b> 정해 둡니다. 계산기가 지금이 어느 장인지
                 자동으로 보고 <b>살 수량을 제안</b>해요(강제 아님 — 다른 수량을 넣어도 그대로 나갑니다).
@@ -6617,7 +6630,7 @@ ${msg}
                   <input type="text" inputMode="decimal" value={seedForm.regular} onChange={(e) => isNumericDraft(e.target.value) && setSeedForm({ ...seedForm, regular: e.target.value })} placeholder="50" />
                 </label>
               </div>
-              <p className="hint">몇 %의 '기준 금액'을 무엇으로 볼지 <b>(✋ 메뉴얼 수량 제안 + 🤖 자동매매 시드 <u>공통</u> — 여기서 바꾸면 자동매매의 기준 금액도 바뀝니다)</b>:</p>
+              <p className="hint">몇 %의 '기준 금액'을 무엇으로 볼지 <b>(✋ 매뉴얼 수량 제안 + 🤖 자동매매 시드 <u>공통</u> — 여기서 바꾸면 자동매매의 기준 금액도 바뀝니다)</b>:</p>
               <label className="radio">
                 <input type="radio" checked={seedForm.basis === "auto"} onChange={() => setSeedForm({ ...seedForm, basis: "auto" })} />
                 <b>계좌의 살 수 있는 돈(예수금)으로 자동</b> — 지금 계좌 달러 잔고 기준 (기본)
@@ -6642,7 +6655,7 @@ ${msg}
 
             {/* [v0.20.0] 주문 편의·안전 옵션 — 원할 때만 켜는 보조 기능 */}
             <div className="settings-block">
-              <h3>보조 안전 옵션 (원할 때만 켜기) <span className="hint">(오입력 방지·휴무 시간대는 ✋ 메뉴얼 주문과 🤖 자동매매 진입 <b>공통</b>, 확인 팝업 건너뛰기는 ✋ 메뉴얼 주문 전용)</span></h3>
+              <h3>보조 안전 옵션 (원할 때만 켜기) <span className="hint">(오입력 방지·휴무 시간대는 ✋ 매뉴얼 주문과 🤖 자동매매 진입 <b>공통</b>, 확인 팝업 건너뛰기는 ✋ 매뉴얼 주문 전용)</span></h3>
               <p className="hint">
                 평소엔 <b>앱이 주문을 막지 않습니다.</b> 아래는 실수를 줄이려고 <b>원할 때만</b> 켜는 보조 기능이에요.
               </p>
@@ -7150,7 +7163,7 @@ ${msg}
                   }
                 }}
               >
-                ↻ 현재가 기준으로 다시 계산 (익절 +{tpPct}% / 손절 −{slPct}%)
+                🔄 현재가 기준으로 다시 계산 (익절 +{tpPct}% / 손절 −{slPct}%)
               </button>
               <button
                 className="mini"
@@ -7162,7 +7175,7 @@ ${msg}
                   else alert("보유수량이 0이거나 조회하지 못했습니다. 직접 입력하세요.");
                 }}
               >
-                ↻ 보유수량 다시 불러오기
+                🔄 보유수량 다시 불러오기
               </button>
             </div>
             <p className="hint">
@@ -7197,7 +7210,7 @@ ${msg}
           </span>
           {updateReady && (
             <button className="btn" onClick={startInstallUpdate} disabled={updateInstalling}>
-              {updateInstalling ? "적용 확인 중…" : "↻ 지금 바로 재시작"}
+              {updateInstalling ? "적용 확인 중…" : "🔄 지금 바로 재시작"}
             </button>
           )}
           <button className="btn" onClick={() => setUpdate(null)}>
@@ -7236,7 +7249,7 @@ ${msg}
         <div className="update-banner" style={update ? { top: 64 } : undefined}>
           <span>🍎 새 버전(v{macSwap.version})이 준비됐어요 — 곧 자동으로 종료·교체·재실행돼요(자동매매 중이어도 진행, 주문 처리 중인 몇 초만 미룹니다).</span>
           <button className="btn" onClick={doInstallMacSwap} disabled={macSwapBusy}>
-            {macSwapBusy ? "적용 중…" : "↻ 지금 바로 재시작"}
+            {macSwapBusy ? "적용 중…" : "🔄 지금 바로 재시작"}
           </button>
           <button className="btn" onClick={() => setMacSwap(null)}>
             닫기
@@ -7370,7 +7383,7 @@ ${msg}
             ) : (
               <div className="live-confirm">
                 <p className="danger" style={{ fontSize: 15, fontWeight: 800 }}>
-                  ⚠ 실제 돈으로 주문이 전송됩니다
+                  ⚠️ 실제 돈으로 주문이 전송됩니다
                 </p>
                 <div className="live-confirm-box">
                   <div>

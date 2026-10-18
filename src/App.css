@@ -71,7 +71,11 @@
 /* [v0.13.0] 숫자가 많은 영역은 고정폭 숫자로 정렬 — 표·손익·리포트·강도. */
 .result-table, .trade-table, .screen-table, .str-table,
 .sum-cards, .hcard, .report-hero-num, .report-badge, .report-row,
-.str-big, .str-now, .tstat, .sb-v, .phase-badge, .sig-chip {
+.str-big, .str-now, .tstat, .sb-v, .phase-badge, .sig-chip,
+/* [v0.97.0] UI/UX 전수 점검에서 빠진 걸 발견해 추가 — 값이 실시간으로 바뀌는데 폭 고정이
+   안 걸려 있던 곳들(매매연구소 숫자 카드·결과 보조숫자·자동매매 로테이션 위젯·계산기 현재가·
+   상단바 예수금·차트 호버 툴팁). */
+.lab-card b, .rs-sub, .tk-pnl, .tk-amt, .cur-price, .sb-item b, .chart-tooltip {
   font-variant-numeric: tabular-nums;
 }
 
@@ -133,13 +137,13 @@ body {
 .topbar-ticker {
   display: flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 999px;
   border: 1px solid var(--blue); background: color-mix(in srgb, var(--blue) 12%, transparent);
-  font-size: 13px; white-space: nowrap; overflow: hidden; max-width: 320px; flex: 0 1 auto;
+  font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 320px; flex: 0 1 auto;
 }
 .tk-bot { font-size: 14px; }
 .tk-sym { font-weight: 800; }
 .tk-pnl { font-weight: 700; }
 .tk-amt { font-weight: 500; opacity: 0.85; }
-.tk-status { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+.tk-status { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tk-dots { display: flex; gap: 4px; margin-left: 2px; }
 .tk-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--border); display: block; }
 .tk-dots i.on { background: var(--blue); }
@@ -289,6 +293,9 @@ input:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px rg
    다크 테마와 확 튀었다(자동매매 카드의 "진입 타점"·"손절 방식" 드롭다운이 그 예). input과
    똑같은 배경·테두리·글자색을 입히고, 기본 화살표(appearance: none으로 끔) 대신 테마에 맞는
    얇은 화살표를 직접 그려 넣는다. */
+/* [v0.97.0] 옵션 문구가 긴 select(예: "1.5분할(...설명...)")는 기본 130px로는 선택값이 거의
+   안 보인다 — 그런 곳에만 이 클래스를 얹어 폭을 넓힌다(다른 select는 영향 없음). */
+.select-wide { width: 100%; max-width: 420px; }
 select {
   background: var(--panel2); border: 1px solid var(--border); color: var(--text);
   border-radius: var(--r-sm); padding: 10px 32px 10px 12px; font-size: 15px; width: 130px;
@@ -555,7 +562,8 @@ ul.hint { padding-left: 18px; }
 .result-head { margin-bottom: 8px; font-size: 15px; }
 .result-table { width: 100%; }
 .result-empty { padding: 30px 12px; text-align: center; line-height: 1.7; }
-.order-cell { white-space: nowrap; }
+/* [v0.97.0] 아래 573행의 .order-cell 선언(normal+flex-wrap)이 이 줄을 항상 덮어써서 죽은
+   코드였다 — 삭제(실제 동작은 그대로, 혼란만 줄임). */
 .btn-buy { background: #1f6feb; color: #fff; }
 .btn-oco { background: #2ea043; color: #fff; }
 
@@ -577,7 +585,7 @@ ul.hint { padding-left: 18px; }
 .statusmain .statusbar { flex-wrap: wrap; }
 .sb-sep { width: 1px; height: 20px; background: #333b48; margin: 0 4px; }
 .sb-k { color: var(--muted); font-size: 12px; }
-.min0 { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.min0 { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .muted { color: var(--muted); }
 
 /* 세그먼트 토글 */
@@ -606,6 +614,10 @@ ul.hint { padding-left: 18px; }
 /* 상단 요약 카드 3개 */
 .sum-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 @media (max-width: 640px) { .sum-cards { grid-template-columns: 1fr; } }
+/* [v0.97.0] 카드가 4개인 곳(매매분석 "매매 수·승률·총 실현손익·평균 보유")은 3열 그리드라
+   마지막 줄에 카드 1개만 외로이 남고 2칸이 비어 어색했다 — 그 자리만 4열로. */
+.sum-cards.cols-4 { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 640px) { .sum-cards.cols-4 { grid-template-columns: 1fr; } }
 .sum-card { display: flex; flex-direction: column; gap: 3px; padding: 16px; border-radius: var(--r-md); background: var(--panel2); border: 1px solid var(--border); box-shadow: var(--edge-hi); min-width: 0; }
 .sum-k { font-size: 12px; color: var(--muted); }
 .sum-v { font-size: 20px; font-weight: 700; color: #e6ebf3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -640,7 +652,7 @@ ul.hint { padding-left: 18px; }
 @media (max-width: 520px) { .hcard-detail, .ord-detail { grid-template-columns: 1fr; } }
 .hcard-detail > div, .ord-detail > div { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; min-width: 0; }
 .hcard-detail dt, .ord-detail dt { color: var(--muted); white-space: nowrap; }
-.hcard-detail dd, .ord-detail dd { color: #e6ebf3; text-align: right; overflow: hidden; text-overflow: ellipsis; }
+.hcard-detail dd, .ord-detail dd { color: #e6ebf3; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dl-wide { grid-column: 1 / -1; }
 .dl-wide dd { text-align: left; white-space: normal; }
 
@@ -872,7 +884,7 @@ ul.hint { padding-left: 18px; }
   font-size: clamp(44px, 12vw, 56px);
   font-weight: 800;
   letter-spacing: -0.03em;
-  line-height: 1.05;
+  line-height: 1.18; /* [v0.97.0] 1.05→1.18: 두 줄이 될 때(긴 손익 숫자) 위아래가 거의 맞붙어 보이던 문제 완화 */
   font-variant-numeric: tabular-nums; /* 숫자가 바뀔 때 폭이 흔들리지 않게 */
 }
 .report-hero-num.up { color: var(--profit); }
@@ -1291,7 +1303,7 @@ body:has(.update-banner) .topbar {
 .rs-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 12px 0; }
 .rs-kpi { background: var(--panel2); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 14px; display: flex; flex-direction: column; gap: 6px; animation: rs-rise 0.5s ease both; }
 .rs-kpi:nth-child(2) { animation-delay: 0.05s; } .rs-kpi:nth-child(3) { animation-delay: 0.1s; } .rs-kpi:nth-child(4) { animation-delay: 0.15s; } .rs-kpi:nth-child(5) { animation-delay: 0.2s; } .rs-kpi:nth-child(6) { animation-delay: 0.25s; }
-.rs-kpi b { font-size: 26px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.rs-kpi b { font-size: 26px; line-height: 1.25; font-variant-numeric: tabular-nums; }
 .rs-kpi span { font-size: 12px; color: var(--muted); }
 .rs-best { margin: 10px 0; padding: 12px 14px; border: 1px solid var(--green); border-radius: var(--r-sm); background: rgba(61, 220, 151, 0.07); line-height: 1.7; }
 .rs-dims { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }

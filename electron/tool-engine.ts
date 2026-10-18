@@ -511,7 +511,7 @@ export function summarizeMissReasons(
   const reasons: string[] = [];
   if (!r.priceInBand) reasons.push(`가격대 벗어남 (현재가 ${r.price != null ? `$${r.price.toFixed(2)}` : "—"})`);
   if (run.emaTrendEnabled && !r.aboveEma) reasons.push("EMA200 아래");
-  if (run.cloudEnabled && !r.aboveCloud) reasons.push("이치모쿠 구름 아래/속");
+  if (run.cloudEnabled && !r.aboveCloud) reasons.push("일목균형표 구름 아래/속");
   if (r.evidence) {
     const f = r.evidence.filters;
     if (!f.firstDoji) reasons.push("최고점 이후 음봉 도지 없음");
@@ -8344,6 +8344,11 @@ export class ToolEngine extends EventEmitter {
     //   마침 5분 사이클이 돌고 있을 때만(그 사이클이 이미 reconcile 중이므로) 겹쳐 부르지 않는다.
     if (!this.autoTradeTickBusy) {
       await this.reconcileAutoPositions();
+      // [v0.98.0 — 오너 지시 "추가매수를... 카프리에 실시간 반영이 안되고있음"] 5분 사이클
+      //   (autoTradeTick)에도 이미 걸어 뒀지만, 이 메서드는 20초마다(자동매매 꺼져 있어도)
+      //   도는 "진짜 실시간" 통로다 — v0.74.0의 같은 이유(task #72)로 reconcileAutoPositions를
+      //   여기로 끌어올렸던 것과 같은 논리. 가볍다(보유 조회 1번) — 더 자주 불러도 안전하다.
+      await this.auditActivePositionQuantities().catch(() => 0);
     }
     void this.pushLiveState(true); // [v0.61.0] "지금 확인" 직후 바뀐 상태를 폰도 바로 볼 수 있게
     return this.getAutoTradeStatus();
@@ -8966,6 +8971,68 @@ export class ToolEngine extends EventEmitter {
     return added;
   }
 
+  /**
+   * [v0.98.0 — 오너 지시 "자동매매 종목에 추가매수를... 토스에서 직접 진행할 경우 카프리에
+   *   실시간 반영이 안되고있음"] reconcileAutoPositions는 조건주문이 "살아있나/끝났나"만
+   *   재확인하고, 보유 "수량"은 전혀 재확인하지 않았다 — 오너가 보호주문이 이미 걸린 종목에
+   *   토스에서 직접 추가 매수하면, Capri의 기록(quantity)은 그대로 멈춰 있어 현황·기록 화면과
+   *   실계좌가 어긋난다. 게다가 늘어난 수량은 "기존에 걸어 둔 OCO"에 애초에 포함돼 있지
+   *   않으므로(OCO는 등록 당시 수량으로 고정) 실제로는 무보호 상태인데도, auditUnprotectedHoldings는
+   *   이 종목이 이미 "추적 중 + 조건주문 있음"이라 건너뛴다(그게 그 함수의 정상 동작) — 그래서
+   *   추가매수분은 어떤 감사에도 안 걸리는 완전한 사각지대였다.
+   *   [범위] 이 함수는 "반영"(기록을 실계좌 기준으로 맞춤)까지만 한다. 늘어난 수량을 자동으로
+   *   새 OCO에 편입하는 건 하지 않는다 — 조건주문 자체를 취소·재등록하는 일은 이미 걸려 있는
+   *   보호를 순간적으로 벗기는 위험한 작업이라, 오너가 "실시간 반영"이라고 명시한 요청 범위를
+   *   넘어선다(사람이 직접 토스에서 처리할 수 있게 강한 알림만 남긴다 — 안전 규칙: 신규 주문·
+   *   조건주문 변경은 명시적 요청 없이 이 함수가 대신 결정하지 않는다).
+   *   수량이 줄어든 경우(오너가 토스에서 직접 일부만 매도)는 위험 신호가 아니라 단순 반영이라
+   *   조용한 수준의 알림만 남긴다.
+   */
+  async auditActivePositionQuantities(): Promise<number> {
+    if (this.isDryRun()) return 0;
+    const active = this.autoTradePositions.filter((p) => p.status === "active" && p.conditionalOrderId);
+    if (active.length === 0) return 0;
+    let held: Map<string, number>;
+    try {
+      const h = (await getHoldings()) as Record<string, unknown>;
+      held = new Map<string, number>();
+      for (const it of (h?.items as Array<Record<string, unknown>>) ?? []) {
+        const q = Number(it.quantity);
+        const sym = String(it.symbol ?? "").toUpperCase();
+        if (sym && Number.isFinite(q)) held.set(sym, q);
+      }
+    } catch {
+      return 0; // 확인 못 하면 손대지 않는다(섣부른 판단 금지 — 기존 감사 함수들과 같은 원칙)
+    }
+    let changed = 0;
+    for (const pos of active) {
+      const sym = pos.symbol.toUpperCase();
+      const realQty = held.get(sym) ?? 0;
+      // realQty<=0(보유가 통째로 사라짐)은 이 함수의 영역이 아니다 — reconcileAutoPositions가
+      //   조건주문 발동/소멸 조회로 이어서 정확히 처리한다(여기서 손대면 그 경로와 중복·충돌).
+      if (realQty <= 0 || realQty === pos.quantity) continue;
+      const idx = this.autoTradePositions.findIndex((p) => p === pos);
+      if (idx === -1) continue;
+      const prevQty = pos.quantity;
+      this.autoTradePositions[idx] = { ...pos, quantity: realQty };
+      this.saveAutoPositions();
+      const grew = realQty > prevQty;
+      const note = grew
+        ? `실계좌 보유 수량이 ${prevQty}주→${realQty}주로 늘었습니다(토스에서 직접 추가매수한 것으로 보임) — ⚠️ 늘어난 ${realQty - prevQty}주는 기존 익절/손절 조건주문에 포함돼 있지 않아 보호되지 않습니다. 보호하려면 토스에서 조건주문을 다시 걸어 주세요.`
+        : `실계좌 보유 수량이 ${prevQty}주→${realQty}주로 줄었습니다(토스에서 직접 일부 매도한 것으로 보임) — 기록만 실계좌 기준으로 맞췄습니다.`;
+      this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, { quantity: realQty, note });
+      this.addJournal({
+        kind: "info", symbol: pos.symbol,
+        summary: `🔁 ${pos.symbol} ${note}`,
+        notify: true,
+        notifyTitle: grew ? `⚠️ 추가매수 감지(무보호 수량 있음): ${pos.symbol}` : `🔁 보유 수량 변경 감지: ${pos.symbol}`,
+      });
+      if (grew) void this.sendDiscordAlert(`⚠️ **추가매수 감지**: ${pos.symbol} — ${note}`);
+      changed++;
+    }
+    return changed;
+  }
+
   // ==========================================================================
   // [v0.87.0] 자동 업데이트 재시작 정책 — 오너 확정(2026-10-13, 재논의 대상 아님): 자동매매·보유 포지션이 있어도 업데이트를 적용하고 재시작한다.
   //   미루는 순간은 딱 두 곳: ① 주문 전송 후 응답을 못 받은 구간(in-flight) ② 매수 체결 확인 ~ OCO 등록 완료 전(+가드가 주문 내는 중).
@@ -9074,6 +9141,7 @@ export class ToolEngine extends EventEmitter {
     const line = describeRestart(marker, this.appVersion ?? "?");
     await this.reconcileAutoPositions().catch(() => undefined); // 실계좌 보유 ↔ 등록 OCO 대조
     await this.auditUnprotectedHoldings().catch(() => 0); // 보호 없는 종목 찾기
+    await this.auditActivePositionQuantities().catch(() => 0); // [v0.98.0] 재시작으로 멈춰 있던 동안의 추가매수도 복구 시점에 반영
     if (this.autoUnprotected.length > 0) this.scheduleGuard(1000); // → 가드가 즉시 재보호
     drop();
     const resumed = marker.autoTradeWasOn && this.autoTradeEnabled;
@@ -9159,7 +9227,34 @@ export class ToolEngine extends EventEmitter {
           });
           continue;
         }
-        if (open && open.some((o) => String(o.symbol ?? "").toUpperCase() === u.symbol)) { done("토스에 익절/손절 조건주문이 걸려 있습니다"); continue; }
+        const alreadyOpen = open?.find((o) => String(o.symbol ?? "").toUpperCase() === u.symbol);
+        if (alreadyOpen) {
+          // [v0.98.0 — 오너 지시 "조건주문 취소하면 아예 빠져버리는데... 재주문 넣은거는 다시
+          //   포함시켜야해, 로직 정확히해라"] 예전엔 여기서 done()을 hist 없이 불러 끝냈다 —
+          //   보호 대기 목록(autoUnprotected)에서만 빠지고, autoTradePositions(현황판이 보는
+          //   바로 그 배열)·매매기록 둘 다 끝까지 "closed_manual"에 머물렀다. 오너가 토스에서
+          //   직접 조건주문을 다시 걸면(교체·재등록) 보호는 즉시 됐지만 Capri는 영원히 모른 채
+          //   "자동매매 종목"에서 완전히 빠진 상태였다는 뜻 — 바로 아래 성공 분기(가드가 직접
+          //   등록할 때, line ~9194)와 똑같은 방식으로, 발견한 그 주문을 그대로 받아 추적을
+          //   복원한다. 수량은 기록이 아니라 지금 실계좌 보유(qtyHeld)를 그대로 쓴다 —
+          //   "추가매수 후 재주문"처럼 그 사이 수량이 늘어 있었어도 그 늘어난 수량까지 정확히
+          //   반영된다(이게 오너가 함께 지적한 추가매수 미반영 문제의 교차점).
+          const legTp = alreadyOpen.first?.triggerPrice;
+          const legSl = alreadyOpen.second?.triggerPrice;
+          const tp = legTp != null && legTp > 0 ? legTp : u.tp;
+          const sl = legSl != null && legSl > 0 ? legSl : u.sl;
+          const qty = qtyHeld;
+          this.autoTradePositions.push({
+            symbol: u.symbol, entry: u.entry, tp, sl, quantity: qty, enteredAtMs: u.enteredAtMs,
+            status: "active", conditionalOrderId: alreadyOpen.conditionalOrderId,
+          });
+          this.saveAutoPositions();
+          done(`오너가 토스에서 직접 건 익절/손절 조건주문을 발견해 자동매매 추적을 복원했습니다(${qty}주, 익절 $${tp}/손절 $${sl})`, {
+            status: "active", exitedAt: null, conditionalOrderId: alreadyOpen.conditionalOrderId, tp, sl, quantity: qty,
+            note: "보호 가드가 오너가 토스에서 직접 등록(또는 교체)한 조건주문을 발견해 자동매매 추적을 복원함(수량은 그 시점 실계좌 보유 기준)",
+          });
+          continue;
+        }
         if (openSellSyms?.has(u.symbol)) {
           this.guardDismissed[u.symbol] = Date.now() + 12 * 3600_000;
           done("토스에 직접 건 매도 주문이 있어 오너가 관리 중인 것으로 보고 보호 대기를 해제합니다(손절 주문은 없으니 필요하면 직접 걸어 주세요)");
@@ -9433,6 +9528,7 @@ export class ToolEngine extends EventEmitter {
       await this.reconcileAutoPositions(); // ①빈자리 먼저 확인(같은 사이클 안에 채우기 위해) — 일시정지 중에도 계속
       await this.auditUnprotectedHoldings().catch(() => 0); // [v0.69.1] 경로와 무관하게 "보유인데 보호 없음"을 결과로 직접 대조
       await this.auditOrphanBuyOrders().catch(() => 0); // [v0.69.3] 봇이 낸 미체결 매수 주문이 추적에서 빠진 채 토스에 남는 고아 주문 정리
+      await this.auditActivePositionQuantities().catch(() => 0); // [v0.98.0] 보호 중인 종목에 토스에서 직접 추가매수한 수량을 반영
 
       // [v0.44.0] 시스템 휴무 시간대(또는 휴장)면 신규 스캔·진입을 전부 건너뛴다. 기존에 이미
       //   체결된(익절/손절 등록된) 포지션은 위 reconcileAutoPositions가 계속 감시하므로 그대로 둔다

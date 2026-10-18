@@ -12,11 +12,12 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ToolEngine, type AutoPosition, type UnprotectedPos } from "../electron/tool-engine";
+import { ToolEngine, type AutoPosition, type AutoTradeHistoryEntry, type UnprotectedPos } from "../electron/tool-engine";
 
 type Internals = {
   autoUnprotected: UnprotectedPos[];
   autoTradePositions: AutoPosition[];
+  autoTradeHistory: AutoTradeHistoryEntry[];
   autoReprotectVanished: boolean;
   marketSellRetryDelaysMs: number[];
   registerUnprotected: (p: AutoPosition, reason: string) => void;
@@ -72,6 +73,47 @@ describe("[v0.69.0] 보호 가드 — 보호주문 없는 보유 종목을 끝�
       await eng.runGuard();
       expect(x.autoUnprotected).toHaveLength(0);
       expect((await eng.conditionals()).length).toBe(1); // 늘지 않음
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("[v0.98.0 — 오너 지시 '조건주문 취소하면 아예 빠져버리는데... 재주문 넣은거는 다시 포함시켜야해'] 오너가 토스에서 직접 재등록한 조건주문을 발견하면, 바뀐 익절/손절·실계좌 수량 그대로 추적과 매매기록을 active로 복원한다", async () => {
+    const { dir, eng, x, stopTimer } = await setup();
+    try {
+      // 옛 기록: tp 2.5/sl 1.8/수량 1주로 추적되다가 조건주문이 사라져 보호 대기로 올라온 상태.
+      const p = pos({ tp: 2.5, sl: 1.8, quantity: 1 });
+      x.autoTradeHistory.push({
+        id: `${p.symbol}@${p.entry}@${p.enteredAtMs}`, symbol: p.symbol, entry: p.entry, tp: p.tp, sl: p.sl, quantity: p.quantity,
+        enteredAt: "10-07 22:00:00", status: "closed_manual", exitedAt: "10-07 22:06:00", exitPrice: null, pnlUsd: null, pnlPct: null,
+        note: "테스트: 조건주문이 사라져 추적 종료됨",
+      });
+      // 오너가 토스에서 직접 다시 건 조건주문 — 익절/손절 값이 옛 기록과 다르다(오너가 값도 바꿔 재등록).
+      const j = await eng.placeOco({ symbol: "AAPL", quantity: 1, tpTrigger: 2.7, tpPrice: 2.7, slTrigger: 1.75, slPrice: 1.7, expireDate: "2026-12-30" });
+      const ownerPlacedId = (j.detail as { conditionalOrderId?: string } | undefined)?.conditionalOrderId;
+      expect(ownerPlacedId).toBeTruthy();
+      x.registerUnprotected(p, "테스트: 조건주문 사라짐");
+      stopTimer();
+      await eng.runGuard();
+      expect(x.autoUnprotected).toHaveLength(0);
+      expect((await eng.conditionals()).length).toBe(1); // 중복으로 새로 걸지 않음(발견한 주문 그대로 채택)
+      // [핵심 1] 예전엔 여기서 끝(추적·기록 모두 복원 안 됨, closed_manual에 영원히 머묾) — 이제는 active로 돌아온다.
+      const active = x.autoTradePositions.find((q) => q.symbol === "AAPL");
+      expect(active?.status).toBe("active");
+      expect(active?.conditionalOrderId).toBe(ownerPlacedId);
+      // [핵심 2] 옛 기록(2.5/1.8)이 아니라 오너가 실제로 재등록한 값(2.7/1.75) 그대로 반영됐다.
+      expect(active?.tp).toBe(2.7);
+      expect(active?.sl).toBe(1.75);
+      // [핵심 3] 수량도 기록(1주)이 아니라 "지금 실계좌 보유"(목 계좌 AAPL 100주) 기준 —
+      //   추가매수 후 재주문했다면 그 늘어난 수량까지 그대로 포함된다는 뜻.
+      expect(active?.quantity).toBe(100);
+      const hist = eng.getAutoTradeHistory().find((h) => h.symbol === "AAPL");
+      expect(hist?.status).toBe("active");
+      expect(hist?.conditionalOrderId).toBe(ownerPlacedId);
+      expect(hist?.tp).toBe(2.7);
+      expect(hist?.sl).toBe(1.75);
+      expect(hist?.quantity).toBe(100);
+      expect(hist?.exitedAt).toBeNull();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

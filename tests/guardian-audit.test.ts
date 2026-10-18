@@ -214,16 +214,27 @@ describe("[v0.75.0 — AGRZ와 같은 부류] runGuard 시장가 정리 분기�
     }
   }, 20_000);
 
-  it("[v0.82.0] 보호 가드가 '이미 조건주문 걸려있음'처럼 아무 것도 안 바꿨으면 알림을 안 보낸다(알림 피로 방지)", async () => {
+  it("[v0.82.0→v0.98.0 수정] 보호 가드가 '이미 조건주문 걸려있음'을 발견하면 — 추적을 복원하는 실제 변화이므로 이제는 알린다", async () => {
     const { dir, eng, x, stopTimer } = await setup();
     try {
+      // [v0.98.0] 이 테스트는 원래(v0.82.0) "이미 조건주문이 걸려 있으면 아무 것도 안 바뀌니
+      //   알리지 않는다"를 검증했다. 그런데 바로 그 경로가 "조건주문 취소하면 아예 빠져버리는데
+      //   재주문 넣은거는 다시 포함시켜야해" 버그의 정체였다 — autoUnprotected에서만 빠지고
+      //   autoTradePositions·매매기록은 영원히 closed_manual에 머물렀다(완전한 무음 방치).
+      //   이제는 발견한 조건주문으로 추적을 "active"로 복원하는 실제 변화가 있으므로, 알리는
+      //   것이 맞다(알림 피로 방지 원칙은 진짜 무변화 경로 — 바로 아래 "직접 건 매도 주문" 테스트
+      //   — 에 그대로 남아 있다).
       x.autoTradeHistory.push(histEntry());
       expect(await eng.auditUnprotectedHoldings()).toBe(1);
       stopTimer();
       await eng.placeOco({ symbol: "AAPL", quantity: 1, tpTrigger: 2.5, tpPrice: 2.5, slTrigger: 1.8, slPrice: 1.79, expireDate: "2026-12-30" });
       await eng.runGuard();
       const j = eng.getJournal().find((e) => e.symbol === "AAPL" && e.summary.includes("보호 확인"));
-      expect(j?.notify).toBeFalsy(); // 이미 조건주문이 걸려 있어 아무 것도 안 바뀜 — 알릴 필요 없음
+      expect(j?.notify).toBe(true);
+      expect(j?.notifyTitle).toContain("보호 가드 결과");
+      const hist = eng.getAutoTradeHistory().find((h) => h.symbol === "AAPL");
+      expect(hist?.status).toBe("active"); // closed_manual에 영원히 안 머문다(이번 수정의 핵심)
+      expect(x.autoTradePositions.find((p) => p.symbol === "AAPL")?.status).toBe("active");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -285,6 +296,103 @@ describe("[v0.77.0 — task #111] 보호 가드가 보유 수량 0을 발견하�
       expect(rec?.exitPrice).toBeNull(); // 모르는 걸 숫자로 지어내지 않음
       expect(rec?.pnlUsd).toBeNull();
       expect(rec?.note).toContain("직접 매도된 것으로 보임");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+});
+
+// =============================================================================
+// [v0.98.0 — 오너 지시 "자동매매 종목에 추가매수... 토스에서 직접 진행할 경우 카프리에 실시간
+//   반영이 안되고있음"] 보호주문(OCO)이 이미 걸려 추적 중인(active) 포지션은 조건주문 상태만
+//   재확인됐지, 보유 "수량"은 전혀 재확인되지 않았다 — 토스에서 직접 추가매수하면 Capri 기록만
+//   그대로 멈춰 실계좌와 어긋난다. auditActivePositionQuantities가 결과(실계좌 수량)를 직접
+//   대조해 반영한다. ⚠️ 실계좌 안 건드림(forceMock — 가짜 계좌는 AAPL 100주를 보유).
+// =============================================================================
+describe("[v0.98.0] 독립 감사 — 보호 중인(active) 포지션의 실계좌 보유 수량 변화를 반영한다", () => {
+  const activePos = (over: Partial<AutoPosition> = {}): AutoPosition => ({
+    symbol: "AAPL", entry: 2.1, tp: 2.5, sl: 1.8, quantity: 60, enteredAtMs: Date.now() - 3600_000,
+    status: "active", conditionalOrderId: "cond-existing-1", ...over,
+  });
+
+  it("추가매수로 실계좌 수량이 늘면(기록 60주 vs 실계좌 100주) 기록을 실계좌 기준으로 갈아 끼우고 '무보호 수량 있음'을 강하게 알린다", async () => {
+    const { dir, eng, x, stopTimer } = await setup();
+    try {
+      const p = activePos({ quantity: 60 });
+      x.autoTradePositions.push(p);
+      x.autoTradeHistory.push(histEntry({ id: `${p.symbol}@${p.entry}@${p.enteredAtMs}`, quantity: 60, status: "active", exitedAt: null }));
+      const changed = await eng.auditActivePositionQuantities();
+      stopTimer();
+      expect(changed).toBe(1);
+      expect(x.autoTradePositions.find((q) => q.symbol === "AAPL")?.quantity).toBe(100); // 목 계좌 보유(100주) 기준으로 갈아 끼움
+      const hist = eng.getAutoTradeHistory().find((h) => h.symbol === "AAPL");
+      expect(hist?.quantity).toBe(100);
+      expect(hist?.note).toContain("60주→100주");
+      expect(hist?.note).toContain("추가매수");
+      const j = eng.getJournal().find((e) => e.symbol === "AAPL" && e.summary.includes("추가매수"));
+      expect(j?.notify).toBe(true); // 늘어난 수량은 무보호라 반드시 강하게 알려야 한다
+      expect(j?.notifyTitle).toContain("추가매수 감지");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("오너가 직접 일부 매도해 수량이 줄면(기록 150주 vs 실계좌 100주) 기록만 조용히 실계좌 기준으로 맞춘다", async () => {
+    const { dir, eng, x, stopTimer } = await setup();
+    try {
+      const p = activePos({ quantity: 150 });
+      x.autoTradePositions.push(p);
+      x.autoTradeHistory.push(histEntry({ id: `${p.symbol}@${p.entry}@${p.enteredAtMs}`, quantity: 150, status: "active", exitedAt: null }));
+      const changed = await eng.auditActivePositionQuantities();
+      stopTimer();
+      expect(changed).toBe(1);
+      expect(x.autoTradePositions.find((q) => q.symbol === "AAPL")?.quantity).toBe(100);
+      const hist = eng.getAutoTradeHistory().find((h) => h.symbol === "AAPL");
+      expect(hist?.note).toContain("150주→100주");
+      expect(hist?.note).toContain("일부 매도");
+      const j = eng.getJournal().find((e) => e.symbol === "AAPL" && e.summary.includes("줄었습니다"));
+      expect(j?.notifyTitle).toContain("보유 수량 변경 감지"); // 무보호 경고(⚠️ 추가매수 감지)와는 다른, 덜 급한 제목
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("기록과 실계좌 수량이 이미 같으면 아무것도 바꾸지 않는다", async () => {
+    const { dir, eng, x, stopTimer } = await setup();
+    try {
+      const p = activePos({ quantity: 100 });
+      x.autoTradePositions.push(p);
+      const changed = await eng.auditActivePositionQuantities();
+      stopTimer();
+      expect(changed).toBe(0);
+      expect(x.autoTradePositions.find((q) => q.symbol === "AAPL")?.quantity).toBe(100);
+      expect(eng.getJournal().some((e) => e.symbol === "AAPL")).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("실계좌에 전혀 없는 종목(보유 0)은 건드리지 않는다 — 조건주문 발동/소멸 조회(reconcileAutoPositions)의 영역", async () => {
+    const { dir, eng, x, stopTimer } = await setup();
+    try {
+      const p = activePos({ symbol: "GHOST", quantity: 10 });
+      x.autoTradePositions.push(p);
+      const changed = await eng.auditActivePositionQuantities();
+      stopTimer();
+      expect(changed).toBe(0);
+      expect(x.autoTradePositions.find((q) => q.symbol === "GHOST")?.quantity).toBe(10); // 그대로
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("watching(아직 체결 대기) 포지션이나 조건주문 번호가 없는 포지션은 대상이 아니다", async () => {
+    const { dir, eng, x, stopTimer } = await setup();
+    try {
+      x.autoTradePositions.push(activePos({ status: "watching", conditionalOrderId: null, quantity: 1 }));
+      const changed = await eng.auditActivePositionQuantities();
+      stopTimer();
+      expect(changed).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

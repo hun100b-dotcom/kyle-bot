@@ -740,6 +740,31 @@ describe("자동매매 상태 관리 — v0.26.0", () => {
     }
   }, 10_000);
 
+  it("[v0.98.0 — 오너 지시 '추가매수를... 카프리에 실시간 반영이 안되고있음'] reconcileAutoPositionsNow — 자동매매가 꺼져 있어도 20초 주기로 추가매수(실계좌 수량 증가)를 바로 반영한다", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
+    try {
+      const eng = mkEngine(dir, { forceMock: true });
+      const j = await eng.placeOco({ symbol: "AAPL", quantity: 1, tpTrigger: 2.5, tpPrice: 2.5, slTrigger: 1.8, slPrice: 1.79, expireDate: "2026-12-30" });
+      const conditionalOrderId = (j.detail as { conditionalOrderId?: string } | undefined)?.conditionalOrderId as string;
+      expect(conditionalOrderId).toBeTruthy();
+
+      const engAny = eng as unknown as { autoTradePositions: AutoPosition[] };
+      // Capri는 아직 60주로 기억 중인데 실계좌(목 서버)는 AAPL 100주를 보유 — 보호주문이
+      // 이미 걸린 뒤 토스에서 직접 추가매수한 상황을 흉내낸다.
+      engAny.autoTradePositions.push({
+        symbol: "AAPL", entry: 2.1, tp: 2.5, sl: 1.8, quantity: 60,
+        enteredAtMs: Date.now(), status: "active", conditionalOrderId,
+      });
+      expect(eng.getAutoTradeStatus().enabled).toBe(false); // 자동매매가 꺼져 있어도(5분 사이클은 안 돎)
+
+      const status = await eng.reconcileAutoPositionsNow();
+      const pos = status.positions.find((p) => p.symbol === "AAPL");
+      expect(pos?.quantity).toBe(100); // 5분 사이클을 기다리지 않고 20초 주기로 즉시 반영됨
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
   it("[v0.45.0] 매매진행할 장 선택 — 지금 세션의 토글을 꺼 두면 스캔·진입 없이 그 사이클만 건너뛴다", async () => {
     const dir = mkdtempSync(join(tmpdir(), "kyle-auto-"));
     try {
