@@ -1169,6 +1169,12 @@ export interface AutoPosition {
    *  반복되는(예: 이미 존재하지 않는 조건주문 ID) 경우 화면엔 "익절/손절 등록됨"만 영원히
    *  보이고 왜 안 지워지는지 알 방법이 없었다. 성공하면 즉시 지운다(null). */
   syncWarning?: string | null;
+  /** [v0.101.0] 걸려 있는 익절/손절 조건주문(OCO)이 실제로 덮고 있는 수량.
+   *  quantity(= 실계좌 보유 수량)와 다를 수 있다 — 오너가 토스에서 직접 추가매수하면 보유는
+   *  늘지만 기존 OCO는 등록 당시 수량만 판다(OCO 수량은 등록 순간 고정). 이 둘을 따로 들고
+   *  있어야 ① 손익을 "실제로 팔린 수량"으로 계산하고 ② OCO가 끝난 뒤 남는 추가매수분을
+   *  놓치지 않고 보호할 수 있다. 값이 없으면(예전 기록) quantity와 같다고 본다. */
+  protectedQty?: number | null;
 }
 
 /** 자동매매 화면 현황판에 보여줄 요약. */
@@ -1192,6 +1198,10 @@ export interface UnprotectedPos {
   attempts: number;
   lastAttemptMs: number | null;
   lastError: string | null;
+  /** [v0.101.0] 이 시각(ms)까지는 가드가 새 주문(조건주문 재등록·시장가 매도)을 내지 않고
+   *  "오너가 토스에서 직접 조건주문을 다시 거는지"만 지켜본다. 오너가 조건주문을 직접 취소한
+   *  경우에만 채워진다(그 밖의 경로는 지금처럼 즉시 보호). 자세한 이유는 registerUnprotected 참고. */
+  graceUntilMs?: number | null;
 }
 
 export interface AutoTradeStatus {
@@ -8568,7 +8578,14 @@ export class ToolEngine extends EventEmitter {
       const exitPrice = exitFillPrice ?? targetPrice;
       const slippagePct = exitFillPrice != null ? Math.round((exitFillPrice / targetPrice - 1) * 10000) / 100 : null;
       const costBasis = pos.fillPrice ?? pos.entry; // [v0.69.2] 실제 체결가가 있으면 그 기준으로 손익 계산
-      const pnlUsd = (exitPrice - costBasis) * pos.quantity;
+      // [v0.101.0] 손익은 "조건주문이 실제로 판 수량"으로 계산한다. 예전엔 pos.quantity(실계좌 보유
+      //   기준 — v0.98.0부터 추가매수하면 늘어남)를 썼는데, OCO는 등록 당시 수량만 팔기 때문에
+      //   추가매수분만큼 손익이 부풀려졌다. 우선순위: 토스가 알려 준 조건주문 수량 → 우리가 기억한
+      //   보호 수량 → (둘 다 없으면) 예전처럼 보유 수량.
+      const ocoQty = Number(resp.quantity);
+      const soldQty = Number.isFinite(ocoQty) && ocoQty > 0 ? ocoQty : (pos.protectedQty ?? pos.quantity);
+      const leftoverQty = Math.max(0, pos.quantity - soldQty); // 조건주문 밖에 있던 수량(= 토스에서 직접 추가매수한 분)
+      const pnlUsd = (exitPrice - costBasis) * soldQty;
       const pnlPct = ((exitPrice - costBasis) / costBasis) * 100;
       this.autoTradeRealizedPnlUsd += pnlUsd;
       this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
@@ -8578,7 +8595,7 @@ export class ToolEngine extends EventEmitter {
         kind: "info",
         symbol: pos.symbol,
         summary:
-          `🤖 자동매매 ${kindKo} 완료 ${pos.symbol}: 진입 $${pos.entry} → 청산 $${exitPrice} × ${pos.quantity}주 ` +
+          `🤖 자동매매 ${kindKo} 완료 ${pos.symbol}: 진입 $${pos.entry} → 청산 $${exitPrice} × ${soldQty}주 ` +
           `(이번 실행 누적손익 $${this.autoTradeRealizedPnlUsd.toFixed(2)}) — 빈자리는 다음 확인 때 채웁니다.`,
         notify: true,
         notifyTitle: `${kindKo === "손절" ? "🛑" : "✅"} ${kindKo} 완료: ${pos.symbol}`,
@@ -8591,17 +8608,57 @@ export class ToolEngine extends EventEmitter {
         slippagePct,
         pnlUsd: Math.round(pnlUsd * 100) / 100,
         pnlPct: Math.round(pnlPct * 100) / 100,
+        quantity: soldQty, // [v0.101.0] 기록의 수량도 손익 계산에 쓴 "실제로 팔린 수량"과 맞춘다
         note:
           `${kindKo} 발동으로 자동 청산` +
-          (exitFillPrice != null ? ` (실제 체결가 $${exitFillPrice}, 목표가 대비 ${slippagePct}%)` : " (체결가 조회 안 됨 — 목표가로 계산)"),
+          (exitFillPrice != null ? ` (실제 체결가 $${exitFillPrice}, 목표가 대비 ${slippagePct}%)` : " (체결가 조회 안 됨 — 목표가로 계산)") +
+          (leftoverQty > 0 ? ` — 조건주문에 포함 안 된 추가매수분 ${leftoverQty}주는 별도 기록으로 이어서 관리` : ""),
       });
+      // [v0.101.0 — 이번 점검의 핵심 구멍] 추가매수분이 조건주문 밖에 남은 경우.
+      //   예전엔 여기서 끝이었다 — 위 기록이 "정상 청산(closed_win/closed_loss)"이 되면 독립 감사
+      //   (auditUnprotectedHoldings)는 "정상 청산된 종목"이라며 이 종목을 건너뛰도록 돼 있어서,
+      //   남은 추가매수분은 보호 없이 계좌에 영영 방치됐다(아무 감사에도 안 걸리는 사각지대).
+      //   이제는 남은 수량을 "새 기록 한 줄"로 분리해 가드에 넘긴다. 새 기록으로 분리하는 이유:
+      //   가드는 결과를 매매기록에 덮어쓰는데, 같은 기록(id)을 쓰면 방금 확정한 익절/손절 손익이
+      //   지워져 버린다. 가드는 평소와 똑같이 움직인다 — 가격이 아직 익절/손절선 사이면 조건주문을
+      //   다시 걸고, 이미 선 밖이면(지금 막 익절·손절이 났으니 대개 이쪽) 원래 포지션과 같은 방향으로
+      //   시장가 정리한다. (손절 매도가 덜 체결된 경우는 위에서 이미 원래 포지션을 가드에 넘겼고,
+      //   가드는 종목 단위로 실계좌 보유 전체를 처리하므로 여기서 중복으로 올리지 않는다.)
+      const alreadyGuarded = this.autoUnprotected.some((u) => u.symbol === pos.symbol.toUpperCase());
+      if (leftoverQty > 0 && !this.isDryRun() && !alreadyGuarded) {
+        const rest: AutoPosition = {
+          symbol: pos.symbol, entry: pos.entry, tp: pos.tp, sl: pos.sl, quantity: leftoverQty,
+          // enteredAtMs를 지금 시각으로 — 기록 id(`종목@진입가@시각`)가 원래 포지션과 겹치지 않게 하는 게 목적
+          enteredAtMs: Date.now(), status: "active", conditionalOrderId: null, fillPrice: pos.fillPrice ?? null,
+        };
+        this.addAutoTradeHistory(rest);
+        this.updateAutoTradeHistory(rest.symbol, rest.entry, rest.enteredAtMs, {
+          status: "oco_failed",
+          note: `토스에서 직접 추가매수한 ${leftoverQty}주 — 원래 조건주문에 포함되지 않아 ${kindKo} 후에도 계좌에 남음(보호 가드가 이어서 처리)`,
+        });
+        const warn = `🚨 ${pos.symbol} ${kindKo}는 조건주문 수량(${soldQty}주)만 팔렸고, 추가매수분 ${leftoverQty}주는 보호 없이 계좌에 남아 있습니다.`;
+        if (this.autoReprotectVanished) {
+          this.registerUnprotected(rest, `${kindKo} 후 조건주문 밖 추가매수분 ${leftoverQty}주가 남음`);
+        } else {
+          // 오너가 설정에서 "사라진 보호 자동 복구"를 꺼 둔 경우 — 봇이 대신 주문하지 않고 강하게 알리기만 한다.
+          this.addJournal({
+            kind: "info", symbol: pos.symbol,
+            summary: `${warn} 자동 보호 복구가 꺼져 있어 봇은 손대지 않습니다 — 토스에서 직접 정리하거나 익절/손절을 걸어 주세요.`,
+            notify: true, notifyTitle: `🚨 무보호 수량 남음: ${pos.symbol}`,
+          });
+          void this.sendDiscordAlert(`${warn} 자동 보호 복구가 꺼져 있어 직접 처리가 필요합니다.`);
+        }
+      }
     } else {
       // 어느 다리도 발동 안 했는데 그룹이 COMPLETED = 사람이 [주문현황]에서 직접 취소한 경우
       // — 손익 반영 없이 자리만 비운다.
+      // [v0.101.0] 이 분기는 "사람이 직접 취소했다"가 확실한 유일한 경로라, 가드가 바로 예전 가격으로
+      //   다시 걸지 않고 오너가 새 조건주문을 거는 시간(OWNER_REREGISTER_GRACE_MS)을 기다려 준다.
       await this.clearAutoPositionWithoutPnl(
         pos,
         `자동매매 포지션의 조건주문이 취소돼 있어 감시를 멈춥니다: ${pos.symbol}`,
         "사람이 [주문현황]에서 조건주문을 직접 취소함(손익 미확정)",
+        ToolEngine.OWNER_REREGISTER_GRACE_MS,
       );
     }
   }
@@ -8624,7 +8681,7 @@ export class ToolEngine extends EventEmitter {
    *   안 잡힌다 — 그 부분까지 고치려면 "기보유 종목은 한도에 안 잡히게" 한 v0.39.0
    *   설계와 충돌해 범위가 커진다(docs/audit-2026-10-01.md 후속 논의 필요, 이번엔 보류).
    */
-  private async clearAutoPositionWithoutPnl(pos: AutoPosition, journalSummary: string, historyNote: string): Promise<void> {
+  private async clearAutoPositionWithoutPnl(pos: AutoPosition, journalSummary: string, historyNote: string, reprotectGraceMs = 0): Promise<void> {
     this.autoTradePositions = this.autoTradePositions.filter((p) => p !== pos);
     this.saveAutoPositions();
     const heldSymbols = await this.fetchRealHeldSymbols();
@@ -8657,7 +8714,11 @@ export class ToolEngine extends EventEmitter {
     //   (기존 경고·기록을 모두 남긴 뒤에 가드 목록에 올린다)
     //   [v0.69.1] stillHeld===null(실계좌 재확인 실패)을 "괜찮음"으로 넘기지 않는다 — 가드가 자기 점검 때 보유를 다시 확인해 0이면 스스로 종료한다.
     if (stillHeld !== false && this.autoReprotectVanished) {
-      this.registerUnprotected(pos, stillHeld ? "조건주문이 토스에서 사라졌는데 실계좌에 주식이 남아 있음" : "조건주문이 사라졌고 실계좌 보유 여부를 확인하지 못함(가드가 재확인)");
+      this.registerUnprotected(
+        pos,
+        stillHeld ? "조건주문이 토스에서 사라졌는데 실계좌에 주식이 남아 있음" : "조건주문이 사라졌고 실계좌 보유 여부를 확인하지 못함(가드가 재확인)",
+        reprotectGraceMs, // [v0.101.0] 오너가 직접 취소한 경우에만 0보다 크다(아래 resolveCompletedConditional 참고)
+      );
     }
   }
 
@@ -8920,23 +8981,43 @@ export class ToolEngine extends EventEmitter {
   //     ③ 실제 매도 가능 수량만큼으로 OCO 재등록(현재가가 감시가 안일 때) / 밴드 밖이면 시장가 매도.
   //   자동매매 켜짐 여부와 무관하게 돈다(이미 가진 주식을 지키는 일이므로).
   // ==========================================================================
-  private registerUnprotected(pos: AutoPosition, reason: string): void {
+  /**
+   * [v0.101.0] 오너가 토스에서 조건주문을 "직접 취소"한 게 확실할 때, 가드가 새 주문을 내기 전에
+   *   기다려 주는 시간(2분). 이유: 오너가 가격을 바꾸려고 "취소 → 새 가격으로 다시 등록"을 하는
+   *   중일 수 있는데, 예전엔 가드가 취소를 알아챈 지 3초 만에 "예전 가격"으로 조건주문을 스스로
+   *   다시 걸었다 — 오너가 토스 앱에서 새 가격을 입력하는 데 보통 그보다 오래 걸리므로, 결과적으로
+   *   ① 같은 종목에 조건주문이 두 개 걸리거나 ② Capri는 봇이 건(오너가 원치 않은) 주문만 추적하게
+   *   됐다. 2분 동안은 "오너가 새로 건 조건주문이 있나"만 확인하고(있으면 그대로 추적 복원),
+   *   2분이 지나도 없으면 그때 예전처럼 가드가 보호한다. (조건주문이 원인 모르게 "사라진" 경우·
+   *   OCO 등록 실패 등 다른 경로는 지금처럼 즉시 보호 — 그쪽은 오너가 손대는 중이 아니므로.)
+   */
+  static readonly OWNER_REREGISTER_GRACE_MS = 120_000;
+
+  private registerUnprotected(pos: AutoPosition, reason: string, graceMs = 0): void {
     const sym = pos.symbol.toUpperCase();
     if (this.autoUnprotected.some((u) => u.symbol === sym)) return;
     if ((this.guardDismissed[sym] ?? 0) > Date.now()) return; // [v0.69.4] 오너가 직접 관리하겠다고 한 종목
     this.autoUnprotected.push({
       symbol: sym, entry: pos.entry, tp: pos.tp, sl: pos.sl, quantity: pos.quantity, enteredAtMs: pos.enteredAtMs, fillPrice: pos.fillPrice ?? null,
       reason, sinceMs: Date.now(), attempts: 0, lastAttemptMs: null, lastError: null,
+      graceUntilMs: graceMs > 0 ? Date.now() + graceMs : null,
     });
     this.saveAutoPositions();
+    // [v0.101.0] 유예가 있으면 안내 문구도 그에 맞게 — "바로 다시 건다"고 알려 놓고 2분 기다리면 오너가 헷갈린다.
+    const graceMin = Math.round(graceMs / 60_000);
+    const plan = graceMs > 0
+      ? `토스에서 직접 다시 거시는 중이면 그 주문을 그대로 이어서 추적합니다. ${graceMin}분 안에 새 조건주문이 없으면 봇이 예전 가격으로 보호를 다시 겁니다.`
+      : "봇이 보호가 걸릴 때까지 계속 다시 시도합니다.";
     this.addJournal({
       kind: "info", symbol: sym,
-      summary: `🛡 ${sym}: 보호주문이 없는 채로 보유 중입니다(${reason}) — 봇이 보호가 걸릴 때까지 계속 다시 시도합니다.`,
+      summary: `🛡 ${sym}: 보호주문이 없는 채로 보유 중입니다(${reason}) — ${plan}`,
       notify: true, notifyTitle: `🛡 보호 복구 시작: ${sym}`,
     });
     // [v0.82.0] 최종 결과(runGuard의 done)뿐 아니라 "지금부터 재시도 시작"도 디스코드로 —
     //   오너가 앱을 안 보고 있어도 가장 이른 시점에 알 수 있게(OS 알림은 앱을 안 보면 못 봄).
-    void this.sendDiscordAlert(`🛡️ **보호 필요**: ${sym} — 보호주문이 없는 채로 보유 중입니다(${reason}). 보호가 걸릴 때까지 계속 시도합니다.`);
+    void this.sendDiscordAlert(`🛡️ **보호 필요**: ${sym} — 보호주문이 없는 채로 보유 중입니다(${reason}). ${plan}`);
+    // 유예 중에도 3초 뒤 첫 점검은 그대로 돈다 — 오너가 이미 새 조건주문을 걸어 뒀으면 그걸 바로 찾아 복원하기 위해서다
+    //   (유예는 "새 주문을 내지 않는다"는 뜻이지 "들여다보지도 않는다"는 뜻이 아니다).
     this.scheduleGuard(3000);
   }
 
@@ -9103,11 +9184,17 @@ export class ToolEngine extends EventEmitter {
       const idx = this.autoTradePositions.findIndex((p) => p === pos);
       if (idx === -1) continue;
       const prevQty = pos.quantity;
-      this.autoTradePositions[idx] = { ...pos, quantity: realQty };
+      // [v0.101.0] 보유 수량만 바꾸고 "조건주문이 덮는 수량"(protectedQty)은 그대로 기억해 둔다 —
+      //   예전엔 quantity 하나만 덮어써서, 익절/손절이 나간 뒤 "추가매수분이 남았다"는 사실 자체를
+      //   알 방법이 없었다(남은 주식이 영영 무보호로 방치되던 원인). 줄어든 경우엔 보유보다 많이
+      //   보호할 수는 없으니 보유 수량으로 낮춘다.
+      const prevProtected = pos.protectedQty ?? prevQty;
+      const protectedQty = Math.min(prevProtected, realQty);
+      this.autoTradePositions[idx] = { ...pos, quantity: realQty, protectedQty };
       this.saveAutoPositions();
       const grew = realQty > prevQty;
       const note = grew
-        ? `실계좌 보유 수량이 ${prevQty}주→${realQty}주로 늘었습니다(토스에서 직접 추가매수한 것으로 보임) — ⚠️ 늘어난 ${realQty - prevQty}주는 기존 익절/손절 조건주문에 포함돼 있지 않아 보호되지 않습니다. 보호하려면 토스에서 조건주문을 다시 걸어 주세요.`
+        ? `실계좌 보유 수량이 ${prevQty}주→${realQty}주로 늘었습니다(토스에서 직접 추가매수한 것으로 보임) — ⚠️ 늘어난 ${realQty - prevQty}주는 기존 익절/손절 조건주문에 포함돼 있지 않아 보호되지 않습니다. 보호하려면 토스에서 조건주문을 다시 걸어 주세요${this.autoReprotectVanished ? "(그대로 두면 익절/손절 후 남는 수량을 보호 가드가 이어서 처리합니다)" : ""}.`
         : `실계좌 보유 수량이 ${prevQty}주→${realQty}주로 줄었습니다(토스에서 직접 일부 매도한 것으로 보임) — 기록만 실계좌 기준으로 맞췄습니다.`;
       this.updateAutoTradeHistory(pos.symbol, pos.entry, pos.enteredAtMs, { quantity: realQty, note });
       this.addJournal({
@@ -9333,14 +9420,24 @@ export class ToolEngine extends EventEmitter {
           const tp = legTp != null && legTp > 0 ? legTp : u.tp;
           const sl = legSl != null && legSl > 0 ? legSl : u.sl;
           const qty = qtyHeld;
+          // [v0.101.0] 보유 수량(qty)과 "그 조건주문이 실제로 덮는 수량"(ocoQty)을 따로 기록한다.
+          //   오너가 일부 수량만 걸었으면 나머지는 무보호이고, 익절/손절 손익도 ocoQty로 계산해야 맞다.
+          //   토스가 수량을 안 알려 주면(응답에 없음) 예전처럼 보유 수량 전체가 보호된다고 본다.
+          const rawOcoQty = Number(alreadyOpen.quantity);
+          const ocoQty = Number.isFinite(rawOcoQty) && rawOcoQty > 0 ? Math.min(rawOcoQty, qty) : qty;
           this.autoTradePositions.push({
             symbol: u.symbol, entry: u.entry, tp, sl, quantity: qty, enteredAtMs: u.enteredAtMs,
             status: "active", conditionalOrderId: alreadyOpen.conditionalOrderId,
+            // [v0.101.0] 실제 체결가를 빠뜨리면 나중 손익이 주문가(entry) 기준으로 계산돼 어긋난다.
+            fillPrice: u.fillPrice ?? null,
+            protectedQty: ocoQty,
           });
           this.saveAutoPositions();
-          done(`오너가 토스에서 직접 건 익절/손절 조건주문을 발견해 자동매매 추적을 복원했습니다(${qty}주, 익절 $${tp}/손절 $${sl})`, {
+          const uncovered = qty - ocoQty;
+          const coverNote = uncovered > 0 ? ` — ⚠️ 보유 ${qty}주 중 ${uncovered}주는 이 조건주문에 포함돼 있지 않아 보호되지 않습니다` : "";
+          done(`오너가 토스에서 직접 건 익절/손절 조건주문을 발견해 자동매매 추적을 복원했습니다(보호 ${ocoQty}주, 익절 $${tp}/손절 $${sl})${coverNote}`, {
             status: "active", exitedAt: null, conditionalOrderId: alreadyOpen.conditionalOrderId, tp, sl, quantity: qty,
-            note: "보호 가드가 오너가 토스에서 직접 등록(또는 교체)한 조건주문을 발견해 자동매매 추적을 복원함(수량은 그 시점 실계좌 보유 기준)",
+            note: `보호 가드가 오너가 토스에서 직접 등록(또는 교체)한 조건주문을 발견해 자동매매 추적을 복원함(보유 ${qty}주, 조건주문 ${ocoQty}주)${coverNote}`,
           });
           continue;
         }
@@ -9349,6 +9446,10 @@ export class ToolEngine extends EventEmitter {
           done("토스에 직접 건 매도 주문이 있어 오너가 관리 중인 것으로 보고 보호 대기를 해제합니다(손절 주문은 없으니 필요하면 직접 걸어 주세요)");
           continue;
         }
+        // [v0.101.0] 오너가 조건주문을 직접 취소한 직후의 유예 시간 — 여기까지(보유 0 확인, 오너가 새로 건
+        //   조건주문 발견, 직접 건 매도 주문 확인)는 그대로 하고, 새 주문을 내는 아래 단계만 미룬다.
+        //   유예가 끝나면 다음 점검(30초 간격)에서 평소처럼 보호한다. 시도 횟수도 세지 않는다(실패가 아니므로).
+        if (u.graceUntilMs != null && u.graceUntilMs > Date.now()) continue;
 
         u.attempts++;
         u.lastAttemptMs = Date.now();
@@ -9375,7 +9476,8 @@ export class ToolEngine extends EventEmitter {
             const id = (j.detail as { conditionalOrderId?: string } | undefined)?.conditionalOrderId;
             if (!id) throw new Error("조건주문 번호를 확인할 수 없습니다.");
             // 다시 정상 추적(active)으로 올려 익절/손절 발동을 이어서 감시한다.
-            this.autoTradePositions.push({ symbol: u.symbol, entry: u.entry, tp, sl, quantity: qty, enteredAtMs: u.enteredAtMs, status: "active", conditionalOrderId: id });
+            // [v0.101.0] fillPrice(실제 체결가)·protectedQty(이 조건주문이 덮는 수량)도 함께 — 빠뜨리면 손익이 어긋난다.
+            this.autoTradePositions.push({ symbol: u.symbol, entry: u.entry, tp, sl, quantity: qty, enteredAtMs: u.enteredAtMs, status: "active", conditionalOrderId: id, fillPrice: u.fillPrice ?? null, protectedQty: qty });
             done(`익절/손절 조건주문을 다시 등록했습니다(${qty}주)`, { status: "active", exitedAt: null, conditionalOrderId: id, note: "보호 가드가 익절/손절 조건주문을 복구 등록함" });
           } else {
             // 가격이 이미 감시가 밖 — 조건주문을 걸 수 없으니 지금 시장가로 정리한다.
