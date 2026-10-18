@@ -32,7 +32,7 @@ import { buildCycles, analyzeTrades, type TradeCycle, type TradeInsights } from 
 import { toSyncPayload, isSyncPayload, type TradeSyncPayload } from "../lib/trade-sync";
 import { toAutoStateSyncPayload, isAutoStateSyncPayload, mergeAutoHistory, derivePositionsFromHistory, type AutoStateSyncPayload } from "../lib/auto-state-sync"; // [v0.31.0] 자동매매 기록 기기 간 동기화
 import { classifyPullResult } from "../lib/sync-all"; // [v0.98.0] 전체 동기화: 받기 결과 분류(진짜 실패면 올리기 보류)
-import { toSplitsSyncPayload, isSplitsSyncPayload, mergeSplits, type SplitsSyncPayload } from "../lib/splits-sync"; // [v0.61.7] 삼분할 타점 기록 기기 간 동기화
+import { toSplitsSyncPayload, isSplitsSyncPayload, mergeSplits, mergeTombstones, type SplitsSyncPayload, type Tombstones } from "../lib/splits-sync"; // [v0.61.7] 삼분할 타점 기록 기기 간 동기화
 import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, WICK_MIN_RATIO, DOJI_MAX_AGE_MINUTES, type Candle, type SessionPattern } from "../lib/indicators";
 import { buildAutoReport, type AutoRunRecord, type AutoReport } from "../lib/auto-report"; // [v0.62.1] 자동매매 리포트
 import {
@@ -746,6 +746,9 @@ export interface SavedSplit {
    *   (옛 기록을 잃지 않기 위해 필수가 아닌 '선택' 항목으로 둡니다)
    */
   inputs?: SplitInputs;
+  /** [v0.102.0] 마지막으로 손댄 시각(ms) — 메모 수정·진입완료 체크가 다른 기기로 제대로 넘어가게 하는 기준.
+   *  (ts는 "저장한 시각"이라 수정해도 안 바뀌어서, 예전엔 다른 기기가 수정본을 옛것으로 보고 무시했다.) */
+  updatedAtMs?: number;
 }
 
 /**
@@ -1282,6 +1285,9 @@ export interface AutoTradeHistoryEntry {
    *  제외 로직은 안전장치로 그대로 남겨 둔다 — true면 절대 "Capri가 산 포지션"으로 취급하지
    *  않는다. */
   reflectedOnly?: boolean;
+  /** [v0.102.0] 이 기록을 마지막으로 고친 시각(ms). 기기 간 동기화에서 "같은 상태인데 내용이 다를 때"
+   *  어느 쪽이 최신인지 가리는 기준이다(lib/auto-state-sync.ts mergeAutoHistory). 옛 기록엔 없다. */
+  updatedAtMs?: number;
   /** [v0.45.0 — 오너 요청 "각 사용자가 어떤 기준으로 자동매매를 진행했는지도 연구 데이터에
    *  모이게"] 이 매매가 실제로 어떤 스크리닝·리스크 설정으로 진입됐는지의 스냅샷. 오너들이
    *  설정을 수시로 바꾸고(버전 이력은 안 남음) capri_group_trades는 이 기록을 그룹 전체가
@@ -1429,6 +1435,9 @@ export class ToolEngine extends EventEmitter {
   /** [v0.4.0] 삼분할 타점 기록 파일 경로/메모리 캐시(여러 종목 동시 운용용). 근거와 별도 파일. */
   private splitsPath: string;
   private splits: SavedSplit[] = [];
+  /** [v0.102.0] 삼분할 기록 삭제 표식 { id: 지운 시각 } — 지운 기록이 다른 기기에서 다시 살아나지 않게(lib/splits-sync.ts). 별도 파일에 보관. */
+  private splitsDeleted: Tombstones = {};
+  private splitsDeletedPath = "";
   /** [v0.5.0] 체결강도 시계열 파일 경로 + 종목별 시계열(메모리 캐시). */
   private strengthPath: string;
   private strengthSeries: Record<string, StrengthSample[]> = {};
@@ -1804,6 +1813,7 @@ export class ToolEngine extends EventEmitter {
     this.journalPath = join(userDataDir, "kylebot-journal.json");
     this.rationalePath = join(userDataDir, "kylebot-rationale.json");
     this.splitsPath = join(userDataDir, "kylebot-splits.json"); // [v0.4.0] 삼분할 기록 파일
+    this.splitsDeletedPath = join(userDataDir, "kylebot-splits-deleted.json"); // [v0.102.0] 삼분할 삭제 표식 파일
     this.strengthPath = join(userDataDir, "kylebot-strength.json"); // [v0.5.0] 체결강도 시계열
     this.tradesPath = join(userDataDir, "kylebot-trades.json"); // [v0.7.0] 자동 기록 트레이드
     this.fillsPath = join(userDataDir, "kylebot-fills.json"); // [v0.9.8] 매매(체결) 이력 — 연결 없이도 리포트를 그리기 위해 보관
@@ -4888,19 +4898,28 @@ export class ToolEngine extends EventEmitter {
     } catch {
       this.splits = [];
     }
+    // [v0.102.0] 삭제 표식 — 이 기기에도 따로 보관한다. 혹시 옛 버전 앱이 클라우드의 표식을 지운 채 올려도
+    //   이 기기가 표식을 기억하고 있어서, 다음 동기화 때 지운 기록을 다시 지우고 표식도 되살린다.
+    try {
+      const raw = existsSync(this.splitsDeletedPath) ? (JSON.parse(readFileSync(this.splitsDeletedPath, "utf8")) as unknown) : {};
+      this.splitsDeleted = raw && typeof raw === "object" && !Array.isArray(raw) ? mergeTombstones(raw as Tombstones, {}, Date.now()) : {};
+    } catch {
+      this.splitsDeleted = {};
+    }
   }
 
   /** 메모리의 기록 목록을 파일에 저장(디바운스 — v0.90.0). */
   private persistSplits(): void {
+    this.saveSplitsLocal();
+    // [v0.61.7 — ③ 전수조사 중간-2] 로그인 상태면 다른 기기도 곧바로 볼 수 있게 클라우드에도 올려 둔다.
+    //   [v0.102.0] 15초 안에 또 바뀌어도 건너뛰지 않고 "남은 시간 뒤"로 예약한다(schedulePush) — 변경 누락 방지.
+    this.schedulePush("splits", 15_000);
+  }
+
+  /** [v0.102.0] 이 기기 파일에만 저장(클라우드로 올리지 않음) — 클라우드에서 받아 합친 직후에 쓴다(받자마자 다시 올리는 핑퐁 방지). */
+  private saveSplitsLocal(): void {
     this.scheduleFileSave("splits", this.splitsPath, () => this.splits);
-    // [v0.61.7 — ③ 전수조사 중간-2] 로그인 상태면 다른 기기도 곧바로 볼 수 있게 클라우드에도
-    //   올려 둔다(persistAutoTradeHistory와 같은 패턴 — 15초 쓰로틀, 실패해도 조용히 무시).
-    const longEnough = Date.now() - (this.lastSplitsPushAtMs ?? 0) > 15_000;
-    if (longEnough && this.syncKeyReady()) {
-      void this.syncPushSplits().catch(() => {
-        /* 업로드 실패는 조용히 넘어간다 */
-      });
-    }
+    this.scheduleFileSave("splitsDeleted", this.splitsDeletedPath, () => this.splitsDeleted);
   }
 
   /**
@@ -4934,6 +4953,7 @@ export class ToolEngine extends EventEmitter {
       memo: (input.memo ?? "").trim(),
       // 입력값은 준 경우에만 담는다(안 주면 예전과 똑같은 모양으로 저장 — 하위호환).
       ...(input.inputs ? { inputs: input.inputs } : {}),
+      updatedAtMs: now.toMillis(), // [v0.102.0] 마지막으로 손댄 시각(기기 간 "누가 최신인가"의 기준)
     };
     this.splits.unshift(rec); // 최신이 맨 위
     if (this.splits.length > 500) this.splits.pop(); // 너무 쌓이면 오래된 것부터 정리
@@ -4949,24 +4969,31 @@ export class ToolEngine extends EventEmitter {
   /** 기록 한 건 삭제(휴지통 아이콘). 순수 함수 removeSavedSplit로 목록을 새로 만든 뒤 저장. */
   deleteSplit(id: string): SavedSplit[] {
     this.splits = removeSavedSplit(this.splits, id);
+    // [v0.102.0] 삭제 표식을 남긴다 — 이게 없으면 아직 이 기록을 가진 다른 기기가 "새 기록"으로 착각해 다시 올려 부활시킨다.
+    this.splitsDeleted = { ...this.splitsDeleted, [id]: Date.now() };
     this.persistSplits();
     return this.getSplits();
   }
 
   /** 특정 기록의 특정 분할에 대해 [진입완료] 체크를 뒤집는다. */
   toggleSplitEntered(id: string, level: number): SavedSplit[] {
-    this.splits = toggleSavedLevel(this.splits, id, level);
+    this.splits = this.touchSplit(toggleSavedLevel(this.splits, id, level), id);
     this.persistSplits();
     return this.getSplits();
   }
 
   /** 기록의 제목(메모)을 수정한다(연필 → 인라인 편집). 파일에 반영, 앱 재시작해도 유지. */
   renameSplit(id: string, memo: string): SavedSplit[] {
-    this.splits = renameSavedSplit(this.splits, id, memo);
+    this.splits = this.touchSplit(renameSavedSplit(this.splits, id, memo), id);
     this.persistSplits();
     return this.getSplits();
   }
 
+  /** [v0.102.0] 기록 하나를 "방금 손댐"으로 표시(updatedAtMs) — 이게 있어야 수정본이 다른 기기의 옛 값을 이긴다. */
+  private touchSplit(list: SavedSplit[], id: string): SavedSplit[] {
+    const now = Date.now();
+    return list.map((s) => (s.id === id ? { ...s, updatedAtMs: Math.max(now, (s.updatedAtMs ?? 0) + 1) } : s));
+  }
   // --------------------------------------------------------------------------
   // [v0.5.0] 체결강도 기록 — 온디맨드 시계열 샘플링(시작/중지/조회)
   //   ⚠️ 읽기 전용(trades 조회만). 주문 로직과 완전히 분리.
@@ -6009,24 +6036,25 @@ export class ToolEngine extends EventEmitter {
     }
   }
 
-  private persistAutoTradeHistory(): void {
+  /** [v0.102.0] 이 기기 파일에만 저장(클라우드로 올리지 않음) — 클라우드에서 받아 합친 직후에 쓴다. */
+  private saveAutoHistoryLocal(): void {
     try {
       if (this.autoTradeHistory.length > ToolEngine.AUTO_TRADE_HISTORY_MAX) {
+        // 기록은 진입 시각(연도 포함) 순으로 정렬돼 있으므로 앞쪽(가장 오래된 것)부터 잘린다 — 모든 기기가 같은 규칙.
         this.autoTradeHistory = this.autoTradeHistory.slice(-ToolEngine.AUTO_TRADE_HISTORY_MAX);
       }
       this.scheduleFileSave("autoHistory", this.autoTradeHistoryPath, () => this.autoTradeHistory); // [v0.90.0] 디바운스
     } catch {
       /* 기록 실패는 자동매매 진행을 막지 않는다 */
     }
-    // [v0.31.0] 로그인 상태면 다른 기기도 곧바로 볼 수 있게 클라우드에도 올려 둔다.
-    //   · 로그인 상태(authPassword 있음)일 때만 동작, 실패해도 조용히 무시(로컬은 이미 저장됨).
+  }
+
+  private persistAutoTradeHistory(): void {
+    this.saveAutoHistoryLocal();
+    // [v0.31.0] 로그인 상태면 다른 기기도 곧바로 볼 수 있게 클라우드에도 올려 둔다(실패는 recordSync가 기록·경고).
     //   · 15초에 한 번으로 제한 — 상태 전이마다(watching→active→종료) 매번 올리면 과함.
-    const longEnough = Date.now() - (this.lastAutoStatePushAtMs ?? 0) > 15_000;
-    if (longEnough && this.syncKeyReady()) {
-      void this.syncPushAutoState().catch(() => {
-        /* 업로드 실패는 조용히 넘어간다 */
-      });
-    }
+    //   · [v0.102.0] 15초 안에 또 바뀌면 건너뛰지 않고 남은 시간 뒤로 예약한다(예전엔 그 변경이 다음 점검까지 누락).
+    this.schedulePush("autoState", 15_000);
     // [v0.35.0] 그룹 공유(평문, capri_group_trades)도 같은 타이밍·쓰로틀로 함께 올린다 —
     //   로그인만 돼 있으면 되고(비밀번호는 필요 없음 — 암호화하지 않으므로), 실패해도
     //   조용히 무시(개인 기록은 이미 로컬+개인 클라우드에 안전하게 저장돼 있다).
@@ -6060,6 +6088,7 @@ export class ToolEngine extends EventEmitter {
         conditionalOrderId: pos.conditionalOrderId,
         buyOrderId: pos.buyOrderId,
         criteriaSnapshot,
+        updatedAtMs: Date.now(), // [v0.102.0] 마지막으로 고친 시각(기기 간 "누가 최신인가"의 기준)
       });
       this.persistAutoTradeHistory();
     } catch {
@@ -6102,8 +6131,13 @@ export class ToolEngine extends EventEmitter {
     if (!ex) return;
     const idx = this.autoTradeHistory.findIndex((x) => x.id === h.id);
     if (idx === -1) return;
-    this.autoTradeHistory[idx] = { ...this.autoTradeHistory[idx], maePct: ex.maePct, mfePct: ex.mfePct };
+    this.autoTradeHistory[idx] = { ...this.autoTradeHistory[idx], maePct: ex.maePct, mfePct: ex.mfePct, updatedAtMs: this.nextHistoryStamp(this.autoTradeHistory[idx]) };
     this.persistAutoTradeHistory();
+  }
+
+  /** [v0.102.0] 수정 시각 — 시계가 같은 ms를 돌려줘도 항상 이전 값보다 커지게(+1ms) 해서 "최신" 판정이 흔들리지 않게 한다. */
+  private nextHistoryStamp(prev: AutoTradeHistoryEntry): number {
+    return Math.max(Date.now(), (prev.updatedAtMs ?? 0) + 1);
   }
 
   /** 이후 상태 전이(체결확인/청산/취소) 때 같은 줄을 id로 찾아 갱신. */
@@ -6113,7 +6147,8 @@ export class ToolEngine extends EventEmitter {
       const idx = this.autoTradeHistory.findIndex((h) => h.id === id);
       if (idx === -1) return; // 기록 자체가 없으면(예: 구버전 데이터) 조용히 무시
       const before = this.autoTradeHistory[idx];
-      this.autoTradeHistory[idx] = { ...before, ...patch };
+      // [v0.102.0] 고칠 때마다 updatedAtMs를 새로 찍는다 — 상태가 같은 수정(수량·체결가·익절/손절가 등)도 다른 기기로 넘어가게.
+      this.autoTradeHistory[idx] = { ...before, ...patch, updatedAtMs: this.nextHistoryStamp(before) };
       this.persistAutoTradeHistory();
       // [v0.63.0] 익절/손절로 "막 끝난" 순간(전이 시점에 한 번만) — 측정·연속 손절 확인.
       const wasClosed = before.status === "closed_win" || before.status === "closed_loss";
@@ -6304,14 +6339,31 @@ export class ToolEngine extends EventEmitter {
     return { ok: false, message: msg };
   }
 
+  /**
+   * [v0.102.0] "내용 지문" — 지난번 올린 뒤로 기록이 바뀌었는지 판단하는 값.
+   *   예전 지문은 일부만 봤다(삼분할은 '개수'만, 자동매매는 상태·손익만) → 메모 수정·진입완료 체크·수량/체결가 수정처럼
+   *   개수·상태가 그대로인 변경은 "안 바뀜"으로 보여 최대 1시간 동안 클라우드에 안 올라갔다. 이제 내용 전체로 계산한다.
+   */
+  private static contentHash(v: unknown): string {
+    const text = JSON.stringify(v) ?? "";
+    let h = 0;
+    for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) | 0;
+    return `${text.length}:${h}`;
+  }
   private fillsFingerprint(): string {
+    // 체결은 토스가 확정한 사실이라 바뀌지 않는다 — 개수와 처음/마지막 시각이면 충분하다(수천 건을 매번 해시하지 않게).
+    const first = this.savedFills[0];
     const last = this.savedFills[this.savedFills.length - 1];
-    return `${this.savedFills.length}:${last ? last.atMs : 0}`;
+    return `${this.savedFills.length}:${first ? first.atMs : 0}:${last ? last.atMs : 0}`;
   }
   private historyFingerprint(): string {
-    let h = 0;
-    for (const e of this.autoTradeHistory) h = (h * 31 + (e.status.length + (e.exitedAt ? e.exitedAt.length : 0) + Math.round((e.pnlUsd ?? 0) * 100))) | 0;
-    return `${this.autoTradeHistory.length}:${h}`;
+    return ToolEngine.contentHash(this.autoTradeHistory);
+  }
+  private splitsFingerprint(): string {
+    return ToolEngine.contentHash([this.splits, this.splitsDeleted]);
+  }
+  private syncFingerprint(ch: "trades" | "autoState" | "splits"): string {
+    return ch === "trades" ? this.fillsFingerprint() : ch === "autoState" ? this.historyFingerprint() : this.splitsFingerprint();
   }
 
   /** 모든 암호화 채널을 지금 올린다(로그인 직후·잠금 해제 직후·주기 점검에서 호출). */
@@ -6415,7 +6467,7 @@ export class ToolEngine extends EventEmitter {
     const defs = [
       { key: "trades" as const, label: "체결 이력", count: () => this.savedFills.length, pull: () => this.syncPullTrades(), push: () => this.syncPushTrades(), fp: () => this.fillsFingerprint() },
       { key: "autoState" as const, label: "자동매매 기록", count: () => this.autoTradeHistory.length, pull: () => this.syncPullAutoState(), push: () => this.syncPushAutoState(), fp: () => this.historyFingerprint() },
-      { key: "splits" as const, label: "삼분할 기록", count: () => this.splits.length, pull: () => this.syncPullSplits(), push: () => this.syncPushSplits(), fp: () => String(this.splits.length) },
+      { key: "splits" as const, label: "삼분할 기록", count: () => this.splits.length, pull: () => this.syncPullSplits(), push: () => this.syncPushSplits(), fp: () => this.splitsFingerprint() },
     ];
     const out: Array<{ key: "trades" | "autoState" | "splits"; label: string; added: number; pulled: "ok" | "empty" | "fail"; pushed: "ok" | "skip" | "fail" | "held"; detail: string }> = [];
     for (const d of defs) {
@@ -6432,7 +6484,8 @@ export class ToolEngine extends EventEmitter {
       let detail = pulled === "fail" ? pr.message : "";
       if (pulled === "fail") {
         pushed = "held"; // 받지 못한 채 올리면 클라우드의 다른 기기 기록을 덮어쓸 수 있다 → 보류
-      } else if (d.count() > 0 && (force || this.cloudSync[d.key].lastFingerprint !== d.fp() || stale(d.key))) {
+      } else if (this.syncChannelDef(d.key).hasData() && (force || this.cloudSync[d.key].lastFingerprint !== d.fp() || stale(d.key))) {
+        // [v0.102.0] 기록이 0건이어도 삭제 표식이 있으면 올린다(hasData) — "전부 지웠다"도 다른 기기에 전해야 하는 변경이다.
         try {
           const x = await d.push();
           pushed = x.ok ? "ok" : "fail";
@@ -6541,207 +6594,309 @@ export class ToolEngine extends EventEmitter {
     }
   }
 
-  /**
-   * syncPushTrades — 저장된 매매 이력을 암호화해 내 계정(capri_trades) 행에 올린다.
-   */
-  async syncPushTrades(): Promise<{ ok: boolean; message: string; count?: number }> {
-    const token = await this.ensureAccessToken();
-    if (!token) return { ok: false, message: "먼저 로그인하세요." };
-    if (!this.syncKeyReady()) return this.syncLockedResult("trades");
-    if (this.savedFills.length === 0) return { ok: false, message: "올릴 매매 이력이 없습니다." };
+  // ===========================================================================
+  // [v0.102.0 — 오너 지시 "맥·윈도우·폰이 같은 계정으로 동기화하는데 데이터 오차가 절대 생기면 안 된다"]
+  //   암호화 동기화 3채널(체결 이력·자동매매 기록·삼분할 기록)의 받기/올리기를 하나의 공통 틀로 다시 짰다.
+  //
+  // [예전 구조의 빈틈 — 실제로 오차가 생길 수 있던 경로]
+  //   ① "올리기"가 클라우드 한 줄을 이 기기 내용으로 통째로 덮어썼다. 기록이 바뀔 때마다 바로 올리는 경로
+  //      (persistSplits·persistAutoTradeHistory)는 받기 없이 곧장 덮어써서, 그 사이 다른 기기가 올린 기록이
+  //      클라우드에서 사라질 수 있었다(나중에 다시 합쳐지긴 해도 그동안 폰엔 안 보임).
+  //   ② 두 기기가 거의 동시에 "받기→합치기→올리기"를 하면, 늦게 올린 쪽이 먼저 올린 쪽을 모른 채 덮어썼다.
+  //   ③ 지운 기록이 다른 기기에서 다시 살아났다(삭제 표식이 없었음 — lib/splits-sync.ts 설명 참고).
+  //
+  // [새 구조 — "버전 확인 후 저장"(compare-and-swap, 은행 송금과 같은 원리)]
+  //   올리기는 이제 항상 ①클라우드 줄을 읽고(그 줄의 버전 = updated_at 기억) ②내 기록과 합친 뒤
+  //   ③"클라우드 버전이 아까 읽은 그대로일 때만" 저장한다. 그 사이 다른 기기가 먼저 저장했으면 저장이
+  //   거절되고(0줄 변경), 처음부터 다시 읽고 합쳐서 저장한다(최대 4번). → 누가 먼저 저장하든 서로의 기록이
+  //   절대 덮여 사라지지 않는다.
+  //   또 같은 기기 안에서도 채널마다 줄을 세워(한 번에 하나씩) 받기와 올리기가 서로 엉키지 않게 했다.
+  // ===========================================================================
 
-    try {
-      const rec = await this.encryptForSync(toSyncPayload(this.savedFills, Date.now()));
-      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_trades?on_conflict=user_id`, {
-        method: "POST",
-        headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
-        body: JSON.stringify({ user_id: this.authUserId, ciphertext: rec.ciphertext, salt: rec.salt, iv: rec.iv, updated_at: new Date().toISOString() }),
-      }, 10_000, "capri_trades");
-      if (!res.ok) return this.recordSync("trades", false, `클라우드 저장 실패(HTTP ${res.status}).`);
-      this.lastSyncPushAtMs = Date.now();
-      this.recordSync("trades", true, null, this.fillsFingerprint());
-      return { ok: true, message: `매매 이력 ${this.savedFills.length}건을 올렸습니다(암호화됨).`, count: this.savedFills.length };
-    } catch (e) {
-      return this.recordSync("trades", false, `올리기 실패: ${e instanceof Error ? e.message : String(e)}`);
-    }
+  /** 채널별 "줄 세우기"(한 번에 하나의 받기/올리기만 진행) — 같은 기기 안에서 둘이 겹쳐 반쯤 합쳐진 상태로 올라가는 일을 막는다. */
+  private syncLocks: Record<"trades" | "autoState" | "splits", Promise<unknown>> = { trades: Promise.resolve(), autoState: Promise.resolve(), splits: Promise.resolve() };
+  /** 채널별 "곧 올리기" 예약 타이머(기록이 바뀌었는데 쓰로틀 때문에 바로 못 올린 경우, 빠뜨리지 않고 나중에 올린다). */
+  private syncPushTimers: Partial<Record<"trades" | "autoState" | "splits", ReturnType<typeof setTimeout>>> = {};
+
+  private withSyncLock<T>(ch: "trades" | "autoState" | "splits", fn: () => Promise<T>): Promise<T> {
+    const run = this.syncLocks[ch].then(fn, fn); // 앞 작업이 실패했어도 다음 작업은 진행
+    this.syncLocks[ch] = run.catch(() => undefined);
+    return run;
   }
 
   /**
-   * syncPullTrades — 내 계정에 올려 둔 매매 이력을 받아 복호화해 저장본에 합친다.
-   *   authSignIn 이 로그인 직후 자동으로 부른다 — 보통 사람이 직접 누를 일이 없다.
+   * schedulePush — 기록이 바뀌었을 때 "곧" 올리도록 예약한다.
+   *   예전엔 "15초 안에 이미 올렸으면 그냥 건너뜀"이라, 15초 안에 두 번 바뀌면 두 번째 변경은 다음 5분 점검까지
+   *   (삼분할은 지문이 '개수'뿐이라 최대 1시간까지) 클라우드에 안 올라갔다. 이제는 건너뛰지 않고 남은 시간 뒤로 예약한다.
    */
-  async syncPullTrades(): Promise<{ ok: boolean; message: string; count?: number }> {
-    const token = await this.ensureAccessToken();
-    if (!token) return { ok: false, message: "먼저 로그인하세요." };
-    if (!this.syncKeyReady()) return { ok: false, message: "동기화 키가 없어 매매 이력을 받을 수 없습니다(로그인 비밀번호를 한 번 입력하면 풀립니다)." };
+  private schedulePush(ch: "trades" | "autoState" | "splits", minGapMs: number): void {
+    if (!this.syncKeyReady()) return;
+    if (this.syncPushTimers[ch]) return; // 이미 예약됨 — 그때 최신 내용으로 올라간다
+    const last = ch === "trades" ? this.lastSyncPushAtMs : ch === "autoState" ? this.lastAutoStatePushAtMs : this.lastSplitsPushAtMs;
+    const wait = Math.max(0, minGapMs - (Date.now() - (last ?? 0)));
+    const go = () => void this.syncPushChannel(ch).catch(() => undefined); // 업로드 실패는 recordSync가 기록·경고한다
+    if (wait === 0) {
+      go();
+      return;
+    }
+    const t = setTimeout(() => {
+      delete this.syncPushTimers[ch];
+      go();
+    }, wait);
+    (t as unknown as { unref?: () => void }).unref?.(); // 이 타이머가 앱 종료를 붙잡지 않게
+    this.syncPushTimers[ch] = t;
+  }
 
-    try {
-      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_trades?select=ciphertext,salt,iv`, {
-        headers: this.authRestHeaders(token),
-      }, 10_000, "capri_trades");
-      if (!res.ok) return { ok: false, message: `클라우드 조회 실패(HTTP ${res.status}).` };
-      const rows = (await res.json()) as Array<{ ciphertext: string; salt: string; iv: string }>;
-      if (!rows || rows.length === 0) {
-        return { ok: false, message: "내 계정에 저장된 매매 이력이 없습니다." };
-      }
-      const payload = await this.decryptFromSync<TradeSyncPayload>(rows[0]); // 틀린 비번/키면 여기서 실패
-      if (!isSyncPayload(payload)) return { ok: false, message: "받은 데이터 형식이 올바르지 않습니다." };
-
-      const before = this.savedFills.length;
-      this.savedFills = mergeFills(this.savedFills, payload.fills);
-      this.fillsSyncedAtMs = Math.max(this.fillsSyncedAtMs ?? 0, payload.pushedAtMs);
-      this.persistFills();
-      const added = this.savedFills.length - before;
+  /** 채널별 차이점(테이블 이름·검사기·합치는 방법 등)을 한곳에 모았다 — 아래 공통 받기/올리기가 이것만 보고 동작한다. */
+  private syncChannelDef(ch: "trades" | "autoState" | "splits"): {
+    table: string;
+    noun: string;
+    validate: (p: unknown) => boolean;
+    absorb: (p: unknown) => { received: number; added: number };
+    /** 합친 뒤에도 "클라우드 내용 ≠ 이 기기 내용"인가 — 그렇다면 이 기기가 다시 올려 클라우드를 바로잡아야 한다(아래 absorbSyncRow). */
+    differs: (p: unknown) => boolean;
+    hasData: () => boolean;
+    build: (nowMs: number) => unknown;
+    count: () => number;
+  } {
+    if (ch === "trades") {
       return {
-        ok: true,
-        message: `매매 이력 ${payload.fills.length}건을 받았습니다(새로 추가 ${added}건).`,
-        count: this.savedFills.length,
+        table: "capri_trades",
+        noun: "매매 이력",
+        validate: isSyncPayload,
+        absorb: (p) => {
+          const payload = p as TradeSyncPayload;
+          const before = this.savedFills.length;
+          // 체결은 토스가 확정한 사실이라 "같은 체결 = 같은 열쇠"(fillKey)로 중복 없이 합쳐진다(합집합).
+          this.savedFills = mergeFills(this.savedFills, payload.fills);
+          this.fillsSyncedAtMs = Math.max(this.fillsSyncedAtMs ?? 0, payload.pushedAtMs);
+          this.persistFills();
+          return { received: payload.fills.length, added: this.savedFills.length - before };
+        },
+        differs: (p) => {
+          const remote = mergeFills([], (p as TradeSyncPayload).fills);
+          return ToolEngine.contentHash(toSyncPayload(remote, 0).fills) !== ToolEngine.contentHash(toSyncPayload(this.savedFills, 0).fills);
+        },
+        hasData: () => this.savedFills.length > 0,
+        build: (now) => toSyncPayload(this.savedFills, now),
+        count: () => this.savedFills.length,
       };
-    } catch (e) {
-      return { ok: false, message: `받기 실패: ${e instanceof Error ? e.message : String(e)}` };
     }
+    if (ch === "splits") {
+      return {
+        table: "capri_splits",
+        noun: "삼분할 기록",
+        validate: isSplitsSyncPayload,
+        absorb: (p) => {
+          const payload = p as SplitsSyncPayload;
+          const before = this.splits.length;
+          // 삭제 표식부터 합친다 → 그다음 기록을 합칠 때 표식이 있는 id는 빠진다(부활 방지).
+          this.splitsDeleted = mergeTombstones(this.splitsDeleted, payload.deleted, Date.now());
+          this.splits = mergeSplits(this.splits, payload.splits, this.splitsDeleted);
+          this.saveSplitsLocal();
+          return { received: payload.splits.length, added: this.splits.length - before };
+        },
+        differs: (p) => {
+          const payload = p as SplitsSyncPayload;
+          const now = Date.now();
+          const rt = mergeTombstones(payload.deleted, {}, now); // 같은 규칙으로 정돈한 뒤 비교(순서 차이로 '다름'이 나오지 않게)
+          const remote = toSplitsSyncPayload(mergeSplits([], payload.splits, rt), 0, rt);
+          const lt = mergeTombstones(this.splitsDeleted, {}, now);
+          const local = toSplitsSyncPayload(mergeSplits([], this.splits, lt), 0, lt);
+          return ToolEngine.contentHash(remote) !== ToolEngine.contentHash(local);
+        },
+        // 기록이 0건이어도 삭제 표식이 있으면 올려야 한다 — "전부 지웠다"도 다른 기기에 알려야 하는 변경이다.
+        hasData: () => this.splits.length > 0 || Object.keys(this.splitsDeleted).length > 0,
+        build: (now) => toSplitsSyncPayload(this.splits, now, this.splitsDeleted),
+        count: () => this.splits.length,
+      };
+    }
+    return {
+      table: "capri_auto_state",
+      noun: "자동매매 기록",
+      validate: isAutoStateSyncPayload,
+      absorb: (p) => {
+        const payload = p as AutoStateSyncPayload;
+        const before = this.autoTradeHistory.length;
+        this.autoTradeHistory = mergeAutoHistory(this.autoTradeHistory, payload.history);
+        this.saveAutoHistoryLocal();
+        // [핵심] "지금 감시 중" 목록도 병합된 기록에서 다시 만든다 — 이 기기가 한 번도 진입시킨
+        //   적 없는 포지션이라도, 다른 기기가 올려 둔 기록에 conditionalOrderId/buyOrderId가
+        //   있으면 이 기기도 그 번호로 실제 체결·발동 여부를 재확인할 수 있게 된다.
+        //   [v0.98.0] 단, 이 기기에서 자동매매가 실제로 켜져 있으면 다시 만들지 않는다 — 실거래 중인 기기의
+        //   감시 목록을 기록으로 덮어쓰면 보호주문 관리가 흔들린다(mergeOwnGroupHistory와 같은 원칙).
+        if (!this.autoTradeEnabled) {
+          this.autoTradePositions = derivePositionsFromHistory(this.autoTradeHistory);
+          this.saveAutoPositions();
+        }
+        return { received: payload.history.length, added: this.autoTradeHistory.length - before };
+      },
+      differs: (p) => {
+        const remote = mergeAutoHistory([], (p as AutoStateSyncPayload).history).slice(-ToolEngine.AUTO_TRADE_HISTORY_MAX);
+        return ToolEngine.contentHash(remote) !== ToolEngine.contentHash(mergeAutoHistory([], this.autoTradeHistory));
+      },
+      hasData: () => this.autoTradeHistory.length > 0,
+      build: (now) => toAutoStateSyncPayload(this.autoTradeHistory, now),
+      count: () => this.autoTradeHistory.length,
+    };
   }
 
-  // ---------------------------------------------------------------------------
-  // [v0.61.7 — ③ 전수조사 중간-2] 삼분할 타점 기록(SavedSplit) 기기 간 동기화 —
-  //   capri_trades와 완전히 같은 패턴. 자세한 설계 이유는 lib/splits-sync.ts 참고.
-  // ---------------------------------------------------------------------------
-
-  /** syncPushSplits — 삼분할 타점 기록 전체를 암호화해 내 계정(capri_splits) 행에 올린다. */
-  async syncPushSplits(): Promise<{ ok: boolean; message: string; count?: number }> {
-    const token = await this.ensureAccessToken();
-    if (!token) return { ok: false, message: "먼저 로그인하세요." };
-    if (!this.syncKeyReady()) return this.syncLockedResult("splits");
-    if (this.splits.length === 0) return { ok: false, message: "올릴 삼분할 기록이 없습니다." };
-
-    try {
-      const rec = await this.encryptForSync(toSplitsSyncPayload(this.splits, Date.now()));
-      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_splits?on_conflict=user_id`, {
-        method: "POST",
-        headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
-        body: JSON.stringify({ user_id: this.authUserId, ciphertext: rec.ciphertext, salt: rec.salt, iv: rec.iv, updated_at: new Date().toISOString() }),
-      }, 10_000, "capri_splits");
-      if (!res.ok) return this.recordSync("splits", false, `클라우드 저장 실패(HTTP ${res.status}).`);
-      this.lastSplitsPushAtMs = Date.now();
-      this.recordSync("splits", true, null, String(this.splits.length));
-      return { ok: true, message: `삼분할 기록 ${this.splits.length}건을 올렸습니다(암호화됨).`, count: this.splits.length };
-    } catch (e) {
-      return this.recordSync("splits", false, `올리기 실패: ${e instanceof Error ? e.message : String(e)}`);
-    }
+  /** 클라우드에서 이 계정의 그 채널 한 줄(암호문 + 버전 = updated_at)을 읽는다. 없으면 row=null. */
+  private async fetchSyncRow(
+    table: string,
+    token: string,
+  ): Promise<{ ok: true; row: { ciphertext: string; salt: string; iv: string; updated_at?: string } | null } | { ok: false; message: string }> {
+    const mine = this.authUserId ? `&user_id=eq.${encodeURIComponent(this.authUserId)}` : "";
+    const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/${table}?select=ciphertext,salt,iv,updated_at${mine}`, { headers: this.authRestHeaders(token) }, 10_000, table);
+    if (!res.ok) return { ok: false, message: `클라우드 조회 실패(HTTP ${res.status}).` };
+    const rows = (await res.json()) as Array<{ ciphertext: string; salt: string; iv: string; updated_at?: string }>;
+    return { ok: true, row: rows && rows.length > 0 ? rows[0] : null };
   }
 
-  /** syncPullSplits — 내 계정에 올려 둔 삼분할 기록을 받아 복호화해 병합한다. authSignIn이 로그인 직후 자동으로 부른다. */
-  async syncPullSplits(): Promise<{ ok: boolean; message: string; count?: number }> {
-    const token = await this.ensureAccessToken();
-    if (!token) return { ok: false, message: "먼저 로그인하세요." };
-    if (!this.syncKeyReady()) return { ok: false, message: "동기화 키가 없어 삼분할 기록을 받을 수 없습니다(로그인 비밀번호를 한 번 입력하면 풀립니다)." };
-
-    try {
-      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_splits?select=ciphertext,salt,iv`, {
-        headers: this.authRestHeaders(token),
-      }, 10_000, "capri_splits");
-      if (!res.ok) return { ok: false, message: `클라우드 조회 실패(HTTP ${res.status}).` };
-      const rows = (await res.json()) as Array<{ ciphertext: string; salt: string; iv: string }>;
-      if (!rows || rows.length === 0) {
-        return { ok: false, message: "내 계정에 저장된 삼분할 기록이 없습니다." };
-      }
-      const payload = await this.decryptFromSync<SplitsSyncPayload>(rows[0]); // 틀린 비번/키면 여기서 실패
-      if (!isSplitsSyncPayload(payload)) return { ok: false, message: "받은 데이터 형식이 올바르지 않습니다." };
-
-      const before = this.splits.length;
-      this.splits = mergeSplits(this.splits, payload.splits);
-      this.persistSplits();
-      const added = this.splits.length - before;
-      return { ok: true, message: `삼분할 기록 ${payload.splits.length}건을 받았습니다(새로 추가 ${added}건).`, count: this.splits.length };
-    } catch (e) {
-      return { ok: false, message: `받기 실패: ${e instanceof Error ? e.message : String(e)}` };
-    }
+  /** 읽어 온 한 줄을 풀어서(복호화) 이 기기 기록에 합친다. 풀지 못하면 예외 — 부른 쪽이 "올리기 보류"로 처리한다. */
+  private async absorbSyncRow(ch: "trades" | "autoState" | "splits", row: { ciphertext: string; salt: string; iv: string }): Promise<{ received: number; added: number }> {
+    const def = this.syncChannelDef(ch);
+    const payload = await this.decryptFromSync<unknown>(row); // 틀린 비번/키면 여기서 실패
+    if (!def.validate(payload)) throw new Error("받은 데이터 형식이 올바르지 않습니다.");
+    const r = def.absorb(payload);
+    // [v0.102.0] 합친 결과가 클라우드 내용과 다르면(이 기기에만 있는 기록, 또는 클라우드에 남아 있는 '지워진' 기록 등)
+    //   "지난번 올린 지문"을 지워 이번 점검에서 반드시 다시 올리게 한다. 이게 없으면 이 기기 내용이 안 바뀐 경우
+    //   (예: 옛 버전 앱이 지운 기록을 다시 올려 둔 상태) 클라우드가 틀린 채로 남아, 새로 로그인한 폰이 그걸 받아 간다.
+    if (def.differs(payload)) this.cloudSync[ch].lastFingerprint = null;
+    return r;
   }
-
-  // ---------------------------------------------------------------------------
-  // [v0.31.0] 자동매매 기록(포지션+이력) 기기 간 동기화 — capri_trades와 완전히 같은 패턴.
-  //   [오너 보고 2026-09-26] "PC에서 진행하다 폰에서 킬 경우 자동매매 기록이 사라짐"의
-  //   나머지 절반(v0.30.1은 "같은 기기 재시작"만 고쳤었다) — 자세한 설계 이유는
-  //   lib/auto-state-sync.ts 파일 상단 주석 참고.
-  // ---------------------------------------------------------------------------
 
   /**
-   * syncPushAutoState — 자동매매 기록 전체를 암호화해 내 계정(capri_auto_state) 행에 올린다
+   * syncPushChannel — [핵심] 받기 → 합치기 → "버전이 그대로일 때만" 저장, 을 한 덩어리로 한다(위 큰 주석 참고).
+   *   · 클라우드 줄을 풀지 못하면(다른 키·깨짐·네트워크) 절대 올리지 않는다 — 모르는 기록을 덮어쓰지 않기 위해.
+   *   · 저장이 거절되면(그 사이 다른 기기가 먼저 저장) 처음부터 다시: 최대 4번.
+   */
+  private syncPushChannel(ch: "trades" | "autoState" | "splits"): Promise<{ ok: boolean; message: string; count?: number }> {
+    return this.withSyncLock(ch, async () => {
+      const def = this.syncChannelDef(ch);
+      const token = await this.ensureAccessToken();
+      if (!token) return { ok: false, message: "먼저 로그인하세요." };
+      if (!this.syncKeyReady()) return this.syncLockedResult(ch);
+      try {
+        for (let attempt = 0; attempt < 4; attempt++) {
+          // ① 읽기
+          const got = await this.fetchSyncRow(def.table, token);
+          if (!got.ok) return this.recordSync(ch, false, `올리기 보류 — ${got.message}`);
+          // ② 합치기(클라우드에만 있던 다른 기기 기록·삭제 표식을 먼저 받아들인다)
+          if (got.row) {
+            try {
+              await this.absorbSyncRow(ch, got.row);
+            } catch (e) {
+              return this.recordSync(ch, false, `올리기 보류 — 클라우드 기록을 풀지 못했습니다(${e instanceof Error ? e.message : String(e)}). 덮어쓰지 않았습니다.`);
+            }
+          }
+          if (!def.hasData()) return { ok: false, message: `올릴 ${def.noun}이 없습니다.` };
+          // ③ 버전 확인 후 저장
+          const rec = await this.encryptForSync(def.build(Date.now()));
+          const prevMs = got.row?.updated_at ? Date.parse(got.row.updated_at) : 0;
+          // 새 버전은 반드시 이전 버전보다 커야 한다(같은 ms에 두 기기가 저장해도 버전이 겹치지 않게 +1ms).
+          const nextAt = new Date(Math.max(Date.now(), (Number.isFinite(prevMs) ? prevMs : 0) + 1)).toISOString();
+          let res: Response;
+          if (got.row) {
+            // 이미 줄이 있으면: "updated_at이 아까 읽은 값 그대로인 줄"만 고친다. 그 사이 누가 저장했으면 0줄이 고쳐진다(=거절).
+            const mine = this.authUserId ? `user_id=eq.${encodeURIComponent(this.authUserId)}` : "";
+            const ver = got.row.updated_at ? `&updated_at=eq.${encodeURIComponent(got.row.updated_at)}` : "";
+            res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/${def.table}?${mine}${ver}`, {
+              method: "PATCH",
+              headers: { ...this.authRestHeaders(token), Prefer: "return=representation" },
+              body: JSON.stringify({ ciphertext: rec.ciphertext, salt: rec.salt, iv: rec.iv, updated_at: nextAt }),
+            }, 10_000, def.table);
+          } else {
+            // 줄이 아직 없으면: 새로 만든다. 그 사이 다른 기기가 먼저 만들었으면 "중복 무시"로 0줄이 돌아온다(=거절).
+            res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/${def.table}?on_conflict=user_id`, {
+              method: "POST",
+              headers: { ...this.authRestHeaders(token), Prefer: "resolution=ignore-duplicates,return=representation" },
+              body: JSON.stringify({ user_id: this.authUserId, ciphertext: rec.ciphertext, salt: rec.salt, iv: rec.iv, updated_at: nextAt }),
+            }, 10_000, def.table);
+            if (res.status === 409) continue; // 동시에 만들어짐 — 다시 읽고 합친다
+          }
+          if (!res.ok) return this.recordSync(ch, false, `클라우드 저장 실패(HTTP ${res.status}).`);
+          const written = await res.json().catch(() => null);
+          if (Array.isArray(written) && written.length === 0) continue; // 거절됨(다른 기기가 먼저 저장) — 처음부터 다시
+          // 저장 성공
+          if (ch === "trades") this.lastSyncPushAtMs = Date.now();
+          else if (ch === "autoState") this.lastAutoStatePushAtMs = Date.now();
+          else this.lastSplitsPushAtMs = Date.now();
+          this.recordSync(ch, true, null, this.syncFingerprint(ch));
+          return { ok: true, message: `${def.noun} ${def.count()}건을 올렸습니다(암호화됨).`, count: def.count() };
+        }
+        return this.recordSync(ch, false, "다른 기기와 동시에 저장하느라 계속 충돌했습니다 — 잠시 후 자동으로 다시 시도합니다(기록은 지워지지 않았습니다).");
+      } catch (e) {
+        return this.recordSync(ch, false, `올리기 실패: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    });
+  }
+
+  /** syncPullChannel — 받아서 합치기만 한다(올리지 않음). 결과 문구는 lib/sync-all.ts classifyPullResult가 읽는다("저장된 ... 없습니다" = 빈 채널). */
+  private syncPullChannel(ch: "trades" | "autoState" | "splits"): Promise<{ ok: boolean; message: string; count?: number }> {
+    return this.withSyncLock(ch, async () => {
+      const def = this.syncChannelDef(ch);
+      const token = await this.ensureAccessToken();
+      if (!token) return { ok: false, message: "먼저 로그인하세요." };
+      if (!this.syncKeyReady()) {
+        if (ch === "autoState") return this.pullOwnGroupHistoryFallback("동기화 키가 없어 암호화 기록은 못 받았습니다");
+        return { ok: false, message: `동기화 키가 없어 ${def.noun}을 받을 수 없습니다(로그인 비밀번호를 한 번 입력하면 풀립니다).` };
+      }
+      try {
+        const got = await this.fetchSyncRow(def.table, token);
+        if (!got.ok) return { ok: false, message: got.message };
+        if (!got.row) {
+          if (ch === "autoState") return this.pullOwnGroupHistoryFallback("내 계정에 저장된 암호화 자동매매 기록이 없습니다");
+          return { ok: false, message: `내 계정에 저장된 ${def.noun}이 없습니다.` };
+        }
+        const r = await this.absorbSyncRow(ch, got.row);
+        if (ch === "autoState") {
+          // [v0.88.0] 암호화 기록이 낡았을 수 있다(PC가 못 올린 기간) — 같은 계정의 그룹 공유(평문, 3분마다 갱신) 기록도 함께 병합해 최신으로 맞춘다.
+          await this.mergeOwnGroupHistory().catch(() => 0);
+          return { ok: true, message: `자동매매 기록 ${r.received}건을 받았습니다(새로 추가 ${Math.max(0, r.added)}건, 지금 감시 중 ${this.autoTradePositions.length}종목).`, count: this.autoTradeHistory.length };
+        }
+        return { ok: true, message: `${def.noun} ${r.received}건을 받았습니다(새로 추가 ${Math.max(0, r.added)}건).`, count: def.count() };
+      } catch (e) {
+        return { ok: false, message: `받기 실패: ${e instanceof Error ? e.message : String(e)}` };
+      }
+    });
+  }
+
+  /** syncPushTrades — 저장된 매매 이력을 (받아 합친 뒤) 암호화해 내 계정(capri_trades) 행에 올린다. */
+  async syncPushTrades(): Promise<{ ok: boolean; message: string; count?: number }> {
+    return this.syncPushChannel("trades");
+  }
+
+  /** syncPullTrades — 내 계정에 올려 둔 매매 이력을 받아 복호화해 저장본에 합친다(authSignIn·주기 점검이 자동으로 부른다). */
+  async syncPullTrades(): Promise<{ ok: boolean; message: string; count?: number }> {
+    return this.syncPullChannel("trades");
+  }
+
+  /** syncPushSplits — 삼분할 타점 기록 전체(+삭제 표식)를 (받아 합친 뒤) 암호화해 내 계정(capri_splits) 행에 올린다. */
+  async syncPushSplits(): Promise<{ ok: boolean; message: string; count?: number }> {
+    return this.syncPushChannel("splits");
+  }
+
+  /** syncPullSplits — 내 계정에 올려 둔 삼분할 기록을 받아 복호화해 병합한다(삭제 표식 반영). */
+  async syncPullSplits(): Promise<{ ok: boolean; message: string; count?: number }> {
+    return this.syncPullChannel("splits");
+  }
+
+  /**
+   * syncPushAutoState — 자동매매 기록 전체를 (받아 합친 뒤) 암호화해 내 계정(capri_auto_state) 행에 올린다
    *   (다른 기기가 로그인하면 내 매매이력을 그대로 이어받을 수 있게 — 순수 개인기록 동기화).
-   *   [v0.61.0] v0.60.5~v0.60.9가 여기 끼워 넣었던 "마지막 스캔 결과·탈락 사유"는
-   *   capri_live_state(pushLiveState/getLiveState, 평문·짧은 주기)로 옮겼다 — "실시간 상태
-   *   중계"와 "개인기록 동기화"는 성격이 달라 한 통로에 같이 두면 어느 쪽이 최신인지
-   *   헷갈리는 사고 위험이 있었다(자세한 배경은 docs/progress.md v0.61.0 참고).
+   *   [v0.61.0] "마지막 스캔 결과·탈락 사유"는 capri_live_state(pushLiveState/getLiveState)가 따로 맡는다.
    */
   async syncPushAutoState(): Promise<{ ok: boolean; message: string; count?: number }> {
-    const token = await this.ensureAccessToken();
-    if (!token) return { ok: false, message: "먼저 로그인하세요." };
-    if (!this.syncKeyReady()) return this.syncLockedResult("autoState");
-    if (this.autoTradeHistory.length === 0) {
-      return { ok: false, message: "올릴 자동매매 기록이 없습니다." };
-    }
-
-    try {
-      const rec = await this.encryptForSync(toAutoStateSyncPayload(this.autoTradeHistory, Date.now()));
-      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_auto_state?on_conflict=user_id`, {
-        method: "POST",
-        headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
-        body: JSON.stringify({ user_id: this.authUserId, ciphertext: rec.ciphertext, salt: rec.salt, iv: rec.iv, updated_at: new Date().toISOString() }),
-      }, 10_000, "capri_auto_state");
-      if (!res.ok) return this.recordSync("autoState", false, `클라우드 저장 실패(HTTP ${res.status}).`);
-      this.lastAutoStatePushAtMs = Date.now();
-      this.recordSync("autoState", true, null, this.historyFingerprint());
-      return { ok: true, message: `자동매매 기록 ${this.autoTradeHistory.length}건을 올렸습니다(암호화됨).`, count: this.autoTradeHistory.length };
-    } catch (e) {
-      return this.recordSync("autoState", false, `올리기 실패: ${e instanceof Error ? e.message : String(e)}`);
-    }
+    return this.syncPushChannel("autoState");
   }
 
   /**
    * syncPullAutoState — 내 계정에 올려 둔 자동매매 기록을 받아 복호화해 병합하고,
-   *   "지금 감시 중" 목록(autoTradePositions)도 병합된 기록에서 다시 만든다(derivePositionsFromHistory).
-   *   authSignIn이 로그인 직후 자동으로 부른다.
+   *   "지금 감시 중" 목록(autoTradePositions)도 병합된 기록에서 다시 만든다(자동매매가 꺼진 기기만).
    */
   async syncPullAutoState(): Promise<{ ok: boolean; message: string; count?: number }> {
-    const token = await this.ensureAccessToken();
-    if (!token) return { ok: false, message: "먼저 로그인하세요." };
-    if (!this.syncKeyReady()) return this.pullOwnGroupHistoryFallback("동기화 키가 없어 암호화 기록은 못 받았습니다");
-
-    try {
-      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_auto_state?select=ciphertext,salt,iv`, {
-        headers: this.authRestHeaders(token),
-      }, 10_000, "capri_auto_state");
-      if (!res.ok) return { ok: false, message: `클라우드 조회 실패(HTTP ${res.status}).` };
-      const rows = (await res.json()) as Array<{ ciphertext: string; salt: string; iv: string }>;
-      if (!rows || rows.length === 0) {
-        return this.pullOwnGroupHistoryFallback("내 계정에 저장된 암호화 자동매매 기록이 없습니다");
-      }
-      const payload = await this.decryptFromSync<AutoStateSyncPayload>(rows[0]); // 틀린 비번/키면 여기서 실패
-      if (!isAutoStateSyncPayload(payload)) return { ok: false, message: "받은 데이터 형식이 올바르지 않습니다." };
-      // [v0.88.0] 암호화 기록이 낡았을 수 있다(PC가 못 올린 기간) — 같은 계정의 그룹 공유(평문, 3분마다 갱신) 기록도 함께 병합해 최신으로 맞춘다.
-      await this.mergeOwnGroupHistory().catch(() => 0);
-
-      const before = this.autoTradeHistory.length;
-      this.autoTradeHistory = mergeAutoHistory(this.autoTradeHistory, payload.history);
-      this.persistAutoTradeHistory();
-      // [핵심] "지금 감시 중" 목록도 병합된 기록에서 다시 만든다 — 이 기기가 한 번도 진입시킨
-      //   적 없는 포지션이라도, 다른 기기가 올려 둔 기록에 conditionalOrderId/buyOrderId가
-      //   있으면 이 기기도 그 번호로 실제 체결·발동 여부를 재확인할 수 있게 된다.
-      //   [v0.98.0] 단, 이 기기에서 자동매매가 실제로 켜져 있으면 다시 만들지 않는다 — 이제 이 함수가 5분마다 자동으로도 불리는데,
-      //   실거래 중인 기기의 감시 목록을 기록으로 덮어쓰면 보호주문 관리가 흔들린다(mergeOwnGroupHistory와 같은 원칙).
-      if (!this.autoTradeEnabled) {
-        this.autoTradePositions = derivePositionsFromHistory(this.autoTradeHistory);
-        this.saveAutoPositions();
-      }
-      const added = this.autoTradeHistory.length - before;
-      return {
-        ok: true,
-        message: `자동매매 기록 ${payload.history.length}건을 받았습니다(새로 추가 ${added}건, 지금 감시 중 ${this.autoTradePositions.length}종목).`,
-        count: this.autoTradeHistory.length,
-      };
-    } catch (e) {
-      return { ok: false, message: `받기 실패: ${e instanceof Error ? e.message : String(e)}` };
-    }
+    return this.syncPullChannel("autoState");
   }
 
   // ---------------------------------------------------------------------------
@@ -7413,13 +7568,9 @@ export class ToolEngine extends EventEmitter {
     //   · 로그인 상태(authPassword 있음)일 때만 동작한다.
     //   · 실패해도 무시한다(로컬 저장본은 그대로라 화면은 정상).
     //   · 5분에 한 번으로 제한 — 너무 잦은 업로드 방지.
+    //   · [v0.102.0] 5분 안에 또 생기면 건너뛰지 않고 남은 시간 뒤로 예약한다(schedulePush).
     const changed = this.savedFills.length !== before;
-    const longEnough = Date.now() - (this.lastSyncPushAtMs ?? 0) > 5 * 60_000;
-    if (changed && longEnough && this.syncKeyReady()) {
-      void this.syncPushTrades().catch(() => {
-        /* 업로드 실패는 조용히 넘어간다 */
-      });
-    }
+    if (changed) this.schedulePush("trades", 5 * 60_000);
     // [v0.22.0] 청산 강도는 여기서 체결을 보고 '기록'하지 않는다.
     //   대신 tradeAnalysis가 자동 저장된 체결강도 시계열을 '청산 시각(sellAtMs)'으로 조회해 붙인다
     //   (strengthAt). 체결→매매 매칭의 시간역전·다진입·부분청산 오류를 원천 회피하기 위함.

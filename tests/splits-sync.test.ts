@@ -142,6 +142,8 @@ describe("[v0.61.7] ToolEngine.syncPushSplits/syncPullSplits — capri_splits �
             capturedBody = String(init?.body ?? "");
             return new Response(null, { status: 200 });
           }
+          // [v0.102.0] 올리기는 이제 먼저 클라우드 줄을 읽는다(받기→합치기→버전 확인 후 저장) — 빈 클라우드로 응답
+          if (u.includes("capri_splits") && method === "GET") return new Response(JSON.stringify([]), { status: 200 });
           return new Response(JSON.stringify({ error: "not_found" }), { status: 404 });
         }),
       );

@@ -70,19 +70,47 @@ const STATUS_RANK: Record<AutoTradeHistoryEntry["status"], number> = {
   dryrun: 2,
 };
 
+/** 기록 id(`symbol@entry@enteredAtMs`)에서 진입 시각(ms, 연도 포함)을 꺼낸다 — 정렬의 기준. */
+export function historyEnteredMs(h: AutoTradeHistoryEntry): number {
+  const n = Number(h.id.slice(h.id.lastIndexOf("@") + 1));
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * pickNewerHistory — 같은 id(=같은 한 번의 진입) 기록 두 개 중 무엇을 남길지 정한다.
+ *   1) 상태가 더 앞서 나간 쪽(STATUS_RANK) — 상태는 절대 뒤로 돌아가지 않는다(안전 규칙, 예전과 동일).
+ *   2) [v0.102.0] 상태가 같으면 updatedAtMs(마지막으로 고친 시각)가 더 늦은 쪽.
+ *      예전엔 상태가 같으면 무조건 "이 기기 것"을 남겨서, 같은 상태 안에서의 수정 —
+ *      추가매수로 바뀐 수량, 실제 체결가(fillPrice), 다시 건 익절·손절가, 매수주문번호, 보유 중 최저·최고(MAE/MFE) 등 —
+ *      이 다른 기기로 영영 넘어가지 않았다(PC와 폰이 같은 매매를 서로 다른 수량·가격으로 보여 주는 원인).
+ *   3) 그래도 같으면(둘 다 옛 기록이라 시각이 없음) 이 기기 것을 유지 — 예전 동작 그대로.
+ */
+function pickNewerHistory(local: AutoTradeHistoryEntry, incoming: AutoTradeHistoryEntry): AutoTradeHistoryEntry {
+  const lr = STATUS_RANK[local.status] ?? 0;
+  const ir = STATUS_RANK[incoming.status] ?? 0;
+  if (ir !== lr) return ir > lr ? incoming : local;
+  const lu = local.updatedAtMs ?? 0;
+  const iu = incoming.updatedAtMs ?? 0;
+  if (iu !== lu) return iu > lu ? incoming : local;
+  return local;
+}
+
 /**
  * mergeAutoHistory — 이 기기에 있던 기록과 클라우드에서 받은 기록을 합친다.
- *   같은 id(=`symbol@entry@enteredAtMs`, 한 번의 진입을 가리키는 열쇠)가 양쪽에 있으면
- *   "더 진행된 쪽"만 남긴다(위 STATUS_RANK). 한쪽에만 있으면 그대로 포함(신규 병합).
+ *   같은 id(=`symbol@entry@enteredAtMs`, 한 번의 진입을 가리키는 열쇠)가 양쪽에 있으면 pickNewerHistory로 고른다.
+ *   한쪽에만 있으면 그대로 포함(신규 병합).
+ *   [v0.102.0] 정렬은 id 안의 진입 시각(ms, 연도 포함)으로 한다 — 예전엔 "MM-dd HH:mm:ss" 문자열로 정렬해서
+ *   12월→1월을 넘어가면 1월 기록이 12월보다 앞(=오래된 쪽)으로 가 버렸고, 500개 한도로 자를 때
+ *   **가장 최근 기록이 먼저 잘려 나가는** 사고로 이어질 수 있었다.
  */
 export function mergeAutoHistory(local: AutoTradeHistoryEntry[], incoming: AutoTradeHistoryEntry[]): AutoTradeHistoryEntry[] {
   const map = new Map<string, AutoTradeHistoryEntry>();
   for (const h of local) map.set(h.id, h);
   for (const h of incoming) {
     const existing = map.get(h.id);
-    if (!existing || STATUS_RANK[h.status] > STATUS_RANK[existing.status]) map.set(h.id, h);
+    map.set(h.id, existing ? pickNewerHistory(existing, h) : h);
   }
-  return [...map.values()].sort((a, b) => a.enteredAt.localeCompare(b.enteredAt));
+  return [...map.values()].sort((a, b) => historyEnteredMs(a) - historyEnteredMs(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
 
 /**

@@ -19,10 +19,17 @@ afterEach(() => { globalThis.fetch = realFetch; });
 
 type Row = { user_id: string; ciphertext: string; salt: string; iv: string; updated_at: string };
 
-/** 메모리 클라우드: capri_* 테이블마다 이 계정의 한 줄. POST=upsert, GET=그 줄(또는 빈 배열). */
+/**
+ * 메모리 클라우드: capri_* 테이블마다 이 계정의 한 줄. 실제 Supabase(PostgREST)처럼 동작한다.
+ *   · GET           : 그 줄(또는 빈 배열)
+ *   · POST(ignore-duplicates) : 줄이 없을 때만 새로 만든다(있으면 빈 배열 = 거절)
+ *   · PATCH ?updated_at=eq.X : 줄의 updated_at이 X와 같을 때만 고친다(아니면 빈 배열 = 거절) — "버전 확인 후 저장"
+ *   · beforeWrite 훅: 저장 직전에 끼어들어 "다른 기기가 동시에 저장"하는 상황을 재현한다.
+ */
 function installFakeCloud() {
   const tables = new Map<string, Row>();
   const posts: string[] = [];
+  const hooks: { beforeWrite: ((table: string) => void) | null } = { beforeWrite: null };
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
@@ -30,19 +37,37 @@ function installFakeCloud() {
     const m = url.match(/\/rest\/v1\/(capri_[a-z_]+)/);
     if (!m) return json([]);
     const table = m[1];
+    const isPriv = table === "capri_trades" || table === "capri_auto_state" || table === "capri_splits";
     if (method === "POST") {
-      if (table === "capri_trades" || table === "capri_auto_state" || table === "capri_splits") {
-        tables.set(table, JSON.parse(String(init?.body ?? "{}")) as Row);
-        posts.push(table);
+      if (!isPriv) return new Response(null, { status: 201 });
+      hooks.beforeWrite?.(table);
+      const body = JSON.parse(String(init?.body ?? "{}")) as Row;
+      const ignoreDup = String((init?.headers as Record<string, string>)?.Prefer ?? "").includes("ignore-duplicates");
+      if (tables.has(table)) {
+        if (ignoreDup) return json([]); // 이미 있음 → 거절
       }
-      return new Response(null, { status: 201 });
+      tables.set(table, body);
+      posts.push(table);
+      return json([body], 201);
+    }
+    if (method === "PATCH") {
+      if (!isPriv) return json([]);
+      hooks.beforeWrite?.(table);
+      const row = tables.get(table);
+      const ver = new URL(url).searchParams.get("updated_at");
+      if (!row || (ver && ver !== `eq.${row.updated_at}`)) return json([]); // 버전이 달라졌음 → 거절(0줄)
+      const patch = JSON.parse(String(init?.body ?? "{}")) as Partial<Row>;
+      const next = { ...row, ...patch };
+      tables.set(table, next);
+      posts.push(table);
+      return json([next]);
     }
     const row = tables.get(table);
     if (url.includes("select=updated_at")) return json(row ? [{ updated_at: row.updated_at }] : []);
-    if (table === "capri_trades" || table === "capri_auto_state" || table === "capri_splits") return json(row ? [row] : []);
+    if (isPriv) return json(row ? [row] : []);
     return json([]); // 그룹 공유 등은 비어 있음
   }) as typeof fetch;
-  return { tables, posts };
+  return { tables, posts, hooks };
 }
 
 type Fill = { symbol: string; side: "BUY" | "SELL"; qty: number; price: number; atMs: number; commission: number; tax: number };
