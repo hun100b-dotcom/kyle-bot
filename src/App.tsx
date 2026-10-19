@@ -21,6 +21,7 @@ import { useLab } from "./useLab"; //                         [v0.65.0] 매매�
 import { LabLiveTab, LabSignalsTab, LabCompareTab } from "./LabTabs"; // [v0.65.0] 매매연구소 화면
 import Tutorial, { openTutorial } from "./Tutorial"; //                  [v0.91.0] 튜토리얼(시작 가이드) — 마법사 + 상시 알약
 import SyncBanner from "./SyncBanner"; //                                [v0.88.0] 클라우드 동기화 상태 띠(PC·폰 공통)
+import PaperBotsTab from "./PaperBots"; //                           [v0.103.0] 가상매매 봇(주문 없음)
 import { LabResultTab } from "./LabResult"; //                         [v0.66.0] 결과 요약
 import { restoreInputsFromSaved } from "../lib/split-restore"; // [v0.9.3] 옛 기록도 계산기로 불러오기
 import { calcSplit3Level } from "../lib/calc"; // [v0.69.6] 후보별 계획 타점(1·1.5·2분할) 표시
@@ -44,7 +45,7 @@ import { summarizeAutoHistory, summarizeGroupHistory, summarizeByCriteria, autoH
 //   묻혀 있었다. 오너 요청("그룹원 관리 탭을 통해 승인·수기등록·근황 파악, 채팅까지")에 따라
 //   독립 탭으로 빼고, 그룹원 근황 현황판·채팅을 새로 추가했다. 같은 이유로 "기록"(journal, 예전엔
 //   설정 하위)도 "서버 로그"로 이름을 바꿔 독립 탭으로 뺐다(카테고리 토글 필터 추가, 아래 참고).
-const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "autoControl", "autoScan", "watchHistory", "screenCriteria", "autoHistory", "autoReport", "research", "labResult", "labLive", "labSignals", "labCompare", "orders", "groupManage", "changelog", "journal", "settings"] as const;
+const ALL_TABS = ["calc", "report", "screener", "splits", "strength", "autoControl", "autoScan", "watchHistory", "screenCriteria", "autoHistory", "autoReport", "research", "labResult", "paperBots", "labLive", "labSignals", "labCompare", "orders", "groupManage", "changelog", "journal", "settings"] as const;
 type TabId = (typeof ALL_TABS)[number];
 
 /** [v0.27.0] 상단 1단 — 매매방식·성격으로 묶은 그룹. 그룹 버튼을 누르면 하위 탭(2단)이 펼쳐진다. */
@@ -55,7 +56,7 @@ const GROUP_CHILDREN: Record<TopGroupId, TabId[]> = {
   manual: ["calc", "screener", "splits"],
   auto: ["autoControl", "autoScan", "watchHistory", "screenCriteria", "autoHistory", "autoReport"],
   // [v0.65.0 — 오너 지시] 매매연구는 자동매매 하위 탭에서 대분류로 올려 비중을 높이고, 신호 기록 모드 탭들을 같은 그룹에 신설
-  lab: ["labResult", "labLive", "labSignals", "labCompare", "research"], // [v0.66.0] 결과 요약을 맨 앞에
+  lab: ["labResult", "paperBots", "labLive", "labSignals", "labCompare", "research"], // [v0.66.0] 결과 요약을 맨 앞에 · [v0.103.0] 가상매매 봇
   status: ["report", "strength", "orders", "groupManage", "changelog", "journal"],
   settings: ["settings"],
 };
@@ -63,7 +64,7 @@ const TOP_GROUPS: TopGroupId[] = ["manual", "auto", "lab", "status", "settings"]
 /** 리프 탭 → 소속 그룹(역방향 조회용). */
 const TAB_GROUP: Record<TabId, TopGroupId> = {
   calc: "manual", screener: "manual", splits: "manual",
-  autoControl: "auto", autoScan: "auto", watchHistory: "auto", screenCriteria: "auto", autoHistory: "auto", autoReport: "auto", research: "lab", labResult: "lab", labLive: "lab", labSignals: "lab", labCompare: "lab",
+  autoControl: "auto", autoScan: "auto", watchHistory: "auto", screenCriteria: "auto", autoHistory: "auto", autoReport: "auto", research: "lab", labResult: "lab", paperBots: "lab", labLive: "lab", labSignals: "lab", labCompare: "lab",
   report: "status", strength: "status", orders: "status", groupManage: "status", changelog: "status", journal: "status",
   settings: "settings",
 };
@@ -82,6 +83,7 @@ const TAB_LABEL: Record<TabId, string> = {
   autoHistory: "자동매매기록",
   autoReport: "📑 자동매매 리포트",
   labResult: "🏁 결과 요약",
+  paperBots: "🧪 가상매매 봇", // [v0.103.0] 오너 요청 — 설정별 가상매매 봇 비교
   labLive: "🔬 신호기록 현황",
   labSignals: "🧾 신호 로우",
   labCompare: "⚖️ 전략 비교·연계",
@@ -5874,6 +5876,8 @@ ${msg}
           집계해 승률·종목별/시간대별 성적을 보여준다(오너 개인 계정 데이터 기준, 기기 로컬 계산 —
           다른 사용자 데이터는 전혀 안 섞임). */}
       {paneTab === "labResult" && <LabResultTab lab={lab} />}
+      {/* [v0.103.0] 가상매매 봇 — 새 봇 기본값은 "지금 내 자동매매 설정"(폰은 PC가 올린 설정) */}
+      {paneTab === "paperBots" && <PaperBotsTab isWebApp={isWebApp} active={isTabVisible("paperBots")} baseSettings={isWebApp ? (pcSettings ?? settings ?? null) : (settings ?? null)} />}
       {paneTab === "labLive" && <LabLiveTab lab={lab} />}
       {paneTab === "labSignals" && <LabSignalsTab lab={lab} />}
       {paneTab === "labCompare" && <LabCompareTab lab={lab} />}

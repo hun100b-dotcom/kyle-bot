@@ -1,0 +1,259 @@
+// =============================================================================
+// tests/paper-bots.test.ts — [v0.103.0] 가상매매 봇 규칙 고정
+//   가상 체결이 "보수적" 규칙대로 되는지, 기기 간 합치기가 데이터를 잃지 않는지, 대시보드 집계가 맞는지.
+// =============================================================================
+
+import { describe, it, expect } from "vitest";
+import {
+  advanceBot, placeEntries, mergeStores, freshSim, sanitizeConfig, defaultBotConfig, botStats, paperDashboard,
+  emptyStore, storeFingerprint, cancelPending, screenKey, isPaperStore,
+  type PaperBot, type PaperBar, type PaperStore,
+} from "../lib/paper-bots";
+
+const MIN = 60_000;
+const T0 = Date.UTC(2026, 9, 19, 14, 0, 0); // 임의의 기준 시각(정각)
+
+function mkBot(over: Partial<PaperBot["config"]> = {}, id = "b1"): PaperBot {
+  const config = sanitizeConfig({ ...defaultBotConfig(null, T0, "테스트"), seedUsd: 10_000, tpPct: 2, slPct: 5, ...over });
+  return { id, config, sim: freshSim(1, T0, config.seedUsd) };
+}
+const bar = (t: number, o: number, h: number, l: number, c: number): PaperBar => ({ time: t, open: o, high: h, low: l, close: c });
+
+/** 대기 주문 하나를 직접 넣은 봇(진입 10, 익절 10.2, 손절 9.5, 100주, 주문 T0+30초). */
+function withPending(b: PaperBot): PaperBot {
+  return {
+    ...b,
+    sim: {
+      ...b.sim,
+      pending: [{ id: "X@1", symbol: "XYZ", entry: 10, tp: 10.2, sl: 9.5, qty: 100, placedAtMs: T0 + 30_000, expiresAtMs: T0 + 30_000 + 10 * MIN, lastBarMs: 0 }],
+      agg: { ...b.sim.agg, orders: 1 },
+    },
+  };
+}
+
+describe("가상 체결(advanceBot)", () => {
+  it("주문을 낸 그 분의 봉은 쓰지 않는다(주문 전 가격으로 체결된 착시 방지)", () => {
+    const b = withPending(mkBot());
+    const bars = new Map([["XYZ", [bar(T0, 10.1, 10.1, 9.0, 9.2)]]]); // T0 봉(주문은 T0+30초) — 저가가 한참 아래지만 무시
+    const sim = advanceBot(b, bars, T0 + 2 * MIN, 0);
+    expect(sim.pending.length).toBe(1);
+    expect(sim.open.length).toBe(0);
+  });
+
+  it("가격에 딱 닿기만 하면 미체결, 뚫고 내려가야 체결", () => {
+    const b = withPending(mkBot());
+    const touch = new Map([["XYZ", [bar(T0 + MIN, 10.1, 10.1, 10.0, 10.05)]]]);
+    expect(advanceBot(b, touch, T0 + 3 * MIN, 0).open.length).toBe(0);
+    const through = new Map([["XYZ", [bar(T0 + MIN, 10.1, 10.1, 9.99, 10.05)]]]);
+    const s2 = advanceBot(b, through, T0 + 3 * MIN, 0);
+    expect(s2.open.length).toBe(1);
+    expect(s2.open[0].fillPrice).toBe(10);
+  });
+
+  it("갭 하락으로 시작하면 시가(더 싼 값)에 체결", () => {
+    const b = withPending(mkBot());
+    const s = advanceBot(b, new Map([["XYZ", [bar(T0 + MIN, 9.8, 9.9, 9.7, 9.85)]]]), T0 + 3 * MIN, 0);
+    expect(s.open[0].fillPrice).toBe(9.8);
+  });
+
+  it("같은 봉에서 익절·손절이 다 가능하면 손절 먼저", () => {
+    const b = withPending(mkBot());
+    const bars = new Map([["XYZ", [bar(T0 + MIN, 10.1, 10.1, 9.99, 10.05), bar(T0 + 2 * MIN, 10.0, 10.5, 9.4, 10.0)]]]);
+    const s = advanceBot(b, bars, T0 + 5 * MIN, 0);
+    expect(s.open.length).toBe(0);
+    expect(s.trades.length).toBe(1);
+    expect(s.trades[0].result).toBe("sl");
+    expect(s.trades[0].exitPrice).toBe(9.5);
+    expect(s.realizedUsd).toBeCloseTo(-50, 6); // (9.5-10)*100
+    expect(s.agg.losses).toBe(1);
+  });
+
+  it("익절은 뚫고 올라가야 체결되고 수수료가 빠진다", () => {
+    const b = withPending(mkBot());
+    const bars = new Map([["XYZ", [bar(T0 + MIN, 10.1, 10.1, 9.99, 10.05), bar(T0 + 2 * MIN, 10.1, 10.2, 10.0, 10.1), bar(T0 + 3 * MIN, 10.1, 10.25, 10.0, 10.2)]]]);
+    const s = advanceBot(b, bars, T0 + 6 * MIN, 0.2);
+    expect(s.trades.length).toBe(1);
+    expect(s.trades[0].result).toBe("tp");
+    expect(s.trades[0].exitedAtMs).toBe(T0 + 4 * MIN); // 10.2에 딱 닿은 2번째 봉이 아니라 3번째 봉
+    // 총이익 20 − 수수료 (10+10.2)*100*0.2/200 = 2.02 → 17.98
+    expect(s.trades[0].pnlUsd).toBeCloseTo(17.98, 6);
+    expect(s.agg.wins).toBe(1);
+  });
+
+  it("체결된 그 봉에서 손절선까지 찍으면 즉시 손절", () => {
+    const b = withPending(mkBot());
+    const s = advanceBot(b, new Map([["XYZ", [bar(T0 + MIN, 10.1, 10.1, 9.4, 9.6)]]]), T0 + 3 * MIN, 0);
+    expect(s.open.length).toBe(0);
+    expect(s.pending.length).toBe(0);
+    expect(s.trades[0].result).toBe("sl");
+  });
+
+  it("유효시간 안에 안 닿으면 취소(미체결로 셈, 매매 아님)", () => {
+    const b = withPending(mkBot());
+    const s = advanceBot(b, new Map([["XYZ", [bar(T0 + MIN, 10.5, 10.6, 10.4, 10.5)]]]), T0 + 30 * MIN, 0);
+    expect(s.pending.length).toBe(0);
+    expect(s.agg.unfilled).toBe(1);
+    expect(s.agg.n).toBe(0);
+    expect(botStats({ ...b, sim: s }).fillRate).toBe(0);
+  });
+
+  it("아직 안 끝난 봉은 쓰지 않고, 같은 봉을 두 번 세지 않는다", () => {
+    const b = withPending(mkBot());
+    const bars = new Map([["XYZ", [bar(T0 + MIN, 10.1, 10.1, 9.99, 10.05), bar(T0 + 2 * MIN, 10.0, 10.0, 9.0, 9.1)]]]);
+    const s1 = advanceBot(b, bars, T0 + 2 * MIN + 30_000, 0); // 두 번째 봉은 진행 중
+    expect(s1.open.length).toBe(1);
+    const s2 = advanceBot({ ...b, sim: s1 }, bars, T0 + 4 * MIN, 0);
+    expect(s2.trades.length).toBe(1);
+    const s3 = advanceBot({ ...b, sim: s2 }, bars, T0 + 5 * MIN, 0);
+    expect(s3.trades.length).toBe(1); // 다시 돌려도 그대로
+    expect(s3.realizedUsd).toBe(s2.realizedUsd);
+  });
+
+  it("입력 봇을 바꾸지 않는다(순수 함수)", () => {
+    const b = withPending(mkBot());
+    const before = JSON.stringify(b);
+    advanceBot(b, new Map([["XYZ", [bar(T0 + MIN, 10.1, 10.1, 9.0, 9.1)]]]), T0 + 3 * MIN, 0);
+    expect(JSON.stringify(b)).toBe(before);
+  });
+
+  it("중지 시 대기 주문만 거두고 보유는 남긴다", () => {
+    const b = withPending(mkBot());
+    const s = cancelPending({ ...b.sim, open: [{ ...b.sim.pending[0], id: "o", fillPrice: 10, filledAtMs: T0, lastPrice: 10 }] });
+    expect(s.pending.length).toBe(0);
+    expect(s.open.length).toBe(1);
+  });
+});
+
+describe("신규 가상 주문(placeEntries)", () => {
+  const cand = (symbol: string, prevClose = 10, ema200 = 9) => ({ symbol, status: "confirmed", price: prevClose, prevClose, ema200 });
+
+  it("삼분할 1분할 타점·봇의 익절/손절 %·투입 비율로 수량을 정한다", () => {
+    const b = mkBot({ trade: { ...mkBot().config.trade, entryLevel: 1, investPct: 30, maxPositions: 3, slMode: "fixed" } });
+    const r = placeEntries(b, b.sim, [cand("AAA")], T0);
+    expect(r.placed).toBe(1);
+    const o = r.sim.pending[0];
+    expect(o.entry).toBeGreaterThan(9);
+    expect(o.entry).toBeLessThan(10);
+    expect(o.tp).toBeCloseTo(o.entry * 1.02, 2);
+    expect(Math.abs(o.sl - o.entry * 0.95)).toBeLessThan(0.011); // 호가 단위(틱) 반올림 차이만 허용
+    expect(o.qty).toBe(Math.floor(3000 / o.entry));
+    expect(o.expiresAtMs).toBe(T0 + b.config.trade.watchMinutes * MIN);
+  });
+
+  it("최대 종목 수·이미 보유·관찰(확정 아님)·EMA 아래는 건너뛴다", () => {
+    const b = mkBot({ trade: { ...mkBot().config.trade, maxPositions: 2 } });
+    const r = placeEntries(b, b.sim, [cand("AAA"), cand("AAA"), { ...cand("WWW"), status: "watch" }, cand("LOW", 8, 9), cand("BBB"), cand("CCC")], T0);
+    expect(r.sim.pending.map((o) => o.symbol)).toEqual(["AAA", "BBB"]);
+    expect(r.notes.some((n) => n.includes("LOW"))).toBe(true);
+    expect(r.notes.some((n) => n.includes("CCC") && n.includes("최대 종목 수"))).toBe(true);
+  });
+
+  it("오늘 손절된 종목은 재진입하지 않는다(설정 켜짐일 때)", () => {
+    const b = mkBot();
+    const sim = { ...b.sim, trades: [{ id: "t", symbol: "AAA", fillPrice: 10, exitPrice: 9.5, qty: 1, tp: 10.2, sl: 9.5, result: "sl" as const, pnlUsd: -0.5, pnlPct: -5, filledAtMs: T0 - MIN, exitedAtMs: T0 - MIN }] };
+    expect(placeEntries(b, sim, [cand("AAA")], T0).placed).toBe(0);
+    const off = mkBot({ trade: { ...b.config.trade, reentryBlock: false } });
+    expect(placeEntries(off, sim, [cand("AAA")], T0).placed).toBe(1);
+  });
+
+  it("가상 현금을 넘겨 사지 않는다", () => {
+    const b = mkBot({ seedUsd: 1000, trade: { ...mkBot().config.trade, investPct: 100, maxPositions: 5 } });
+    const r = placeEntries(b, b.sim, [cand("AAA"), cand("BBB")], T0);
+    expect(r.placed).toBe(1);
+    expect(r.notes.some((n) => n.includes("현금 부족"))).toBe(true);
+  });
+});
+
+describe("기기 간 합치기(mergeStores)", () => {
+  const store = (bots: PaperBot[], deleted: Record<string, number> = {}): PaperStore => ({ v: 1, bots, deleted });
+
+  it("설정은 나중에 고친 쪽, 진행 기록은 (판 번호, 시각)이 큰 쪽이 따로 이긴다", () => {
+    const base = mkBot();
+    // 폰: 익절 3%로 고침(설정 최신) / PC: 결과를 쌓음(진행 최신)
+    const phone = { ...base, config: { ...base.config, tpPct: 3, updatedAtMs: T0 + 100 } };
+    const pc = { ...base, sim: { ...base.sim, realizedUsd: 42, updatedAtMs: T0 + 50 } };
+    const m = mergeStores(store([phone]), store([pc]), T0 + 1000);
+    expect(m.bots[0].config.tpPct).toBe(3);
+    expect(m.bots[0].sim.realizedUsd).toBe(42);
+    // 순서를 바꿔도 같은 결과(어느 기기에서 합쳐도 같다)
+    expect(storeFingerprint(mergeStores(store([pc]), store([phone]), T0 + 1000), T0 + 1000)).toBe(storeFingerprint(m, T0 + 1000));
+  });
+
+  it("초기화(판 번호+1)는 더 늦게 쌓인 옛 판 기록보다 이긴다", () => {
+    const base = mkBot();
+    const reset = { ...base, sim: freshSim(2, T0 + 10, base.config.seedUsd) };
+    const oldButLater = { ...base, sim: { ...base.sim, realizedUsd: 99, updatedAtMs: T0 + 999 } };
+    expect(mergeStores(store([oldButLater]), store([reset]), T0 + 2000).bots[0].sim.epoch).toBe(2);
+  });
+
+  it("지운 봇은 다른 기기가 다시 올려도 되살아나지 않는다", () => {
+    const b = mkBot();
+    const m = mergeStores(store([], { [b.id]: T0 + 5 }), store([b]), T0 + 10);
+    expect(m.bots.length).toBe(0);
+    expect(m.deleted[b.id]).toBe(T0 + 5);
+  });
+
+  it("양쪽에만 있는 봇은 모두 남고 만든 순서로 정렬", () => {
+    const a = mkBot({ createdAtMs: T0 + 2 }, "a");
+    const c = mkBot({ createdAtMs: T0 + 1 }, "c");
+    expect(mergeStores(store([a]), store([c]), T0).bots.map((x) => x.id)).toEqual(["c", "a"]);
+  });
+
+  it("형식 검사", () => {
+    expect(isPaperStore(emptyStore())).toBe(true);
+    expect(isPaperStore({ v: 2, bots: [], deleted: {} })).toBe(false);
+    expect(isPaperStore(null)).toBe(false);
+  });
+});
+
+describe("설정 보정·스캔 공유 열쇠", () => {
+  it("범위를 벗어난 값은 안전 범위로", () => {
+    const c = sanitizeConfig({ seedUsd: -5, tpPct: 0, slPct: 500, screen: { priceMin: 9, priceMax: 1, count: 9999 } });
+    expect(c.seedUsd).toBe(100);
+    expect(c.tpPct).toBe(0.1);
+    expect(c.slPct).toBe(100);
+    expect(c.screen.priceMin).toBe(1);
+    expect(c.screen.priceMax).toBe(9);
+    expect(c.screen.count).toBe(200);
+  });
+
+  it("스크리닝 기준이 같으면 같은 열쇠(스캔 한 번을 나눠 씀)", () => {
+    const a = mkBot({ slPct: 3 });
+    const b = mkBot({ slPct: 7 });
+    expect(screenKey(a.config.screen)).toBe(screenKey(b.config.screen));
+    const c = mkBot({ screen: { ...a.config.screen, count: 30 } });
+    expect(screenKey(c.config.screen)).not.toBe(screenKey(a.config.screen));
+  });
+});
+
+describe("대시보드", () => {
+  function botWith(id: string, sl: number, pnls: number[]): PaperBot {
+    const b = mkBot({ slPct: sl, name: `봇${id}` }, id);
+    const trades = pnls.map((p, i) => ({ id: `${id}${i}`, symbol: "Z", fillPrice: 10, exitPrice: 10, qty: 1, tp: 1, sl: 1, result: (p > 0 ? "tp" : "sl") as "tp" | "sl", pnlUsd: p, pnlPct: p / 100, filledAtMs: T0, exitedAtMs: T0 }));
+    const realized = pnls.reduce((s, x) => s + x, 0);
+    const wins = pnls.filter((x) => x > 0);
+    return {
+      ...b,
+      sim: {
+        ...b.sim,
+        trades,
+        realizedUsd: realized,
+        agg: { ...b.sim.agg, n: pnls.length, wins: wins.length, losses: pnls.length - wins.length, grossWinUsd: wins.reduce((s, x) => s + x, 0), grossLossUsd: -pnls.filter((x) => x <= 0).reduce((s, x) => s + x, 0), sumPnlPct: pnls.reduce((s, x) => s + x / 100, 0) },
+      },
+    };
+  }
+
+  it("수익률 순위와 손절값별 최고를 고른다(표본 부족은 최고에서 제외)", () => {
+    const many = (v: number, n: number) => Array.from({ length: n }, () => v);
+    const bots = [botWith("a", 3, many(10, 20)), botWith("b", 5, many(30, 20)), botWith("c", 7, many(500, 3))];
+    const d = paperDashboard(bots);
+    expect(d.ranking[0].name).toBe("봇c"); // 수익률은 1위지만
+    expect(d.best.bot).toBe("봇b"); //        표본(20건) 기준 최고는 b
+    expect(d.best.sl).toBe(5);
+    expect(d.bySl.map((r) => r.value)).toEqual([3, 5, 7]);
+    expect(d.bySl.find((r) => r.value === 7)!.enough).toBe(false);
+    const s = botStats(bots[1]);
+    expect(s.returnPct).toBe(6); // 600 / 10000
+    expect(s.winRate).toBe(100);
+  });
+});

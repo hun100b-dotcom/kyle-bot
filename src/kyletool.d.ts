@@ -844,6 +844,19 @@ interface CondOrderRow {
   isOpen: boolean;
 }
 
+/** [v0.103.0] 가상매매 봇 화면 묶음(electron/tool-engine.ts getPaperBots와 같은 모양). */
+interface PaperBotsView {
+  bots: Array<import("../lib/paper-bots").PaperBot & { stats: import("../lib/paper-bots").PaperBotStats; runnerIsMe: boolean }>;
+  dashboard: import("../lib/paper-bots").PaperDashboard;
+  deviceId: string;
+  canRun: boolean;
+  busy: boolean;
+  lastTickMs: number | null;
+  nextTickMs: number | null;
+  lastError: string | null;
+  lastSyncMs: number | null;
+  syncError: string | null;
+}
 interface KyletoolBridge {
   status(): Promise<ToolStatus>;
   journal(): Promise<JournalEntry[]>;
@@ -1031,6 +1044,18 @@ interface KyletoolBridge {
   /** [v0.66.0] 데이터 검증: 저장된 로우 재계산 + 토스 실데이터 대조(표본). */
   /** [v0.67.0] 종합 평가(결론+허점 점검+실매매 전환 게이트). realtimeOnly 기본 true. */
   getLabAssessment?(realtimeOnly?: boolean): Promise<import("../lib/lab-verdict").Assessment>;
+  // [v0.103.0] 가상매매 봇(주문 없음) — PC·폰 공통(폰은 클라우드 한 줄을 직접 합쳐 쓴다)
+  paperList?(): Promise<PaperBotsView>;
+  paperRefresh?(): Promise<PaperBotsView>;
+  paperAdd?(base?: Partial<import("../lib/paper-bots").PaperBotConfig>): Promise<PaperBotsView>;
+  paperAddSlSet?(baseId: string | null, slList: number[]): Promise<PaperBotsView>;
+  paperUpdate?(id: string, patch: Partial<import("../lib/paper-bots").PaperBotConfig>): Promise<PaperBotsView>;
+  paperStart?(id: string): Promise<PaperBotsView>;
+  paperStop?(id: string): Promise<PaperBotsView>;
+  paperReset?(id: string): Promise<PaperBotsView>;
+  paperDelete?(id: string): Promise<PaperBotsView>;
+  paperDuplicate?(id: string): Promise<PaperBotsView>;
+  paperRunNow?(): Promise<PaperBotsView>;
   verifyLab?(sample?: number): Promise<{
     at: number;
     local: import("../lib/lab-verdict").LocalVerify;
