@@ -92,6 +92,18 @@ contextBridge.exposeInMainWorld("kyletool", {
   exportLab: (kind) => ipcRenderer.invoke("tool:lab:export", kind),
   verifyLab: (sample) => ipcRenderer.invoke("tool:lab:verify", sample),
   getLabAssessment: (realtimeOnly) => ipcRenderer.invoke("tool:lab:assessment", realtimeOnly),
+  // [v0.103.0] 가상매매 봇
+  paperList: () => ipcRenderer.invoke("tool:paper:list"),
+  paperRefresh: () => ipcRenderer.invoke("tool:paper:refresh"),
+  paperAdd: (base) => ipcRenderer.invoke("tool:paper:add", base),
+  paperAddSlSet: (baseId, slList) => ipcRenderer.invoke("tool:paper:addSlSet", baseId, slList),
+  paperUpdate: (id, patch) => ipcRenderer.invoke("tool:paper:update", id, patch),
+  paperStart: (id) => ipcRenderer.invoke("tool:paper:start", id),
+  paperStop: (id) => ipcRenderer.invoke("tool:paper:stop", id),
+  paperReset: (id) => ipcRenderer.invoke("tool:paper:reset", id),
+  paperDelete: (id) => ipcRenderer.invoke("tool:paper:delete", id),
+  paperDuplicate: (id) => ipcRenderer.invoke("tool:paper:duplicate", id),
+  paperRunNow: () => ipcRenderer.invoke("tool:paper:runNow"),
 
   // 주문 현황
   // [v0.2.10] 주문 근거(기법 스냅샷) 목록 / 보유 포지션 손익

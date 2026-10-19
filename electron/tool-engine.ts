@@ -72,6 +72,11 @@ import {
 } from "../lib/lab"; // [v0.65.0] 매매연구소(신호 기록 모드)
 import { verifyLocal, compareWithFresh, buildAssessment, type LocalVerify, type TossCompareRow, type Assessment } from "../lib/lab-verdict"; // [v0.66.0] 데이터 검증 + [v0.67.0] 종합 평가
 import { requiredPathEndMs } from "../lib/lab";
+import {
+  emptyStore, isPaperStore, mergeStores, storeFingerprint, sanitizeConfig, defaultBotConfig, freshSim, newBotId, screenKey,
+  advanceBot, cancelPending, placeEntries, botStats, paperDashboard, PAPER_MAX_BOTS,
+  type PaperStore, type PaperBot, type PaperBotConfig, type PaperScreen, type PaperSim, type PaperBar, type PaperBotStats, type PaperDashboard,
+} from "../lib/paper-bots"; // [v0.103.0] 가상매매 봇(주문 없음)
 import { fetchWithTimeout, netStats } from "../lib/fetch-timeout"; // [v0.61.5 — ③ 전수조사 "높음-1"] Supabase REST 호출도 토스처럼 타임아웃을 건다
 import {
   getPrice,
@@ -1867,6 +1872,13 @@ export class ToolEngine extends EventEmitter {
     this.loadAutoRuns(); // [v0.62.1] 자동매매 실행 기록
     this.loadLab(); // [v0.65.0] 매매연구소 신호 로우
     this.loadWatchHistory(); // [관찰종목 이력]
+    // [v0.103.0] 가상매매 봇 — 저장본 불러오기 + 이 기기 번호(처음이면 새로 만들어 저장)
+    this.paperPath = join(userDataDir, "kylebot-paper.json");
+    this.loadPaper();
+    if (!this.paperDeviceId) {
+      this.paperDeviceId = `dev_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e9).toString(36)}`;
+      this.persistPaper();
+    }
     // [v0.69.0] 재시작 전에 보호 못 받던 종목이 남아 있으면 30초 뒤부터 가드가 이어서 처리한다.
     if (this.autoUnprotected.length > 0 && !opts?.forceMock) this.scheduleGuard(30_000);
     // 신호 기록 모드는 주문을 내지 않는 읽기 전용이라 켜 둔 상태를 재시작해도 유지한다(테스트용 forceMock은 자동 시작 안 함).
@@ -2464,6 +2476,7 @@ export class ToolEngine extends EventEmitter {
       await this.prepareBackend();
       const run = await this.scanScreener(this.buildAutoScanOpts());
       this.autoTradeLastScan = run;
+      this.rememberScanForPaper(this.buildAutoScanOpts(), run); // [v0.103.0] 가상매매 봇이 같은 기준이면 나눠 씀
       this.autoTradeLastScanError = null; // [v0.45.0]
       const cand = run.results.filter((r) => r.status === "confirmed" || r.status === "watch").length;
       this.addJournal({ kind: "info", symbol: "-", summary: `🤖 자동매매 스크리너 수동 새로고침(미리보기) — 후보 ${cand}개` });
@@ -5302,6 +5315,422 @@ export class ToolEngine extends EventEmitter {
   }
 
   // ==========================================================================
+  // [v0.103.0] 가상매매 봇(페이퍼 트레이딩) — 오너 요청 2026-10-19
+  //   "손절을 어디로 둘지 고민이 아니라 데이터로 답을 얻고 싶다" → 설정만 다른 봇을 여러 개 돌려 비교.
+  //   · 주문 API를 절대 부르지 않는다(시세·캔들·스크리닝 조회만). 실계좌와 완전히 무관.
+  //   · 규칙·계산은 전부 lib/paper-bots.ts(순수 함수, 테스트로 고정). 여기는 "언제 돌리고 어디에 저장하나"만.
+  //   · 저장: 이 기기 파일(kylebot-paper.json) + 클라우드 capri_live_state(kind='paper_bots') 한 줄.
+  //     PC 두 대·폰이 같은 줄을 "받아 합치고 → 버전이 그대로일 때만 저장"(syncPushChannel과 같은 원칙)해서
+  //     어느 기기에서 고쳐도 데이터가 엇갈리지 않는다(합치는 규칙은 mergeStores 주석 참고).
+  //   · 실행: 봇마다 "돌리는 PC"(runnerDeviceId)가 정해져 있어 두 PC가 같은 봇을 동시에 돌리지 않는다.
+  //     폰에서 켜면 켜져 있는 PC가 가져가고, 돌리던 PC가 20분 넘게 소식이 없으면 다른 PC가 이어받는다.
+  //   · 자동매매(실주문 경로)가 스캔 중이면 양보한다(토스 요청 한도를 나눠 쓰므로 — 연구소와 같은 원칙).
+  // ==========================================================================
+
+  private paperPath = "";
+  private paperStore: PaperStore = emptyStore();
+  private paperDeviceId = "";
+  private paperLoopOn = false; //       이 기기가 봇을 "돌리는" 기기인가(데스크톱만 true — main.ts가 켠다)
+  private paperTimer: ReturnType<typeof setInterval> | null = null;
+  private paperDeferTimer: ReturnType<typeof setTimeout> | null = null;
+  private paperSyncTimer: ReturnType<typeof setInterval> | null = null;
+  private paperBusy = false;
+  private paperLastTickMs: number | null = null;
+  private paperLastError: string | null = null;
+  private paperLastSyncMs: number | null = null;
+  private paperSyncError: string | null = null;
+  private paperSyncChain: Promise<unknown> = Promise.resolve();
+  /** 스크리닝 결과 재사용(같은 기준이면 4분 안의 결과를 그대로 — 자동매매 스캔 결과도 여기 넣어 나눠 쓴다). */
+  private paperScanCache = new Map<string, { run: ScreenRun; atMs: number }>();
+  private static readonly PAPER_INTERVAL_MS = 5 * 60_000;
+  private static readonly PAPER_TAKEOVER_MS = 20 * 60_000;
+  private static readonly PAPER_MAX_SCANS_PER_TICK = 4;
+
+  private loadPaper(): void {
+    try {
+      if (!existsSync(this.paperPath)) return;
+      const d = JSON.parse(readFileSync(this.paperPath, "utf8")) as { deviceId?: string; store?: unknown };
+      if (typeof d.deviceId === "string" && d.deviceId) this.paperDeviceId = d.deviceId;
+      if (isPaperStore(d.store)) this.paperStore = mergeStores(d.store, emptyStore(), Date.now());
+    } catch {
+      /* 파일이 깨졌으면 빈 상태로 시작(클라우드에 있으면 다음 동기화 때 받아 온다) */
+    }
+  }
+
+  private persistPaper(): void {
+    try {
+      this.scheduleFileSave("paper", this.paperPath, () => ({ deviceId: this.paperDeviceId, store: this.paperStore }));
+    } catch {
+      /* 저장 실패는 다음 기회에 — 클라우드에도 있으므로 데이터는 남는다 */
+    }
+  }
+
+  /** 데스크톱(main.ts)만 부른다 — 폰(웹)은 봇을 돌리지 않고 보기·설정만 한다(토스에 직접 못 붙으므로). */
+  startPaperBotLoop(): void {
+    if (this.paperTimer) return;
+    this.paperLoopOn = true;
+    // 앱 시작 직후엔 자동매매·연구소 초기 조회가 몰리므로 첫 실행을 90초 늦춘다(실주문 경로 우선).
+    this.paperDeferTimer = setTimeout(() => { this.paperDeferTimer = null; void this.paperTick(); }, 90_000);
+    this.paperTimer = setInterval(() => void this.paperTick(), ToolEngine.PAPER_INTERVAL_MS);
+    // 1분마다 가볍게 받아 합치기 — 폰에서 고친 설정·폰에서 켠 봇이 5분을 기다리지 않고 들어오게.
+    //   폰에서 켜 "돌릴 PC 미정"인 봇이 보이면 바로 한 주기를 돌려 이 PC가 가져간다.
+    this.paperSyncTimer = setInterval(() => {
+      if (this.paperBusy) return;
+      void this.paperSync().then(() => {
+        if (this.paperStore.bots.some((b) => b.config.running && b.config.runnerDeviceId == null)) void this.paperTick();
+      });
+    }, 60_000);
+  }
+
+  stopPaperBotLoop(): void {
+    if (this.paperTimer) clearInterval(this.paperTimer);
+    if (this.paperSyncTimer) clearInterval(this.paperSyncTimer);
+    this.paperSyncTimer = null;
+    if (this.paperDeferTimer) clearTimeout(this.paperDeferTimer);
+    this.paperTimer = null;
+    this.paperDeferTimer = null;
+  }
+
+  /** 자동매매가 스캔한 결과도 봇들이 나눠 쓸 수 있게 보관(같은 기준이면 다시 스캔하지 않음 — 요청 한도 절약). */
+  private rememberScanForPaper(opts: ScreenOpts, run: ScreenRun): void {
+    try {
+      this.paperScanCache.set(screenKey(sanitizeConfig({ screen: opts as Partial<PaperScreen> }).screen), { run, atMs: Date.now() });
+    } catch {
+      /* 보관 실패는 무시 — 봇이 직접 스캔하면 된다 */
+    }
+  }
+
+  /**
+   * paperSync — 클라우드 한 줄과 합치기(받기 → 합치기 → 다르면 "버전 그대로일 때만" 저장, 최대 4번).
+   *   한 번에 하나만 돈다(체인으로 줄 세움) — 같은 기기 안에서 두 저장이 엇갈리지 않게.
+   */
+  private paperSync(): Promise<{ ok: boolean; message: string }> {
+    const run = this.paperSyncChain.then(() => this.paperSyncInner());
+    this.paperSyncChain = run.catch(() => undefined);
+    return run;
+  }
+
+  private async paperSyncInner(): Promise<{ ok: boolean; message: string }> {
+    const token = await this.ensureAccessToken().catch(() => null);
+    if (!token || !this.authUserId) {
+      this.paperSyncError = "로그인 전이라 이 기기에만 저장됩니다(로그인하면 다른 기기와 맞춰집니다).";
+      return { ok: false, message: this.paperSyncError };
+    }
+    const base = `${ToolEngine.SUPABASE_URL}/rest/v1/capri_live_state`;
+    const mine = `user_id=eq.${encodeURIComponent(this.authUserId)}&kind=eq.paper_bots`;
+    try {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        // ① 읽기
+        const res = await fetchWithTimeout(`${base}?${mine}&select=payload,updated_at`, { headers: this.authRestHeaders(token) }, 10_000, "capri_live_state");
+        if (!res.ok) throw new Error(`클라우드 조회 실패(HTTP ${res.status})`);
+        const rows = (await res.json()) as Array<{ payload: unknown; updated_at: string }>;
+        const row = rows[0] ?? null;
+        const remote = row && isPaperStore(row.payload) ? row.payload : null;
+        if (row && !remote) throw new Error("클라우드의 가상매매 봇 데이터 형식을 읽지 못해 덮어쓰지 않았습니다");
+        // ② 합치기
+        const now = Date.now();
+        this.paperStore = mergeStores(this.paperStore, remote ?? emptyStore(), now);
+        this.persistPaper();
+        const localFp = storeFingerprint(this.paperStore, now);
+        if (remote && storeFingerprint(remote, now) === localFp) break; // 클라우드와 같음 — 저장할 것 없음
+        if (!remote && this.paperStore.bots.length === 0 && Object.keys(this.paperStore.deleted).length === 0) break;
+        // ③ 버전 확인 후 저장
+        const prevMs = row?.updated_at ? Date.parse(row.updated_at) : 0;
+        const nextAt = new Date(Math.max(now, (Number.isFinite(prevMs) ? prevMs : 0) + 1)).toISOString();
+        let w: Response;
+        if (row) {
+          w = await fetchWithTimeout(`${base}?${mine}&updated_at=eq.${encodeURIComponent(row.updated_at)}`, {
+            method: "PATCH",
+            headers: { ...this.authRestHeaders(token), Prefer: "return=representation" },
+            body: JSON.stringify({ payload: this.paperStore, updated_at: nextAt }),
+          }, 10_000, "capri_live_state");
+        } else {
+          w = await fetchWithTimeout(`${base}?on_conflict=user_id,kind`, {
+            method: "POST",
+            headers: { ...this.authRestHeaders(token), Prefer: "resolution=ignore-duplicates,return=representation" },
+            body: JSON.stringify({ user_id: this.authUserId, kind: "paper_bots", payload: this.paperStore, updated_at: nextAt }),
+          }, 10_000, "capri_live_state");
+          if (w.status === 409) continue;
+        }
+        if (!w.ok) throw new Error(`클라우드 저장 실패(HTTP ${w.status})`);
+        const written = await w.json().catch(() => null);
+        if (Array.isArray(written) && written.length === 0) continue; // 그 사이 다른 기기가 먼저 저장 — 다시 받아 합친다
+        break;
+      }
+      this.paperLastSyncMs = Date.now();
+      this.paperSyncError = null;
+      return { ok: true, message: "동기화 완료" };
+    } catch (e) {
+      this.paperSyncError = e instanceof Error ? e.message : String(e);
+      return { ok: false, message: this.paperSyncError };
+    }
+  }
+
+  /** 화면용 묶음. */
+  getPaperBots(): {
+    bots: Array<PaperBot & { stats: PaperBotStats; runnerIsMe: boolean }>;
+    dashboard: PaperDashboard;
+    deviceId: string;
+    canRun: boolean;
+    busy: boolean;
+    lastTickMs: number | null;
+    nextTickMs: number | null;
+    lastError: string | null;
+    lastSyncMs: number | null;
+    syncError: string | null;
+  } {
+    const bots = this.paperStore.bots.map((b) => ({ ...b, stats: botStats(b), runnerIsMe: b.config.runnerDeviceId === this.paperDeviceId }));
+    return {
+      bots,
+      dashboard: paperDashboard(this.paperStore.bots),
+      deviceId: this.paperDeviceId,
+      canRun: this.paperLoopOn,
+      busy: this.paperBusy,
+      lastTickMs: this.paperLastTickMs,
+      nextTickMs: this.paperLoopOn && this.paperLastTickMs != null ? this.paperLastTickMs + ToolEngine.PAPER_INTERVAL_MS : null,
+      lastError: this.paperLastError,
+      lastSyncMs: this.paperLastSyncMs,
+      syncError: this.paperSyncError,
+    };
+  }
+
+  /** 클라우드에서 최신을 받아 합친 뒤 돌려준다(화면이 열려 있는 동안 주기적으로 부른다). */
+  async paperBotsRefresh(): Promise<ReturnType<ToolEngine["getPaperBots"]>> {
+    await this.paperSync();
+    return this.getPaperBots();
+  }
+
+  /** 봇 하나의 설정을 바꾸고(버전=지금) 저장·동기화한다. */
+  private async paperEditConfig(id: string, fn: (c: PaperBotConfig) => Partial<PaperBotConfig>): Promise<ReturnType<ToolEngine["getPaperBots"]>> {
+    const now = Date.now();
+    this.paperStore = {
+      ...this.paperStore,
+      bots: this.paperStore.bots.map((b) => (b.id === id ? { ...b, config: sanitizeConfig({ ...b.config, ...fn(b.config), updatedAtMs: Math.max(now, b.config.updatedAtMs + 1) }) } : b)),
+    };
+    this.persistPaper();
+    await this.paperSync();
+    return this.getPaperBots();
+  }
+
+  /** 봇 추가. base를 주면 그 설정으로(화면이 "지금 자동매매 설정"을 넘긴다), 없으면 이 기기 설정으로. */
+  async paperBotAdd(base?: Partial<PaperBotConfig>): Promise<ReturnType<ToolEngine["getPaperBots"]>> {
+    if (this.paperStore.bots.length >= PAPER_MAX_BOTS) throw new Error(`봇은 최대 ${PAPER_MAX_BOTS}개까지 만들 수 있습니다.`);
+    // 만든 시각은 기존 봇보다 반드시 1ms라도 뒤로 — 목록 순서(만든 순)가 기기마다 똑같이 보이게(같은 ms에 여러 개 만들 때 대비).
+    const now = Math.max(Date.now(), ...this.paperStore.bots.map((b) => b.config.createdAtMs + 1));
+    const def = defaultBotConfig(this.getSettings() as unknown as Record<string, unknown>, now, `가상봇 ${this.paperStore.bots.length + 1}`);
+    const config = sanitizeConfig({ ...def, ...(base ?? {}), trade: { ...def.trade, ...(base?.trade ?? {}) }, screen: { ...def.screen, ...(base?.screen ?? {}) }, running: false, runnerDeviceId: null, createdAtMs: now, updatedAtMs: now });
+    const bot: PaperBot = { id: newBotId(now), config, sim: freshSim(1, now, config.seedUsd) };
+    this.paperStore = { ...this.paperStore, bots: [...this.paperStore.bots, bot] };
+    this.persistPaper();
+    await this.paperSync();
+    return this.getPaperBots();
+  }
+
+  /** 손절 비교 세트 — 기준 봇과 다른 건 전부 같고 손절%만 다른 봇들을 한 번에 만든다(손절 고민용 지름길). */
+  async paperBotAddSlSet(baseId: string | null, slList: number[]): Promise<ReturnType<ToolEngine["getPaperBots"]>> {
+    const base = baseId ? this.paperStore.bots.find((b) => b.id === baseId)?.config : undefined;
+    const list = [...new Set(slList.filter((x) => Number.isFinite(x) && x > 0))].slice(0, 8);
+    if (this.paperStore.bots.length + list.length > PAPER_MAX_BOTS) throw new Error(`봇은 최대 ${PAPER_MAX_BOTS}개까지 만들 수 있습니다.`);
+    for (const sl of list) {
+      const name = `${base ? base.name.replace(/\s*·\s*손절.*$/, "") : "손절비교"} · 손절 ${sl}%`;
+      await this.paperBotAdd({ ...(base ?? {}), name, slPct: sl });
+    }
+    return this.getPaperBots();
+  }
+
+  async paperBotUpdate(id: string, patch: Partial<PaperBotConfig>): Promise<ReturnType<ToolEngine["getPaperBots"]>> {
+    // 켜짐·돌리는 기기·만든 시각은 시작/중지 버튼으로만 바뀐다(설정 저장이 실수로 끄거나 켜지 않게).
+    return this.paperEditConfig(id, (c) => ({
+      ...patch,
+      trade: { ...c.trade, ...(patch.trade ?? {}) },
+      screen: { ...c.screen, ...(patch.screen ?? {}) },
+      running: c.running,
+      runnerDeviceId: c.runnerDeviceId,
+      createdAtMs: c.createdAtMs,
+    }));
+  }
+
+  async paperBotStart(id: string): Promise<ReturnType<ToolEngine["getPaperBots"]>> {
+    // PC에서 켜면 그 PC가 돌린다. 폰에서 켜면 "아무 PC나"(null) — 켜져 있는 PC가 다음 주기에 가져간다.
+    const r = await this.paperEditConfig(id, () => ({ running: true, runnerDeviceId: this.paperLoopOn ? this.paperDeviceId : null }));
+    if (this.paperLoopOn) setTimeout(() => void this.paperTick(), 1500); // 5분 기다리지 않고 바로 한 번
+    return r;
+  }
+
+  async paperBotStop(id: string): Promise<ReturnType<ToolEngine["getPaperBots"]>> {
+    return this.paperEditConfig(id, () => ({ running: false }));
+  }
+
+  /** 결과 초기화 — 진행 기록을 새 판(epoch+1)으로. 어느 기기에서 해도 옛 기록을 이긴다. */
+  async paperBotReset(id: string): Promise<ReturnType<ToolEngine["getPaperBots"]>> {
+    const now = Date.now();
+    this.paperStore = {
+      ...this.paperStore,
+      bots: this.paperStore.bots.map((b) => (b.id === id ? { ...b, sim: freshSim(b.sim.epoch + 1, now, b.config.seedUsd) } : b)),
+    };
+    this.persistPaper();
+    await this.paperSync();
+    return this.getPaperBots();
+  }
+
+  async paperBotDelete(id: string): Promise<ReturnType<ToolEngine["getPaperBots"]>> {
+    this.paperStore = { ...this.paperStore, bots: this.paperStore.bots.filter((b) => b.id !== id), deleted: { ...this.paperStore.deleted, [id]: Date.now() } };
+    this.persistPaper();
+    await this.paperSync();
+    return this.getPaperBots();
+  }
+
+  async paperBotDuplicate(id: string): Promise<ReturnType<ToolEngine["getPaperBots"]>> {
+    const src = this.paperStore.bots.find((b) => b.id === id);
+    if (!src) throw new Error("봇을 찾지 못했습니다.");
+    return this.paperBotAdd({ ...src.config, name: `${src.config.name} (복사)` });
+  }
+
+  /** 지금 바로 한 번(데스크톱만) — 5분을 기다리지 않고 진행. */
+  async paperBotsRunNow(): Promise<ReturnType<ToolEngine["getPaperBots"]>> {
+    if (this.paperLoopOn) await this.paperTick(true);
+    else await this.paperSync();
+    return this.getPaperBots();
+  }
+
+  /** 1분봉을 가상 체결용 모양으로(필요한 길이만큼 — 오래 꺼져 있었으면 더 깊게). */
+  private async paperFetchBars(symbol: string, sinceMs: number): Promise<PaperBar[]> {
+    const needMin = Math.ceil((Date.now() - sinceMs) / 60_000) + 5;
+    const raw = needMin <= 190 ? await getCandles1mLatest(symbol, 200) : await getCandles1mPaged(symbol, Math.min(2400, needMin), 14);
+    return raw.map((c) => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close })).sort((a, b) => a.time - b.time);
+  }
+
+  /**
+   * paperTick — 한 주기(5분): 받아 합치기 → (필요하면) 봇 가져오기 → 체결 판정 → 신규 가상 주문 → 저장·동기화.
+   */
+  private async paperTick(manual = false): Promise<void> {
+    if (!this.paperLoopOn || this.paperBusy) return;
+    if (!manual && (this.autoTradeTickBusy || this.screenBusy)) {
+      // 실주문 경로(자동매매)·스크리닝이 도는 중이면 1분 뒤로 양보한다.
+      if (!this.paperDeferTimer) this.paperDeferTimer = setTimeout(() => { this.paperDeferTimer = null; void this.paperTick(); }, 60_000);
+      return;
+    }
+    this.paperBusy = true;
+    this.paperLastError = null;
+    try {
+      await this.paperSync();
+      const me = this.paperDeviceId;
+      const now0 = Date.now();
+      // ① 돌릴 기기가 없거나(폰에서 켬) 돌리던 PC가 오래 소식이 없으면 이 PC가 가져온다.
+      let claimed = false;
+      this.paperStore = {
+        ...this.paperStore,
+        bots: this.paperStore.bots.map((b) => {
+          const c = b.config;
+          if (!c.running || c.runnerDeviceId === me) return b;
+          const quiet = Math.max(b.sim.lastTickMs ?? 0, c.updatedAtMs) < now0 - ToolEngine.PAPER_TAKEOVER_MS;
+          if (c.runnerDeviceId == null || quiet) {
+            claimed = true;
+            return { ...b, config: { ...c, runnerDeviceId: me, updatedAtMs: Math.max(now0, c.updatedAtMs + 1) } };
+          }
+          return b;
+        }),
+      };
+      if (claimed) {
+        this.persistPaper();
+        await this.paperSync(); // 다른 PC와 동시에 가져갔으면 여기서 정리된다(나중에 고친 쪽이 이김)
+      }
+      const mine = this.paperStore.bots.filter((b) => b.config.runnerDeviceId === me && (b.config.running || b.sim.open.length > 0 || b.sim.pending.length > 0));
+      if (mine.length === 0) return;
+
+      await this.prepareBackend();
+      if (this.labFeePct == null) {
+        const rate = await this.resolveCommissionRate().catch(() => null);
+        if (rate != null && rate > 0) this.labFeePct = Math.max(0.1, Math.round(rate * 2 * 100 * 1000) / 1000);
+      }
+      const fee = this.labFeePct ?? LAB_PARAMS_DEFAULT.feeRoundTripPct;
+
+      // ② 대기·보유 종목의 1분봉 받기(종목당 한 번 — 여러 봇이 같은 종목이면 나눠 씀)
+      const since = new Map<string, number>();
+      for (const b of mine) {
+        for (const o of b.sim.pending) since.set(o.symbol, Math.min(since.get(o.symbol) ?? Infinity, o.lastBarMs || o.placedAtMs));
+        for (const p of b.sim.open) since.set(p.symbol, Math.min(since.get(p.symbol) ?? Infinity, p.lastBarMs));
+      }
+      const bars = new Map<string, PaperBar[]>();
+      for (const [sym, s] of since) {
+        try {
+          bars.set(sym, await this.paperFetchBars(sym, s));
+        } catch {
+          /* 이 종목은 다음 주기에 이어서(체결 판정은 봉이 들어올 때 순서대로 하므로 빠짐없이 따라잡는다) */
+        }
+        await new Promise((r) => setTimeout(r, 150)); // 요청 간격(한도 나눠 쓰기)
+      }
+      const now = Date.now();
+      const sims = new Map<string, { epoch: number; sim: PaperSim; note: string | null }>();
+      for (const b of mine) {
+        let sim = advanceBot(b, bars, now, fee);
+        if (!b.config.running && sim.pending.length) sim = cancelPending(sim); // 중지된 봇: 새 매수는 거두고, 보유분만 끝까지 지켜본다
+        sims.set(b.id, { epoch: b.sim.epoch, sim, note: b.config.running ? null : sim.open.length ? `중지됨 — 보유 ${sim.open.length}종목은 익절/손절까지 계속 지켜봅니다` : "중지됨" });
+      }
+
+      // ③ 신규 가상 주문 — 휴무 시간대·꺼 둔 장이면 안 낸다(자동매매와 같은 관문)
+      const pause = this.getSystemPauseStatus();
+      const session = getSession(DateTime.now().setZone("Asia/Seoul"));
+      const groups = new Map<string, PaperBot[]>();
+      for (const b of mine) {
+        if (!b.config.running) continue;
+        const st = sims.get(b.id)!;
+        if (pause.paused) { st.note = `⏸ ${pause.reason ?? "휴무 시간대"} — 새 매수 없이 보유분만 지켜봄`; continue; }
+        const on = session === "day" ? b.config.trade.sessions.day : session === "pre" ? b.config.trade.sessions.pre : session === "regular" ? b.config.trade.sessions.regular : session === "after" ? b.config.trade.sessions.after : false;
+        if (!on) { st.note = session === "closed" ? "장 시간이 아님 — 새 매수 없음" : "이 봇은 지금 장(세션)을 꺼 둠 — 새 매수 없음"; continue; }
+        if (st.sim.pending.length + st.sim.open.length >= b.config.trade.maxPositions) { st.note = `최대 종목 수(${b.config.trade.maxPositions}) 보유 중`; continue; }
+        const k = screenKey(b.config.screen);
+        groups.set(k, [...(groups.get(k) ?? []), b]);
+      }
+      let scans = 0;
+      for (const [k, list] of groups) {
+        let cached = this.paperScanCache.get(k);
+        if (!cached || now - cached.atMs > 4 * 60_000) {
+          if (scans >= ToolEngine.PAPER_MAX_SCANS_PER_TICK || this.screenBusy || this.autoTradeTickBusy) {
+            for (const b of list) sims.get(b.id)!.note = "스크리닝 차례를 기다리는 중(다음 주기에 시도)";
+            continue;
+          }
+          try {
+            scans++;
+            const run = await this.scanScreener(list[0].config.screen, true);
+            cached = { run, atMs: Date.now() };
+            this.paperScanCache.set(k, cached);
+          } catch (e) {
+            const msg = String(e).replace(/^Error:\s*/, "");
+            for (const b of list) sims.get(b.id)!.note = `스크리닝 실패 — ${msg}`;
+            continue;
+          }
+        }
+        const cands = cached.run.results.filter((r) => r.status === "confirmed");
+        for (const b of list) {
+          const st = sims.get(b.id)!;
+          const r = placeEntries({ ...b, sim: st.sim }, st.sim, cands, Date.now());
+          st.sim = r.sim;
+          st.note = `스크리닝 확정 ${cands.length}종목 · 새 가상 매수 ${r.placed}건${r.notes.length ? ` · ${r.notes.slice(0, 3).join(" / ")}` : ""}`;
+        }
+      }
+
+      // ④ 반영 — 그 사이(이 주기 도중) 다른 기기에서 초기화한 봇은 옛 결과로 덮지 않는다.
+      const t = Date.now();
+      this.paperStore = {
+        ...this.paperStore,
+        bots: this.paperStore.bots.map((b) => {
+          const st = sims.get(b.id);
+          if (!st || b.sim.epoch !== st.epoch) return b;
+          return { ...b, sim: { ...st.sim, updatedAtMs: Math.max(t, b.sim.updatedAtMs + 1), lastTickMs: t, startedAtMs: st.sim.startedAtMs ?? t, lastNote: st.note } };
+        }),
+      };
+      this.persistPaper();
+      await this.paperSync();
+    } catch (e) {
+      this.paperLastError = String(e).replace(/^Error:\s*/, "");
+    } finally {
+      this.paperBusy = false;
+      this.paperLastTickMs = Date.now();
+    }
+  }
+
+  // ==========================================================================
   // [v0.65.0] 매매연구소 — 신호 기록 모드 (주문 없음, 읽기 전용)
   //   오너·카일 합의: "연속 상승 캔들 매매기법"을 실매매에 붙이기 전에, 실제 스크리닝 → 가상 매수 →
   //   로직대로 가상 매매 → 현황까지 전부 **로우 데이터**로 쌓고, 그 로우에서 통계를 낸다.
@@ -8052,7 +8481,9 @@ export class ToolEngine extends EventEmitter {
    *   [v0.11.0] 옵션 객체로 바뀜 — 몸통비율뿐 아니라 스캔 종목수·가격대(하한/상한)를 사용자가 조절.
    *   @param opts { bodyRatio(0.1~0.8), count(10~200), priceMin($), priceMax($) } — 전부 선택(기본값 있음).
    */
-  async scanScreener(opts: ScreenOpts = {}): Promise<ScreenRun> {
+  // [v0.103.0] quiet=true: 가상매매 봇 전용 — 화면의 스크리너 진행 막대·폰 미러에 "스캔 중"을 띄우지 않는다
+  //   (오너가 수동/자동 스크리너를 돌린 것처럼 보이면 헷갈리므로). 계산 자체는 완전히 같은 코드를 탄다.
+  async scanScreener(opts: ScreenOpts = {}, quiet = false): Promise<ScreenRun> {
     if (this.screenBusy) throw new Error("이미 스캔이 진행 중입니다. 끝날 때까지 기다려 주세요.");
     this.assertNotSystemPaused("스크리닝"); // [v0.44.0] 수동 스크리너 + 자동매매 스캔 공용 경로
     this.screenBusy = true;
@@ -8089,9 +8520,9 @@ export class ToolEngine extends EventEmitter {
       await this.prepareBackend();
 
       // 1) 거래량 랭킹으로 스캔 대상 종목 확보
-      this.emit("screener:progress", { phase: "ranking", done: 0, total: count, symbol: "" } as ScreenProgress);
+      if (!quiet) this.emit("screener:progress", { phase: "ranking", done: 0, total: count, symbol: "" } as ScreenProgress);
       // [v0.61.4] 폰이 "지금 PC가 스캔 중"임을 바로 알 수 있게 — 시작 신호는 쓰로틀 없이 즉시 올린다.
-      this.pushScanProgress({ phase: "ranking", done: 0, total: count, symbol: "", running: true, startedAtMs: Date.now() });
+      if (!quiet) this.pushScanProgress({ phase: "ranking", done: 0, total: count, symbol: "", running: true, startedAtMs: Date.now() });
       const ranked = await getRankings(count);
 
       // 1-b) [v0.6.3] ETF·레버리지·인버스 배제 — 종목 메타(securityType)를 한 번에 조회해 걸러낸다.
@@ -8131,8 +8562,8 @@ export class ToolEngine extends EventEmitter {
         if (this.screenCancelRequested) {
           throw new Error("오너 요청으로 스크리닝을 취소했습니다.");
         }
-        this.emit("screener:progress", { phase: "scanning", done, total, symbol: rk.symbol } as ScreenProgress);
-        this.pushScanProgress({ phase: "scanning", done, total, symbol: rk.symbol, running: true, startedAtMs: this.scanProgressForMirror?.startedAtMs ?? Date.now() });
+        if (!quiet) this.emit("screener:progress", { phase: "scanning", done, total, symbol: rk.symbol } as ScreenProgress);
+        if (!quiet) this.pushScanProgress({ phase: "scanning", done, total, symbol: rk.symbol, running: true, startedAtMs: this.scanProgressForMirror?.startedAtMs ?? Date.now() });
         try {
           // 1분봉을 과거로 당겨 확보한다.
           //   EMA200 에는 **완성된** 5분봉 200개(=1분봉 1000개)가 필요하다.
@@ -8250,9 +8681,9 @@ export class ToolEngine extends EventEmitter {
         done++;
       }
 
-      this.emit("screener:progress", { phase: "done", done, total, symbol: "" } as ScreenProgress);
+      if (!quiet) this.emit("screener:progress", { phase: "done", done, total, symbol: "" } as ScreenProgress);
       // [v0.61.4] 완료 신호도 쓰로틀 없이 즉시 — 게이지가 꽉 찬 채로 안 멈추고 바로 사라지게.
-      this.pushScanProgress({ phase: "done", done, total, symbol: "", running: false, startedAtMs: this.scanProgressForMirror?.startedAtMs ?? Date.now() });
+      if (!quiet) this.pushScanProgress({ phase: "done", done, total, symbol: "", running: false, startedAtMs: this.scanProgressForMirror?.startedAtMs ?? Date.now() });
       // 정렬: 확정(🔴) → 관찰(🟡) → 나머지. 같은 등급이면 랭킹 순.
       const order: Record<ScreenStatus, number> = { confirmed: 0, watch: 1, none: 2, insufficient: 3 };
       results.sort((a, b) => order[a.status] - order[b.status] || a.rank - b.rank);
@@ -8282,7 +8713,7 @@ export class ToolEngine extends EventEmitter {
       // [v0.61.4] 취소·오류로 "done" 신호 없이 끝난 경우(위 try 블록 중간에 throw)도, 게이지가
       //   "진행 중"에 영원히 멈춰 있지 않도록 여기서 반드시 running:false로 마감한다.
       if (this.scanProgressForMirror?.running) {
-        this.pushScanProgress({ ...this.scanProgressForMirror, running: false });
+        if (!quiet) this.pushScanProgress({ ...this.scanProgressForMirror, running: false });
       }
     }
   }
@@ -9980,6 +10411,7 @@ export class ToolEngine extends EventEmitter {
         if (this.currentAutoRun) this.currentAutoRun.scanCount++; // [v0.62.1] 리포트: 실제로 스크리닝까지 돈 횟수
         run = await this.scanScreener(this.buildAutoScanOpts()); // ③빈자리를 "현재 스크리닝으로 탐색된 다른 종목"으로 채움
         this.autoTradeLastScan = run; // [v0.27.0] 버리지 않고 보관 → "스크리닝 결과" 탭이 그대로 보여줌
+        this.rememberScanForPaper(this.buildAutoScanOpts(), run); // [v0.103.0] 가상매매 봇이 같은 기준이면 나눠 씀
         this.autoTradeLastScanError = null; // [v0.45.0] 성공했으니 이전 실패 기록은 지운다
       } catch (e) {
         // [v0.43.0] 오너가 스크리닝 취소 버튼을 눌러 멈춘 경우는 "실패"가 아니라 요청한 결과다 —

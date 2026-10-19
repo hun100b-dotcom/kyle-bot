@@ -573,6 +573,18 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:lab:export", (_ev, kind) => e.exportLab(kind));
   ipcMain.handle("tool:lab:verify", (_ev, sample) => e.verifyLab(sample));
   ipcMain.handle("tool:lab:assessment", (_ev, realtimeOnly) => e.getLabAssessment(realtimeOnly !== false));
+  // [v0.103.0] 가상매매 봇(주문 없음 — 시세·스크리닝 조회만으로 모의 체결)
+  ipcMain.handle("tool:paper:list", () => e.getPaperBots());
+  ipcMain.handle("tool:paper:refresh", () => e.paperBotsRefresh());
+  ipcMain.handle("tool:paper:add", (_ev, base) => e.paperBotAdd(base));
+  ipcMain.handle("tool:paper:addSlSet", (_ev, baseId, slList) => e.paperBotAddSlSet(baseId ?? null, Array.isArray(slList) ? slList : []));
+  ipcMain.handle("tool:paper:update", (_ev, id, patch) => e.paperBotUpdate(id, patch ?? {}));
+  ipcMain.handle("tool:paper:start", (_ev, id) => e.paperBotStart(id));
+  ipcMain.handle("tool:paper:stop", (_ev, id) => e.paperBotStop(id));
+  ipcMain.handle("tool:paper:reset", (_ev, id) => e.paperBotReset(id));
+  ipcMain.handle("tool:paper:delete", (_ev, id) => e.paperBotDelete(id));
+  ipcMain.handle("tool:paper:duplicate", (_ev, id) => e.paperBotDuplicate(id));
+  ipcMain.handle("tool:paper:runNow", () => e.paperBotsRunNow());
   // [v0.2.10] 매매 근거 목록 / 보유 포지션(손익 포함) — 둘 다 읽기 전용이라 안전하다.
   ipcMain.handle("tool:rationales", () => e.getRationales());
   // [v0.4.0] 삼분할 타점 기록(여러 종목 동시 운용) — 저장/조회/삭제/진입완료 체크
@@ -825,6 +837,9 @@ app.whenReady().then(async () => {
   //   positionSyncTimer 필드 주석 참고). 위 두 루프와 똑같은 재시도 패턴.
   engine.startPositionSyncLoop();
   setInterval(() => engine?.startPositionSyncLoop(), 15_000);
+
+  // [v0.103.0] 가상매매 봇 루프 — PC(데스크톱)만 봇을 실제로 돌린다(폰은 보기·설정만). 주문은 절대 안 나간다.
+  engine.startPaperBotLoop();
 
   // 자동 업데이트는 실제 설치본에서만(개발/검증 실행 제외). 실패해도 앱은 정상.
   if (app.isPackaged && !process.env.KYLEBOT_SHOT) {
