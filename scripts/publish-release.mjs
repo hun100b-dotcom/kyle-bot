@@ -158,6 +158,74 @@ async function api(token, url, init = {}) {
   return { status: res.status, body };
 }
 
+// -----------------------------------------------------------------------------
+// 3-1) [v0.102.1] 릴리스 파일 교체(삭제 확인 → 업로드 → 충돌 시 재시도) — 같은 버전을 다시 배포해도 성공하게 하는 장치
+// -----------------------------------------------------------------------------
+const GONE_POLLS = 8; // 삭제가 반영됐는지 목록을 다시 보는 최대 횟수
+const GONE_WAIT_MS = 2000; // 확인 사이 대기(2초) → 한 번의 삭제 확인은 최대 약 16초
+const UPLOAD_TRIES = 3; // 업로드 최대 시도 횟수(처음 1번 + 충돌 재시도 2번)
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 릴리스에 지금 올라가 있는 파일 목록(이름·번호). 조회 실패 시 null. */
+async function listAssets(token, relId) {
+  const r = await api(token, `https://api.github.com/repos/${OWNER}/${REPO}/releases/${relId}/assets?per_page=100`);
+  return r.status === 200 && Array.isArray(r.body) ? r.body : null;
+}
+
+/** 같은 이름의 파일을 모두 지우고, 목록에서 정말 사라질 때까지 기다린다(상한 있음). 사라졌으면 true. */
+async function deleteAndConfirmGone(token, relId, name) {
+  const list = await listAssets(token, relId);
+  const dups = (list ?? []).filter((e) => e.name === name);
+  if (dups.length === 0) return true; // 지울 게 없음
+  for (const d of dups) {
+    const del = await api(token, `https://api.github.com/repos/${OWNER}/${REPO}/releases/assets/${d.id}`, { method: "DELETE" });
+    // 204=삭제됨, 404=이미 없음(둘 다 목적 달성). 그 외는 실패이므로 기록만 하고 아래 확인 단계가 최종 판단한다.
+    console.log(`  (기존 ${name} 삭제 요청 → HTTP ${del.status})`);
+  }
+  for (let i = 1; i <= GONE_POLLS; i++) {
+    const now = await listAssets(token, relId);
+    if (now && !now.some((e) => e.name === name)) {
+      console.log(`  (기존 ${name} 삭제 확인됨${i > 1 ? ` — ${i}번째 확인에서` : ""})`);
+      return true;
+    }
+    console.log(`  (기존 ${name} 아직 목록에 남아 있음 — ${GONE_WAIT_MS / 1000}초 기다림 ${i}/${GONE_POLLS})`);
+    await sleep(GONE_WAIT_MS);
+  }
+  return false;
+}
+
+/** 파일 한 개를 안전하게 교체 업로드한다. 성공하면 true. */
+async function replaceAsset(token, relId, a) {
+  const data = readFileSync(a.file);
+  for (let attempt = 1; attempt <= UPLOAD_TRIES; attempt++) {
+    const gone = await deleteAndConfirmGone(token, relId, a.name);
+    if (!gone) console.log(`  ⚠ ${a.name}: 삭제 확인이 끝내 안 됐지만 업로드를 시도합니다(시도 ${attempt}/${UPLOAD_TRIES}).`);
+    const res = await fetch(
+      `https://uploads.github.com/repos/${OWNER}/${REPO}/releases/${relId}/assets?name=${encodeURIComponent(a.name)}`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": a.name.endsWith(".yml") ? "text/yaml" : "application/octet-stream",
+          "Content-Length": String(data.length),
+        },
+        body: data,
+      },
+    );
+    console.log(`  ↑ ${a.name} → HTTP ${res.status}${attempt > 1 ? ` (재시도 ${attempt}/${UPLOAD_TRIES})` : ""}`);
+    if (res.status === 201) return true;
+    const text = await res.text();
+    const retryable = (res.status === 422 && text.includes("already_exists")) || res.status >= 500;
+    if (!retryable || attempt === UPLOAD_TRIES) {
+      console.error(`✖ 업로드 실패 (${a.name}, 시도 ${attempt}/${UPLOAD_TRIES})`, text);
+      return false;
+    }
+    console.log(`  ↻ ${a.name}: ${res.status === 422 ? "같은 이름이 아직 남아 있음(already_exists)" : "서버 일시 오류"} → ${attempt * 3}초 뒤 지우고 다시 올립니다.`);
+    await sleep(attempt * 3000);
+  }
+  return false;
+}
+
 async function main() {
   console.log(`\n=== Capri 릴리스 배포: ${TAG} ===`);
 
@@ -250,32 +318,17 @@ async function main() {
 
   const relId = rel.body.id;
 
-  // ② 같은 이름 자산이 이미 있으면 지우고 다시 올린다(재배포 시 덮어쓰기)
-  const existing = await api(token, `https://api.github.com/repos/${OWNER}/${REPO}/releases/${relId}/assets?per_page=100`);
+  // ② 같은 이름 자산이 이미 있으면 지우고 다시 올린다(재배포 시 덮어쓰기) — [v0.102.1] 멱등(몇 번을 다시 돌려도 성공)
+  //
+  // [왜 고쳤나] 예전엔 "삭제 요청 → 곧바로 업로드"였다. 그런데 GitHub는 삭제를 **바로 반영하지 않는 경우**가 있어서,
+  //   같은 버전을 두 번째로 배포하면 "이미 같은 이름이 있다"(HTTP 422 already_exists)며 업로드가 거절됐고 배포 전체가 실패했다.
+  //   (삭제 요청의 결과도 확인하지 않아서, 삭제가 실패해도 조용히 넘어갔다.)
+  // [어떻게 막나] 한 파일마다 ① 지우고 → ② 목록을 다시 조회해 **정말 사라졌는지 확인**(짧게 기다리며 최대 8번(GONE_POLLS))
+  //   → ③ 업로드. 그래도 422(already_exists)가 나면 **한 번 더 지우고** 다시 올린다(최대 3번, UPLOAD_TRIES).
+  //   모든 대기와 재시도에 **상한**이 있어 무한히 기다리지 않는다. 로그에는 어떤 경로를 탔는지(삭제함/기다림/재시도함) 남긴다.
   for (const a of assets) {
-    const dup = Array.isArray(existing.body) ? existing.body.find((e) => e.name === a.name) : null;
-    if (dup) {
-      await api(token, `https://api.github.com/repos/${OWNER}/${REPO}/releases/assets/${dup.id}`, { method: "DELETE" });
-      console.log(`  (기존 ${a.name} 삭제 후 재업로드)`);
-    }
-    const data = readFileSync(a.file);
-    const res = await fetch(
-      `https://uploads.github.com/repos/${OWNER}/${REPO}/releases/${relId}/assets?name=${encodeURIComponent(a.name)}`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": a.name.endsWith(".yml") ? "text/yaml" : "application/octet-stream",
-          "Content-Length": String(data.length),
-        },
-        body: data,
-      },
-    );
-    console.log(`  ↑ ${a.name} → HTTP ${res.status}`);
-    if (res.status !== 201) {
-      console.error("✖ 업로드 실패", await res.text());
-      process.exit(1);
-    }
+    const ok = await replaceAsset(token, relId, a);
+    if (!ok) process.exit(1);
   }
 
   // ③ 검증: 공개된 latest*.yml 을 다시 내려받아 로컬과 같은지 확인
