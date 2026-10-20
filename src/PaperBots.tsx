@@ -17,7 +17,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DateTime } from "luxon";
-import { defaultBotConfig, exitLabel, sanitizeConfig, type PaperBotConfig, type PaperGroupRow, type PaperSlMode } from "../lib/paper-bots";
+import { defaultBotConfig, exitLabel, sanitizeConfig, PAPER_DROP_LABEL, type PaperDropKey, type PaperBotConfig, type PaperGroupRow, type PaperSlMode } from "../lib/paper-bots";
 
 type View = PaperBotsView;
 type BotRow = View["bots"][number];
@@ -262,9 +262,16 @@ function BotRowView({ b, busy, settingsOpen, tradesOpen, onToggleSettings, onTog
       </div>
 
       <div className="pb-sub hint">
-        시드 {usd(c.seedUsd, 0)} · 익절 {c.tpPct}% · {exitLabel(c.trade, c.slPct)} · {c.followAutoScreen ? "스크리닝: 자동매매 기준" : "스크리닝: 직접 설정"} · {c.trade.entryLevel}분할 타점 · 최대 {c.trade.maxPositions}종목 · 종목당 {c.trade.investPct}%
+        시드 {usd(c.seedUsd, 0)} · 익절 {c.tpPct}% · {exitLabel(c.trade, c.slPct)} · {c.trade.entryLevel}분할 타점 · 최대 {c.trade.maxPositions}종목 · 종목당 {c.trade.investPct}%
       </div>
 
+      {/* [v0.106.0 오너 요청] 관찰·확정·진입 건수를 실시간으로 — 봇 기준 스크리닝에서 몇 건이 나왔는지 바로 보이게. */}
+      <div className="pb-metrics">
+        <Metric label="🟡 관찰" value={`${b.sim.funnel?.watch ?? 0}건`} sub={`스캔 ${b.sim.funnel?.scans ?? 0}회`} />
+        <Metric label="🔴 확정" value={`${b.sim.funnel?.confirmed ?? 0}건`} />
+        <Metric label="🛒 진입(가상 매수)" value={`${b.sim.agg.orders}건`} sub={`체결 ${Math.max(0, b.sim.agg.orders - b.sim.agg.unfilled - s.pendingCount)}건`} />
+      </div>
+      <ScanSummaryView b={b} />
       <div className="pb-metrics">
         <Metric label="수익률(실현)" value={sgn(s.returnPct)} tone={s.returnPct} />
         <Metric label="실현 손익" value={usd(s.realizedUsd)} tone={s.realizedUsd} />
@@ -281,6 +288,27 @@ function BotRowView({ b, busy, settingsOpen, tradesOpen, onToggleSettings, onTog
 
       {settingsOpen && <SettingsDrawer b={b} busy={busy} act={act} onClose={onToggleSettings} />}
       {tradesOpen && <TradesDrawer b={b} />}
+    </div>
+  );
+}
+
+/**
+ * [v0.106.0] 마지막 스캔 요약 — 봇 기준으로 몇 종목을 훑었고, 어느 단계에서 몇 개가 떨어졌는지,
+ *   같은 무렵 자동매매가 확정한 종목이 이 봇 기준에선 왜 안 잡혔는지를 보여 준다.
+ *   ("0건이 정말 조건에 맞는 종목이 없어서인지" 오너가 직접 확인할 수 있게.)
+ */
+function ScanSummaryView({ b }: { b: BotRow }) {
+  const ls = b.sim.lastScan;
+  if (!ls) return <div className="hint pb-note">🔎 아직 이 봇 기준으로 본 스캔이 없습니다(봇을 켜 두면 5분마다 스캔합니다).</div>;
+  const drops = (Object.entries(ls.drops) as Array<[PaperDropKey, number]>).filter(([, n]) => n > 0).sort((a, z) => z[1] - a[1]);
+  return (
+    <div className="hint pb-note">
+      🔎 마지막 스캔 {ls.scannedAt}: 훑은 {ls.total ?? "—"}종목 → 관찰 {ls.watch.length}{ls.watch.length ? `(${ls.watch.join(", ")})` : ""} · 확정 {ls.confirmed.length}
+      {ls.confirmed.length ? `(${ls.confirmed.join(", ")})` : ""}
+      {drops.length > 0 && <> · 탈락: {drops.map(([k, n]) => `${PAPER_DROP_LABEL[k]} ${n}`).join(" · ")}</>}
+      {ls.autoMissed.length > 0 && (
+        <div>⚖️ 같은 무렵 자동매매 확정 → 이 봇 기준에선: {ls.autoMissed.map((m) => `${m.symbol}(${m.reason})`).join(" · ")}</div>
+      )}
     </div>
   );
 }
@@ -406,15 +434,7 @@ function SettingsDrawer({ b, busy, act, onClose }: { b: BotRow; busy: boolean; a
       </div>
 
       <h4>스크리닝 기준</h4>
-      {/* [v0.105.0] 기본은 "자동매매 스크리닝 기준 그대로" — 자동매매가 잡은 종목을 봇도 똑같이 보게.
-          끄면 아래 칸들로 이 봇만의 기준을 직접 정한다. */}
-      <div className="form-row">
-        {chk("followAutoScreen", "자동매매 스크리닝 기준 그대로 쓰기(권장)", "켜 두면 PC의 자동매매 스크리닝 설정을 매번 그대로 쓰고, 자동매매 스캔 결과를 함께 씁니다.")}
-      </div>
-      {d.followAutoScreen ? (
-        <p className="hint">지금 자동매매의 스크리닝 기준을 그대로 씁니다 — 자동매매가 "관찰 확정"으로 잡은 종목을 이 봇도 똑같이 봅니다. 이 봇만 다른 기준으로 돌리려면 체크를 끄세요.</p>
-      ) : (
-      <>
+      {/* [v0.106.0 오너 정정] 봇은 항상 아래 "봇 자기 기준"으로 스크리닝한다(자동매매 기준 따라가기 칸은 뺌). */}
       <div className="form-row">
         {num("s.count", "거래량 상위 몇 종목", undefined, 90)}
         {num("s.priceMin", "가격 하한($)", undefined, 90)}
@@ -442,11 +462,9 @@ function SettingsDrawer({ b, busy, act, onClose }: { b: BotRow; busy: boolean; a
         {chk("s.atrFilterEnabled", "변동성 상한")}
         {d["s.atrFilterEnabled"] && num("s.atrMaxPct", "변동성 상한 %", undefined, 80)}
       </div>
-      </>
-      )}
 
       <p className="hint">
-        저장될 값: 익절 {preview.tpPct}% · 손절 {preview.slPct}% · 시드 {usd(preview.seedUsd, 0)} · {preview.followAutoScreen ? "스크리닝 = 자동매매 기준" : `가격 $${preview.screen.priceMin}~$${preview.screen.priceMax}`}
+        저장될 값: 익절 {preview.tpPct}% · 손절 {preview.slPct}% · 시드 {usd(preview.seedUsd, 0)} · 가격 ${preview.screen.priceMin}~${preview.screen.priceMax}
         {" "}(범위를 벗어난 값은 안전한 범위로 자동 보정됩니다)
       </p>
       <div className="form-row">
@@ -569,6 +587,7 @@ function Dashboard({ view }: { view: View | null }) {
     <section className="card wide">
       <h2>📊 대시보드 <span className="hint">(봇 순위 · 설정값별 비교)</span></h2>
       <div className="lab-cards">
+        <div className="lab-card"><span>🔎 전체 봇 합계</span><b>관찰 {d.funnel.watch} · 확정 {d.funnel.confirmed} · 진입 {d.funnel.entries}</b><span>스캔 {d.funnel.scans}회(봇별 합)</span></div>
         <div className="lab-card"><span>🏆 수익률 1위 봇</span><b className="pb-best">{d.best.bot ?? "아직 판단 불가"}</b><span>매매 {d.minTrades}건 이상 쌓인 봇 중</span></div>
         <div className="lab-card"><span>🛑 최고 손절값</span><b>{d.best.sl != null ? `${d.best.sl}%` : "아직 판단 불가"}</b><span>같은 손절값 봇들의 평균 수익률 기준</span></div>
         <div className="lab-card"><span>✅ 최고 익절값</span><b>{d.best.tp != null ? `${d.best.tp}%` : "아직 판단 불가"}</b><span>같은 익절값 봇들의 평균 수익률 기준</span></div>

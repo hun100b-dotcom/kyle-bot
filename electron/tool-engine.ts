@@ -74,7 +74,7 @@ import { verifyLocal, compareWithFresh, buildAssessment, type LocalVerify, type 
 import { requiredPathEndMs } from "../lib/lab";
 import {
   emptyStore, isPaperStore, mergeStores, storeFingerprint, sanitizeConfig, defaultBotConfig, freshSim, newBotId, screenKey,
-  advanceBot, cancelPending, placeEntries, botStats, paperDashboard, PAPER_MAX_BOTS,
+  advanceBot, cancelPending, placeEntries, summarizeScan, applyScanSummary, botStats, paperDashboard, PAPER_MAX_BOTS,
   type PaperStore, type PaperBot, type PaperBotConfig, type PaperScreen, type PaperSim, type PaperBar, type PaperBotStats, type PaperDashboard,
 } from "../lib/paper-bots"; // [v0.103.0] 가상매매 봇(주문 없음)
 import { fetchWithTimeout, netStats } from "../lib/fetch-timeout"; // [v0.61.5 — ③ 전수조사 "높음-1"] Supabase REST 호출도 토스처럼 타임아웃을 건다
@@ -5334,6 +5334,7 @@ export class ToolEngine extends EventEmitter {
   private paperTimer: ReturnType<typeof setInterval> | null = null;
   private paperDeferTimer: ReturnType<typeof setTimeout> | null = null;
   private paperAfterScanTimer: ReturnType<typeof setTimeout> | null = null; // [v0.105.0] 자동매매 스캔 직후 한 번 돌리기
+  private paperAutoConfirmed: { atMs: number; symbols: string[] } | null = null; // [v0.106.0]
   private paperScanning = false; // [v0.105.0] 가상봇이 자기 스캔을 돌리는 중인지(자동매매가 잠깐 기다려 줄지 판단용)
   private paperSyncTimer: ReturnType<typeof setInterval> | null = null;
   private paperBusy = false;
@@ -5399,6 +5400,8 @@ export class ToolEngine extends EventEmitter {
   private rememberScanForPaper(opts: ScreenOpts, run: ScreenRun): void {
     try {
       this.paperScanCache.set(screenKey(sanitizeConfig({ screen: opts as Partial<PaperScreen> }).screen), { run, atMs: Date.now() });
+      // [v0.106.0] 자동매매가 이번에 확정한 종목 — 봇 기준 결과와 비교해 "왜 봇은 안 잡았는지"를 보여 준다.
+      this.paperAutoConfirmed = { atMs: Date.now(), symbols: run.results.filter((r) => r.status === "confirmed").map((r) => r.symbol) };
     } catch {
       /* 보관 실패는 무시 — 봇이 직접 스캔하면 된다 */
     }
@@ -5702,8 +5705,8 @@ export class ToolEngine extends EventEmitter {
         const on = session === "day" ? b.config.trade.sessions.day : session === "pre" ? b.config.trade.sessions.pre : session === "regular" ? b.config.trade.sessions.regular : session === "after" ? b.config.trade.sessions.after : false;
         if (!on) { st.note = session === "closed" ? "장 시간이 아님 — 새 매수 없음" : "이 봇은 지금 장(세션)을 꺼 둠 — 새 매수 없음"; continue; }
         if (st.sim.pending.length + st.sim.open.length >= b.config.trade.maxPositions) { st.note = `최대 종목 수(${b.config.trade.maxPositions}) 보유 중`; continue; }
-        // 값이 없으면(옛 봇) 켬으로 본다 — "꺼짐"은 오너가 서랍에서 직접 끈 경우(false)뿐.
-        const scr = b.config.followAutoScreen !== false ? autoScreen : b.config.screen;
+        // [v0.106.0 오너 정정] 봇은 자기 스크리닝 기준으로 돈다. 자동매매 기준은 true로 명시된 경우만.
+        const scr = b.config.followAutoScreen === true ? autoScreen : b.config.screen;
         const k = screenKey(scr);
         screenOf.set(k, scr);
         groups.set(k, [...(groups.get(k) ?? []), b]);
@@ -5741,11 +5744,16 @@ export class ToolEngine extends EventEmitter {
           }
         }
         const cands = cached.run.results.filter((r) => r.status === "confirmed");
+        // [v0.106.0] 이 봇 기준 스캔 요약(단계별 탈락 수) + 같은 무렵 자동매매가 확정한 종목과 비교.
+        //   "0건이 정말 조건에 맞는 종목이 없어서인지"를 숫자로 보이게 하려는 것(오너 요청).
+        const autoConf = this.paperAutoConfirmed && Date.now() - this.paperAutoConfirmed.atMs < 6 * 60_000 ? this.paperAutoConfirmed.symbols : [];
+        const sum = summarizeScan(cached.run, screenOf.get(k) ?? list[0].config.screen, cached.atMs, autoConf);
         for (const b of list) {
           const st = sims.get(b.id)!;
+          st.sim = applyScanSummary(st.sim, sum);
           const r = placeEntries({ ...b, sim: st.sim }, st.sim, cands, Date.now());
           st.sim = r.sim;
-          st.note = `스크리닝 확정 ${cands.length}종목 · 새 가상 매수 ${r.placed}건${r.notes.length ? ` · ${r.notes.slice(0, 3).join(" / ")}` : ""}`;
+          st.note = `봇 기준 스캔 ${sum.total}종목 · 관찰 ${sum.watch.length} · 확정 ${sum.confirmed.length} · 새 가상 매수 ${r.placed}건${r.notes.length ? ` · ${r.notes.slice(0, 3).join(" / ")}` : ""}`;
         }
       }
 

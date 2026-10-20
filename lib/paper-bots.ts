@@ -86,7 +86,10 @@ export interface PaperBotConfig {
   trade: PaperTradeRules;
   screen: PaperScreen;
   /**
-   * [v0.105.0] 스크리닝 기준을 "지금 자동매매 설정"에서 그대로 가져올지(기본 켬).
+   * [v0.105.0 도입 → v0.106.0 기본 끔] 스크리닝 기준을 "지금 자동매매 설정"에서 그대로 가져올지.
+   *   오너 정정(2026-10-20): 봇은 "내가 정한 봇 기준"으로 데이터를 모으는 것이 목적이라, 자동매매
+   *   기준을 따라가면 비교 의미가 없다 → 기본은 끔(=봇 자기 기준), 화면에서도 켜는 칸을 뺐다.
+   *   (아래는 v0.105.0 당시 설명 — 기록용)
    *   켜면 아래 screen 값은 무시하고, 봇을 돌리는 PC의 자동매매 스크리닝 기준을 매번 그대로 쓴다
    *   → 자동매매가 "관찰 확정"으로 잡은 종목을 가상봇도 똑같이 본다(자동매매 스캔 결과를 나눠 씀).
    *   이유: 봇을 만들 때 복사해 둔 기준이 나중에 자동매매 설정을 바꾸면 어긋나, 자동매매는 종목을
@@ -165,6 +168,59 @@ export interface PaperSim {
   lastNote: string | null;
   /** 최근 장부(평가금) 곡선 — 청산 때마다 한 점(최대 PAPER_CURVE_KEEP개). 대시보드 그래프용. */
   curve: Array<{ t: number; eq: number }>;
+  /**
+   * [v0.106.0] 누적 깔때기(이 봇 기준 스크리닝에서 나온 관찰·확정 건수 + 스캔 횟수).
+   *   "진입" 건수는 agg.orders(가상 매수 주문 낸 수)를 그대로 쓴다. 옛 저장본엔 없을 수 있어 선택값.
+   */
+  funnel?: PaperFunnel;
+  /** [v0.106.0] 이 봇 기준으로 본 마지막 스캔 요약(단계별 탈락 수 + 자동매매 확정과 비교). */
+  lastScan?: PaperScanSummary | null;
+}
+
+/** 누적 깔때기 — 같은 종목이 연달아 관찰/확정으로 보이면 처음 한 번만 센다(자동매매 알림과 같은 방식). */
+export interface PaperFunnel {
+  scans: number; //     이 봇 기준으로 본 스캔 횟수
+  watch: number; //     새로 "관찰"(도지 나옴, 다음 봉 대기)이 된 건수
+  confirmed: number; // 새로 "확정"이 된 건수
+}
+
+/** 스캔 한 번에서 한 종목이 떨어진 단계(앞 단계부터 차례로 검사해 처음 걸린 곳). */
+export type PaperDropKey = "price" | "data" | "ema" | "cloud" | "warrant" | "defense" | "noDoji" | "farDoji" | "oldDoji" | "other";
+
+export const PAPER_DROP_LABEL: Record<PaperDropKey, string> = {
+  price: "가격대 밖",
+  data: "시세 부족·조회 실패",
+  ema: "EMA 아래",
+  cloud: "구름 아래",
+  warrant: "워런트",
+  defense: "방어 필터(이격도·변동성·기울기)",
+  noDoji: "도지 패턴 없음",
+  farDoji: "고점→도지 간격 초과",
+  oldDoji: "도지가 오래됨",
+  other: "기타(다음 봉 양봉 등)",
+};
+
+/** 스캔 요약 — 화면에 "왜 0건인지"를 숫자로 보여 주는 용도. */
+export interface PaperScanSummary {
+  scannedAt: string; //     스캔 시각(KST 문자열, 같은 스캔을 두 번 세지 않는 열쇠)
+  atMs: number;
+  total: number; //         훑은 종목 수(ETF 제외 후)
+  watch: string[]; //       관찰 종목
+  confirmed: string[]; //   확정 종목
+  drops: Partial<Record<PaperDropKey, number>>; // 단계별 탈락 수
+  /** 같은 시각 자동매매가 확정한 종목 중 이 봇 기준에선 확정이 아니었던 것과 그 이유(최대 5개). */
+  autoMissed: Array<{ symbol: string; reason: string }>;
+}
+
+/** 스캔 결과 한 줄 중 분류에 필요한 부분만(엔진 타입에 묶이지 않게 최소 모양). */
+export interface PaperScanRow {
+  symbol: string;
+  status: string;
+  priceInBand: boolean;
+  note?: string;
+  defenseReasons?: string[];
+  warrantWarning?: string | null;
+  evidence?: { filters?: { aboveEma?: boolean; aboveCloud?: boolean; firstDoji?: boolean; recentDoji?: boolean; dojiNearHigh?: boolean } } | null;
 }
 
 export interface PaperBot {
@@ -262,7 +318,7 @@ export function defaultBotConfig(s: Record<string, unknown> | null | undefined, 
       nextCandleConfirmEnabled: g("autoScanNextCandleConfirmEnabled") as boolean,
       excludeEtf: g("autoScanExcludeEtf") as boolean,
     },
-    followAutoScreen: true,
+    followAutoScreen: false,
     running: false,
     runnerDeviceId: null,
     createdAtMs: nowMs,
@@ -319,13 +375,82 @@ export function sanitizeConfig(c: Omit<Partial<PaperBotConfig>, "trade" | "scree
       nextCandleConfirmEnabled: bool(s.nextCandleConfirmEnabled, true),
       excludeEtf: bool(s.excludeEtf, true),
     },
-    // 값이 없으면(v0.104.0 이하에서 만든 봇) 켬 — 그 봇들도 원래 "자동매매 설정 복사본"이었다.
-    followAutoScreen: bool(c.followAutoScreen, true),
+    // [v0.106.0] 값이 없으면 끔 = 봇 자기 기준(오너 정정). 켬은 true로 명시된 경우뿐.
+    followAutoScreen: bool(c.followAutoScreen, false),
     running: bool(c.running, false),
     runnerDeviceId: typeof c.runnerDeviceId === "string" && c.runnerDeviceId ? c.runnerDeviceId : null,
     createdAtMs: clampNum(c.createdAtMs, 0, Number.MAX_SAFE_INTEGER, 0, 0),
     updatedAtMs: clampNum(c.updatedAtMs, 0, Number.MAX_SAFE_INTEGER, 0, 0),
   };
+}
+
+/**
+ * [v0.106.0] 스캔 결과 한 줄이 어디서 떨어졌는지(또는 관찰/확정인지) — 봇 자기 스크리닝 기준으로 판단.
+ *   스캐너가 기록한 근거(가격대·EMA·구름·도지 패턴·방어 필터·워런트)를 앞 단계부터 차례로 본다.
+ *   꺼 둔 조건(예: 구름 끔)은 탈락 사유로 치지 않는다.
+ */
+export function classifyScanRow(r: PaperScanRow, screen: PaperScreen): "confirmed" | "watch" | PaperDropKey {
+  if (r.status === "confirmed") return "confirmed";
+  if (r.status === "watch") return "watch";
+  if (!r.priceInBand) return "price";
+  const f = r.evidence?.filters;
+  if (r.status === "insufficient" || !f) return "data";
+  if (screen.emaTrendEnabled && f.aboveEma === false) return "ema";
+  if (screen.cloudEnabled && f.aboveCloud === false) return "cloud";
+  if (r.warrantWarning) return "warrant";
+  if (r.defenseReasons && r.defenseReasons.length) return "defense";
+  if (f.firstDoji === false) return "noDoji";
+  if (screen.dojiMaxGapEnabled && f.dojiNearHigh === false) return "farDoji";
+  if (screen.dojiMaxAgeEnabled && f.recentDoji === false) return "oldDoji";
+  return "other";
+}
+
+/** 한 종목의 탈락 사유를 사람이 읽는 말로(방어 필터는 구체 사유까지). */
+export function scanRowReason(r: PaperScanRow | undefined, screen: PaperScreen): string {
+  if (!r) return "이 봇의 스캔 대상(거래량 순위·가격대)에 없음";
+  const k = classifyScanRow(r, screen);
+  if (k === "confirmed") return "확정";
+  if (k === "watch") return "관찰(다음 봉 대기)";
+  if (k === "defense") return `방어 필터 — ${(r.defenseReasons ?? []).join(", ")}`;
+  if (k === "warrant") return `워런트 — ${r.warrantWarning}`;
+  return PAPER_DROP_LABEL[k];
+}
+
+/** 스캔 결과 → 요약(단계별 탈락 수 + 자동매매 확정 비교). autoConfirmed는 같은 무렵 자동매매가 확정한 종목. */
+export function summarizeScan(
+  run: { scannedAt: string; total: number; results: PaperScanRow[] },
+  screen: PaperScreen,
+  atMs: number,
+  autoConfirmed: string[] = [],
+): PaperScanSummary {
+  const drops: Partial<Record<PaperDropKey, number>> = {};
+  const watch: string[] = [];
+  const confirmed: string[] = [];
+  for (const r of run.results) {
+    const k = classifyScanRow(r, screen);
+    if (k === "confirmed") confirmed.push(r.symbol);
+    else if (k === "watch") watch.push(r.symbol);
+    else drops[k] = (drops[k] ?? 0) + 1;
+  }
+  const bySym = new Map(run.results.map((r) => [r.symbol, r]));
+  const autoMissed = autoConfirmed
+    .filter((sym) => !confirmed.includes(sym))
+    .slice(0, 5)
+    .map((sym) => ({ symbol: sym, reason: scanRowReason(bySym.get(sym), screen) }));
+  return { scannedAt: run.scannedAt, atMs, total: run.total, watch, confirmed, drops, autoMissed };
+}
+
+/**
+ * 새 스캔 요약을 봇 기록에 반영 — 누적 관찰/확정 수를 올린다(직전 스캔에도 같은 상태였던 종목은 안 셈).
+ *   같은 스캔(scannedAt 같음)을 두 번 받으면(다른 봇과 나눠 쓰는 캐시) 숫자를 다시 올리지 않는다.
+ */
+export function applyScanSummary(sim: PaperSim, sum: PaperScanSummary): PaperSim {
+  const prev = sim.lastScan ?? null;
+  const f = sim.funnel ?? { scans: 0, watch: 0, confirmed: 0 };
+  if (prev && prev.scannedAt === sum.scannedAt) return { ...sim, lastScan: { ...sum } };
+  const newWatch = sum.watch.filter((x) => !(prev?.watch ?? []).includes(x)).length;
+  const newConf = sum.confirmed.filter((x) => !(prev?.confirmed ?? []).includes(x)).length;
+  return { ...sim, funnel: { scans: f.scans + 1, watch: f.watch + newWatch, confirmed: f.confirmed + newConf }, lastScan: sum };
 }
 
 /** 빈 진행 상태(새 봇·초기화). */
@@ -342,6 +467,8 @@ export function freshSim(epoch: number, nowMs: number, seedUsd: number): PaperSi
     lastTickMs: null,
     lastNote: null,
     curve: [],
+    funnel: { scans: 0, watch: 0, confirmed: 0 },
+    lastScan: null,
   };
 }
 
@@ -733,6 +860,8 @@ export interface PaperDashboard {
   byExit: PaperGroupRow[]; // [v0.104.0] 청산 방식별(고정 % / 손절 %+EMA / EMA만)
   byCombo: PaperGroupRow[]; // 익절 × 청산(손절 % 또는 EMA) 조합별
   best: { bot: string | null; sl: number | null; tp: number | null; exit: string | null; combo: string | null };
+  /** [v0.106.0] 모든 봇 합계 — 관찰·확정(새로 나온 건수)·진입(가상 매수 주문 수)·스캔 횟수. */
+  funnel: { watch: number; confirmed: number; entries: number; scans: number };
   minTrades: number;
 }
 
@@ -818,5 +947,14 @@ export function paperDashboard(bots: PaperBot[], minTrades = PAPER_MIN_TRADES): 
   const bt = bestOf(byTp);
   const be = bestOf(byExit);
   const bc = bestOf(byCombo);
-  return { ranking, bySl, byTp, byExit, byCombo, best: { bot: bestBot?.name ?? null, sl: bs?.value ?? null, tp: bt?.value ?? null, exit: be?.label ?? null, combo: bc?.label ?? null }, minTrades };
+  const funnel = bots.reduce(
+    (a, b) => ({
+      watch: a.watch + (b.sim.funnel?.watch ?? 0),
+      confirmed: a.confirmed + (b.sim.funnel?.confirmed ?? 0),
+      entries: a.entries + b.sim.agg.orders,
+      scans: a.scans + (b.sim.funnel?.scans ?? 0),
+    }),
+    { watch: 0, confirmed: 0, entries: 0, scans: 0 },
+  );
+  return { funnel, ranking, bySl, byTp, byExit, byCombo, best: { bot: bestBot?.name ?? null, sl: bs?.value ?? null, tp: bt?.value ?? null, exit: be?.label ?? null, combo: bc?.label ?? null }, minTrades };
 }
