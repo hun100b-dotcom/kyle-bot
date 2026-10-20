@@ -6,7 +6,7 @@
 import { describe, it, expect } from "vitest";
 import {
   advanceBot, placeEntries, mergeStores, freshSim, sanitizeConfig, defaultBotConfig, botStats, paperDashboard,
-  emptyStore, storeFingerprint, cancelPending, screenKey, isPaperStore, paperStopPrice, exitLabel,
+  emptyStore, storeFingerprint, cancelPending, screenKey, isPaperStore, paperStopPrice, exitLabel, classifyScanRow, summarizeScan, applyScanSummary,
   type PaperBot, type PaperBar, type PaperStore,
 } from "../lib/paper-bots";
 
@@ -318,26 +318,69 @@ describe("청산 방식(200EMA 이탈)", () => {
   });
 });
 
-describe("스크리닝 기준 따라가기(v0.105.0)", () => {
-  it("값이 없던 옛 봇은 켬, 끈 값은 유지", () => {
+describe("스크리닝 기준(v0.106.0 오너 정정: 봇 자기 기준이 기본)", () => {
+  it("값이 없던 옛 봇은 끔(=봇 자기 기준), 켠 값만 켬", () => {
     const c = mkBot().config;
     const { followAutoScreen: _drop, ...old } = c;
     void _drop;
-    expect(sanitizeConfig(old).followAutoScreen).toBe(true);
-    expect(sanitizeConfig({ ...c, followAutoScreen: false }).followAutoScreen).toBe(false);
-    expect(defaultBotConfig(null, T0, "x").followAutoScreen).toBe(true);
+    expect(sanitizeConfig(old).followAutoScreen).toBe(false);
+    expect(sanitizeConfig({ ...c, followAutoScreen: true }).followAutoScreen).toBe(true);
+    expect(defaultBotConfig(null, T0, "x").followAutoScreen).toBe(false);
   });
 });
 
 describe("옛 버전이 저장한 봇 읽기(v0.105.1)", () => {
-  it("followAutoScreen 칸이 없는 저장본도 합치면 '켬'으로 보정되고, 보정은 멱등", () => {
+  it("followAutoScreen 칸이 없는 저장본도 합치면 '끔'으로 채워지고 봇 기준은 그대로, 보정은 멱등", () => {
     const b = mkBot();
     const { followAutoScreen: _x, ...rawConfig } = b.config;
     void _x;
     const oldStore: PaperStore = { v: 1, bots: [{ ...b, config: rawConfig as PaperBot["config"] }], deleted: {} };
     const m = mergeStores(oldStore, emptyStore(), T0);
-    expect(m.bots[0].config.followAutoScreen).toBe(true);
+    expect(m.bots[0].config.followAutoScreen).toBe(false);
+    expect(m.bots[0].config.screen).toEqual(b.config.screen); // 봇이 정한 스크리닝 기준은 덮어쓰지 않음
     expect(mergeStores(m, emptyStore(), T0)).toEqual(m);
     expect(storeFingerprint(oldStore, T0)).toBe(storeFingerprint(m, T0)); // 칸 하나 없다고 "달라짐"으로 보고 쓰기를 반복하지 않음
+  });
+});
+
+describe("관찰·확정·진입 카운트와 스캔 요약(v0.106.0)", () => {
+  const scr = mkBot().config.screen; // 기본: EMA 켬, 구름 켬, 신선도·간격 켬
+  const ok = { aboveEma: true, aboveCloud: true, firstDoji: true, recentDoji: true, dojiNearHigh: true };
+  const row = (symbol: string, over: Record<string, unknown> = {}, f: Record<string, boolean> = {}) => ({
+    symbol, status: "none", priceInBand: true, evidence: { filters: { ...ok, ...f } }, ...over,
+  });
+  it("앞 단계부터 처음 걸린 곳으로 분류(꺼 둔 조건은 사유로 안 침)", () => {
+    expect(classifyScanRow(row("A", { priceInBand: false, evidence: null }), scr)).toBe("price");
+    expect(classifyScanRow(row("B", { status: "insufficient" }), scr)).toBe("data");
+    expect(classifyScanRow(row("C", {}, { aboveEma: false }), scr)).toBe("ema");
+    expect(classifyScanRow(row("C2", {}, { aboveEma: false }), { ...scr, emaTrendEnabled: false })).toBe("other");
+    expect(classifyScanRow(row("D", { defenseReasons: ["변동성 7% > 6%"] }), scr)).toBe("defense");
+    expect(classifyScanRow(row("E", {}, { firstDoji: false }), scr)).toBe("noDoji");
+    expect(classifyScanRow(row("F", {}, { dojiNearHigh: false }), scr)).toBe("farDoji");
+    expect(classifyScanRow(row("G", {}, { recentDoji: false }), scr)).toBe("oldDoji");
+    expect(classifyScanRow(row("H", { status: "watch" }), scr)).toBe("watch");
+    expect(classifyScanRow(row("I", { status: "confirmed" }), scr)).toBe("confirmed");
+  });
+  it("요약: 단계별 탈락 수 + 자동매매 확정인데 봇은 아닌 종목과 그 이유", () => {
+    const run = { scannedAt: "10-21 01:07:35", total: 4, results: [row("A", { priceInBand: false }), row("M", { defenseReasons: ["변동성 7% > 6%"] }), row("W", { status: "watch" }), row("K", { status: "confirmed" })] };
+    const s1 = summarizeScan(run, scr, T0, ["M", "K", "ZZ"]);
+    expect(s1.drops).toEqual({ price: 1, defense: 1 });
+    expect(s1.watch).toEqual(["W"]);
+    expect(s1.confirmed).toEqual(["K"]);
+    expect(s1.autoMissed).toEqual([
+      { symbol: "M", reason: "방어 필터 — 변동성 7% > 6%" },
+      { symbol: "ZZ", reason: "이 봇의 스캔 대상(거래량 순위·가격대)에 없음" },
+    ]);
+  });
+  it("누적 카운트: 새로 나온 것만 세고, 같은 스캔을 두 번 받아도 다시 안 셈", () => {
+    const sum = (at: string, watch: string[], confirmed: string[]) => ({ scannedAt: at, atMs: T0, total: 10, watch, confirmed, drops: {}, autoMissed: [] });
+    let sim = mkBot().sim;
+    sim = applyScanSummary(sim, sum("t1", ["A"], []));
+    sim = applyScanSummary(sim, sum("t1", ["A"], [])); //   같은 스캔 → 그대로
+    sim = applyScanSummary(sim, sum("t2", ["A", "B"], ["A"])); // A는 이미 관찰 중 → B만 새 관찰, A 확정
+    sim = applyScanSummary(sim, sum("t3", [], ["A"])); //    A 확정 계속 → 안 셈
+    expect(sim.funnel).toEqual({ scans: 3, watch: 2, confirmed: 1 });
+    const d = paperDashboard([{ ...mkBot(), sim: { ...sim, agg: { ...sim.agg, orders: 1 } } }]);
+    expect(d.funnel).toEqual({ watch: 2, confirmed: 1, entries: 1, scans: 3 });
   });
 });

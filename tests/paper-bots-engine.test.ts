@@ -108,7 +108,7 @@ describe("가상매매 봇 — 엔진", () => {
   });
 
   // [v0.105.0] 2026-10-20 버그: 자동매매가 종목을 잡는데 가상봇은 하루 종일 0건이던 문제
-  it("자동매매 스크리닝 기준 따라가기: 봇에 저장된 기준이 달라도 자동매매 스캔 결과로 진입, 끄면 자기 기준으로 스캔", async () => {
+  it("봇은 자기 스크리닝 기준으로 스캔한다(기본) — 자동매매 기준은 명시적으로 켠 봇만, 카운트·요약도 기록", async () => {
     const t0 = DateTime.fromObject({ year: 2026, month: 7, day: 16, hour: 22, minute: 0 }, { zone: "Asia/Seoul" }).toMillis();
     const now = t0;
     Settings.now = () => now;
@@ -127,10 +127,10 @@ describe("가상매매 봇 — 엔진", () => {
         return { results: [] }; // 봇 자기 기준으로는 확정 종목 없음
       };
       // 봇 둘: 저장된 스크리닝 기준(가격 $20~30)은 자동매매(기본 $1~9)와 다름
-      let v = await e.paperBotAdd({ name: "따라감", screen: { priceMin: 20, priceMax: 30 } as never });
-      v = await e.paperBotAdd({ name: "직접", followAutoScreen: false, screen: { priceMin: 20, priceMax: 30 } as never });
-      expect(v.bots[0].config.followAutoScreen).toBe(true); // 기본 켬
-      expect(v.bots[1].config.followAutoScreen).toBe(false);
+      let v = await e.paperBotAdd({ name: "따라감", followAutoScreen: true, screen: { priceMin: 20, priceMax: 30 } as never });
+      v = await e.paperBotAdd({ name: "직접", screen: { priceMin: 20, priceMax: 30 } as never });
+      expect(v.bots[0].config.followAutoScreen).toBe(true);
+      expect(v.bots[1].config.followAutoScreen).toBe(false); // 기본 끔 = 봇 자기 기준
       for (const b of v.bots) await e.paperBotStart(b.id);
 
       // 자동매매가 방금 스캔을 끝냄(확정 1종목) → 결과를 봇과 나눠 씀 + 곧바로 봇 한 번 돌리기 예약
@@ -146,7 +146,10 @@ describe("가상매매 봇 — 엔진", () => {
       expect(v.bots[0].sim.pending.map((o) => o.symbol)).toEqual(["ZZZ"]); // 자동매매가 잡은 종목에 가상 진입
       expect(v.bots[1].sim.pending.length).toBe(0); //                          자기 기준(가격 $20~30)으론 없음
       expect(ownScans.length).toBe(1); //                                       자기 기준 봇만 따로 스캔
-      expect((ownScans[0] as { priceMin: number }).priceMin).toBe(20);
+      expect((ownScans[0] as { priceMin: number }).priceMin).toBe(20); // 봇이 정한 기준 그대로 스캔
+      expect(v.bots[1].sim.funnel?.scans).toBe(1); //                      봇 기준 스캔 횟수가 쌓임
+      expect(v.bots[1].sim.lastScan?.autoMissed.map((m) => m.symbol)).toEqual(["ZZZ"]); // 자동매매 확정과 비교
+      expect(v.bots[0].sim.funnel?.confirmed).toBe(1);
     } finally {
       Date.now = realNow;
     }
@@ -177,7 +180,7 @@ describe("가상매매 봇 — 엔진", () => {
     }
   });
 
-  it("옛 버전에서 만든 봇(설정 칸 없음)을 파일에서 읽어도 자동매매 기준을 따라간다", async () => {
+  it("옛 버전에서 만든 봇(설정 칸 없음)을 파일에서 읽으면 봇 자기 기준 그대로(덮어쓰지 않음)", async () => {
     const { e, dir } = mkEngine();
     await e.paperBotAdd({ name: "옛봇", screen: { priceMin: 20, priceMax: 30 } as never });
     e.flushAllFileSavesSync();
@@ -187,6 +190,7 @@ describe("가상매매 봇 — 엔진", () => {
     delete raw.store.bots[0].config.followAutoScreen; // v0.104.0 이하 저장본 흉내
     fs.writeFileSync(file, JSON.stringify(raw));
     const again = mkEngine(dir).e;
-    expect(again.getPaperBots().bots[0].config.followAutoScreen).toBe(true);
+    expect(again.getPaperBots().bots[0].config.followAutoScreen).toBe(false);
+    expect(again.getPaperBots().bots[0].config.screen.priceMin).toBe(20);
   });
 });
