@@ -175,7 +175,14 @@ export interface PaperSim {
   funnel?: PaperFunnel;
   /** [v0.106.0] 이 봇 기준으로 본 마지막 스캔 요약(단계별 탈락 수 + 자동매매 확정과 비교). */
   lastScan?: PaperScanSummary | null;
+  /**
+   * [v0.106.1] "자동매매는 확정, 이 봇은 아님" 기록(최근 PAPER_MISS_KEEP건). lastScan은 다음 스캔에 덮이므로,
+   *   자동매매가 종목을 잡은 그 순간 봇 기준에서 왜 빠졌는지를 따로 남겨 둔다(오너가 나중에 확인할 수 있게).
+   */
+  missLog?: Array<{ atMs: number; symbol: string; reason: string }>;
 }
+
+export const PAPER_MISS_KEEP = 30;
 
 /** 누적 깔때기 — 같은 종목이 연달아 관찰/확정으로 보이면 처음 한 번만 센다(자동매매 알림과 같은 방식). */
 export interface PaperFunnel {
@@ -447,10 +454,17 @@ export function summarizeScan(
 export function applyScanSummary(sim: PaperSim, sum: PaperScanSummary): PaperSim {
   const prev = sim.lastScan ?? null;
   const f = sim.funnel ?? { scans: 0, watch: 0, confirmed: 0 };
-  if (prev && prev.scannedAt === sum.scannedAt) return { ...sim, lastScan: { ...sum } };
+  // 자동매매 확정인데 봇은 아닌 종목 — 같은 종목은 30분 안에 다시 쌓지 않는다(5분마다 같은 줄이 반복되지 않게).
+  const log = [...(sim.missLog ?? [])];
+  for (const m of sum.autoMissed) {
+    if (log.some((x) => x.symbol === m.symbol && sum.atMs - x.atMs < 30 * 60_000)) continue;
+    log.push({ atMs: sum.atMs, symbol: m.symbol, reason: m.reason });
+  }
+  const missLog = log.slice(-PAPER_MISS_KEEP);
+  if (prev && prev.scannedAt === sum.scannedAt) return { ...sim, lastScan: { ...sum }, missLog };
   const newWatch = sum.watch.filter((x) => !(prev?.watch ?? []).includes(x)).length;
   const newConf = sum.confirmed.filter((x) => !(prev?.confirmed ?? []).includes(x)).length;
-  return { ...sim, funnel: { scans: f.scans + 1, watch: f.watch + newWatch, confirmed: f.confirmed + newConf }, lastScan: sum };
+  return { ...sim, funnel: { scans: f.scans + 1, watch: f.watch + newWatch, confirmed: f.confirmed + newConf }, lastScan: sum, missLog };
 }
 
 /** 빈 진행 상태(새 봇·초기화). */

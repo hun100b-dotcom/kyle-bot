@@ -380,7 +380,13 @@ describe("관찰·확정·진입 카운트와 스캔 요약(v0.106.0)", () => {
     sim = applyScanSummary(sim, sum("t2", ["A", "B"], ["A"])); // A는 이미 관찰 중 → B만 새 관찰, A 확정
     sim = applyScanSummary(sim, sum("t3", [], ["A"])); //    A 확정 계속 → 안 셈
     expect(sim.funnel).toEqual({ scans: 3, watch: 2, confirmed: 1 });
+    // 자동매매 확정인데 봇은 아닌 종목은 따로 남고(다음 스캔에 덮이지 않음), 30분 안 반복은 한 번만
+    const miss = (at: string, ms: number) => ({ ...sum(at, [], []), atMs: ms, autoMissed: [{ symbol: "SAIQ", reason: "도지 패턴 없음" }] });
+    sim = applyScanSummary(sim, miss("t4", T0));
+    sim = applyScanSummary(sim, miss("t5", T0 + 5 * MIN));
+    sim = applyScanSummary(sim, sum("t6", [], []));
+    expect(sim.missLog).toEqual([{ atMs: T0, symbol: "SAIQ", reason: "도지 패턴 없음" }]);
     const d = paperDashboard([{ ...mkBot(), sim: { ...sim, agg: { ...sim.agg, orders: 1 } } }]);
-    expect(d.funnel).toEqual({ watch: 2, confirmed: 1, entries: 1, scans: 3 });
+    expect(d.funnel).toEqual({ watch: 2, confirmed: 1, entries: 1, scans: 6 });
   });
 });
