@@ -5533,7 +5533,10 @@ export class ToolEngine extends EventEmitter {
     if (this.paperStore.bots.length + list.length > PAPER_MAX_BOTS) throw new Error(`봇은 최대 ${PAPER_MAX_BOTS}개까지 만들 수 있습니다.`);
     for (const sl of list) {
       const name = `${base ? base.name.replace(/\s*·\s*손절.*$/, "") : "손절비교"} · 손절 ${sl}%`;
-      await this.paperBotAdd({ ...(base ?? {}), name, slPct: sl });
+      // 기준 봇이 "200EMA 이탈만"이면 손절 %를 안 쓰므로 손절 %만 바꿔서는 비교가 안 된다 →
+      // 이 세트는 "손절 %만" 방식으로 만든다(손절 % 자체를 비교하려는 기능이므로).
+      const trade = base && base.trade.slMode === "emaOnly" ? { ...base.trade, slMode: "fixed" as const } : base?.trade;
+      await this.paperBotAdd({ ...(base ?? {}), ...(trade ? { trade } : {}), name, slPct: sl });
     }
     return this.getPaperBots();
   }

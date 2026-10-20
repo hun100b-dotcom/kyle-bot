@@ -6,7 +6,7 @@
 import { describe, it, expect } from "vitest";
 import {
   advanceBot, placeEntries, mergeStores, freshSim, sanitizeConfig, defaultBotConfig, botStats, paperDashboard,
-  emptyStore, storeFingerprint, cancelPending, screenKey, isPaperStore,
+  emptyStore, storeFingerprint, cancelPending, screenKey, isPaperStore, paperStopPrice, exitLabel,
   type PaperBot, type PaperBar, type PaperStore,
 } from "../lib/paper-bots";
 
@@ -255,5 +255,65 @@ describe("대시보드", () => {
     const s = botStats(bots[1]);
     expect(s.returnPct).toBe(6); // 600 / 10000
     expect(s.winRate).toBe(100);
+  });
+});
+
+// [v0.104.0] 200EMA 이탈 청산 옵션 — 손절 %만 / 손절 % + 200EMA 이탈 / 200EMA 이탈만
+describe("청산 방식(200EMA 이탈)", () => {
+  const cand = (symbol: string, prevClose = 10, ema200 = 9) => ({ symbol, status: "confirmed", price: prevClose, prevClose, ema200 });
+  const mode = (slMode: "fixed" | "ema" | "emaOnly", slPct = 5, buf = 1.5) => mkBot({ slPct, trade: { ...mkBot().config.trade, entryLevel: 1, slMode, emaStopBufferPct: buf } });
+
+  it("손절가 계산: 둘 다 = 더 높은 쪽, EMA만 = EMA×(1−여유), 진입가 위면 null", () => {
+    expect(paperStopPrice("fixed", 10, 9, 1.5, 9.5)).toBe(9.5);
+    expect(paperStopPrice("ema", 10, 9, 1.5, 9.5)).toBe(9.5); //            EMA 손절(8.865)보다 고정(9.5)이 높음
+    expect(paperStopPrice("ema", 10, 9.8, 1, 9.5)).toBeCloseTo(9.702, 6); // EMA 손절(9.702)이 더 높음
+    expect(paperStopPrice("emaOnly", 10, 9, 1.5, 9.5)).toBeCloseTo(8.865, 6); // 고정 손절 무시
+    expect(paperStopPrice("emaOnly", 10, 10.2, 1, 9.5)).toBeNull(); //      EMA 손절가가 진입가 위
+    expect(paperStopPrice("ema", 10, 10.2, 1, 9.5)).toBeNull();
+  });
+
+  it("200EMA 이탈만이면 손절 %와 상관없이 EMA 아래 여유%에 손절가를 건다", () => {
+    const a = placeEntries(mode("emaOnly", 3), mode("emaOnly", 3).sim, [cand("AAA")], T0).sim.pending[0];
+    const b = placeEntries(mode("emaOnly", 20), mode("emaOnly", 20).sim, [cand("AAA")], T0).sim.pending[0];
+    expect(a.sl).toBeCloseTo(9 * 0.985, 1);
+    expect(b.sl).toBe(a.sl); // 손절 %(3 vs 20)가 달라도 같다
+    expect(a.sl).toBeLessThan(a.entry);
+  });
+
+  it("손절 % + 200EMA 이탈은 둘 중 먼저 닿는(높은) 손절가", () => {
+    const tight = placeEntries(mode("ema", 1), mode("ema", 1).sim, [cand("AAA")], T0).sim.pending[0];
+    expect(Math.abs(tight.sl - tight.entry * 0.99)).toBeLessThan(0.011); // 고정 1%가 EMA보다 높음
+    const wide = placeEntries(mode("ema", 30), mode("ema", 30).sim, [cand("AAA")], T0).sim.pending[0];
+    expect(wide.sl).toBeCloseTo(9 * 0.985, 1); //                          EMA 이탈이 더 높음
+  });
+
+  it("옛 값·모르는 값은 보정: ema·emaOnly는 유지, 그 외는 고정 %", () => {
+    const t = mkBot().config.trade;
+    expect(sanitizeConfig({ ...mkBot().config, trade: { ...t, slMode: "emaOnly" } }).trade.slMode).toBe("emaOnly");
+    expect(sanitizeConfig({ ...mkBot().config, trade: { ...t, slMode: "ema" } }).trade.slMode).toBe("ema");
+    expect(sanitizeConfig({ ...mkBot().config, trade: { ...t, slMode: "weird" as never } }).trade.slMode).toBe("fixed");
+    expect(exitLabel({ slMode: "emaOnly", emaStopBufferPct: 1.5 }, 5)).toBe("200EMA 이탈만(여유 1.5%)");
+    expect(exitLabel({ slMode: "ema", emaStopBufferPct: 1.5 }, 5)).toBe("손절 5% + 200EMA 이탈(여유 1.5%)");
+    expect(exitLabel({ slMode: "fixed", emaStopBufferPct: 1.5 }, 5)).toBe("손절 5%");
+  });
+
+  it("대시보드: 청산 방식별로 따로 묶고, EMA만 봇은 손절값별 비교에서 뺀다", () => {
+    const withTrades = (b: PaperBot, pnl: number, n: number): PaperBot => ({
+      ...b,
+      sim: { ...b.sim, realizedUsd: pnl * n, agg: { ...b.sim.agg, n, wins: pnl > 0 ? n : 0, losses: pnl > 0 ? 0 : n, sumPnlPct: (pnl / 100) * n } },
+    });
+    const bots = [
+      withTrades({ ...mode("fixed", 5), id: "f" }, 10, 20),
+      withTrades({ ...mode("ema", 5), id: "e" }, 20, 20),
+      withTrades({ ...mode("emaOnly", 5), id: "o" }, 30, 20),
+    ];
+    const d = paperDashboard(bots);
+    expect(d.byExit.map((r) => r.label)).toEqual(["고정 손절 %만", "손절 % + 200EMA 이탈(여유 1.5%)", "200EMA 이탈만(여유 1.5%)"]);
+    expect(d.best.exit).toBe("200EMA 이탈만(여유 1.5%)");
+    expect(d.bySl).toHaveLength(1); //     손절 5% 묶음엔 고정·둘 다 봇만(EMA만 봇 제외)
+    expect(d.bySl[0].bots).toBe(2);
+    expect(d.byCombo).toHaveLength(3); //  익절이 같아도 청산 방식이 다르면 다른 조합
+    expect(d.best.combo).toBe("익절 2% · 200EMA 이탈만(여유 1.5%)");
+    expect(d.ranking[0].exit).toBe("200EMA 이탈만(여유 1.5%)");
   });
 });
