@@ -5702,7 +5702,8 @@ export class ToolEngine extends EventEmitter {
         const on = session === "day" ? b.config.trade.sessions.day : session === "pre" ? b.config.trade.sessions.pre : session === "regular" ? b.config.trade.sessions.regular : session === "after" ? b.config.trade.sessions.after : false;
         if (!on) { st.note = session === "closed" ? "장 시간이 아님 — 새 매수 없음" : "이 봇은 지금 장(세션)을 꺼 둠 — 새 매수 없음"; continue; }
         if (st.sim.pending.length + st.sim.open.length >= b.config.trade.maxPositions) { st.note = `최대 종목 수(${b.config.trade.maxPositions}) 보유 중`; continue; }
-        const scr = b.config.followAutoScreen ? autoScreen : b.config.screen;
+        // 값이 없으면(옛 봇) 켬으로 본다 — "꺼짐"은 오너가 서랍에서 직접 끈 경우(false)뿐.
+        const scr = b.config.followAutoScreen !== false ? autoScreen : b.config.screen;
         const k = screenKey(scr);
         screenOf.set(k, scr);
         groups.set(k, [...(groups.get(k) ?? []), b]);

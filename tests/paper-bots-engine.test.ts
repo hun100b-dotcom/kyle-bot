@@ -176,4 +176,17 @@ describe("가상매매 봇 — 엔진", () => {
       Date.now = realNow;
     }
   });
+
+  it("옛 버전에서 만든 봇(설정 칸 없음)을 파일에서 읽어도 자동매매 기준을 따라간다", async () => {
+    const { e, dir } = mkEngine();
+    await e.paperBotAdd({ name: "옛봇", screen: { priceMin: 20, priceMax: 30 } as never });
+    e.flushAllFileSavesSync();
+    const fs = await import("node:fs");
+    const file = join(dir, "kylebot-paper.json");
+    const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+    delete raw.store.bots[0].config.followAutoScreen; // v0.104.0 이하 저장본 흉내
+    fs.writeFileSync(file, JSON.stringify(raw));
+    const again = mkEngine(dir).e;
+    expect(again.getPaperBots().bots[0].config.followAutoScreen).toBe(true);
+  });
 });
