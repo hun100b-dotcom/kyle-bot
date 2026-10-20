@@ -56,14 +56,23 @@ export interface PaperScreen {
   excludeEtf: boolean; //         ETF 제외
 }
 
+/** 청산(손절) 방식 — PaperTradeRules.slMode 설명 참고. */
+export type PaperSlMode = "fixed" | "ema" | "emaOnly";
+
 /** 자동매매 기준(봇이 "어떻게 사고 몇 개까지 들고 있을지"). 자동매매 현황 탭의 설정과 같은 뜻. */
 export interface PaperTradeRules {
   entryLevel: 1 | 1.5 | 2; //     삼분할 몇 분할 타점으로 살지
   maxPositions: number; //        동시에 들고 있을 최대 종목 수(대기 주문 포함)
   investPct: number; //           종목 1개당 투입 비율(현재 평가 시드 대비 %)
   watchMinutes: number; //        매수 지정가가 이 시간 안에 안 닿으면 취소(분)
-  slMode: "fixed" | "ema"; //     손절 방식: 고정 % / EMA 기준
-  emaStopBufferPct: number; //    EMA 기준 손절일 때 EMA 아래 여유(%)
+  // 청산(손절) 방식 — [v0.104.0] 3가지:
+  //   "fixed"   = 고정 손절 %만(진입가 −N%)
+  //   "ema"     = 고정 손절 % + 200EMA 이탈(둘 중 먼저 닿는 쪽 = 더 높은 손절가). 자동매매 "EMA 기준"과 같은 뜻
+  //   "emaOnly" = 200EMA 이탈만(고정 손절 %는 안 씀). 손절가 = 진입 시점 5분봉 EMA200 × (1 − 여유%)
+  // 이유: "ema"라는 저장값은 v0.103.0부터 "둘 다" 뜻으로 저장돼 있었으므로, 기존 봇의 의미가
+  // 바뀌지 않도록 그대로 두고 "EMA만"은 새 값(emaOnly)으로 추가했다.
+  slMode: PaperSlMode;
+  emaStopBufferPct: number; //    EMA 이탈 기준일 때 EMA 아래 여유(%) — 자동매매 설정과 같은 값(기본 1.5)
   reentryBlock: boolean; //       오늘 손절된 종목 재진입 금지
   sessions: { day: boolean; pre: boolean; regular: boolean; after: boolean }; // 매매할 장
 }
@@ -274,7 +283,8 @@ export function sanitizeConfig(c: Omit<Partial<PaperBotConfig>, "trade" | "scree
       maxPositions: clampNum(t.maxPositions, 1, 20, 3, 0),
       investPct: clampNum(t.investPct, 1, 100, 30, 1),
       watchMinutes: clampNum(t.watchMinutes, 1, 600, 10, 0),
-      slMode: t.slMode === "ema" ? "ema" : "fixed",
+      // 모르는 값(옛 버전·오타)은 가장 보수적인 "고정 %"로 되돌린다.
+      slMode: t.slMode === "ema" || t.slMode === "emaOnly" ? t.slMode : "fixed",
       emaStopBufferPct: clampNum(t.emaStopBufferPct, 0, 20, 1.5, 2),
       reentryBlock: bool(t.reentryBlock, true),
       sessions: { day: bool(ss.day, true), pre: bool(ss.pre, true), regular: bool(ss.regular, true), after: bool(ss.after, true) },
@@ -560,9 +570,11 @@ export function placeEntries(bot: PaperBot, sim0: PaperSim, candidates: PaperCan
       notes.push(`${cand.symbol}: 전봉종가가 EMA 이하라 삼분할 진입 불가`);
       continue;
     }
-    if (c.trade.slMode === "ema") {
-      const s = structuralStopPrice(lv.entry, cand.ema200, c.trade.emaStopBufferPct, lv.sl);
+    if (c.trade.slMode !== "fixed") {
+      const s = paperStopPrice(c.trade.slMode, lv.entry, cand.ema200, c.trade.emaStopBufferPct, lv.sl);
       if (s == null) {
+        // EMA 아래 여유를 둔 손절가가 진입가보다 높거나 같으면 손절선을 둘 곳이 없다 → 진입 안 함
+        // (자동매매의 "EMA 기준 손절"과 똑같은 처리).
         notes.push(`${cand.symbol}: EMA 기준 손절선을 둘 수 없음`);
         continue;
       }
@@ -654,6 +666,38 @@ export function botStats(bot: PaperBot): PaperBotStats {
   };
 }
 
+/**
+ * paperStopPrice — 청산 방식별 손절가. EMA는 "진입 시점 5분봉 EMA200"(스크리닝 결과값)이고,
+ * 진입 후 EMA가 움직여도 손절가는 그대로다(자동매매·실험실의 "EMA 기준 손절"과 같은 정의 — 
+ * 토스 서버 OCO에 고정 가격으로 걸리는 실제 매매와 똑같이 비교하려는 것).
+ *   - "ema"     : lib/defense.ts structuralStopPrice 그대로(고정 손절가와 EMA 손절가 중 더 높은 쪽)
+ *   - "emaOnly" : EMA × (1 − 여유%) 그대로(고정 손절 % 무시)
+ *   - 둘 다 EMA 손절가가 진입가 이상이면 null(손절선을 둘 수 없음 → 진입 안 함)
+ */
+export function paperStopPrice(mode: PaperSlMode, entry: number, emaValue: number, bufferPct: number, fixedSl: number): number | null {
+  if (mode === "fixed") return fixedSl;
+  if (mode === "ema") return structuralStopPrice(entry, emaValue, bufferPct, fixedSl);
+  const emaStop = emaValue * (1 - bufferPct / 100);
+  return emaStop < entry ? emaStop : null;
+}
+
+/** 청산 방식을 사람이 읽는 말로(행 요약·대시보드 공용). */
+export function exitLabel(t: Pick<PaperTradeRules, "slMode" | "emaStopBufferPct">, slPct: number): string {
+  if (t.slMode === "emaOnly") return `200EMA 이탈만(여유 ${t.emaStopBufferPct}%)`;
+  if (t.slMode === "ema") return `손절 ${slPct}% + 200EMA 이탈(여유 ${t.emaStopBufferPct}%)`;
+  return `손절 ${slPct}%`;
+}
+
+/** 청산 방식만 따로 본 이름(손절 %는 빼고) — "청산 방식별 비교" 묶음용. */
+function exitMethodLabel(t: Pick<PaperTradeRules, "slMode" | "emaStopBufferPct">): string {
+  if (t.slMode === "emaOnly") return `200EMA 이탈만(여유 ${t.emaStopBufferPct}%)`;
+  if (t.slMode === "ema") return `손절 % + 200EMA 이탈(여유 ${t.emaStopBufferPct}%)`;
+  return "고정 손절 %만";
+}
+
+/** 청산 방식 정렬 번호(표에서 고정 → 둘 다 → EMA만 순서로 보이게). */
+const EXIT_ORDER: Record<PaperSlMode, number> = { fixed: 0, ema: 1, emaOnly: 2 };
+
 /** 같은 설정값(예: 손절 5%)을 쓰는 봇들을 한 묶음으로 본 성적. */
 export interface PaperGroupRow {
   label: string; //        예: "손절 5%"
@@ -667,32 +711,39 @@ export interface PaperGroupRow {
 }
 
 export interface PaperDashboard {
-  ranking: Array<{ id: string; name: string; returnPct: number; trades: number; winRate: number | null; tpPct: number; slPct: number; enough: boolean; running: boolean }>;
-  bySl: PaperGroupRow[];
+  ranking: Array<{ id: string; name: string; returnPct: number; trades: number; winRate: number | null; tpPct: number; slPct: number; exit: string; enough: boolean; running: boolean }>;
+  bySl: PaperGroupRow[]; //   손절 %별(손절 %를 안 쓰는 "200EMA 이탈만" 봇은 빠짐)
   byTp: PaperGroupRow[];
-  byCombo: PaperGroupRow[];
-  best: { bot: string | null; sl: number | null; tp: number | null; combo: string | null };
+  byExit: PaperGroupRow[]; // [v0.104.0] 청산 방식별(고정 % / 손절 %+EMA / EMA만)
+  byCombo: PaperGroupRow[]; // 익절 × 청산(손절 % 또는 EMA) 조합별
+  best: { bot: string | null; sl: number | null; tp: number | null; exit: string | null; combo: string | null };
   minTrades: number;
 }
 
 /** 이 정도 매매가 쌓이기 전에는 "최고"라고 부르지 않는다(운 좋은 몇 번으로 결론 내리지 않게). */
 export const PAPER_MIN_TRADES = 20;
 
-function groupRows(bots: PaperBot[], keyOf: (b: PaperBot) => number, label: (v: number) => string, minTrades: number): PaperGroupRow[] {
-  const m = new Map<number, PaperBot[]>();
+// 묶음 기준 — key: 같은 묶음인지 가르는 값, value: 표 정렬 순서(작은 것부터), label: 표에 보일 이름.
+// [v0.104.0] 숫자 하나로는 "청산 방식 + 손절 % + EMA 여유"를 담기 어려워 문자열 key로 바꿨다.
+interface GroupKey { key: string; value: number; label: string }
+
+function groupRows(bots: PaperBot[], keyOf: (b: PaperBot) => GroupKey, minTrades: number): PaperGroupRow[] {
+  const m = new Map<string, { k: GroupKey; list: PaperBot[] }>();
   for (const b of bots) {
     const k = keyOf(b);
-    m.set(k, [...(m.get(k) ?? []), b]);
+    const g = m.get(k.key);
+    if (g) g.list.push(b);
+    else m.set(k.key, { k, list: [b] });
   }
   const rows: PaperGroupRow[] = [];
-  for (const [value, list] of m) {
+  for (const { k, list } of m.values()) {
     const st = list.map(botStats);
     const n = st.reduce((s, x) => s + x.n, 0);
     const w = st.reduce((s, x) => s + x.wins, 0);
     const sumPct = list.reduce((s, b) => s + b.sim.agg.sumPnlPct, 0);
     rows.push({
-      label: label(value),
-      value,
+      label: k.label,
+      value: k.value,
       bots: list.length,
       trades: n,
       winRate: n ? Math.round((w / n) * 10_000) / 100 : null,
@@ -701,7 +752,7 @@ function groupRows(bots: PaperBot[], keyOf: (b: PaperBot) => number, label: (v: 
       enough: n >= minTrades,
     });
   }
-  return rows.sort((a, b) => a.value - b.value);
+  return rows.sort((a, b) => a.value - b.value || a.label.localeCompare(b.label));
 }
 
 /** 가장 좋은 묶음 — 표본이 충분한 것 중 "평균 수익률"이 가장 높은 것(없으면 null). */
@@ -716,16 +767,40 @@ export function paperDashboard(bots: PaperBot[], minTrades = PAPER_MIN_TRADES): 
   const ranking = bots
     .map((b) => {
       const s = botStats(b);
-      return { id: b.id, name: b.config.name, returnPct: s.returnPct, trades: s.n, winRate: s.winRate, tpPct: b.config.tpPct, slPct: b.config.slPct, enough: s.n >= minTrades, running: b.config.running };
+      return { id: b.id, name: b.config.name, returnPct: s.returnPct, trades: s.n, winRate: s.winRate, tpPct: b.config.tpPct, slPct: b.config.slPct, exit: exitLabel(b.config.trade, b.config.slPct), enough: s.n >= minTrades, running: b.config.running };
     })
     .sort((a, b) => b.returnPct - a.returnPct || b.trades - a.trades);
-  const bySl = groupRows(bots, (b) => b.config.slPct, (v) => `손절 ${v}%`, minTrades);
-  const byTp = groupRows(bots, (b) => b.config.tpPct, (v) => `익절 ${v}%`, minTrades);
-  // 조합(익절×손절)은 숫자 하나로 정렬하기 위해 익절*1000+손절로 묶는다(표시는 label이 맡음).
-  const byCombo = groupRows(bots, (b) => Math.round(b.config.tpPct * 100) * 100_000 + Math.round(b.config.slPct * 100), (v) => `익절 ${Math.floor(v / 100_000) / 100}% · 손절 ${(v % 100_000) / 100}%`, minTrades);
+  // 손절 %별 비교: "200EMA 이탈만" 봇은 손절 %를 쓰지 않으므로 빼야 숫자가 섞이지 않는다.
+  const bySl = groupRows(
+    bots.filter((b) => b.config.trade.slMode !== "emaOnly"),
+    (b) => ({ key: String(b.config.slPct), value: b.config.slPct, label: `손절 ${b.config.slPct}%` }),
+    minTrades,
+  );
+  const byTp = groupRows(bots, (b) => ({ key: String(b.config.tpPct), value: b.config.tpPct, label: `익절 ${b.config.tpPct}%` }), minTrades);
+  // 청산 방식별 비교: 고정 % / 손절 %+EMA / EMA만 (EMA 여유 %가 다르면 다른 묶음).
+  const byExit = groupRows(
+    bots,
+    (b) => {
+      const t = b.config.trade;
+      const buf = t.slMode === "fixed" ? 0 : t.emaStopBufferPct;
+      return { key: `${t.slMode}|${buf}`, value: EXIT_ORDER[t.slMode] * 1000 + buf, label: exitMethodLabel(t) };
+    },
+    minTrades,
+  );
+  // 조합: 익절 × 청산(손절 % / EMA) — 같은 익절끼리 모이도록 익절을 먼저 정렬한다.
+  const byCombo = groupRows(
+    bots,
+    (b) => {
+      const c = b.config;
+      const ex = exitLabel(c.trade, c.slPct);
+      return { key: `${c.tpPct}|${ex}`, value: c.tpPct * 1_000_000 + EXIT_ORDER[c.trade.slMode] * 100_000 + (c.trade.slMode === "emaOnly" ? 0 : c.slPct), label: `익절 ${c.tpPct}% · ${ex}` };
+    },
+    minTrades,
+  );
   const bestBot = ranking.find((r) => r.enough) ?? null;
   const bs = bestOf(bySl);
   const bt = bestOf(byTp);
+  const be = bestOf(byExit);
   const bc = bestOf(byCombo);
-  return { ranking, bySl, byTp, byCombo, best: { bot: bestBot?.name ?? null, sl: bs?.value ?? null, tp: bt?.value ?? null, combo: bc?.label ?? null }, minTrades };
+  return { ranking, bySl, byTp, byExit, byCombo, best: { bot: bestBot?.name ?? null, sl: bs?.value ?? null, tp: bt?.value ?? null, exit: be?.label ?? null, combo: bc?.label ?? null }, minTrades };
 }

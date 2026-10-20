@@ -17,7 +17,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DateTime } from "luxon";
-import { defaultBotConfig, sanitizeConfig, type PaperBotConfig, type PaperGroupRow } from "../lib/paper-bots";
+import { defaultBotConfig, exitLabel, sanitizeConfig, type PaperBotConfig, type PaperGroupRow, type PaperSlMode } from "../lib/paper-bots";
 
 type View = PaperBotsView;
 type BotRow = View["bots"][number];
@@ -30,6 +30,22 @@ const cls = (v: number | null | undefined) => (v == null ? "" : v > 0 ? "pnl-up"
 
 /** 손절 비교 세트 기본값 — 오너가 가장 고민하는 구간(얕은 손절 ~ 지금 기본값 근처)을 고르게. */
 const SL_SET_DEFAULT = "3, 5, 7, 10";
+
+/** [v0.104.0] 청산 방식 비교 세트에 쓰는 3가지 방식과 짧은 이름(봇 이름 꼬리표). */
+const EXIT_MODES: Array<{ mode: PaperSlMode; tag: string }> = [
+  { mode: "fixed", tag: "손절%만" },
+  { mode: "ema", tag: "손절%+EMA" },
+  { mode: "emaOnly", tag: "EMA이탈만" },
+];
+
+/**
+ * 기준 설정에서 청산 방식만 바꾼 봇 설정을 만든다(나머지는 전부 같음 → 청산 방식만 공정하게 비교).
+ * 이름 뒤 꼬리표(" · 손절%만" 등)는 기존 꼬리표를 지우고 새로 붙여 이름이 길어지지 않게 한다.
+ */
+function withExitMode(base: PaperBotConfig, mode: PaperSlMode, tag: string): PaperBotConfig {
+  const stem = base.name.replace(/\s*·\s*(손절%만|손절%\+EMA|EMA이탈만)$/, "");
+  return { ...base, name: `${stem} · ${tag}`.slice(0, 30), trade: { ...base.trade, slMode: mode } };
+}
 
 export default function PaperBotsTab({ isWebApp, active, baseSettings }: { isWebApp: boolean; active: boolean; baseSettings: ToolSettings | null }) {
   const [view, setView] = useState<View | null>(null);
@@ -156,6 +172,20 @@ export default function PaperBotsTab({ isWebApp, active, baseSettings }: { isWeb
           >
             ⚖️ 손절 비교 세트 만들기
           </button>
+          <button
+            className="mini"
+            disabled={busy}
+            title="청산 방식만 다른 봇 3개(손절 %만 / 손절 % + 200EMA 이탈 / 200EMA 이탈만)를 '지금 내 자동매매 설정' 기준으로 한 번에 만듭니다."
+            onClick={() =>
+              void act("청산 방식 비교 봇 3개를 만들었습니다", async () => {
+                let v: View | null = null;
+                for (const x of EXIT_MODES) v = await api.paperAdd!(withExitMode(baseConfig("청산비교"), x.mode, x.tag));
+                return v!;
+              })
+            }
+          >
+            🚪 청산 방식 비교 세트 만들기
+          </button>
           {view?.canRun && (
             <button className="mini" disabled={busy || view.busy} onClick={() => void act("지금 한 번 실행했습니다", () => api.paperRunNow!())} title="5분을 기다리지 않고 지금 바로 스크리닝·체결 판정을 한 번 돌립니다.">
               ▶ 지금 한 번 실행
@@ -232,7 +262,7 @@ function BotRowView({ b, busy, settingsOpen, tradesOpen, onToggleSettings, onTog
       </div>
 
       <div className="pb-sub hint">
-        시드 {usd(c.seedUsd, 0)} · 익절 {c.tpPct}% · 손절 {c.slPct}%{c.trade.slMode === "ema" ? `(EMA 기준, 여유 ${c.trade.emaStopBufferPct}%)` : ""} · {c.trade.entryLevel}분할 타점 · 최대 {c.trade.maxPositions}종목 · 종목당 {c.trade.investPct}%
+        시드 {usd(c.seedUsd, 0)} · 익절 {c.tpPct}% · {exitLabel(c.trade, c.slPct)} · {c.trade.entryLevel}분할 타점 · 최대 {c.trade.maxPositions}종목 · 종목당 {c.trade.investPct}%
       </div>
 
       <div className="pb-metrics">
@@ -352,12 +382,19 @@ function SettingsDrawer({ b, busy, act, onClose }: { b: BotRow; busy: boolean; a
         {num("t.watchMinutes", "미체결 취소(분)", "지정가가 이 시간 안에 안 닿으면 가상 주문을 취소")}
         <label>
           손절 방식
-          <select value={String(d["t.slMode"])} onChange={(e) => setD({ ...d, "t.slMode": e.target.value })}>
-            <option value="fixed">고정 %</option>
-            <option value="ema">EMA 기준</option>
+          {/* [v0.104.0] 청산 방식 3가지 — 손절 %만 / 손절 %와 200EMA 이탈 함께 / 200EMA 이탈만.
+              "EMA 이탈" 손절가 = 진입 시점 5분봉 200EMA × (1 − 여유%) — 자동매매의 "EMA 기준 손절"과 같은 정의. */}
+          <select
+            value={String(d["t.slMode"])}
+            onChange={(e) => setD({ ...d, "t.slMode": e.target.value })}
+            title="손절 %만: 진입가 −N%에서 손절 · 둘 다: 손절 %와 200EMA 이탈 중 먼저 닿는 쪽 · 200EMA 이탈만: 손절 %는 무시하고 200EMA 아래 여유%에서 손절"
+          >
+            <option value="fixed">손절 %만</option>
+            <option value="ema">손절 % + 200EMA 이탈(먼저 닿는 쪽)</option>
+            <option value="emaOnly">200EMA 이탈만</option>
           </select>
         </label>
-        {d["t.slMode"] === "ema" && num("t.emaStopBufferPct", "EMA 아래 여유 %")}
+        {d["t.slMode"] !== "fixed" && num("t.emaStopBufferPct", "200EMA 아래 여유 %", "200EMA보다 이만큼 더 내려가야 이탈로 봅니다(자동매매 기본 1.5%)")}
       </div>
       <div className="form-row">
         {chk("t.reentryBlock", "오늘 손절된 종목 재진입 금지")}
@@ -412,6 +449,20 @@ function SettingsDrawer({ b, busy, act, onClose }: { b: BotRow; busy: boolean; a
           onClick={() => void act("손절 비교 세트(이 봇 기준)", () => api.paperAddSlSet!(b.id, [3, 5, 7, 10].filter((x) => x !== b.config.slPct)))}
         >
           ⚖️ 이 봇 기준 손절 비교 세트
+        </button>
+        <button
+          className="mini"
+          disabled={busy}
+          title="이 봇 설정을 기준으로, 청산 방식만 다른 봇을 만듭니다(이 봇에 없는 나머지 방식들)."
+          onClick={() =>
+            void act("청산 방식 비교 세트(이 봇 기준)", async () => {
+              let v: View | null = null;
+              for (const x of EXIT_MODES.filter((m) => m.mode !== b.config.trade.slMode)) v = await api.paperAdd!(withExitMode(b.config, x.mode, x.tag));
+              return v!;
+            })
+          }
+        >
+          🚪 이 봇 기준 청산 방식 비교
         </button>
         {confirm === "" && <button className="mini" disabled={busy} onClick={() => setConfirm("reset")}>🧹 결과 초기화</button>}
         {confirm === "" && <button className="mini btn-kill" disabled={busy} onClick={() => setConfirm("delete")}>🗑 삭제</button>}
@@ -510,7 +561,8 @@ function Dashboard({ view }: { view: View | null }) {
         <div className="lab-card"><span>🏆 수익률 1위 봇</span><b className="pb-best">{d.best.bot ?? "아직 판단 불가"}</b><span>매매 {d.minTrades}건 이상 쌓인 봇 중</span></div>
         <div className="lab-card"><span>🛑 최고 손절값</span><b>{d.best.sl != null ? `${d.best.sl}%` : "아직 판단 불가"}</b><span>같은 손절값 봇들의 평균 수익률 기준</span></div>
         <div className="lab-card"><span>✅ 최고 익절값</span><b>{d.best.tp != null ? `${d.best.tp}%` : "아직 판단 불가"}</b><span>같은 익절값 봇들의 평균 수익률 기준</span></div>
-        <div className="lab-card"><span>🎯 최고 조합</span><b className="pb-best">{d.best.combo ?? "아직 판단 불가"}</b><span>익절×손절 조합별 평균 수익률 기준</span></div>
+        <div className="lab-card"><span>🚪 최고 청산 방식</span><b className="pb-best">{d.best.exit ?? "아직 판단 불가"}</b><span>손절 % / 200EMA 이탈 방식별 평균 수익률 기준</span></div>
+        <div className="lab-card"><span>🎯 최고 조합</span><b className="pb-best">{d.best.combo ?? "아직 판단 불가"}</b><span>익절×청산 조합별 평균 수익률 기준</span></div>
       </div>
       <p className="hint">
         "아직 판단 불가" = 비교할 값이 2개 이상이고 각각 매매가 충분히 쌓여야 고릅니다.{" "}
@@ -523,9 +575,9 @@ function Dashboard({ view }: { view: View | null }) {
         {d.ranking.map((r, i) => (
           <div key={r.id} className={`pb-rank-row ${r.enough ? "" : "lab-dim"}`}>
             <span className="pb-rank-no">{i + 1}</span>
-            <span className="pb-rank-name" title={`익절 ${r.tpPct}% · 손절 ${r.slPct}%`}>
+            <span className="pb-rank-name" title={`익절 ${r.tpPct}% · ${r.exit}`}>
               {r.name}{r.running ? " 🟢" : ""}
-              <span className="pb-msub"> 익절 {r.tpPct}% · 손절 {r.slPct}% · {r.trades}건 · 승률 {pct(r.winRate)}{r.enough ? "" : " · 표본 부족"}</span>
+              <span className="pb-msub"> 익절 {r.tpPct}% · {r.exit} · {r.trades}건 · 승률 {pct(r.winRate)}{r.enough ? "" : " · 표본 부족"}</span>
             </span>
             <span className="pb-bar"><i className={r.returnPct >= 0 ? "up" : "down"} style={{ width: `${(Math.abs(r.returnPct) / maxAbs) * 100}%` }} /></span>
             <span className={`pb-rank-v ${cls(r.returnPct)}`}>{sgn(r.returnPct)}</span>
@@ -533,9 +585,10 @@ function Dashboard({ view }: { view: View | null }) {
         ))}
       </div>
 
-      <GroupTable title="손절값별 비교" rows={d.bySl} best={d.best.sl} />
+      <GroupTable title="청산 방식별 비교 (손절 % / 200EMA 이탈)" rows={d.byExit} bestLabel={d.best.exit} />
+      {d.bySl.length > 0 && <GroupTable title="손절값별 비교 (200EMA 이탈만 쓰는 봇은 제외)" rows={d.bySl} best={d.best.sl} />}
       <GroupTable title="익절값별 비교" rows={d.byTp} best={d.best.tp} />
-      {d.byCombo.length > 1 && <GroupTable title="익절 × 손절 조합별 비교" rows={d.byCombo} bestLabel={d.best.combo} />}
+      {d.byCombo.length > 1 && <GroupTable title="익절 × 청산 조합별 비교" rows={d.byCombo} bestLabel={d.best.combo} />}
     </section>
   );
 }
