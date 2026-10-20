@@ -85,6 +85,14 @@ export interface PaperBotConfig {
   slPct: number; //     손절 %
   trade: PaperTradeRules;
   screen: PaperScreen;
+  /**
+   * [v0.105.0] 스크리닝 기준을 "지금 자동매매 설정"에서 그대로 가져올지(기본 켬).
+   *   켜면 아래 screen 값은 무시하고, 봇을 돌리는 PC의 자동매매 스크리닝 기준을 매번 그대로 쓴다
+   *   → 자동매매가 "관찰 확정"으로 잡은 종목을 가상봇도 똑같이 본다(자동매매 스캔 결과를 나눠 씀).
+   *   이유: 봇을 만들 때 복사해 둔 기준이 나중에 자동매매 설정을 바꾸면 어긋나, 자동매매는 종목을
+   *   잡는데 봇은 0종목인 일이 실제로 있었다(2026-10-20 오너 제보). 끄면 screen 값을 직접 쓴다.
+   */
+  followAutoScreen: boolean;
   running: boolean; //  자동매매(가상) 켜짐 여부 — 이 값은 저장·동기화된다(실계좌 자동매매와 다름: 주문이 안 나가므로)
   /** 실제로 이 봇을 돌리는 PC의 기기 번호. 폰에서 켜면 null → 켜져 있는 PC가 가져가 돌린다. */
   runnerDeviceId: string | null;
@@ -254,6 +262,7 @@ export function defaultBotConfig(s: Record<string, unknown> | null | undefined, 
       nextCandleConfirmEnabled: g("autoScanNextCandleConfirmEnabled") as boolean,
       excludeEtf: g("autoScanExcludeEtf") as boolean,
     },
+    followAutoScreen: true,
     running: false,
     runnerDeviceId: null,
     createdAtMs: nowMs,
@@ -310,6 +319,8 @@ export function sanitizeConfig(c: Omit<Partial<PaperBotConfig>, "trade" | "scree
       nextCandleConfirmEnabled: bool(s.nextCandleConfirmEnabled, true),
       excludeEtf: bool(s.excludeEtf, true),
     },
+    // 값이 없으면(v0.104.0 이하에서 만든 봇) 켬 — 그 봇들도 원래 "자동매매 설정 복사본"이었다.
+    followAutoScreen: bool(c.followAutoScreen, true),
     running: bool(c.running, false),
     runnerDeviceId: typeof c.runnerDeviceId === "string" && c.runnerDeviceId ? c.runnerDeviceId : null,
     createdAtMs: clampNum(c.createdAtMs, 0, Number.MAX_SAFE_INTEGER, 0, 0),

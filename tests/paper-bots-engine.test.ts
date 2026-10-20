@@ -106,4 +106,74 @@ describe("가상매매 봇 — 엔진", () => {
       Date.now = realNow;
     }
   });
+
+  // [v0.105.0] 2026-10-20 버그: 자동매매가 종목을 잡는데 가상봇은 하루 종일 0건이던 문제
+  it("자동매매 스크리닝 기준 따라가기: 봇에 저장된 기준이 달라도 자동매매 스캔 결과로 진입, 끄면 자기 기준으로 스캔", async () => {
+    const t0 = DateTime.fromObject({ year: 2026, month: 7, day: 16, hour: 22, minute: 0 }, { zone: "Asia/Seoul" }).toMillis();
+    const now = t0;
+    Settings.now = () => now;
+    const realNow = Date.now;
+    Date.now = () => now;
+    try {
+      const { e } = mkEngine();
+      const anyE = e as unknown as Record<string, unknown>;
+      anyE.paperLoopOn = true;
+      anyE.prepareBackend = async () => undefined;
+      anyE.resolveCommissionRate = async () => null;
+      anyE.paperFetchBars = async () => [];
+      const ownScans: unknown[] = [];
+      anyE.scanScreener = async (opts: unknown) => {
+        ownScans.push(opts);
+        return { results: [] }; // 봇 자기 기준으로는 확정 종목 없음
+      };
+      // 봇 둘: 저장된 스크리닝 기준(가격 $20~30)은 자동매매(기본 $1~9)와 다름
+      let v = await e.paperBotAdd({ name: "따라감", screen: { priceMin: 20, priceMax: 30 } as never });
+      v = await e.paperBotAdd({ name: "직접", followAutoScreen: false, screen: { priceMin: 20, priceMax: 30 } as never });
+      expect(v.bots[0].config.followAutoScreen).toBe(true); // 기본 켬
+      expect(v.bots[1].config.followAutoScreen).toBe(false);
+      for (const b of v.bots) await e.paperBotStart(b.id);
+
+      // 자동매매가 방금 스캔을 끝냄(확정 1종목) → 결과를 봇과 나눠 씀 + 곧바로 봇 한 번 돌리기 예약
+      const autoOpts = (e as unknown as { buildAutoScanOpts(): unknown }).buildAutoScanOpts();
+      (e as unknown as { rememberScanForPaper(o: unknown, r: unknown): void }).rememberScanForPaper(autoOpts, {
+        results: [{ symbol: "ZZZ", status: "confirmed", price: 10, prevClose: 5, ema200: 4.5 }],
+      });
+      expect(anyE.paperAfterScanTimer).not.toBeNull();
+      clearTimeout(anyE.paperAfterScanTimer as ReturnType<typeof setTimeout>);
+      anyE.paperAfterScanTimer = null;
+
+      v = await e.paperBotsRunNow();
+      expect(v.bots[0].sim.pending.map((o) => o.symbol)).toEqual(["ZZZ"]); // 자동매매가 잡은 종목에 가상 진입
+      expect(v.bots[1].sim.pending.length).toBe(0); //                          자기 기준(가격 $20~30)으론 없음
+      expect(ownScans.length).toBe(1); //                                       자기 기준 봇만 따로 스캔
+      expect((ownScans[0] as { priceMin: number }).priceMin).toBe(20);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  it("자동매매가 스캔 중이면 다음 5분이 아니라 1분 뒤 다시 시도", async () => {
+    const t0 = DateTime.fromObject({ year: 2026, month: 7, day: 16, hour: 22, minute: 0 }, { zone: "Asia/Seoul" }).toMillis();
+    Settings.now = () => t0;
+    const realNow = Date.now;
+    Date.now = () => t0;
+    try {
+      const { e } = mkEngine();
+      const anyE = e as unknown as Record<string, unknown>;
+      anyE.paperLoopOn = true;
+      anyE.prepareBackend = async () => undefined;
+      anyE.resolveCommissionRate = async () => null;
+      anyE.paperFetchBars = async () => [];
+      const v = await e.paperBotAdd({ name: "A" });
+      await e.paperBotStart(v.bots[0].id);
+      anyE.screenBusy = true; // 자동매매 스캔이 도는 중
+      const v2 = await e.paperBotsRunNow();
+      expect(v2.bots[0].sim.lastNote).toContain("1분 뒤");
+      expect(anyE.paperDeferTimer).not.toBeNull();
+      clearTimeout(anyE.paperDeferTimer as ReturnType<typeof setTimeout>);
+      anyE.paperDeferTimer = null;
+    } finally {
+      Date.now = realNow;
+    }
+  });
 });
