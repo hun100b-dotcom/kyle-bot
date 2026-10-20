@@ -317,3 +317,14 @@ describe("청산 방식(200EMA 이탈)", () => {
     expect(d.ranking[0].exit).toBe("200EMA 이탈만(여유 1.5%)");
   });
 });
+
+describe("스크리닝 기준 따라가기(v0.105.0)", () => {
+  it("값이 없던 옛 봇은 켬, 끈 값은 유지", () => {
+    const c = mkBot().config;
+    const { followAutoScreen: _drop, ...old } = c;
+    void _drop;
+    expect(sanitizeConfig(old).followAutoScreen).toBe(true);
+    expect(sanitizeConfig({ ...c, followAutoScreen: false }).followAutoScreen).toBe(false);
+    expect(defaultBotConfig(null, T0, "x").followAutoScreen).toBe(true);
+  });
+});

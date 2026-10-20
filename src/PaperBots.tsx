@@ -262,7 +262,7 @@ function BotRowView({ b, busy, settingsOpen, tradesOpen, onToggleSettings, onTog
       </div>
 
       <div className="pb-sub hint">
-        시드 {usd(c.seedUsd, 0)} · 익절 {c.tpPct}% · {exitLabel(c.trade, c.slPct)} · {c.trade.entryLevel}분할 타점 · 최대 {c.trade.maxPositions}종목 · 종목당 {c.trade.investPct}%
+        시드 {usd(c.seedUsd, 0)} · 익절 {c.tpPct}% · {exitLabel(c.trade, c.slPct)} · {c.followAutoScreen ? "스크리닝: 자동매매 기준" : "스크리닝: 직접 설정"} · {c.trade.entryLevel}분할 타점 · 최대 {c.trade.maxPositions}종목 · 종목당 {c.trade.investPct}%
       </div>
 
       <div className="pb-metrics">
@@ -303,7 +303,7 @@ function Metric({ label, value, sub, tone }: { label: string; value: string; sub
 type Draft = Record<string, string | boolean>;
 
 function toDraft(c: PaperBotConfig): Draft {
-  const d: Draft = { name: c.name, seedUsd: String(c.seedUsd), tpPct: String(c.tpPct), slPct: String(c.slPct) };
+  const d: Draft = { name: c.name, seedUsd: String(c.seedUsd), tpPct: String(c.tpPct), slPct: String(c.slPct), followAutoScreen: c.followAutoScreen };
   for (const [k, v] of Object.entries(c.trade)) {
     if (k === "sessions") continue;
     d[`t.${k}`] = typeof v === "boolean" ? v : String(v);
@@ -330,7 +330,7 @@ function fromDraft(d: Draft, base: PaperBotConfig): PaperBotConfig {
     const v = d[`s.${k}`];
     screen[k] = typeof v === "boolean" ? v : n(`s.${k}`);
   }
-  return sanitizeConfig({ ...base, name: String(d.name), seedUsd: n("seedUsd"), tpPct: n("tpPct"), slPct: n("slPct"), trade: trade as unknown as PaperBotConfig["trade"], screen: screen as unknown as PaperBotConfig["screen"] });
+  return sanitizeConfig({ ...base, name: String(d.name), followAutoScreen: !!d.followAutoScreen, seedUsd: n("seedUsd"), tpPct: n("tpPct"), slPct: n("slPct"), trade: trade as unknown as PaperBotConfig["trade"], screen: screen as unknown as PaperBotConfig["screen"] });
 }
 
 function SettingsDrawer({ b, busy, act, onClose }: { b: BotRow; busy: boolean; act: (label: string, fn: () => Promise<View>) => Promise<void>; onClose: () => void }) {
@@ -406,6 +406,15 @@ function SettingsDrawer({ b, busy, act, onClose }: { b: BotRow; busy: boolean; a
       </div>
 
       <h4>스크리닝 기준</h4>
+      {/* [v0.105.0] 기본은 "자동매매 스크리닝 기준 그대로" — 자동매매가 잡은 종목을 봇도 똑같이 보게.
+          끄면 아래 칸들로 이 봇만의 기준을 직접 정한다. */}
+      <div className="form-row">
+        {chk("followAutoScreen", "자동매매 스크리닝 기준 그대로 쓰기(권장)", "켜 두면 PC의 자동매매 스크리닝 설정을 매번 그대로 쓰고, 자동매매 스캔 결과를 함께 씁니다.")}
+      </div>
+      {d.followAutoScreen ? (
+        <p className="hint">지금 자동매매의 스크리닝 기준을 그대로 씁니다 — 자동매매가 "관찰 확정"으로 잡은 종목을 이 봇도 똑같이 봅니다. 이 봇만 다른 기준으로 돌리려면 체크를 끄세요.</p>
+      ) : (
+      <>
       <div className="form-row">
         {num("s.count", "거래량 상위 몇 종목", undefined, 90)}
         {num("s.priceMin", "가격 하한($)", undefined, 90)}
@@ -433,9 +442,11 @@ function SettingsDrawer({ b, busy, act, onClose }: { b: BotRow; busy: boolean; a
         {chk("s.atrFilterEnabled", "변동성 상한")}
         {d["s.atrFilterEnabled"] && num("s.atrMaxPct", "변동성 상한 %", undefined, 80)}
       </div>
+      </>
+      )}
 
       <p className="hint">
-        저장될 값: 익절 {preview.tpPct}% · 손절 {preview.slPct}% · 시드 {usd(preview.seedUsd, 0)} · 가격 ${preview.screen.priceMin}~${preview.screen.priceMax}
+        저장될 값: 익절 {preview.tpPct}% · 손절 {preview.slPct}% · 시드 {usd(preview.seedUsd, 0)} · {preview.followAutoScreen ? "스크리닝 = 자동매매 기준" : `가격 $${preview.screen.priceMin}~$${preview.screen.priceMax}`}
         {" "}(범위를 벗어난 값은 안전한 범위로 자동 보정됩니다)
       </p>
       <div className="form-row">

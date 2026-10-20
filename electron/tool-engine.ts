@@ -5333,6 +5333,8 @@ export class ToolEngine extends EventEmitter {
   private paperLoopOn = false; //       이 기기가 봇을 "돌리는" 기기인가(데스크톱만 true — main.ts가 켠다)
   private paperTimer: ReturnType<typeof setInterval> | null = null;
   private paperDeferTimer: ReturnType<typeof setTimeout> | null = null;
+  private paperAfterScanTimer: ReturnType<typeof setTimeout> | null = null; // [v0.105.0] 자동매매 스캔 직후 한 번 돌리기
+  private paperScanning = false; // [v0.105.0] 가상봇이 자기 스캔을 돌리는 중인지(자동매매가 잠깐 기다려 줄지 판단용)
   private paperSyncTimer: ReturnType<typeof setInterval> | null = null;
   private paperBusy = false;
   private paperLastTickMs: number | null = null;
@@ -5389,6 +5391,8 @@ export class ToolEngine extends EventEmitter {
     if (this.paperDeferTimer) clearTimeout(this.paperDeferTimer);
     this.paperTimer = null;
     this.paperDeferTimer = null;
+    if (this.paperAfterScanTimer) clearTimeout(this.paperAfterScanTimer);
+    this.paperAfterScanTimer = null;
   }
 
   /** 자동매매가 스캔한 결과도 봇들이 나눠 쓸 수 있게 보관(같은 기준이면 다시 스캔하지 않음 — 요청 한도 절약). */
@@ -5397,6 +5401,18 @@ export class ToolEngine extends EventEmitter {
       this.paperScanCache.set(screenKey(sanitizeConfig({ screen: opts as Partial<PaperScreen> }).screen), { run, atMs: Date.now() });
     } catch {
       /* 보관 실패는 무시 — 봇이 직접 스캔하면 된다 */
+    }
+    // [v0.105.0] 자동매매 스캔이 끝나면 곧바로 가상봇도 그 결과로 한 번 돈다.
+    //   이유(2026-10-20 실제 버그): 가상봇 5분 주기와 자동매매 5분 주기가 같은 순간에 맞물려,
+    //   봇이 돌 때마다 자동매매가 스캔 중이라 "스크리닝 차례를 기다리는 중"으로 넘어갔고, 나눠 쓰려던
+    //   자동매매 스캔 결과는 다음 주기엔 4분이 넘어 "오래됨"으로 버려졌다 → 하루 종일 0건.
+    //   자동매매 스캔 직후에 바로 받아 쓰면 자동매매가 본 확정 종목을 가상봇도 똑같이 본다.
+    //   (자동매매 주기가 아직 안 끝났으면 paperTick이 알아서 1분 뒤로 양보한다.)
+    if (this.paperLoopOn && !this.paperAfterScanTimer) {
+      this.paperAfterScanTimer = setTimeout(() => {
+        this.paperAfterScanTimer = null;
+        void this.paperTick();
+      }, 3_000);
     }
   }
 
@@ -5675,6 +5691,10 @@ export class ToolEngine extends EventEmitter {
       const pause = this.getSystemPauseStatus();
       const session = getSession(DateTime.now().setZone("Asia/Seoul"));
       const groups = new Map<string, PaperBot[]>();
+      // [v0.105.0] 봇마다 실제로 쓸 스크리닝 기준 — "자동매매 기준 따라가기"면 이 PC의 지금 자동매매 설정.
+      //   같은 열쇠(screenKey)면 자동매매가 방금 돌린 스캔 결과를 그대로 나눠 쓴다(rememberScanForPaper).
+      const autoScreen = sanitizeConfig({ screen: this.buildAutoScanOpts() as Partial<PaperScreen> }).screen;
+      const screenOf = new Map<string, PaperScreen>();
       for (const b of mine) {
         if (!b.config.running) continue;
         const st = sims.get(b.id)!;
@@ -5682,7 +5702,9 @@ export class ToolEngine extends EventEmitter {
         const on = session === "day" ? b.config.trade.sessions.day : session === "pre" ? b.config.trade.sessions.pre : session === "regular" ? b.config.trade.sessions.regular : session === "after" ? b.config.trade.sessions.after : false;
         if (!on) { st.note = session === "closed" ? "장 시간이 아님 — 새 매수 없음" : "이 봇은 지금 장(세션)을 꺼 둠 — 새 매수 없음"; continue; }
         if (st.sim.pending.length + st.sim.open.length >= b.config.trade.maxPositions) { st.note = `최대 종목 수(${b.config.trade.maxPositions}) 보유 중`; continue; }
-        const k = screenKey(b.config.screen);
+        const scr = b.config.followAutoScreen ? autoScreen : b.config.screen;
+        const k = screenKey(scr);
+        screenOf.set(k, scr);
         groups.set(k, [...(groups.get(k) ?? []), b]);
       }
       let scans = 0;
@@ -5690,12 +5712,25 @@ export class ToolEngine extends EventEmitter {
         let cached = this.paperScanCache.get(k);
         if (!cached || now - cached.atMs > 4 * 60_000) {
           if (scans >= ToolEngine.PAPER_MAX_SCANS_PER_TICK || this.screenBusy || this.autoTradeTickBusy) {
-            for (const b of list) sims.get(b.id)!.note = "스크리닝 차례를 기다리는 중(다음 주기에 시도)";
+            for (const b of list) sims.get(b.id)!.note = "스크리닝 차례를 기다리는 중(1분 뒤 다시 시도)";
+            // [v0.105.0] 다음 5분 주기까지 기다리지 않고 1분 뒤 다시 — 5분 주기끼리 맞물려 매번 밀리는 일 방지.
+            if (!this.paperDeferTimer) {
+              this.paperDeferTimer = setTimeout(() => {
+                this.paperDeferTimer = null;
+                void this.paperTick();
+              }, 60_000);
+            }
             continue;
           }
           try {
             scans++;
-            const run = await this.scanScreener(list[0].config.screen, true);
+            this.paperScanning = true; // 자동매매가 이 표시를 보고 우리 스캔이 끝나길 잠깐 기다린다
+            let run: ScreenRun;
+            try {
+              run = await this.scanScreener(screenOf.get(k) ?? list[0].config.screen, true);
+            } finally {
+              this.paperScanning = false;
+            }
             cached = { run, atMs: Date.now() };
             this.paperScanCache.set(k, cached);
           } catch (e) {
@@ -10412,6 +10447,13 @@ export class ToolEngine extends EventEmitter {
       try {
         // [v0.28.0→v0.33.0] 오너가 "스크리닝 기준" 탭에서 조절한 조건을 그대로 쓴다(전부).
         if (this.currentAutoRun) this.currentAutoRun.scanCount++; // [v0.62.1] 리포트: 실제로 스크리닝까지 돈 횟수
+        // [v0.105.0] 가상매매 봇이 마침 자기 스캔을 돌리는 중이면(스캔은 한 번에 하나뿐) 끝날 때까지
+        //   잠깐(최대 90초) 기다린다 — 그냥 부르면 "이미 스캔이 진행 중" 오류로 실제 자동매매 사이클이
+        //   통째로 건너뛰어진다. 가상봇 때문에 실매매가 밀리는 일은 없어야 한다.
+        if (this.screenBusy && this.paperScanning) {
+          const waitFrom = Date.now();
+          while (this.screenBusy && this.paperScanning && Date.now() - waitFrom < 90_000) await new Promise((r) => setTimeout(r, 1_000));
+        }
         run = await this.scanScreener(this.buildAutoScanOpts()); // ③빈자리를 "현재 스크리닝으로 탐색된 다른 종목"으로 채움
         this.autoTradeLastScan = run; // [v0.27.0] 버리지 않고 보관 → "스크리닝 결과" 탭이 그대로 보여줌
         this.rememberScanForPaper(this.buildAutoScanOpts(), run); // [v0.103.0] 가상매매 봇이 같은 기준이면 나눠 씀
