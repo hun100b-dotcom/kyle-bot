@@ -405,7 +405,12 @@ export function mergeStores(a: PaperStore, b: PaperStore, nowMs: number): PaperS
     byId.set(bot.id, { id: bot.id, config, sim });
   }
   // 순서: 만든 순서(오래된 것 위) — 기기마다 화면 순서가 같아야 헷갈리지 않는다.
-  const bots = [...byId.values()].sort((x, y) => x.config.createdAtMs - y.config.createdAtMs || (x.id < y.id ? -1 : 1));
+  // [v0.105.1] 설정은 항상 한 번 보정해서 쓴다 — 예전 버전이 저장한 봇엔 새로 생긴 칸(예: followAutoScreen)이
+  //   아예 없어서 "없음 = 꺼짐"으로 읽혔다(2026-10-20 실제 버그: 기존 봇이 자동매매 기준을 안 따라가 0건).
+  //   보정은 같은 값을 다시 넣어도 결과가 같아서(멱등) 기기마다 똑같이 보인다.
+  const bots = [...byId.values()]
+    .map((x) => ({ ...x, config: sanitizeConfig(x.config) }))
+    .sort((x, y) => x.config.createdAtMs - y.config.createdAtMs || (x.id < y.id ? -1 : 1));
   return { v: 1, bots, deleted };
 }
 

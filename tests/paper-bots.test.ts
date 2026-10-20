@@ -328,3 +328,16 @@ describe("스크리닝 기준 따라가기(v0.105.0)", () => {
     expect(defaultBotConfig(null, T0, "x").followAutoScreen).toBe(true);
   });
 });
+
+describe("옛 버전이 저장한 봇 읽기(v0.105.1)", () => {
+  it("followAutoScreen 칸이 없는 저장본도 합치면 '켬'으로 보정되고, 보정은 멱등", () => {
+    const b = mkBot();
+    const { followAutoScreen: _x, ...rawConfig } = b.config;
+    void _x;
+    const oldStore: PaperStore = { v: 1, bots: [{ ...b, config: rawConfig as PaperBot["config"] }], deleted: {} };
+    const m = mergeStores(oldStore, emptyStore(), T0);
+    expect(m.bots[0].config.followAutoScreen).toBe(true);
+    expect(mergeStores(m, emptyStore(), T0)).toEqual(m);
+    expect(storeFingerprint(oldStore, T0)).toBe(storeFingerprint(m, T0)); // 칸 하나 없다고 "달라짐"으로 보고 쓰기를 반복하지 않음
+  });
+});
