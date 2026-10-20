@@ -306,8 +306,11 @@ function ScanSummaryView({ b }: { b: BotRow }) {
       🔎 마지막 스캔 {ls.scannedAt}: 훑은 {ls.total ?? "—"}종목 → 관찰 {ls.watch.length}{ls.watch.length ? `(${ls.watch.join(", ")})` : ""} · 확정 {ls.confirmed.length}
       {ls.confirmed.length ? `(${ls.confirmed.join(", ")})` : ""}
       {drops.length > 0 && <> · 탈락: {drops.map(([k, n]) => `${PAPER_DROP_LABEL[k]} ${n}`).join(" · ")}</>}
-      {ls.autoMissed.length > 0 && (
-        <div>⚖️ 같은 무렵 자동매매 확정 → 이 봇 기준에선: {ls.autoMissed.map((m) => `${m.symbol}(${m.reason})`).join(" · ")}</div>
+      {(b.sim.missLog ?? []).length > 0 && (
+        <div>
+          ⚖️ 자동매매는 확정했지만 이 봇 기준에선 빠진 종목(최근):{" "}
+          {(b.sim.missLog ?? []).slice(-5).reverse().map((m) => `${kst(m.atMs, "MM-dd HH:mm")} ${m.symbol}(${m.reason})`).join(" · ")}
+        </div>
       )}
     </div>
   );
