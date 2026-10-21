@@ -32,7 +32,7 @@ jobs:
         run: |
           set -e
           API=https://api.github.com/repos/hun100b-dotcom/kyle-bot-releases/releases
-          curl -sSL "$API?per_page=5" -o rels.json
+          curl -sSL -H "Authorization: Bearer ${{ github.token }}" "$API?per_page=5" -o rels.json
           LATEST=$(python3 -c "import json;r=json.load(open('rels.json'));print([x for x in r if any(a['name'].endswith('.pkg') for a in x['assets'])][0]['tag_name'][1:])")
           PREV=$(python3 -c "import json;r=json.load(open('rels.json'));print([x for x in r if any(a['name'].endswith('.pkg') for a in x['assets'])][1]['tag_name'][1:])")
           echo "latest=$LATEST prev=$PREV"
@@ -64,7 +64,7 @@ jobs:
       - name: 최신 배포 버전 번호
         id: rel
         run: |
-          LATEST=$(curl -sSL https://api.github.com/repos/hun100b-dotcom/kyle-bot-releases/releases/latest | python3 -c "import json,sys;print(json.load(sys.stdin)['tag_name'][1:])")
+          LATEST=$(curl -sSL -H "Authorization: Bearer ${{ github.token }}" https://api.github.com/repos/hun100b-dotcom/kyle-bot-releases/releases/latest | python3 -c "import json,sys;print(json.load(sys.stdin)['tag_name'][1:])")
           echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
       - name: 검증 — 이 PR 코드가 최신 버전으로 스스로 업데이트·재시작하는가
         run: bash scripts/mac-update-e2e.sh release/Capri-0.0.1-universal.pkg "${{ steps.rel.outputs.latest }}" 420

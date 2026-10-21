@@ -303,3 +303,31 @@ describe.skipIf(!canRunSh)("buildSwapScript — 실제 실행", () => {
     }
   });
 });
+
+describe("latest-mac.yml로 새 버전 찾기(v0.107.0 — GitHub API 호출 제한 회피)", () => {
+  const yml = `version: 0.106.1
+files:
+  - url: Capri-0.106.1-mac.zip
+    sha512: aaa==
+    size: 1
+  - url: Capri-0.106.1-arm64-mac.zip
+    sha512: bbb==
+    size: 2
+path: Capri-0.106.1-mac.zip
+sha512: aaa==
+releaseDate: '2026-10-20T17:57:35.097Z'
+`;
+  it("버전을 읽는다", async () => {
+    const { parseLatestMacYmlVersion } = await import("../electron/mac-self-update");
+    expect(parseLatestMacYmlVersion(yml)).toBe("0.106.1");
+  });
+  it("칩별 zip 다운로드 주소를 만들고, 이 맥의 칩에 맞는 걸 고른다", async () => {
+    const { macZipAssetsFromYml } = await import("../electron/mac-self-update");
+    const assets = macZipAssetsFromYml(yml, "0.106.1");
+    expect(assets.map((a) => a.name)).toEqual(["Capri-0.106.1-mac.zip", "Capri-0.106.1-arm64-mac.zip"]);
+    expect(pickMacZipAsset(assets, "arm64")?.browser_download_url).toBe(
+      "https://github.com/hun100b-dotcom/kyle-bot-releases/releases/download/v0.106.1/Capri-0.106.1-arm64-mac.zip",
+    );
+    expect(pickMacZipAsset(assets, "x64")?.name).toBe("Capri-0.106.1-mac.zip");
+  });
+});

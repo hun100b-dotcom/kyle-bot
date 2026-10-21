@@ -271,7 +271,23 @@ export interface MacUpdateReadyInfo {
   oldAppPath: string;
 }
 
-const RELEASES_LATEST_API = "https://api.github.com/repos/hun100b-dotcom/kyle-bot-releases/releases/latest";
+const RELEASES_BASE = "https://github.com/hun100b-dotcom/kyle-bot-releases/releases";
+const LATEST_MAC_YML_URL = `${RELEASES_BASE}/latest/download/latest-mac.yml`;
+
+/** latest-mac.yml 맨 위의 `version: 0.107.0` 줄에서 버전을 뽑는다. */
+export function parseLatestMacYmlVersion(ymlText: string): string | null {
+  const m = ymlText.match(/^version:\s*['"]?([0-9][0-9A-Za-z.\-]*)['"]?\s*$/m);
+  return m ? m[1] : null;
+}
+
+/** latest-mac.yml의 files 목록에 있는 zip들을 "다운로드 주소가 붙은 자산"으로 바꾼다. */
+export function macZipAssetsFromYml(ymlText: string, version: string): ReleaseAsset[] {
+  const out: ReleaseAsset[] = [];
+  for (const m of ymlText.matchAll(/^\s*-\s*url:\s*(\S+?-mac\.zip)\s*$/gm)) {
+    out.push({ name: m[1], browser_download_url: `${RELEASES_BASE}/download/v${version}/${m[1]}` });
+  }
+  return out;
+}
 
 /** stagingDir/.ready 마커 — 30분마다 재확인할 때마다 120MB를 다시 받지 않기 위한 캐시. */
 function readReadyMarker(stagingDir: string): MacUpdateReadyInfo | null {
@@ -300,19 +316,24 @@ export async function prepareMacSelfUpdate(currentVersion: string): Promise<MacU
       return null;
     }
 
-    const res = await fetch(RELEASES_LATEST_API);
-    if (!res.ok) return null;
-    const rel = (await res.json()) as { tag_name?: string; assets?: ReleaseAsset[] };
-    const latest = String(rel.tag_name ?? "").replace(/^v/, "");
+    // [v0.107.0] 새 버전 확인은 GitHub "API"가 아니라 릴리스 파일(latest-mac.yml)을 직접 받아서 한다.
+    //   API는 로그인 없이 쓰면 같은 인터넷 주소(IP)당 시간당 60번까지만 허용돼서, 회사·카페처럼
+    //   여러 사람이 같은 주소를 쓰거나 30분마다 확인이 쌓이면 조용히 막혀(403) 업데이트가 멈출 수
+    //   있다(실제 맥 검증 중 GitHub 러너에서 바로 이 제한에 걸렸다). 릴리스 파일 다운로드에는 그런
+    //   제한이 없고, 맥 빌드가 다 올라간 뒤에만 이 파일이 생기므로 "윈도우만 먼저 올라간 반쪽
+    //   릴리스"를 잘못 집을 일도 없다.
+    const ymlRes = await fetch(LATEST_MAC_YML_URL);
+    if (!ymlRes.ok) return null;
+    const ymlText = await ymlRes.text();
+    const latest = parseLatestMacYmlVersion(ymlText);
     if (!latest || !isNewerVersion(latest, currentVersion)) return null;
     // [v0.107.0] 교체 스크립트가 "이 버전은 자동 적용에 실패했다"고 적어 둔 버전이면 다시 시도하지 않는다 —
     //   같은 실패를 되풀이하며 앱이 꺼졌다 켜졌다 하는 무한 반복을 막는다(다음 새 버전은 정상 시도).
     if (readFailedVersion() === latest) return null;
 
-    const assets = rel.assets ?? [];
+    const assets = macZipAssetsFromYml(ymlText, latest);
     const zipAsset = pickMacZipAsset(assets, process.arch);
-    const ymlAsset = assets.find((a) => a.name === "latest-mac.yml");
-    if (!zipAsset || !ymlAsset) return null;
+    if (!zipAsset) return null;
 
     const stagingDir = join(app.getPath("temp"), `capri-mac-update-${latest}`);
     const cached = readReadyMarker(stagingDir);
@@ -320,9 +341,6 @@ export async function prepareMacSelfUpdate(currentVersion: string): Promise<MacU
 
     mkdirSync(stagingDir, { recursive: true });
 
-    const ymlRes = await fetch(ymlAsset.browser_download_url);
-    if (!ymlRes.ok) return null;
-    const ymlText = await ymlRes.text();
     const expectedSha512 = parseLatestMacYmlSha512(ymlText, zipAsset.name);
     if (!expectedSha512) return null;
 
