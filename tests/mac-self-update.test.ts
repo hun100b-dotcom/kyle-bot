@@ -188,3 +188,146 @@ describe("buildSwapScript", () => {
     expect(mvNewIdx).toBeGreaterThan(mvOldIdx); // 기존 앱을 먼저 백업한 뒤에야 새 앱을 들여놓는다
   });
 });
+
+// =============================================================================
+// [v0.107.0] 교체 스크립트를 "진짜로 실행"해 보는 시험 — 2026-10-21 "재시작 후 안 켜짐" 사고 재발 방지
+// -----------------------------------------------------------------------------
+//   가짜 Capri.app 폴더(안에 실행파일 역할의 작은 셸 스크립트)를 만들어 놓고 교체 스크립트를
+//   실제로 돌린다. 맥의 `open` 명령 대신 실행파일을 직접 띄우는 가짜 open을 끼워 넣는다
+//   (CAPRI_SWAP_OPEN). /bin/sh가 없는 윈도우에선 건너뛴다(배포 CI는 윈도우라 거기선 생략되고,
+//   리눅스·맥 개발 환경과 맥 e2e 워크플로에서 검증된다).
+// =============================================================================
+import { spawnSync, execSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, chmodSync } from "node:fs";
+
+const canRunSh = process.platform !== "win32" && existsSync("/bin/sh");
+
+function makeFakeApp(dir: string, label: string, body: string): void {
+  mkdirSync(join(dir, "Contents", "MacOS"), { recursive: true });
+  const exe = join(dir, "Contents", "MacOS", "Capri");
+  writeFileSync(exe, `#!/bin/sh\necho ${label} >> "$(dirname "$0")/../../../ran.txt"\n${body}\n`);
+  chmodSync(exe, 0o755);
+}
+
+function runSwap(root: string, newBody: string) {
+  const oldApp = join(root, "Apps", "Capri.app");
+  const newApp = join(root, "staging", "Capri.app");
+  makeFakeApp(oldApp, "old", "sleep 30");
+  makeFakeApp(newApp, "new", newBody);
+  const fakeOpen = join(root, "fakeopen.sh");
+  writeFileSync(fakeOpen, '#!/bin/sh\nnohup "$1/Contents/MacOS/Capri" >/dev/null 2>&1 &\n');
+  chmodSync(fakeOpen, 0o755);
+  const script = join(root, "swap.sh");
+  writeFileSync(script, buildSwapScript());
+  // PID 자리엔 이미 끝난 프로세스를 넣는다(옛 앱이 종료된 상황).
+  const deadPid = spawnSync("/bin/sh", ["-c", "echo $$"], { encoding: "utf8" }).stdout.trim();
+  const log = join(root, "swap.log");
+  const fail = join(root, "failed.txt");
+  const r = spawnSync("/bin/sh", [script, deadPid, oldApp, newApp, log, fail, "9.9.9"], {
+    env: { ...process.env, CAPRI_SWAP_OPEN: fakeOpen, CAPRI_SWAP_ALIVE_WAIT: "1" },
+    encoding: "utf8",
+  });
+  spawnSync("/bin/sh", ["-c", "sleep 0.5"]); // 가짜 open은 백그라운드 실행이라 기록될 시간을 준다
+  const ranPath = join(root, "Apps", "ran.txt");
+  return {
+    status: r.status,
+    exe: readFileSync(join(oldApp, "Contents", "MacOS", "Capri"), "utf8"),
+    ran: existsSync(ranPath) ? readFileSync(ranPath, "utf8") : "",
+    log: existsSync(log) ? readFileSync(log, "utf8") : "",
+    failed: existsSync(fail) ? readFileSync(fail, "utf8").trim() : null,
+    backupLeft: existsSync(`${oldApp}.capri-update-backup`),
+    kill: () => {
+      try {
+        execSync(`pkill -f "${join(root, "Apps")}" || true`);
+      } catch {
+        /* 무시 */
+      }
+    },
+  };
+}
+
+describe.skipIf(!canRunSh)("buildSwapScript — 실제 실행", () => {
+  it("정상: 새 앱으로 바꾸고 실행하며, 백업은 지우고 실패 표식은 남기지 않는다", () => {
+    const root = mkdtempSync(join(tmpdir(), "capri-swap-ok-"));
+    const r = runSwap(root, "sleep 30");
+    try {
+      expect(r.status).toBe(0);
+      expect(r.exe).toContain("echo new");
+      expect(r.ran).toContain("new");
+      expect(r.backupLeft).toBe(false);
+      expect(r.failed).toBeNull();
+    } finally {
+      r.kill();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("새 앱이 켜지자마자 죽으면: 옛 앱으로 되돌려 **다시 연다** + 그 버전을 실패로 표시(무한 재시도 방지)", () => {
+    const root = mkdtempSync(join(tmpdir(), "capri-swap-die-"));
+    const r = runSwap(root, "exit 1");
+    try {
+      expect(r.status).toBe(1);
+      expect(r.exe).toContain("echo old"); // 제자리에 옛 앱이 돌아와 있다
+      expect(r.ran.trim().split("\n")).toEqual(["new", "old"]); // 새 앱 시도 → 실패 → 옛 앱 다시 실행
+      expect(r.failed).toBe("9.9.9");
+      expect(r.log).toContain("되돌리기 완료");
+    } finally {
+      r.kill();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("새 앱 폴더가 없으면: 아무것도 안 건드리고 옛 앱을 다시 연다(그냥 꺼진 채로 끝나지 않음)", () => {
+    const root = mkdtempSync(join(tmpdir(), "capri-swap-missing-"));
+    const r = runSwap(root, "sleep 30");
+    r.kill();
+    // 새 앱을 지우고 다시 실행
+    rmSync(join(root, "staging"), { recursive: true, force: true });
+    rmSync(join(root, "Apps"), { recursive: true, force: true });
+    makeFakeApp(join(root, "Apps", "Capri.app"), "old", "sleep 30");
+    const deadPid = spawnSync("/bin/sh", ["-c", "echo $$"], { encoding: "utf8" }).stdout.trim();
+    const res = spawnSync(
+      "/bin/sh",
+      [join(root, "swap.sh"), deadPid, join(root, "Apps", "Capri.app"), join(root, "staging", "Capri.app"), join(root, "l.log"), join(root, "f.txt"), "9.9.9"],
+      { env: { ...process.env, CAPRI_SWAP_OPEN: join(root, "fakeopen.sh"), CAPRI_SWAP_ALIVE_WAIT: "1" } },
+    );
+    try {
+      expect(res.status).toBe(1);
+      expect(readFileSync(join(root, "Apps", "Capri.app", "Contents", "MacOS", "Capri"), "utf8")).toContain("echo old");
+      // fakeopen은 백그라운드로 띄우므로 잠깐 기다린 뒤 확인
+      spawnSync("/bin/sh", ["-c", "sleep 0.5"]);
+      expect(readFileSync(join(root, "Apps", "ran.txt"), "utf8")).toContain("old");
+    } finally {
+      r.kill();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("latest-mac.yml로 새 버전 찾기(v0.107.0 — GitHub API 호출 제한 회피)", () => {
+  const yml = `version: 0.106.1
+files:
+  - url: Capri-0.106.1-mac.zip
+    sha512: aaa==
+    size: 1
+  - url: Capri-0.106.1-arm64-mac.zip
+    sha512: bbb==
+    size: 2
+path: Capri-0.106.1-mac.zip
+sha512: aaa==
+releaseDate: '2026-10-20T17:57:35.097Z'
+`;
+  it("버전을 읽는다", async () => {
+    const { parseLatestMacYmlVersion } = await import("../electron/mac-self-update");
+    expect(parseLatestMacYmlVersion(yml)).toBe("0.106.1");
+  });
+  it("칩별 zip 다운로드 주소를 만들고, 이 맥의 칩에 맞는 걸 고른다", async () => {
+    const { macZipAssetsFromYml } = await import("../electron/mac-self-update");
+    const assets = macZipAssetsFromYml(yml, "0.106.1");
+    expect(assets.map((a) => a.name)).toEqual(["Capri-0.106.1-mac.zip", "Capri-0.106.1-arm64-mac.zip"]);
+    expect(pickMacZipAsset(assets, "arm64")?.browser_download_url).toBe(
+      "https://github.com/hun100b-dotcom/kyle-bot-releases/releases/download/v0.106.1/Capri-0.106.1-arm64-mac.zip",
+    );
+    expect(pickMacZipAsset(assets, "x64")?.name).toBe("Capri-0.106.1-mac.zip");
+  });
+});

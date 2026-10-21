@@ -42,4 +42,17 @@ APP="$TARGET/Capri.app"
 # ② 애드혹 서명 재적용 — 옮기는 과정에서 깨진 서명을 복구한다.
 /usr/bin/codesign --force --deep --sign - "$APP" 2>/dev/null
 
+# ③ [v0.107.0] 앱 소유자를 "지금 로그인한 사람"으로 바꾼다.
+#   설치팩은 관리자(root) 권한으로 깔리기 때문에 앱 폴더 주인이 root가 된다. 그러면 나중에 앱이
+#   자동 업데이트로 자기 자신을 갈아끼울 때(electron/mac-self-update.ts) 일반 권한으로는 못 옮겨
+#   교체가 실패할 수 있다(2026-10-21 "재시작 후 안 켜짐" 사고의 원인 후보). 주인을 사용자로
+#   바꿔 두면 매번 암호를 묻지 않고 조용히 업데이트된다.
+CONSOLE_USER="$(/usr/bin/stat -f%Su /dev/console 2>/dev/null)"
+if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
+  /usr/sbin/chown -R "$CONSOLE_USER":staff "$APP" 2>/dev/null
+fi
+
+# ④ 예전 자동 업데이트가 남긴 백업/실패 폴더가 있으면 치운다(관리자 소유라 앱이 못 지운 것).
+/bin/rm -rf "$APP".capri-update-backup* "$APP.capri-failed" 2>/dev/null
+
 exit 0

@@ -133,47 +133,135 @@ export function sha512Base64OfFile(filePath: string): string {
 }
 
 /**
- * 앱 종료 시 실행할 교체 스크립트(순수 텍스트 — $1 PID, $2 기존 .app, $3 새 .app을
- * 인자로 받는다. 값을 스크립트 문자열에 직접 끼워 넣지 않고 인자로 넘기는 이유는 경로에
- * 공백이 있어도(예: "/Users/Kail Kim/Applications/Capri.app") 안전하게 다루기 위해서다).
+ * 앱 종료 시 실행할 교체 스크립트(순수 텍스트). 값은 스크립트에 끼워 넣지 않고 **인자로** 받는다
+ * — 경로에 공백이 있어도(예: "/Users/Kail Kim/Applications/Capri.app") 안전하게 다루기 위해서다.
+ *   $1 PID(끝나길 기다릴 옛 앱) · $2 기존 .app · $3 새 .app · $4 로그 파일 · $5 실패 표식 파일 · $6 새 버전
+ *
+ * [v0.107.0 — 2026-10-21 "재시작 창 뜬 뒤 앱이 꺼지고 다시 안 켜짐" 긴급 수정]
+ *   옛 스크립트는 어느 단계든 실패하면 `exit 1`로 **조용히 끝나 버렸다** — 앱은 이미 꺼진
+ *   상태라, 사용자 눈에는 "꺼지고 다시 안 켜짐"으로 보인다. 게다가 새 앱이 켜지자마자 죽어도
+ *   (서명 문제 등) 백업을 이미 지운 뒤라 되돌릴 길이 없었다. 그래서 이렇게 바꿨다:
+ *     ① **어떤 경우에도 마지막엔 반드시 앱을 다시 연다**(새 앱이 안 되면 옛 앱이라도).
+ *     ② 교체 직후 새 앱이 20초 동안 정말 살아 있는지 확인한 **뒤에야** 백업을 지운다 —
+ *        죽으면 백업으로 되돌리고 옛 앱을 연다.
+ *     ③ 실패한 버전은 표식 파일에 적어 둔다 → 다음 실행이 같은 버전을 또 시도해
+ *        "꺼졌다 켜졌다"를 무한 반복하지 않게(prepareMacSelfUpdate가 이 표식을 본다).
+ *     ④ 설치팩(.pkg)으로 깐 앱은 관리자(root) 소유라 일반 권한으로 못 옮길 수 있다 →
+ *        그때만 macOS 기본 "관리자 암호" 창으로 한 번 더 시도한다.
+ *     ⑤ 모든 단계를 로그 파일(~/Library/Logs/Capri/update-swap.log)에 남긴다 — 다음에
+ *        무슨 일이 있었는지 추측이 아니라 기록으로 확인하려고.
+ *   테스트에서 바꿔 끼울 수 있게 open 명령과 생존 확인 시간은 환경변수로 덮어쓸 수 있다.
  */
 export function buildSwapScript(): string {
   return `#!/bin/sh
-# Capri 맥 자동업데이트 — 앱이 완전히 종료된 뒤에만 번들을 교체한다.
+# Capri 맥 자동업데이트 — 앱이 완전히 종료된 뒤에만 번들을 교체하고, 무슨 일이 있어도 앱을 다시 연다.
 set -u
 PID="$1"
 OLD_APP="$2"
 NEW_APP="$3"
+LOG="$4"
+FAIL_MARK="$5"
+NEW_VER="$6"
+OPEN_CMD="\${CAPRI_SWAP_OPEN:-open}"
+ALIVE_WAIT="\${CAPRI_SWAP_ALIVE_WAIT:-20}"
+BACKUP="\${OLD_APP}.capri-update-backup"
 
-# 1) 기존 프로세스가 완전히 끝날 때까지 기다린다(최대 30초, 0.1초 간격 확인).
-#    살아있는 동안은 아래 어떤 파일 작업도 하지 않는다 — 실행 중 번들 교체 금지.
+mkdir -p "$(dirname "$LOG")" 2>/dev/null
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG" 2>/dev/null; }
+reopen() { log "앱 다시 열기: $1"; $OPEN_CMD "$1" >>"$LOG" 2>&1 || log "열기 실패(open 종료코드 $?)"; }
+mark_failed() { log "실패 — v$NEW_VER 은(는) 자동 적용 실패로 표시(같은 버전 재시도 안 함): $1"; echo "$NEW_VER" >"$FAIL_MARK" 2>/dev/null; }
+alive() { pgrep -f "$OLD_APP/Contents/MacOS/" >/dev/null 2>&1; }
+
+log "=== 교체 시작: PID=$PID 새 버전=v$NEW_VER 기존=$OLD_APP 새 앱=$NEW_APP"
+
+# 1) 옛 앱이 완전히 끝날 때까지 기다린다(최대 120초). 살아 있는 동안은 파일을 절대 건드리지 않는다.
 i=0
 while kill -0 "$PID" 2>/dev/null; do
   i=$((i + 1))
-  if [ "$i" -ge 300 ]; then
+  if [ "$i" -ge 1200 ]; then
+    log "옛 앱이 120초 안에 안 꺼짐 — 교체 포기(옛 앱은 그대로 실행 중)"
     exit 1
   fi
   sleep 0.1
 done
+log "옛 앱 종료 확인"
 
-# 2) 이름 바꿔치기로 교체한다. 같은 볼륨 안의 mv(rename)는 원자적이라, 두 mv 사이의
-#    아주 짧은 순간을 빼면 "기존 앱 또는 새 앱 중 하나"는 항상 제자리에 있다.
-BACKUP="\${OLD_APP}.capri-update-backup"
-rm -rf "$BACKUP"
-if ! mv "$OLD_APP" "$BACKUP"; then
-  # 기존 앱을 백업 이름으로도 못 옮겼으면 아무것도 건드리지 않은 것과 같다 — 그대로 중단.
+if [ ! -d "$NEW_APP/Contents/MacOS" ]; then
+  mark_failed "새 앱 폴더가 없음"
+  reopen "$OLD_APP"
   exit 1
 fi
-if ! mv "$NEW_APP" "$OLD_APP"; then
-  # 새 앱으로 못 옮겼으면 반드시 기존 앱을 되돌린다 — 자리가 빈 채로 끝나면 안 된다.
-  mv "$BACKUP" "$OLD_APP"
+
+# 2) 이름 바꿔치기. 같은 볼륨 안 mv(rename)는 원자적이라 "기존 앱 또는 새 앱 중 하나"는 항상 제자리에 있다.
+#    ★ [v0.107.0 사고의 직접 원인] 설치팩(.pkg)으로 깐 앱은 관리자(root) 소유다. 첫 자동 업데이트 때
+#    그 root 소유 옛 앱이 백업 이름으로 옮겨진 뒤 **일반 권한으론 못 지워져 남는다.** 그러면 두 번째
+#    업데이트 때 옛 스크립트의 'mv 기존앱 백업이름'이 "이미 있는 root 폴더 안으로 넣기"가 되어 권한
+#    오류로 실패 → 조용히 종료 → 앱이 꺼진 채 안 켜졌다. 그래서 지우지 못한 백업이 남아 있으면
+#    겹치지 않는 새 이름(시각 붙임)을 쓴다.
+rm -rf "$BACKUP" 2>/dev/null
+if [ -e "$BACKUP" ]; then
+  log "지우지 못한 옛 백업이 남아 있음(관리자 소유로 추정) — 새 백업 이름 사용"
+  BACKUP="\${OLD_APP}.capri-update-backup-$(date +%s)"
+fi
+SWAPPED=0
+if mv "$OLD_APP" "$BACKUP" 2>>"$LOG"; then
+  if mv "$NEW_APP" "$OLD_APP" 2>>"$LOG"; then
+    SWAPPED=1
+  else
+    log "새 앱 옮기기 실패 — 기존 앱 되돌림"
+    mv "$BACKUP" "$OLD_APP" 2>>"$LOG"
+  fi
+fi
+
+if [ "$SWAPPED" -ne 1 ]; then
+  # 일반 권한으로 못 옮겼다(설치팩으로 깐 앱 = 관리자 소유). macOS 기본 관리자 암호 창으로 한 번만 더 시도.
+  log "일반 권한 교체 실패 — 관리자 권한으로 재시도"
+  ME="$(id -un)"
+  /usr/bin/osascript - "$OLD_APP" "$NEW_APP" "$BACKUP" "$ME" >>"$LOG" 2>&1 <<'APPLESCRIPT'
+on run argv
+  set o to quoted form of item 1 of argv
+  set n to quoted form of item 2 of argv
+  set b to quoted form of item 3 of argv
+  set u to quoted form of item 4 of argv
+  do shell script "rm -rf " & b & " && mv " & o & " " & b & " && (mv " & n & " " & o & " || (mv " & b & " " & o & "; exit 1)) && chown -R " & u & " " & o & " " & b with prompt "Capri 새 버전을 설치하려면 암호가 한 번 필요합니다." with administrator privileges
+end run
+APPLESCRIPT
+  if [ -d "$BACKUP" ] && [ -d "$OLD_APP/Contents/MacOS" ] && [ ! -d "$NEW_APP" ]; then
+    SWAPPED=1
+    log "관리자 권한 교체 성공"
+  fi
+fi
+
+if [ "$SWAPPED" -ne 1 ]; then
+  mark_failed "교체 불가(권한 등) — 기존 앱 유지"
+  [ -d "$OLD_APP" ] || { [ -d "$BACKUP" ] && mv "$BACKUP" "$OLD_APP"; }
+  reopen "$OLD_APP"
   exit 1
 fi
-rm -rf "$BACKUP"
 
-# 3) 다시 연다.
-open "$OLD_APP"
-exit 0
+# 3) 새 앱을 열고, 정말 살아 있는지 확인한 뒤에야 백업을 지운다.
+log "교체 완료 — 새 앱 실행"
+reopen "$OLD_APP"
+sleep "$ALIVE_WAIT"
+if alive; then
+  log "새 앱 정상 실행 확인 — 백업 삭제, 업데이트 성공(v$NEW_VER)"
+  rm -rf "$BACKUP" 2>/dev/null
+  rm -f "$FAIL_MARK" 2>/dev/null
+  exit 0
+fi
+
+log "새 앱이 \${ALIVE_WAIT}초 안에 꺼짐 — 옛 앱으로 되돌림"
+rm -rf "$OLD_APP.capri-failed" 2>/dev/null
+if mv "$OLD_APP" "$OLD_APP.capri-failed" 2>>"$LOG" && mv "$BACKUP" "$OLD_APP" 2>>"$LOG"; then
+  rm -rf "$OLD_APP.capri-failed" 2>/dev/null
+  log "되돌리기 완료"
+else
+  log "되돌리기 실패 — 남아 있는 앱을 그대로 연다"
+  [ -d "$OLD_APP" ] || mv "$OLD_APP.capri-failed" "$OLD_APP" 2>>"$LOG"
+fi
+mark_failed "새 앱 실행 직후 종료"
+reopen "$OLD_APP"
+exit 1
 `;
 }
 
@@ -183,7 +271,23 @@ export interface MacUpdateReadyInfo {
   oldAppPath: string;
 }
 
-const RELEASES_LATEST_API = "https://api.github.com/repos/hun100b-dotcom/kyle-bot-releases/releases/latest";
+const RELEASES_BASE = "https://github.com/hun100b-dotcom/kyle-bot-releases/releases";
+const LATEST_MAC_YML_URL = `${RELEASES_BASE}/latest/download/latest-mac.yml`;
+
+/** latest-mac.yml 맨 위의 `version: 0.107.0` 줄에서 버전을 뽑는다. */
+export function parseLatestMacYmlVersion(ymlText: string): string | null {
+  const m = ymlText.match(/^version:\s*['"]?([0-9][0-9A-Za-z.\-]*)['"]?\s*$/m);
+  return m ? m[1] : null;
+}
+
+/** latest-mac.yml의 files 목록에 있는 zip들을 "다운로드 주소가 붙은 자산"으로 바꾼다. */
+export function macZipAssetsFromYml(ymlText: string, version: string): ReleaseAsset[] {
+  const out: ReleaseAsset[] = [];
+  for (const m of ymlText.matchAll(/^\s*-\s*url:\s*(\S+?-mac\.zip)\s*$/gm)) {
+    out.push({ name: m[1], browser_download_url: `${RELEASES_BASE}/download/v${version}/${m[1]}` });
+  }
+  return out;
+}
 
 /** stagingDir/.ready 마커 — 30분마다 재확인할 때마다 120MB를 다시 받지 않기 위한 캐시. */
 function readReadyMarker(stagingDir: string): MacUpdateReadyInfo | null {
@@ -212,16 +316,24 @@ export async function prepareMacSelfUpdate(currentVersion: string): Promise<MacU
       return null;
     }
 
-    const res = await fetch(RELEASES_LATEST_API);
-    if (!res.ok) return null;
-    const rel = (await res.json()) as { tag_name?: string; assets?: ReleaseAsset[] };
-    const latest = String(rel.tag_name ?? "").replace(/^v/, "");
+    // [v0.107.0] 새 버전 확인은 GitHub "API"가 아니라 릴리스 파일(latest-mac.yml)을 직접 받아서 한다.
+    //   API는 로그인 없이 쓰면 같은 인터넷 주소(IP)당 시간당 60번까지만 허용돼서, 회사·카페처럼
+    //   여러 사람이 같은 주소를 쓰거나 30분마다 확인이 쌓이면 조용히 막혀(403) 업데이트가 멈출 수
+    //   있다(실제 맥 검증 중 GitHub 러너에서 바로 이 제한에 걸렸다). 릴리스 파일 다운로드에는 그런
+    //   제한이 없고, 맥 빌드가 다 올라간 뒤에만 이 파일이 생기므로 "윈도우만 먼저 올라간 반쪽
+    //   릴리스"를 잘못 집을 일도 없다.
+    const ymlRes = await fetch(LATEST_MAC_YML_URL);
+    if (!ymlRes.ok) return null;
+    const ymlText = await ymlRes.text();
+    const latest = parseLatestMacYmlVersion(ymlText);
     if (!latest || !isNewerVersion(latest, currentVersion)) return null;
+    // [v0.107.0] 교체 스크립트가 "이 버전은 자동 적용에 실패했다"고 적어 둔 버전이면 다시 시도하지 않는다 —
+    //   같은 실패를 되풀이하며 앱이 꺼졌다 켜졌다 하는 무한 반복을 막는다(다음 새 버전은 정상 시도).
+    if (readFailedVersion() === latest) return null;
 
-    const assets = rel.assets ?? [];
+    const assets = macZipAssetsFromYml(ymlText, latest);
     const zipAsset = pickMacZipAsset(assets, process.arch);
-    const ymlAsset = assets.find((a) => a.name === "latest-mac.yml");
-    if (!zipAsset || !ymlAsset) return null;
+    if (!zipAsset) return null;
 
     const stagingDir = join(app.getPath("temp"), `capri-mac-update-${latest}`);
     const cached = readReadyMarker(stagingDir);
@@ -229,9 +341,6 @@ export async function prepareMacSelfUpdate(currentVersion: string): Promise<MacU
 
     mkdirSync(stagingDir, { recursive: true });
 
-    const ymlRes = await fetch(ymlAsset.browser_download_url);
-    if (!ymlRes.ok) return null;
-    const ymlText = await ymlRes.text();
     const expectedSha512 = parseLatestMacYmlSha512(ymlText, zipAsset.name);
     if (!expectedSha512) return null;
 
@@ -250,7 +359,15 @@ export async function prepareMacSelfUpdate(currentVersion: string): Promise<MacU
     const extractDir = join(stagingDir, "extracted");
     rmSync(extractDir, { recursive: true, force: true });
     mkdirSync(extractDir, { recursive: true });
-    const unzipResult = spawnSync("unzip", ["-q", "-o", zipPath, "-d", extractDir], { stdio: "ignore" });
+    // [v0.107.0] 압축 풀기는 macOS 기본 도구 ditto를 먼저 쓴다 — 애플이 앱 번들(.app)용으로 권장하는
+    //   방식이라 심볼릭 링크·실행 권한·확장 속성을 빠짐없이 보존한다(앱 서명이 깨지지 않게).
+    //   ditto가 어떤 이유로 실패하면 예전 방식(unzip)으로 한 번 더 시도한다.
+    let unzipResult = spawnSync("/usr/bin/ditto", ["-x", "-k", zipPath, extractDir], { stdio: "ignore" });
+    if (unzipResult.status !== 0) {
+      rmSync(extractDir, { recursive: true, force: true });
+      mkdirSync(extractDir, { recursive: true });
+      unzipResult = spawnSync("unzip", ["-q", "-o", zipPath, "-d", extractDir], { stdio: "ignore" });
+    }
     if (unzipResult.status !== 0) {
       console.error("[capri][mac-self-update] 압축 해제 실패:", unzipResult.error ?? unzipResult.status);
       return null;
@@ -262,7 +379,19 @@ export async function prepareMacSelfUpdate(currentVersion: string): Promise<MacU
     if (!existsSync(join(newAppPath, "Contents", "MacOS"))) return null; // 최소한의 구조 확인
 
     // 격리(quarantine) 속성 재귀 제거 — 안 지우면 교체해도 실행할 때마다 Gatekeeper 경고.
-    spawnSync("xattr", ["-cr", newAppPath], { stdio: "ignore" });
+    spawnSync("/usr/bin/xattr", ["-cr", newAppPath], { stdio: "ignore" });
+
+    // [v0.107.0] ★ 애드혹 서명을 이 맥에서 다시 찍고, 서명이 온전한지 검사한다.
+    //   설치팩(.pkg)의 postinstall은 2026-10-16 사고(실행 0.4초 만에 꺼짐) 뒤로 설치할 때마다
+    //   이 두 가지(xattr + 재서명)를 해 왔는데, 자동 업데이트 경로엔 재서명이 빠져 있었다.
+    //   서명이 깨진 앱은 애플 실리콘에서 실행하는 순간 커널이 죽인다 → "재시작 후 안 켜짐".
+    //   검사에 실패하면 교체 자체를 하지 않는다(기존 앱은 그대로, 다음 주기에 다시 받음).
+    spawnSync("/usr/bin/codesign", ["--force", "--deep", "--sign", "-", newAppPath], { stdio: "ignore" });
+    const verify = spawnSync("/usr/bin/codesign", ["--verify", "--deep", "--strict", newAppPath], { encoding: "utf8" });
+    if (verify.status !== 0) {
+      console.error("[capri][mac-self-update] 새 앱 서명 검사 실패 — 교체하지 않습니다:", verify.stderr);
+      return null;
+    }
 
     const ready: MacUpdateReadyInfo = { version: latest, newAppPath, oldAppPath };
     writeFileSync(join(stagingDir, ".ready"), JSON.stringify(ready), "utf8");
@@ -270,6 +399,21 @@ export async function prepareMacSelfUpdate(currentVersion: string): Promise<MacU
     return ready;
   } catch (err) {
     console.error("[capri][mac-self-update] 준비 실패(조용히 무시, 다음 주기에 재시도):", err);
+    return null;
+  }
+}
+
+/** [v0.107.0] 교체 기록(로그)·실패 표식 파일 위치. 로그는 사람이 Finder에서 찾기 쉬운 표준 위치에 둔다. */
+export function swapLogPath(): string {
+  return join(app.getPath("logs"), "update-swap.log");
+}
+function failedMarkPath(): string {
+  return join(app.getPath("userData"), "mac-update-failed-version.txt");
+}
+function readFailedVersion(): string | null {
+  try {
+    return readFileSync(failedMarkPath(), "utf8").trim() || null;
+  } catch {
     return null;
   }
 }
@@ -289,7 +433,7 @@ export function scheduleMacSelfUpdateSwap(ready: MacUpdateReadyInfo): void {
     try {
       const scriptPath = join(app.getPath("temp"), "capri-mac-swap.sh");
       writeFileSync(scriptPath, buildSwapScript(), { mode: 0o755 });
-      const child = spawn("/bin/sh", [scriptPath, String(process.pid), ready.oldAppPath, ready.newAppPath], {
+      const child = spawn("/bin/sh", [scriptPath, String(process.pid), ready.oldAppPath, ready.newAppPath, swapLogPath(), failedMarkPath(), ready.version], {
         detached: true,
         stdio: "ignore",
       });

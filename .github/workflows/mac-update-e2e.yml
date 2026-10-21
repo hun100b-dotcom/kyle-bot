@@ -1,0 +1,52 @@
+# =============================================================================
+# mac-update-e2e.yml — 맥 자동 업데이트(자기 교체·재시작)를 진짜 맥에서 검증
+# -----------------------------------------------------------------------------
+# [왜] 맥 자동 업데이트는 리눅스·윈도우에선 시험할 수 없다. 2026-10-21 "재시작 후 앱이 안 켜짐"
+#   사고를 계기로, 업데이트 관련 코드가 바뀐 PR마다 실제 맥 러너에서 처음부터 끝까지 돌려 본다.
+#   (배포는 하지 않는다 — 공개 릴리스는 건드리지 않고, 결과만 확인한다.)
+#
+# [시험] this-pr: 이 PR 코드로 만든 앱(옛 버전 역할)이 최신 배포 버전으로 스스로 업데이트·재시작하는지
+#   (pkg 설치 직후 + "root 소유 옛 백업 폴더가 남은" 사용자 맥 상태 두 가지).
+#   ※ 2026-10-21 진단 때는 "이미 배포된 v0.106.0 → v0.106.1" 재현 작업도 돌려 고장을 확인했다
+#     (EXPECT=fail + SIMULATE_ROOT_LEFTOVER=1 로 재현됨). 옛 코드는 GitHub API 호출 제한에도 걸려
+#     결과가 들쭉날쭉해 상시 검사에서는 뺐다 — 필요하면 scripts/mac-update-e2e.sh 로 다시 돌릴 수 있다.
+# =============================================================================
+name: mac-update-e2e
+
+on:
+  pull_request:
+    paths:
+      - "electron/**"
+      - "build/**"
+      - "electron-builder.yml"
+      - "scripts/mac-update-e2e.sh"
+      - ".github/workflows/mac-update-e2e.yml"
+  workflow_dispatch:
+
+jobs:
+  this-pr:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: 이 PR 코드로 "옛 버전" 역할의 설치팩 만들기(버전을 0.0.1로 낮춰 최신 배포본을 새 버전으로 인식하게)
+        run: |
+          set -e
+          npm version 0.0.1 --no-git-tag-version --allow-same-version
+          npm run dist:mac
+          ls -la release
+      - name: 최신 배포 버전 번호
+        id: rel
+        run: |
+          LATEST=$(curl -sSL -H "Authorization: Bearer ${{ github.token }}" https://api.github.com/repos/hun100b-dotcom/kyle-bot-releases/releases/latest | python3 -c "import json,sys;print(json.load(sys.stdin)['tag_name'][1:])")
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+      - name: 검증 — 이 PR 코드가 최신 버전으로 스스로 업데이트·재시작하는가
+        run: bash scripts/mac-update-e2e.sh release/Capri-0.0.1-universal.pkg "${{ steps.rel.outputs.latest }}" 420
+      - name: 검증 — root 소유 옛 백업이 남아 있어도(사용자 맥 상태) 이 PR 코드는 업데이트·재시작에 성공하는가
+        env:
+          SIMULATE_ROOT_LEFTOVER: "1"
+        run: bash scripts/mac-update-e2e.sh release/Capri-0.0.1-universal.pkg "${{ steps.rel.outputs.latest }}" 420
