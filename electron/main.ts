@@ -651,6 +651,14 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:trades:close", (_ev, id: string, exitPrice: number, kind: "tp" | "sl" | "manual") => e.closeTradeManual(id, exitPrice, kind));
   ipcMain.handle("tool:trades:delete", (_ev, id: string) => e.deleteTrade(id));
   e.on("trades", (log) => win?.webContents.send("tool:tradesEvent", log));
+  // [v0.108.0] 계정 동기화(설정·기록) — 다른 기기에서 바꾼 설정이 들어오면 화면 입력칸을 즉시 다시 채운다.
+  e.on("settingsSynced", (st) => win?.webContents.send("tool:settingsSyncedEvent", st));
+  e.on("uiPrefsSynced", (p) => win?.webContents.send("tool:uiPrefsSyncedEvent", p));
+  e.on("itemsSynced", (p) => win?.webContents.send("tool:itemsSyncedEvent", p));
+  ipcMain.handle("tool:uipref:get", (_ev, key: string) => e.getUiPref(String(key ?? "")));
+  ipcMain.handle("tool:uipref:set", (_ev, key: string, value: string | null) => e.setUiPref(String(key ?? ""), value == null ? null : String(value)));
+  ipcMain.handle("tool:itemsync:status", () => e.getItemSyncStatus());
+  ipcMain.handle("tool:itemsync:now", () => e.itemSyncNow());
   ipcMain.handle("tool:positions", () => e.positions());
   // [v0.3.3] 주문 현황(토스 스타일) 리치 뷰
   ipcMain.handle("tool:holdingsView", () => e.holdingsView());

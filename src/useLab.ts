@@ -3,8 +3,10 @@
 // -----------------------------------------------------------------------------
 // [PC vs 폰]
 //   · PC(데스크톱 앱): 엔진이 이 기기에 있으니 getLabSummary 등을 직접 부른다.
-//   · 폰(웹): 로컬 엔진엔 데이터가 없다 → PC가 상태 미러에 올려 둔 요약(pcLab)만 보여 주고,
-//     켜기/끄기·설정은 원격 명령(saveLabSettings)으로 PC에 보낸다. 상세 로우·내보내기는 PC 전용.
+//   · 폰(웹): [v0.108.0] 이제 폰 엔진도 계정 동기화로 연구소 신호 전체를 받는다(연구소 화면을 처음 열 때).
+//     그래서 폰도 PC와 "같은 데이터·같은 계산"으로 요약을 직접 만든다. 다만 "지금 수집 중인지·스캔 진행" 같은
+//     실시간 상태는 수집하는 PC 것이므로 PC가 올린 상태 사진(pcLab.status)을 쓴다. 받기 전(첫 몇 초)엔 예전처럼 PC 요약을 보여 준다.
+//     켜기/끄기는 원격 명령으로 PC에 보낸다(수집은 PC만 한다). 기준값(몸통·거래량 등)은 계정 설정이라 폰에서 저장해도 모든 기기에 반영된다.
 // =============================================================================
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -54,7 +56,6 @@ export function useLab(isWebApp: boolean, pcLab: LabMirror | null, active: boole
   }, []);
 
   const refresh = useCallback(async () => {
-    if (isWebApp) return;
     try {
       const s = await window.kyletool.getLabSummary?.(filter);
       if (s) setLocal(s);
@@ -65,21 +66,37 @@ export function useLab(isWebApp: boolean, pcLab: LabMirror | null, active: boole
 
   // 연구소 탭이 열려 있는 동안: 필터가 바뀔 때 즉시 + 15초마다 갱신(스캔 중 진행 상황이 보이게)
   useEffect(() => {
-    if (!active || isWebApp) return;
+    if (!active) return;
     void refresh();
     const id = setInterval(() => void refresh(), 15_000);
-    return () => clearInterval(id);
-  }, [active, isWebApp, refresh]);
+    // [v0.108.0] 다른 기기에서 연구소 신호가 들어오면 15초를 기다리지 않고 바로 다시 그린다.
+    const off = window.kyletool.onItemsSynced?.((p) => {
+      if (p.kind === "lab_signal") void refresh();
+    });
+    return () => {
+      clearInterval(id);
+      off?.();
+    };
+  }, [active, refresh]);
 
-  const summary: LabSummary | null = useMemo(() => (isWebApp ? (pcLab ? mirrorToSummary(pcLab) : null) : local), [isWebApp, pcLab, local]);
+  const summary: LabSummary | null = useMemo(() => {
+    if (!isWebApp) return local;
+    // [v0.108.0] 폰: 동기화로 받은 전체 기록으로 만든 요약(local)을 우선 — 수집 상태만 PC 것으로 덮는다.
+    if (local && local.counts.total > 0) return pcLab ? { ...local, status: pcLab.status } : local;
+    return pcLab ? mirrorToSummary(pcLab) : local;
+  }, [isWebApp, pcLab, local]);
 
   const saveSettings = useCallback(
     async (input: { enabled?: boolean; rankCount?: number; dojiBodyMaxPct?: number; bodyMinPct?: number; volRatioMin?: number; minRangePct?: number }) => {
       setBusy(true);
       try {
         if (isWebApp) {
+          // [v0.108.0] 기준값은 폰에도 저장(→ 계정 동기화로 모든 기기). 켜기/끄기는 수집하는 PC의 일이라 명령으로만 보낸다.
+          const { enabled: _enabled, ...criteria } = input;
+          if (Object.keys(criteria).length > 0) await window.kyletool.saveLabSettings?.(criteria);
           const r = await window.kyletool.sendCommand("saveLabSettings", input);
-          setMsg(r.ok ? "✅ PC로 명령을 보냈습니다(PC가 몇 초 안에 반영 — 아래 상태가 곧 갱신됩니다)." : `⚠️ ${r.message}`);
+          setMsg(r.ok ? "✅ 저장했습니다 — 계정의 모든 기기에 반영되고, 켜기/끄기는 PC가 몇 초 안에 처리합니다." : `⚠️ ${r.message}`);
+          await refresh();
         } else {
           await window.kyletool.saveLabSettings?.(input);
           setMsg("✅ 저장했습니다.");
@@ -138,7 +155,10 @@ export function useLab(isWebApp: boolean, pcLab: LabMirror | null, active: boole
     [isWebApp],
   );
 
-  return { summary, filter, setFilter, busy, msg, setMsg, refresh, saveSettings, scanNow, reset, download, isMirror: isWebApp };
+  // [v0.108.0] isMirror = "PC 요약만 있는 상태"(폰이 아직 전체 기록을 못 받음) — 상세 표·분해 화면을 막는 데 쓴다.
+  //   isWeb = 폰인가 — 지금 스캔·초기화(모든 기기의 연구소 기록을 지움)·내보내기는 PC에서만 하게 막는 데 쓴다.
+  const isMirror = isWebApp && !(local && local.counts.total > 0);
+  return { summary, filter, setFilter, busy, msg, setMsg, refresh, saveSettings, scanNow, reset, download, isMirror, isWeb: isWebApp };
 }
 
 export type LabApi = ReturnType<typeof useLab>;

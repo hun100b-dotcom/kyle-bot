@@ -1337,6 +1337,9 @@ function App() {
   //   /describeScreenCriteria를 공용 함수로 뽑았던 v0.70.0과 같은 이유: 두 곳에 따로
   //   적어두면 나중에 하나만 고쳐져 말이 달라지는 사고가 난다).
   // --------------------------------------------------------------------------
+  // [v0.108.0] 계정 동기화 이벤트 처리기 — 아래에서 최신 함수로 매 렌더 갈아 끼운다(이벤트 구독은 한 번만 하므로 ref로 넘긴다).
+  const settingsSyncedRef = useRef<(s: ToolSettings) => void>(() => {});
+  const itemsSyncedRef = useRef<(kind: string) => void>(() => {});
   const applyAutoFormsFromSettings = (s: ToolSettings) => {
     setAutoForm({
       maxPositions: String(s.autoTradeMaxPositions ?? 3),
@@ -1383,11 +1386,9 @@ function App() {
       afterEnabled: s.autoScanAfterEnabled ?? true,
     });
   };
-  /** [v0.84.0] PC 전용 — 지금 엔진에 실제로 저장된 값을 다시 읽어와 두 폼을 통째로 재동기화한다.
-   *  isWebApp이면 아무 것도 안 한다(폰의 입력칸은 "PC로 보낼 명령 초안"이라 로컬 재조회가 의미
-   *  없음 — v0.61.1 설계 그대로 존중). */
+  /** [v0.84.0] 지금 엔진에 실제로 저장된 값을 다시 읽어와 두 폼을 통째로 재동기화한다.
+   *  [v0.108.0] 폰도 한다 — 이제 폰 엔진의 설정은 계정 동기화로 PC와 같은 값이다(예전엔 폰 엔진이 기본값이라 건너뛰었다). */
   const resyncPcFormsFromEngine = async () => {
-    if (isWebApp) return;
     const s = await window.kyletool.getSettings();
     setSettings(s);
     applyAutoFormsFromSettings(s);
@@ -1431,6 +1432,10 @@ function App() {
     void refreshAuth(); // [v0.8.1] 로그인 상태 복원(+운영자면 승인 대기 목록도, v0.24.0)
     void loadAnalysis(); // [v0.19.0] 매매분석(실체결) 시작 시 로드
     const off = window.kyletool.onJournal((e) => setJournal((prev) => [...prev.slice(-99), e]));
+    // [v0.108.0] 다른 기기(PC·폰·노트북)에서 바꾼 설정이 계정 동기화로 들어오면 입력칸을 즉시 그 값으로 다시 채운다.
+    //   (예전엔 화면을 켤 때 한 번만 채워서, 다른 기기에서 바꾼 값이 이 화면엔 영영 안 보였다 — "동기화 안 됨"의 직접 원인 중 하나.)
+    const offSettingsSynced = window.kyletool.onSettingsSynced?.((s) => settingsSyncedRef.current(s));
+    const offItemsSynced = window.kyletool.onItemsSynced?.((p) => itemsSyncedRef.current(p.kind));
     // [v0.32.0] 자동매매 관찰 확정·주문 알림 — 권한이 허용돼 있을 때만 실제로 띄운다(요청은
     //   오너가 버튼을 눌러야만 — 브라우저가 사용자 동작 없는 자동 요청을 막거나 무시할 수 있음).
     const offNotify = window.kyletool.onNotify?.((n) => {
@@ -1490,6 +1495,8 @@ function App() {
       offTrd?.();
       offUpd?.();
       offGroupSync?.();
+      offSettingsSynced?.();
+      offItemsSynced?.();
     };
   }, []);
 
@@ -1556,6 +1563,34 @@ function App() {
   //   렌더 블록은 paneTab로 옮겼지만, 명령형 가드(자동계산·주문 후 새로고침·킬스위치)가 stale tab을 봐서
   //   2컬럼에서 계산기·주문현황이 갱신 안 되던 치명 버그를 이 헬퍼로 바로잡는다.
   const isTabVisible = (t: TabId) => (showTwoCol ? tabL === t || tabR === t : tab === t);
+
+  // [v0.108.0] 다른 기기에서 바꾼 설정이 도착 → 입력칸 전부를 그 값으로(시드·기본 손익비·가격보호 포함).
+  settingsSyncedRef.current = (s: ToolSettings) => {
+    setSettings(s);
+    applyAutoFormsFromSettings(s);
+    applyScreenFormsFromSettings(s);
+    setSeedForm({
+      day: String(s.seedDayPct),
+      pre: String(s.seedPrePct),
+      regular: String(s.seedRegularPct),
+      basis: s.seedBasis,
+      fixed: s.seedFixedUsd != null ? String(s.seedFixedUsd) : "",
+    });
+    setDefForm({ tp: String(s.defaultTpPct ?? 2), sl: String(s.defaultSlPct ?? 10) });
+    if (s.priceGuardPct) setGuardPct(String(s.priceGuardPct));
+    void window.kyletool.getSystemPauseStatus?.().then(setSystemPause).catch(() => {});
+  };
+  // [v0.108.0] 다른 기기의 기록이 도착 → 지금 열려 있는 해당 탭만 다시 불러온다(입력 중인 칸은 건드리지 않는다).
+  itemsSyncedRef.current = (kind: string) => {
+    const map: Record<string, TabId[]> = {
+      watch: ["watchHistory"],
+      autoState: ["autoHistory", "research"],
+      splits: ["splits"],
+      auto_run: ["autoReport"],
+      trades: ["report"],
+    };
+    for (const t of map[kind] ?? []) if (isTabVisible(t)) activateTab(t);
+  };
 
   // [v0.59.0] 디스코드 알림의 "지금 승인하기" 링크(#/approve)로 들어온 경우 — 오너 로그인이
   //   확인되는 즉시 [그룹원 관리] 탭으로 바로 이동한다. 아직 로그인 전이면(막 앱을 열어
@@ -2790,8 +2825,13 @@ ${msg}
       return;
     }
     if (isWebApp) {
+      // [v0.108.0] 폰 엔진에 먼저 저장 → 계정 동기화로 모든 기기(PC·노트북)에 10초 안에 반영된다.
+      //   아직 업데이트 안 된 PC를 위해 예전 원격 명령도 함께 보낸다(같은 값이라 충돌 없음 — 새 PC는 오래 묵은 명령을 무시한다).
+      const local = await window.kyletool.saveAutoTradeSettings({ maxPositions, maxLossPct, maxInvestPct, watchMinutes, entryLevel: autoEntryLevel, ...defense });
+      setSettings(local);
+      applyAutoFormsFromSettings(local);
       const r = await window.kyletool.sendCommand("saveAutoTradeSettings", { maxPositions, maxLossPct, maxInvestPct, watchMinutes, entryLevel: autoEntryLevel, ...defense });
-      setSavedMsg(r.ok ? "✅ PC로 자동매매 한도 저장 명령을 보냈습니다(PC가 몇 초 안에 반영 — 아래 'PC 실제값'으로 확인하세요)." : `⚠️ ${r.message}`);
+      setSavedMsg(r.ok ? "✅ 저장했습니다 — 계정의 모든 기기(PC·노트북)에 곧 반영됩니다(아래 'PC 실제값'으로 확인하세요)." : `⚠️ 저장은 됐지만 PC 명령 전송 실패: ${r.message}`);
       setTimeout(() => setSavedMsg(""), 4000);
       // [v0.70.0] PC가 명령을 처리할 몇 초를 준 뒤 상태 미러를 다시 받아와 "PC 실제값"을 갱신한다
       //   (비상정지 버튼이 이미 쓰던 패턴과 동일 — 20초 정기 폴링까지 기다리지 않게).
@@ -2881,8 +2921,12 @@ ${msg}
     //   믿게 만드는 상태 불일치였다. 폰 응답은 즉시 오지 않으므로(PC가 몇 초 뒤 처리)
     //   clamp된 값으로 입력칸을 되맞추는 건 PC 로컬에서만 한다.
     if (isWebApp) {
+      // [v0.108.0] 자동매매 한도와 같은 방식 — 폰에 저장(→ 계정 동기화로 모든 기기) + 옛 PC용 명령.
+      const local = await window.kyletool.saveAutoScanSettings(criteria);
+      setSettings(local);
+      applyScreenFormsFromSettings(local);
       const r = await window.kyletool.sendCommand("saveAutoScanSettings", criteria);
-      setSavedMsg(r.ok ? "✅ PC로 스크리닝 기준 저장 명령을 보냈습니다(PC가 몇 초 안에 반영 — 아래 'PC 실제값'으로 확인하세요)." : `⚠️ ${r.message}`);
+      setSavedMsg(r.ok ? "✅ 저장했습니다 — 계정의 모든 기기(PC·노트북)에 곧 반영됩니다(아래 'PC 실제값'으로 확인하세요)." : `⚠️ 저장은 됐지만 PC 명령 전송 실패: ${r.message}`);
       setTimeout(() => setSavedMsg(""), 4000);
       // [v0.70.0] 비상정지 버튼과 같은 패턴 — PC가 처리할 몇 초를 준 뒤 상태 미러를 다시 받아온다.
       setTimeout(() => void refreshLiveState(), 2000);
@@ -6721,9 +6765,13 @@ ${msg}
                     // [v0.61.6 — ③ 전수조사 중간-1, 오너 승인] 웹(폰)에서는 로컬(의미 없는) 엔진의
                     //   플래그만 바뀌어 PC의 실제 스캔·주문 차단 여부는 그대로였다 — 원격 명령으로
                     //   보낸다(결과를 바로 되읽어올 방법은 아직 없어 "보냈다" 메시지까지만).
+                    // [v0.108.0] 이제 이 값은 계정 동기화 대상이다 — 폰 엔진에 저장하면 클라우드를 거쳐 모든 PC에
+                    //   10초 안에 들어간다. 옛 버전 PC(아직 업데이트 전)를 위해 명령도 함께 보낸다(같은 값이라 충돌 없음).
                     if (isWebApp) {
-                      const r = await window.kyletool.sendCommand("saveSystemPauseEnabled", { enabled: e.target.checked });
-                      setAutoToggleMsg(r.ok ? "✅ PC로 휴무 시간대 설정 명령을 보냈습니다." : `⚠️ ${r.message}`);
+                      const checked = e.target.checked;
+                      setSettings(await window.kyletool.saveSystemPauseEnabled(checked));
+                      const r = await window.kyletool.sendCommand("saveSystemPauseEnabled", { enabled: checked });
+                      setAutoToggleMsg(r.ok ? "✅ 저장했습니다 — 계정의 모든 기기(PC 포함)에 곧 반영됩니다." : `⚠️ 저장은 됐지만 PC 명령 전송 실패: ${r.message}`);
                       return;
                     }
                     setSettings(await window.kyletool.saveSystemPauseEnabled(e.target.checked));

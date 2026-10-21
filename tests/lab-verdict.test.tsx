@@ -171,7 +171,7 @@ function fakeLab(sigs: LabSignal[], mirror = false): LabApi {
     refKey: "DD-1.5-e1",
     counts: { total: sigs.length, eligible: sigs.filter((x) => x.eligible).length, complete: sigs.length, open: 0 },
   };
-  return { summary, filter: {}, setFilter: () => undefined, busy: false, msg: "", setMsg: () => undefined, refresh: async () => undefined, saveSettings: async () => undefined, scanNow: async () => undefined, reset: async () => undefined, download: async () => undefined, isMirror: mirror } as unknown as LabApi;
+  return { summary, filter: {}, setFilter: () => undefined, busy: false, msg: "", setMsg: () => undefined, refresh: async () => undefined, saveSettings: async () => undefined, scanNow: async () => undefined, reset: async () => undefined, download: async () => undefined, isMirror: mirror, isWeb: mirror } as unknown as LabApi;
 }
 
 describe("[v0.66.0] 결과 요약 화면·가이드 렌더링", () => {

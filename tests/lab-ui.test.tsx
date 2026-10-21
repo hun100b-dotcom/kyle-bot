@@ -63,7 +63,7 @@ function fakeLab(over: Partial<LabApi> = {}, mirror = false): LabApi {
     summary, filter: { includeIneligible: false, includeThin: false, includeBackfilled: true, refKey: "DD-1.5-e1" },
     setFilter: () => undefined, busy: false, msg: "", setMsg: () => undefined, refresh: async () => undefined,
     saveSettings: async () => undefined, scanNow: async () => undefined, reset: async () => undefined, download: async () => undefined,
-    isMirror: mirror, ...over,
+    isMirror: mirror, isWeb: mirror, ...over,
   } as LabApi;
 }
 

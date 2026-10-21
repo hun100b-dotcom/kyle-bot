@@ -22,6 +22,20 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 const STORE_KEY = "capri-tab-order";
 
+/** [v0.108.0] 탭 순서도 계정 단위로 동기화한다(PC에서 바꾼 순서가 폰·노트북에도) — 엔진의 화면 설정(ui_pref) 저장소 키. */
+function prefKey(storageKey: string): string {
+  return `tab:${storageKey.replace(/[^a-zA-Z0-9_.:-]/g, "_")}`.slice(0, 80);
+}
+
+/** 엔진 다리(window.kyletool)가 없거나 옛 앱이면 undefined — 그때는 예전처럼 이 기기에만 저장한다. */
+function tool(): Window["kyletool"] | undefined {
+  try {
+    return typeof window !== "undefined" ? window.kyletool : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * useTabOrder — 탭 순서 상태 + 드래그 핸들러를 돌려준다.
  * @param allTabs 앱이 가진 모든 탭(기본 순서)
@@ -65,12 +79,32 @@ export function useTabOrder<T extends string>(allTabs: readonly T[], storageKey:
     setOrder((cur) => normalize(cur));
   }, [normalize]);
 
+  // [v0.108.0] 계정에 저장된 순서를 받아 오고, 다른 기기에서 바꾸면 바로 따라간다.
+  useEffect(() => {
+    const k = tool();
+    const key = prefKey(storageKey);
+    const take = (raw: string | null | undefined) => {
+      if (!raw) return;
+      try {
+        const next = normalize(JSON.parse(raw) as string[]);
+        setOrder((cur) => (cur.join("|") === next.join("|") ? cur : next));
+        localStorage.setItem(storageKey, JSON.stringify(next));
+      } catch {
+        /* 깨진 값은 무시 */
+      }
+    };
+    void k?.getUiPref?.(key).then(take).catch(() => {});
+    const off = k?.onUiPrefsSynced?.((prefs) => take(prefs[key]));
+    return () => off?.();
+  }, [normalize, storageKey]);
+
   const persist = useCallback((next: T[]) => {
     try {
       localStorage.setItem(storageKey, JSON.stringify(next));
     } catch {
       /* 저장 실패해도 이번 세션 순서는 그대로 쓴다 */
     }
+    void tool()?.setUiPref?.(prefKey(storageKey), JSON.stringify(next)).catch(() => {}); // [v0.108.0] 다른 기기에도
   }, [storageKey]);
 
   /** 두 탭의 자리를 바꾼다 */

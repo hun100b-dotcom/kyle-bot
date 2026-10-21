@@ -33,6 +33,8 @@ export interface AutoRunPositionSnapshot {
 /** 실행 기록 — 앱 데이터 폴더에 JSON으로 보관(최근 30건). */
 export interface AutoRunRecord {
   id: string;
+  /** [v0.108.0] 이 실행을 돌린 기기 번호 — 기기 간 동기화 후 다른 기기가 이 기록을 "앱 종료"로 잘못 닫지 않게. */
+  deviceId?: string;
   startedAtMs: number;
   lastActiveAtMs: number; //   마지막으로 사이클이 돈 시각(앱이 갑자기 꺼져도 "대략 언제까지 일했는지" 남김)
   endedAtMs: number | null; // 종료 전이면 null
