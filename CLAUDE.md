@@ -89,6 +89,11 @@ npm run app:dist   # macOS 설치 파일(dmg) 생성 → release/
   러너)이 매 배포마다 `codesign --display`로 서명 여부를 확인해 이 문제가 다시 새어나가면 CI가
   실패하도록 막아 둠.
 
+- macOS 자동 업데이트(v0.107.0 확인): 맥은 electron-updater를 안 쓰고 `electron/mac-self-update.ts`가 직접 번들을
+  교체한다. 설치팩(.pkg)으로 깐 앱은 root 소유라 교체 백업이 못 지워져 남을 수 있다(2026-10-21 "재시작 후 안 켜짐" 사고 원인).
+  교체 스크립트·postinstall·재서명을 고치면 반드시 `mac-update-e2e.yml`(실제 맥 러너에서 pkg 설치→자동 업데이트→재실행 확인)이
+  초록인지 보고 머지한다. 교체 기록: `~/Library/Logs/kyle-bot/update-swap.log`.
+
 ## 환경 팁
 - 커밋 메시지에 큰따옴표가 있으면 PowerShell here-string이 깨진다 → `git commit -F <메시지파일>` 사용.
 - 타입체크(참고): lib은 tsconfig include 밖이라, 필요 시 `tsc --noEmit --ignoreConfig` 로 개별 검사.
