@@ -1125,6 +1125,16 @@ interface KyletoolBridge {
   tradesClose(id: string, exitPrice: number, kind: "tp" | "sl" | "manual"): Promise<StrengthTrade[]>;
   tradesDelete(id: string): Promise<StrengthTrade[]>;
   onTrades(cb: (log: StrengthTrade[]) => void): () => void;
+  /** [v0.108.0] 계정 동기화 — 다른 기기에서 바꾼 설정이 이 기기에 들어왔을 때(입력칸을 다시 채우는 데 쓴다).
+   *  화면은 원격으로 먼저 바뀌고 앱(엔진)은 나중에 바뀔 수 있어 선택(?)으로 둔다 — 옛 앱에선 없음. */
+  onSettingsSynced?(cb: (s: ToolSettings) => void): () => void;
+  onUiPrefsSynced?(cb: (prefs: Record<string, string>) => void): () => void;
+  /** 다른 기기의 기록(관찰·연구소·트레이드·실행기록·자동매매기록·삼분할 등)이 들어왔을 때 — kind로 무엇인지 알려 준다. */
+  onItemsSynced?(cb: (p: { kind: string }) => void): () => void;
+  getUiPref?(key: string): Promise<string | null>;
+  setUiPref?(key: string, value: string | null): Promise<{ ok: boolean }>;
+  getItemSyncStatus?(): Promise<{ ready: string[]; lastOkMs: number | null; lastError: string | null }>;
+  itemSyncNow?(): Promise<{ ok: boolean; message: string }>;
   positions(): Promise<PositionView[]>;
   holdingsView(): Promise<{ summary: HoldingsSummary; items: HoldingRow[] }>;
   ordersView(status: "OPEN" | "CLOSED"): Promise<OrderRow[]>;

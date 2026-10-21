@@ -31,7 +31,8 @@ import { reconcileHistoryEntry, enteredAtMsFromId, type HistoryReconcileResult }
 import { buildCycles, analyzeTrades, type TradeCycle, type TradeInsights } from "../lib/trade-analysis"; // [v0.19.0] 매매 사이클 자동추적·분석
 import { toSyncPayload, isSyncPayload, type TradeSyncPayload } from "../lib/trade-sync";
 import { toAutoStateSyncPayload, isAutoStateSyncPayload, mergeAutoHistory, derivePositionsFromHistory, type AutoStateSyncPayload } from "../lib/auto-state-sync"; // [v0.31.0] 자동매매 기록 기기 간 동기화
-import { classifyPullResult } from "../lib/sync-all"; // [v0.98.0] 전체 동기화: 받기 결과 분류(진짜 실패면 올리기 보류)
+import { classifyPullResult } from "../lib/sync-all";
+import { ItemSync, type ItemAdapter, type ItemSyncState, type PutItem, type SyncRow } from "../lib/item-sync"; // [v0.108.0] 설정·기록 전체 계정 동기화(항목 단위) // [v0.98.0] 전체 동기화: 받기 결과 분류(진짜 실패면 올리기 보류)
 import { toSplitsSyncPayload, isSplitsSyncPayload, mergeSplits, mergeTombstones, type SplitsSyncPayload, type Tombstones } from "../lib/splits-sync"; // [v0.61.7] 삼분할 타점 기록 기기 간 동기화
 import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, WICK_MIN_RATIO, DOJI_MAX_AGE_MINUTES, type Candle, type SessionPattern } from "../lib/indicators";
 import { buildAutoReport, type AutoRunRecord, type AutoReport } from "../lib/auto-report"; // [v0.62.1] 자동매매 리포트
@@ -206,10 +207,12 @@ export interface TradeRationale {
    *  않기 위해(technique와 달리 명시적으로 안 보내도 되게) — saveRationale이 "manual"로 기본
    *  채운다. 자동매매(autoTradeTick)만 명시적으로 "auto"를 보낸다. */
   source?: "auto" | "manual";
+  /** [v0.108.0] 기록 시각(ms, 연도 포함) — 기기 간 동기화 후에도 모든 기기가 같은 순서로 보여 주기 위한 정렬 기준. */
+  atMs?: number;
 }
 
 /** 화면이 주문할 때 함께 보내는 근거 입력(위 타입에서 자동 채워지는 항목 제외) */
-export type RationaleInput = Omit<TradeRationale, "clientOrderId" | "ts" | "kind" | "symbol" | "quantity" | "tossOrderId" | "dryRun">;
+export type RationaleInput = Omit<TradeRationale, "clientOrderId" | "ts" | "kind" | "symbol" | "quantity" | "tossOrderId" | "dryRun" | "atMs">;
 
 /** [v0.2.10] 보유 포지션 한 줄 — 근거 + 실시간 손익까지 합쳐 화면에 그대로 뿌린다. */
 export interface PositionView {
@@ -601,13 +604,29 @@ export function updateWatchHistory(
     if (next.some((h) => h.symbol === r.symbol && h.outcome === "watching")) continue; // 이미 관찰 중으로 기록됨
     next = [...next, { id: `${r.symbol}:${nowMs}`, symbol: r.symbol, watchedAtMs: nowMs, watchedPrice: r.price, lastSeenAtMs: nowMs, resolvedAtMs: null, outcome: "watching", reasons: [], reasonBuckets: [] }];
   }
+  return trimWatchHistory(next);
+}
+
+/**
+ * [v0.108.0] trimWatchHistory — 관찰 기록 상한 정리(updateWatchHistory에서 뽑아냄). 기기 간 동기화로 합친 뒤에도
+ *   모든 기기가 "똑같은 규칙"으로 잘라야 같은 목록이 남는다(그래서 한 함수로 공유한다).
+ *   규칙: 상한을 넘으면 '관찰 중'은 전부 보존, 끝난 기록은 오래된 것부터 자른다. 결과는 관찰 시작 시각 순.
+ */
+export function trimWatchHistory(list: WatchHistoryEntry[]): WatchHistoryEntry[] {
+  let next = list;
   if (next.length > WATCH_HISTORY_MAX) {
     const watching = next.filter((h) => h.outcome === "watching");
-    const resolved = next.filter((h) => h.outcome !== "watching").sort((a, b) => (a.resolvedAtMs ?? 0) - (b.resolvedAtMs ?? 0));
+    const resolved = next.filter((h) => h.outcome !== "watching").sort((a, b) => (a.resolvedAtMs ?? 0) - (b.resolvedAtMs ?? 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     const keepResolved = resolved.slice(Math.max(0, resolved.length - Math.max(0, WATCH_HISTORY_MAX - watching.length)));
-    next = [...keepResolved, ...watching].sort((a, b) => a.watchedAtMs - b.watchedAtMs);
+    next = [...keepResolved, ...watching];
   }
-  return next;
+  return [...next].sort((a, b) => a.watchedAtMs - b.watchedAtMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+/** [v0.108.0] 트레이드 기록 정렬 기준(id 앞부분이 진입 시각 ms — `${ms}-${symbol}`). */
+export function tradeSortMs(t: { id: string }): number {
+  const n = Number(String(t.id).split("-")[0]);
+  return Number.isFinite(n) ? n : 0;
 }
 
 /** [v0.96.0 — 오너 요청 "확정된 종목이 실제로 매수까지 이어졌는지, 성적이 어땠는지가 보여야
@@ -1807,12 +1826,17 @@ export class ToolEngine extends EventEmitter {
    */
   private appVersion: string | null = null;
 
+  /** [v0.108.0] 이 엔진이 어디서 도는가 — "desktop"(윈도우·맥 앱) / "web"(폰·브라우저). 웹은 상태 사진을 올리지 않고
+   *  (PC 화면을 폰의 빈 상태로 덮어쓰지 않게), 큰 기록(연구소·관찰)을 폰 저장소에 쓰지 않는다(용량 초과로 로그인 정보까지 못 쓰는 사고 방지). */
+  private role: "desktop" | "web" = "desktop";
+
   constructor(
     private userDataDir: string,
-    opts?: { forceMock?: boolean; appVersion?: string },
+    opts?: { forceMock?: boolean; appVersion?: string; role?: "desktop" | "web" },
   ) {
     super();
     this.appVersion = opts?.appVersion ?? null;
+    this.role = opts?.role ?? "desktop";
     mkdirSync(userDataDir, { recursive: true });
     this.envPath = join(userDataDir, ".env");
     this.journalPath = join(userDataDir, "kylebot-journal.json");
@@ -1827,6 +1851,8 @@ export class ToolEngine extends EventEmitter {
     this.autoRunsPath = join(userDataDir, "kylebot-auto-runs.json"); // [v0.62.1] 자동매매 실행 기록(리포트 원본)
     this.labPath = join(userDataDir, "kylebot-lab.json"); // [v0.65.0] 매매연구소 신호 로우
     this.watchHistoryPath = join(userDataDir, "kylebot-watch-history.json"); // [관찰종목 이력]
+    // [v0.108.0] 공장 기본값을 .env를 읽기 "전에" 찍어 둔다 — 첫 동기화 때 "이 기기에서 직접 바꾼 값"인지 구분하는 데 쓴다.
+    this.settingsDefaults = Object.fromEntries(this.syncedSettings().map((e) => [e.env, e.get()]));
     this.loadEnv();
     // [v0.68.1] 거래량 순위 기본값이 60→120으로 바뀌었는데, 이미 저장돼 있던 값(옛 기본값 60)은 그대로 남아 오너 화면의 수집이 계속 느렸다.
     //   "옛 기본값 그대로(60)"인 경우에만 한 번 120으로 올리고 화면에 알린다(직접 다른 값으로 바꾼 사람은 건드리지 않음).
@@ -1861,6 +1887,13 @@ export class ToolEngine extends EventEmitter {
     //   낡은 값이 남아 다음 엔진(같은 테스트 프로세스 안의 또 다른 생성)을 오염시키는" 경로를
     //   원천 차단한다. persistEnv()가 실제로 호출되는지와 무관하게 항상 최신 상태를 보장한다.
     process.env.AUTO_RESUME_AFTER_UPDATE = this.autoResumeAfterUpdatePending ? "true" : "false";
+    // [v0.103.0→v0.108.0] 이 기기 번호를 다른 기록보다 먼저 정한다(자동매매 실행 기록에 "어느 기기 것인지"를 남기기 위해).
+    this.paperPath = join(userDataDir, "kylebot-paper.json");
+    this.loadPaper();
+    if (!this.paperDeviceId) {
+      this.paperDeviceId = `dev_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e9).toString(36)}`;
+      this.persistPaper();
+    }
     this.loadJournal();
     this.loadRationales();
     this.loadSplits();
@@ -1872,13 +1905,10 @@ export class ToolEngine extends EventEmitter {
     this.loadAutoRuns(); // [v0.62.1] 자동매매 실행 기록
     this.loadLab(); // [v0.65.0] 매매연구소 신호 로우
     this.loadWatchHistory(); // [관찰종목 이력]
-    // [v0.103.0] 가상매매 봇 — 저장본 불러오기 + 이 기기 번호(처음이면 새로 만들어 저장)
-    this.paperPath = join(userDataDir, "kylebot-paper.json");
-    this.loadPaper();
-    if (!this.paperDeviceId) {
-      this.paperDeviceId = `dev_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e9).toString(36)}`;
-      this.persistPaper();
-    }
+    // [v0.108.0] 계정 동기화(설정·기록 전체) 준비 — 실제 시작은 로그인된 뒤 startItemSync()가 한다.
+    this.uiPrefsPath = join(userDataDir, "kylebot-ui-prefs.json");
+    this.loadUiPrefs();
+    this.setupItemSync();
     // [v0.69.0] 재시작 전에 보호 못 받던 종목이 남아 있으면 30초 뒤부터 가드가 이어서 처리한다.
     if (this.autoUnprotected.length > 0 && !opts?.forceMock) this.scheduleGuard(30_000);
     // 신호 기록 모드는 주문을 내지 않는 읽기 전용이라 켜 둔 상태를 재시작해도 유지한다(테스트용 forceMock은 자동 시작 안 함).
@@ -2588,6 +2618,8 @@ export class ToolEngine extends EventEmitter {
     process.env.LIVE_ORDERS = this.liveOrdersEnabled ? "true" : "false";
     process.env.AUTO_RESUME_AFTER_UPDATE = this.autoResumeAfterUpdatePending ? "true" : "false"; // [v0.86.0]
     writeFileSync(this.envPath, lines, "utf8");
+    // [v0.108.0] 설정이 바뀌었을 수 있다 → 다른 기기에도 올린다(바뀐 칸만, 1.5초 모았다가). 안 바뀐 저장(로그인 토큰 갱신 등)은 아무것도 안 올라간다.
+    this.itemSync?.markDirty("settings");
     chmodSync(this.envPath, 0o600);
   }
 
@@ -4882,10 +4914,12 @@ export class ToolEngine extends EventEmitter {
         source: input?.source ?? "manual", // [v0.30.0] 마찬가지로 안 보내면(수동 버튼 전부) '수동'
         ...input,
         ...fixed,
+        atMs: Date.now(), // [v0.108.0] 기기 간 정렬 기준
       };
       this.rationales.push(rec);
       if (this.rationales.length > 2000) this.rationales.shift(); // 오래된 것부터 정리
       this.scheduleFileSave("rationale", this.rationalePath, () => this.rationales); // [v0.90.0] 디바운스
+      this.itemSync?.markDirty("rationale"); // [v0.108.0] 다른 기기에도
     } catch {
       /* 기록 실패는 주문을 되돌리지 않는다 */
     }
@@ -5196,6 +5230,11 @@ export class ToolEngine extends EventEmitter {
   }
 
   private persistTrades(): void {
+    this.persistTradesLocal();
+    this.itemSync?.markDirty("trade_log"); // [v0.108.0] 다른 기기에도
+  }
+
+  private persistTradesLocal(): void {
     this.scheduleFileSave("trades", this.tradesPath, () => this.trades); // [v0.90.0] 디바운스
   }
 
@@ -5221,9 +5260,13 @@ export class ToolEngine extends EventEmitter {
       this.autoRuns = [];
     }
     // 닫히지 않은 채 남은 기록 = 앱이 꺼지면서 끝난 실행. 마지막 활동 시각을 종료 시각으로 삼는다.
+    // [v0.108.0] 단, "이 기기의" 실행 기록만 닫는다 — 동기화로 받아 온 다른 PC의 진행 중 기록을 이 기기가 멋대로
+    //   "앱 종료"로 닫아 버리면 안 된다. 기기 표시가 없는 옛 기록은 이 기기에서 만든 것(동기화 이전)이라 이 기기 것으로 본다.
+    //   웹(폰)은 자동매매를 돌리지 않으므로 아무것도 닫지 않는다.
     let changed = false;
     for (const r of this.autoRuns) {
-      if (r.endedAtMs == null) {
+      if (r.deviceId == null && this.role !== "web") r.deviceId = this.paperDeviceId;
+      if (r.endedAtMs == null && r.deviceId === this.paperDeviceId && this.role !== "web") {
         r.endedAtMs = r.lastActiveAtMs;
         r.endReason = "앱 종료·재시작(자동매매는 앱이 켜져 있는 동안만 작동 — 종료 시각은 마지막 사이클 기준)";
         changed = true;
@@ -5233,6 +5276,11 @@ export class ToolEngine extends EventEmitter {
   }
 
   private persistAutoRuns(): void {
+    this.persistAutoRunsLocal();
+    this.itemSync?.markDirty("auto_run"); // [v0.108.0] 다른 기기에도(폰·노트북도 같은 자동매매 리포트를 보게)
+  }
+
+  private persistAutoRunsLocal(): void {
     try {
       if (this.autoRuns.length > ToolEngine.AUTO_RUNS_MAX) this.autoRuns = this.autoRuns.slice(-ToolEngine.AUTO_RUNS_MAX);
       this.scheduleFileSave("autoRuns", this.autoRunsPath, () => this.autoRuns); // [v0.90.0] 디바운스
@@ -5246,6 +5294,7 @@ export class ToolEngine extends EventEmitter {
       const now = Date.now();
       this.currentAutoRun = {
         id: `run-${now}`,
+        deviceId: this.paperDeviceId, // [v0.108.0] 어느 기기의 실행인지(다른 기기가 멋대로 닫지 않게)
         startedAtMs: now,
         lastActiveAtMs: now,
         endedAtMs: null,
@@ -5900,6 +5949,13 @@ export class ToolEngine extends EventEmitter {
   }
 
   private persistWatchHistory(): void {
+    this.persistWatchHistoryLocal();
+    this.itemSync?.markDirty("watch"); // [v0.108.0] 다른 기기에도
+  }
+
+  /** [v0.108.0] 이 기기 파일에만(웹은 저장 안 함 — 연구소와 같은 이유). */
+  private persistWatchHistoryLocal(): void {
+    if (this.role === "web") return;
     this.scheduleFileSave("watchHistory", this.watchHistoryPath, () => ({ entries: this.watchHistory }));
   }
 
@@ -5968,6 +6024,13 @@ export class ToolEngine extends EventEmitter {
   }
 
   private persistLab(): void {
+    this.persistLabLocal();
+    this.itemSync?.markDirty("lab_signal"); // [v0.108.0] 다른 기기에도
+  }
+
+  /** [v0.108.0] 이 기기 파일에만 저장(웹은 저장 안 함 — 수 MB라 폰 저장소를 넘칠 수 있다. 열 때마다 클라우드에서 받는다). */
+  private persistLabLocal(): void {
+    if (this.role === "web") return;
     try {
       // [v0.90.0] 디바운스 — 연구용 데이터는 자주 쌓여 동기 저장이 메인 프로세스를 자주 막던 지점 중 하나였다.
       this.scheduleFileSave("lab", this.labPath, () => ({
@@ -6067,6 +6130,7 @@ export class ToolEngine extends EventEmitter {
   /** 모든 연구소 데이터 삭제(복구 불가 — 화면에서 확인 후에만 호출). */
   labReset(): LabStatus {
     this.labGen++; // 진행 중인 스캔의 결과가 초기화 뒤에 다시 쓰이지 않게
+    this.itemSync?.markDeleted("lab_signal", this.labSignals.map((x) => x.id)); // [v0.108.0] 모든 기기에서 지운다
     this.labSignals = [];
     this.labAttempts = {};
     this.labLocalVerify = null;
@@ -6312,6 +6376,7 @@ export class ToolEngine extends EventEmitter {
 
   /** 화면용 요약: 깔때기·변형 성적표·연계 요약·신호 목록(가벼운 행). 기준 변형(refKey)의 결과를 행마다 붙인다. */
   getLabSummary(f?: LabQueryFilter): LabSummary {
+    this.wantWebLab(); // [v0.108.0] 폰은 연구소 화면을 처음 열 때 연구소 기록을 받아 온다
     const filter = this.labFilterFrom(f);
     const refKey = f?.refKey || "DD-1.5-e1";
     // 무거운 계산(변형 성적표 등)은 데이터 버전별로 캐시하고, 상태(스캔 중 여부 등)는 매번 새로 붙인다.
@@ -6368,6 +6433,7 @@ export class ToolEngine extends EventEmitter {
 
   /** 신호 한 건의 전체 로우 + 모든 변형 결과(상세 보기용). */
   getLabSignal(id: string): { signal: LabSignal; trades: SimTrade[] } | null {
+    this.wantWebLab(); // [v0.108.0] 폰은 연구소 화면을 처음 열 때 연구소 기록을 받아 온다
     const s = this.labSignals.find((x) => x.id === id);
     return s ? { signal: s, trades: simulateSignal(s, this.labParams()) } : null;
   }
@@ -7028,6 +7094,7 @@ export class ToolEngine extends EventEmitter {
   }
 
   startCloudSyncLoop(): void {
+    this.startItemSync(); // [v0.108.0] 설정·기록 계정 동기화 + 10초 변경 감지(이미 돌고 있으면 아무 일 없음)
     if (this.cloudSyncTimer) return;
     if (!(this.authAccessToken || this.authRefreshToken)) return; // 로그인 안 돼 있으면 시작 안 함
     setTimeout(() => void this.cloudSyncTick(), 20_000); // 시작 직후 한 번(재시작 뒤 밀린 것 바로 올리기)
@@ -7035,6 +7102,7 @@ export class ToolEngine extends EventEmitter {
   }
 
   stopCloudSyncLoop(): void {
+    this.stopItemSync(); // [v0.108.0]
     if (this.cloudSyncTimer) {
       clearInterval(this.cloudSyncTimer);
       this.cloudSyncTimer = null;
@@ -7239,6 +7307,7 @@ export class ToolEngine extends EventEmitter {
     //   "지난번 올린 지문"을 지워 이번 점검에서 반드시 다시 올리게 한다. 이게 없으면 이 기기 내용이 안 바뀐 경우
     //   (예: 옛 버전 앱이 지운 기록을 다시 올려 둔 상태) 클라우드가 틀린 채로 남아, 새로 로그인한 폰이 그걸 받아 간다.
     if (def.differs(payload)) this.cloudSync[ch].lastFingerprint = null;
+    if (r.added > 0 || r.received > 0) this.emit("itemsSynced", { kind: ch }); // [v0.108.0] 열려 있는 화면을 바로 다시 그리게
     return r;
   }
 
@@ -7375,6 +7444,485 @@ export class ToolEngine extends EventEmitter {
     return this.syncPullChannel("autoState");
   }
 
+  // ===========================================================================
+  // [v0.108.0 — 오너 지시 "PC에서 세팅한 값이 폰·다른 노트북에 동기화가 안 된다. 로그인 계정 기준으로
+  //   설정·자동매매 설정·스크리닝 기준·매매기록·매매연구소·관찰 기록·가상봇 기록 전부 실시간 동기화"]
+  //
+  // [지금까지 안 되던 이유 — 코드로 확인한 사실]
+  //   ① 설정 60여 개(자동매매 한도·스크리닝 기준·시드·기본 손익비·연구소 기준 등)는 persistEnv()가
+  //      "이 기기의 .env 파일"에만 썼다. 클라우드로 올라간 적이 없다.
+  //      · 폰: 화면 입력칸을 폰 자기 엔진(기본값)으로 채우고, PC가 올린 상태 사진의 값은 "PC 실제값" 한 줄로만 보여 줬다.
+  //      · 다른 노트북: 자기 .env(대부분 기본값)로 그대로 돌았다 — 아무 데서도 PC 값을 받아 오지 않았다.
+  //   ② 매매연구소 신호·관찰 기록·트레이드 기록·매매 근거·자동매매 실행 기록(리포트 원본)도 전부 기기 파일 전용.
+  //      폰은 PC가 올린 "요약 사진"만 봤고(관찰 기록 탭은 폰에서 아예 비어 있었다), 다른 노트북은 자기 것만 봤다.
+  //   ③ 기존 암호화 동기화(v0.98~v0.102)는 체결·자동매매기록·삼분할 3가지만 다뤘고, 받기가 5분에 한 번이었다.
+  //   ④ PC가 두 대 켜져 있으면 둘 다 상태 사진·생존 신호를 번갈아 덮어써, 폰 화면이 두 PC 사이를 오락가락했다.
+  //
+  // [이번 구조]
+  //   · lib/item-sync.ts(항목 단위 동기화) + 클라우드 표 capri_sync_items(마이그레이션 20261022000000).
+  //   · 아래 어댑터 6종이 "무엇을, 어떻게 반영하는지"를 엔진에 알려 준다.
+  //   · 10초마다 capri_sync_versions()로 "바뀐 게 있나"만 가볍게 묻고, 바뀐 것만 받아 온다(실시간에 가까움).
+  //     암호화 3채널·가상봇도 같은 신호로 바뀌었을 때 즉시 받는다(예전 5분 → 최대 10초).
+  // ===========================================================================
+
+  /** 이 기기의 고유 번호(가상봇 runner 번호와 같은 값 — 기기당 하나). */
+  getDeviceId(): string {
+    return this.paperDeviceId;
+  }
+
+  private itemSync: ItemSync | null = null;
+  private itemSyncPath = "";
+  private liveSyncTimer: ReturnType<typeof setInterval> | null = null;
+  private liveSyncBusy = false;
+  private liveSyncSeen: Record<string, string | null> = {};
+  private liveSyncStarted = false;
+  /** 웹(폰)은 연구소 탭을 열기 전까지 연구소 신호(수 MB)를 받지 않는다 — 데이터 요금·저장 공간 절약. */
+  private webLabWanted = false;
+  /** 공장 기본값(첫 동기화 때 "직접 바꾼 적 있는 값인가" 판단용 — 생성자가 .env를 읽기 전에 찍어 둔다). */
+  private settingsDefaults: Record<string, string> = {};
+
+  /**
+   * 동기화되는 설정 목록 — persistEnv()의 .env 줄과 똑같은 이름·형식(그래서 기기 간 값이 1:1로 맞는다).
+   *   ⚠️ 일부러 빼 둔 것(기기마다 달라야 안전하거나 의미가 있는 것):
+   *     · 토스 키·계좌(capri_secrets로 따로 동기화) · 로그인 토큰 · DRY_RUN
+   *     · LIVE_ORDERS(실주문 잠금 해제 — "그 PC에서 직접 켜야만" 실주문이 나가는 안전장치. 폰에서는 원격 명령으로 켠다)
+   *     · LAB_ENABLED(연구소 수집 켜짐 — 두 PC가 같이 켜지면 같은 토스 키로 조회가 두 배가 돼 자동매매 조회 한도를 갉아먹는다)
+   *     · AUTO_RESUME_AFTER_UPDATE·LAB_RANK_MIGRATED(이 기기의 재시작/1회성 표식)
+   *     · 자동매매 "켜짐" 자체(원래부터 저장 안 함 — CLAUDE.md 원칙)
+   *   sk = getSettings()의 이름(첫 동기화 때 대표 PC가 올린 상태 사진에서 값을 이어받는 데 쓴다).
+   */
+  private syncedSettings(): Array<{ env: string; sk?: string; get: () => string; set: (v: string) => void }> {
+    const num = (v: string, ok: (n: number) => boolean, put: (n: number) => void) => {
+      if (v === "") return;
+      const n = Number(v);
+      if (Number.isFinite(n) && ok(n)) put(n);
+    };
+    const bool = (v: string, put: (b: boolean) => void) => {
+      if (v === "true") put(true);
+      else if (v === "false") put(false);
+    };
+    const s = (x: unknown) => (x == null ? "" : String(x));
+    return [
+      { env: "PRICE_GUARD", sk: "priceGuardEnabled", get: () => s(this.priceGuardEnabled), set: (v) => bool(v, (b) => (this.priceGuardEnabled = b)) },
+      { env: "PRICE_GUARD_PCT", sk: "priceGuardPct", get: () => s(this.priceGuardPct), set: (v) => num(v, (n) => n > 0, (n) => (this.priceGuardPct = n)) },
+      { env: "SKIP_CONFIRM", sk: "skipOrderConfirm", get: () => s(this.skipOrderConfirm), set: (v) => bool(v, (b) => (this.skipOrderConfirm = b)) },
+      { env: "SEED_DAY_PCT", sk: "seedDayPct", get: () => s(this.seedDayPct), set: (v) => num(v, (n) => n >= 0, (n) => (this.seedDayPct = n)) },
+      { env: "SEED_PRE_PCT", sk: "seedPrePct", get: () => s(this.seedPrePct), set: (v) => num(v, (n) => n >= 0, (n) => (this.seedPrePct = n)) },
+      { env: "SEED_REGULAR_PCT", sk: "seedRegularPct", get: () => s(this.seedRegularPct), set: (v) => num(v, (n) => n >= 0, (n) => (this.seedRegularPct = n)) },
+      { env: "SEED_BASIS", sk: "seedBasis", get: () => s(this.seedBasis), set: (v) => { if (v === "fixed" || v === "auto") this.seedBasis = v; } },
+      {
+        env: "SEED_FIXED_USD", sk: "seedFixedUsd", get: () => s(this.seedFixedUsd),
+        set: (v) => { if (v === "") this.seedFixedUsd = null; else num(v, (n) => n > 0, (n) => (this.seedFixedUsd = n)); },
+      },
+      { env: "DEFAULT_TP_PCT", sk: "defaultTpPct", get: () => s(this.defaultTpPct), set: (v) => num(v, (n) => n > 0, (n) => (this.defaultTpPct = n)) },
+      { env: "DEFAULT_SL_PCT", sk: "defaultSlPct", get: () => s(this.defaultSlPct), set: (v) => num(v, (n) => n > 0, (n) => (this.defaultSlPct = n)) },
+      { env: "AUTO_MAX_POSITIONS", sk: "autoTradeMaxPositions", get: () => s(this.autoTradeMaxPositions), set: (v) => num(v, (n) => n > 0, (n) => (this.autoTradeMaxPositions = Math.round(n))) },
+      { env: "AUTO_MAX_LOSS_PCT", sk: "autoTradeMaxLossPct", get: () => s(this.autoTradeMaxLossPct), set: (v) => num(v, (n) => n > 0, (n) => (this.autoTradeMaxLossPct = n)) },
+      { env: "AUTO_MAX_INVEST_PCT", sk: "autoTradeMaxInvestPct", get: () => s(this.autoTradeMaxInvestPct), set: (v) => num(v, (n) => n > 0, (n) => (this.autoTradeMaxInvestPct = n)) },
+      { env: "AUTO_WATCH_MINUTES", sk: "autoTradeWatchMinutes", get: () => s(this.autoTradeWatchMinutes), set: (v) => num(v, (n) => n > 0, (n) => (this.autoTradeWatchMinutes = Math.round(n))) },
+      { env: "AUTO_ENTRY_LEVEL", sk: "autoTradeEntryLevel", get: () => s(this.autoTradeEntryLevel), set: (v) => num(v, (n) => n === 1 || n === 1.5 || n === 2, (n) => (this.autoTradeEntryLevel = n as 1 | 1.5 | 2)) },
+      { env: "AUTO_SL_MODE", sk: "autoTradeSlMode", get: () => s(this.autoTradeSlMode), set: (v) => { if (v === "ema" || v === "fixed") this.autoTradeSlMode = v; } },
+      { env: "AUTO_EMA_STOP_BUFFER_PCT", sk: "autoTradeEmaStopBufferPct", get: () => s(this.autoTradeEmaStopBufferPct), set: (v) => num(v, (n) => n >= 0, (n) => (this.autoTradeEmaStopBufferPct = n)) },
+      { env: "AUTO_REENTRY_BLOCK_ENABLED", sk: "autoTradeReentryBlockEnabled", get: () => s(this.autoTradeReentryBlockEnabled), set: (v) => bool(v, (b) => (this.autoTradeReentryBlockEnabled = b)) },
+      { env: "AUTO_VOL_SCALED_SIZING_ENABLED", sk: "autoTradeVolScaledSizingEnabled", get: () => s(this.autoTradeVolScaledSizingEnabled), set: (v) => bool(v, (b) => (this.autoTradeVolScaledSizingEnabled = b)) },
+      { env: "AUTO_LOSS_STREAK_LIMIT", sk: "autoTradeLossStreakLimit", get: () => s(this.autoTradeLossStreakLimit), set: (v) => num(v, (n) => n >= 0, (n) => (this.autoTradeLossStreakLimit = Math.round(n))) },
+      { env: "AUTO_REPROTECT_VANISHED", sk: "autoTradeReprotectVanished", get: () => s(this.autoReprotectVanished), set: (v) => bool(v, (b) => (this.autoReprotectVanished = b)) },
+      { env: "SYSTEM_PAUSE_ENABLED", sk: "systemPauseEnabled", get: () => s(this.systemPauseEnabled), set: (v) => bool(v, (b) => (this.systemPauseEnabled = b)) },
+      { env: "LAB_RANK_COUNT", get: () => s(this.labRankCount), set: (v) => num(v, (n) => n >= 10, (n) => (this.labRankCount = Math.min(200, Math.round(n)))) },
+      { env: "LAB_DOJI_BODY_MAX", get: () => s(this.labDojiBodyMax), set: (v) => num(v, (n) => n > 0, (n) => (this.labDojiBodyMax = n)) },
+      { env: "LAB_BODY_MIN", get: () => s(this.labBodyMin), set: (v) => num(v, (n) => n > 0, (n) => (this.labBodyMin = n)) },
+      { env: "LAB_VOL_MIN", get: () => s(this.labVolMin), set: (v) => num(v, (n) => n > 0, (n) => (this.labVolMin = n)) },
+      { env: "LAB_MIN_RANGE_PCT", get: () => s(this.labMinRangePct), set: (v) => num(v, (n) => n >= 0, (n) => (this.labMinRangePct = n)) },
+      { env: "LAST_SEEN_CHANGELOG", get: () => s(this.lastSeenChangelogVersion), set: (v) => { this.lastSeenChangelogVersion = v || null; } },
+      { env: "AUTO_SCAN_COUNT", sk: "autoScanCount", get: () => s(this.autoScanCount), set: (v) => num(v, (n) => n > 0, (n) => (this.autoScanCount = Math.round(n))) },
+      { env: "AUTO_SCAN_PRICE_MIN", sk: "autoScanPriceMin", get: () => s(this.autoScanPriceMin), set: (v) => num(v, (n) => n >= 0, (n) => (this.autoScanPriceMin = n)) },
+      { env: "AUTO_SCAN_PRICE_MAX", sk: "autoScanPriceMax", get: () => s(this.autoScanPriceMax), set: (v) => num(v, (n) => n >= 0, (n) => (this.autoScanPriceMax = n)) },
+      { env: "AUTO_SCAN_BODY_RATIO", sk: "autoScanBodyRatio", get: () => s(this.autoScanBodyRatio), set: (v) => num(v, (n) => n > 0, (n) => (this.autoScanBodyRatio = n)) },
+      { env: "AUTO_SCAN_EMA_ENABLED", sk: "autoScanEmaTrendEnabled", get: () => s(this.autoScanEmaTrendEnabled), set: (v) => bool(v, (b) => (this.autoScanEmaTrendEnabled = b)) },
+      { env: "AUTO_SCAN_EMA_PERIOD", sk: "autoScanEmaPeriod", get: () => s(this.autoScanEmaPeriod), set: (v) => num(v, (n) => n > 0, (n) => (this.autoScanEmaPeriod = Math.round(n))) },
+      { env: "AUTO_SCAN_CLOUD_ENABLED", sk: "autoScanCloudEnabled", get: () => s(this.autoScanCloudEnabled), set: (v) => bool(v, (b) => (this.autoScanCloudEnabled = b)) },
+      { env: "AUTO_SCAN_DOJI_WICK_MIN_RATIO", sk: "autoScanDojiWickMinRatio", get: () => s(this.autoScanDojiWickMinRatio), set: (v) => num(v, (n) => n >= 0, (n) => (this.autoScanDojiWickMinRatio = n)) },
+      { env: "AUTO_SCAN_DOJI_MAX_AGE_ENABLED", sk: "autoScanDojiMaxAgeEnabled", get: () => s(this.autoScanDojiMaxAgeEnabled), set: (v) => bool(v, (b) => (this.autoScanDojiMaxAgeEnabled = b)) },
+      { env: "AUTO_SCAN_DOJI_MAX_AGE_MINUTES", sk: "autoScanDojiMaxAgeMinutes", get: () => s(this.autoScanDojiMaxAgeMinutes), set: (v) => num(v, (n) => n > 0, (n) => (this.autoScanDojiMaxAgeMinutes = Math.round(n))) },
+      { env: "AUTO_SCAN_DOJI_MAX_GAP_ENABLED", sk: "autoScanDojiMaxGapEnabled", get: () => s(this.autoScanDojiMaxGapEnabled), set: (v) => bool(v, (b) => (this.autoScanDojiMaxGapEnabled = b)) },
+      { env: "AUTO_SCAN_DOJI_MAX_GAP_MINUTES", sk: "autoScanDojiMaxGapMinutes", get: () => s(this.autoScanDojiMaxGapMinutes), set: (v) => num(v, (n) => n > 0, (n) => (this.autoScanDojiMaxGapMinutes = Math.round(n))) },
+      { env: "AUTO_SCAN_EMA_MIN_GAP_ENABLED", sk: "autoScanEmaMinGapEnabled", get: () => s(this.autoScanEmaMinGapEnabled), set: (v) => bool(v, (b) => (this.autoScanEmaMinGapEnabled = b)) },
+      { env: "AUTO_SCAN_EMA_MIN_GAP_PCT", sk: "autoScanEmaMinGapPct", get: () => s(this.autoScanEmaMinGapPct), set: (v) => num(v, (n) => n > 0, (n) => (this.autoScanEmaMinGapPct = n)) },
+      { env: "AUTO_SCAN_EMA_SLOPE_ENABLED", sk: "autoScanEmaSlopeEnabled", get: () => s(this.autoScanEmaSlopeEnabled), set: (v) => bool(v, (b) => (this.autoScanEmaSlopeEnabled = b)) },
+      { env: "AUTO_SCAN_ATR_FILTER_ENABLED", sk: "autoScanAtrFilterEnabled", get: () => s(this.autoScanAtrFilterEnabled), set: (v) => bool(v, (b) => (this.autoScanAtrFilterEnabled = b)) },
+      { env: "AUTO_SCAN_ATR_MAX_PCT", sk: "autoScanAtrMaxPct", get: () => s(this.autoScanAtrMaxPct), set: (v) => num(v, (n) => n > 0, (n) => (this.autoScanAtrMaxPct = n)) },
+      { env: "AUTO_SCAN_NEXT_CANDLE_CONFIRM_ENABLED", sk: "autoScanNextCandleConfirmEnabled", get: () => s(this.autoScanNextCandleConfirmEnabled), set: (v) => bool(v, (b) => (this.autoScanNextCandleConfirmEnabled = b)) },
+      { env: "AUTO_SCAN_EXCLUDE_ETF", sk: "autoScanExcludeEtf", get: () => s(this.autoScanExcludeEtf), set: (v) => bool(v, (b) => (this.autoScanExcludeEtf = b)) },
+      { env: "AUTO_SCAN_DAY_ENABLED", sk: "autoScanDayEnabled", get: () => s(this.autoScanDayEnabled), set: (v) => bool(v, (b) => (this.autoScanDayEnabled = b)) },
+      { env: "AUTO_SCAN_PRE_ENABLED", sk: "autoScanPreEnabled", get: () => s(this.autoScanPreEnabled), set: (v) => bool(v, (b) => (this.autoScanPreEnabled = b)) },
+      { env: "AUTO_SCAN_REGULAR_ENABLED", sk: "autoScanRegularEnabled", get: () => s(this.autoScanRegularEnabled), set: (v) => bool(v, (b) => (this.autoScanRegularEnabled = b)) },
+      { env: "AUTO_SCAN_AFTER_ENABLED", sk: "autoScanAfterEnabled", get: () => s(this.autoScanAfterEnabled), set: (v) => bool(v, (b) => (this.autoScanAfterEnabled = b)) },
+    ];
+  }
+
+  /** 화면(useTabOrder 등)의 개인 화면 설정 — 계정 단위로 동기화한다(키 → JSON 문자열). */
+  private uiPrefs: Record<string, string> = {};
+  private uiPrefsPath = "";
+
+  getUiPref(key: string): string | null {
+    return Object.prototype.hasOwnProperty.call(this.uiPrefs, key) ? this.uiPrefs[key] : null;
+  }
+
+  setUiPref(key: string, value: string | null): { ok: boolean } {
+    if (!/^[a-zA-Z0-9_.:-]{1,80}$/.test(key)) return { ok: false };
+    if (value == null) delete this.uiPrefs[key];
+    else this.uiPrefs[key] = String(value).slice(0, 20_000);
+    this.persistUiPrefs();
+    return { ok: true };
+  }
+
+  private loadUiPrefs(): void {
+    try {
+      if (!existsSync(this.uiPrefsPath)) return;
+      const d = JSON.parse(readFileSync(this.uiPrefsPath, "utf8")) as unknown;
+      if (d && typeof d === "object" && !Array.isArray(d)) {
+        for (const [k, v] of Object.entries(d as Record<string, unknown>)) if (typeof v === "string") this.uiPrefs[k] = v;
+      }
+    } catch {
+      /* 깨졌으면 빈 상태 — 클라우드에서 다시 받는다 */
+    }
+  }
+
+  private persistUiPrefs(): void {
+    try {
+      writeFileSync(this.uiPrefsPath, JSON.stringify(this.uiPrefs), "utf8");
+    } catch {
+      /* 무시 */
+    }
+    this.itemSync?.markDirty("ui_pref");
+  }
+
+  /** 엔진이 만들어질 때 한 번: 어댑터 6+1종을 묶어 동기화 관리자를 만든다(로그인 후 startItemSync로 시작). */
+  private setupItemSync(): void {
+    this.itemSyncPath = join(this.userDataDir, "kylebot-item-sync.json");
+    const web = this.role === "web";
+    const adapters: ItemAdapter[] = [
+      {
+        kind: "settings",
+        newItemsLegacy: true,
+        list: () => this.syncedSettings().map((e) => ({ id: e.env, data: e.get(), sort: 0 })),
+        // 공장 기본값 그대로면 1, 이 기기에서 직접 바꾼 값이면 2 → 처음 맞출 때 "바꾼 값"이 기본값을 이긴다.
+        legacyRev: (d, id) => (this.settingsDefaults[id] !== undefined && this.settingsDefaults[id] === d ? 1 : 2),
+        apply: (ups) => {
+          const table = new Map(this.syncedSettings().map((e) => [e.env, e]));
+          for (const u of ups) table.get(u.id)?.set(typeof u.data === "string" ? u.data : String(u.data ?? ""));
+          this.labVersion++; // 연구소 기준이 바뀌었으면 요약을 다시 계산
+          this.persistEnv(); // 이 기기 .env에도 반영(다음 실행에도 유지). 지문이 같아 다시 올라가지 않는다.
+          this.emit("settingsSynced", this.getSettings());
+        },
+      },
+      {
+        kind: "ui_pref",
+        list: () => Object.entries(this.uiPrefs).map(([id, data]) => ({ id, data, sort: 0 })),
+        legacyRev: () => 1,
+        apply: (ups, dels) => {
+          for (const u of ups) if (typeof u.data === "string") this.uiPrefs[u.id] = u.data;
+          for (const d of dels) delete this.uiPrefs[d];
+          try {
+            writeFileSync(this.uiPrefsPath, JSON.stringify(this.uiPrefs), "utf8");
+          } catch {
+            /* 무시 */
+          }
+          this.emit("uiPrefsSynced", { ...this.uiPrefs });
+        },
+      },
+      {
+        kind: "lab_signal",
+        keep: ToolEngine.LAB_MAX_SIGNALS,
+        persistMeta: !web,
+        enabled: () => !web || this.webLabWanted,
+        list: () => this.labSignals.map((s) => ({ id: s.id, data: s, sort: s.c2T })),
+        legacyRev: (d) => {
+          const s = d as LabSignal;
+          return s.complete ? 3 : s.linkageDone ? 2 : 1;
+        },
+        apply: (ups, dels) => {
+          const map = new Map(this.labSignals.map((s) => [s.id, s]));
+          for (const d of dels) map.delete(d);
+          for (const u of ups) if (u.data && typeof u.data === "object") map.set(u.id, u.data as LabSignal);
+          let arr = [...map.values()].sort((a, b) => a.c2T - b.c2T);
+          if (arr.length > ToolEngine.LAB_MAX_SIGNALS) arr = arr.slice(arr.length - ToolEngine.LAB_MAX_SIGNALS);
+          this.labSignals = arr;
+          this.labVersion++;
+          this.persistLabLocal();
+          this.emit("itemsSynced", { kind: "lab_signal" }); // 화면이 열려 있으면 바로 다시 그린다
+        },
+      },
+      {
+        kind: "watch",
+        keep: WATCH_HISTORY_MAX,
+        persistMeta: !web,
+        list: () => this.watchHistory.map((h) => ({ id: h.id, data: h, sort: h.watchedAtMs })),
+        legacyRev: (d) => ((d as WatchHistoryEntry).outcome === "watching" ? 1 : 2),
+        apply: (ups, dels) => {
+          const map = new Map(this.watchHistory.map((h) => [h.id, h]));
+          for (const d of dels) map.delete(d);
+          for (const u of ups) if (u.data && typeof u.data === "object") map.set(u.id, u.data as WatchHistoryEntry);
+          this.watchHistory = trimWatchHistory([...map.values()]);
+          this.persistWatchHistoryLocal();
+          this.emit("itemsSynced", { kind: "watch" }); // 화면이 열려 있으면 바로 다시 그린다
+        },
+      },
+      {
+        kind: "trade_log",
+        keep: 1000,
+        list: () => this.trades.map((t) => ({ id: t.id, data: t, sort: tradeSortMs(t) })),
+        legacyRev: (d) => ((d as StrengthTrade).outcome != null ? 2 : 1),
+        apply: (ups, dels) => {
+          const map = new Map(this.trades.map((t) => [t.id, t]));
+          for (const d of dels) map.delete(d);
+          for (const u of ups) if (u.data && typeof u.data === "object") map.set(u.id, u.data as StrengthTrade);
+          let arr = [...map.values()].sort((a, b) => tradeSortMs(a) - tradeSortMs(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+          if (arr.length > 1000) arr = arr.slice(arr.length - 1000);
+          this.trades = arr;
+          this.persistTradesLocal();
+          this.emit("trades", this.getTradeLog());
+          this.emit("itemsSynced", { kind: "trade_log" }); // 화면이 열려 있으면 바로 다시 그린다
+        },
+      },
+      {
+        kind: "auto_run",
+        keep: ToolEngine.AUTO_RUNS_MAX,
+        list: () => this.autoRuns.map((r) => ({ id: r.id, data: r, sort: r.startedAtMs })),
+        legacyRev: (d) => ((d as AutoRunRecord).endedAtMs != null ? 2 : 1),
+        apply: (ups, dels) => {
+          const mine = this.currentAutoRun?.id ?? null;
+          const map = new Map(this.autoRuns.map((r) => [r.id, r]));
+          for (const d of dels) if (d !== mine) map.delete(d);
+          // 지금 이 기기가 진행 중인 실행 기록은 이 기기가 주인 — 받은 것으로 바꾸지 않는다(이 기기의 다음 갱신이 항상 더 최신).
+          for (const u of ups) if (u.id !== mine && u.data && typeof u.data === "object") map.set(u.id, u.data as AutoRunRecord);
+          let arr = [...map.values()].sort((a, b) => a.startedAtMs - b.startedAtMs);
+          if (arr.length > ToolEngine.AUTO_RUNS_MAX) arr = arr.slice(arr.length - ToolEngine.AUTO_RUNS_MAX);
+          this.autoRuns = arr;
+          this.persistAutoRunsLocal();
+          this.emit("itemsSynced", { kind: "auto_run" }); // 화면이 열려 있으면 바로 다시 그린다
+        },
+      },
+      {
+        kind: "rationale",
+        keep: 2000,
+        list: () => this.rationales.map((r) => ({ id: r.clientOrderId, data: r, sort: r.atMs ?? 0 })),
+        legacyRev: () => 1,
+        apply: (ups) => {
+          const map = new Map(this.rationales.map((r) => [r.clientOrderId, r]));
+          for (const u of ups) if (u.data && typeof u.data === "object") map.set(u.id, u.data as TradeRationale);
+          let arr = [...map.values()].sort((a, b) => (a.atMs ?? 0) - (b.atMs ?? 0));
+          if (arr.length > 2000) arr = arr.slice(arr.length - 2000);
+          this.rationales = arr;
+          this.scheduleFileSave("rationale", this.rationalePath, () => this.rationales);
+          this.emit("itemsSynced", { kind: "rationale" }); // 화면이 열려 있으면 바로 다시 그린다
+        },
+      },
+    ];
+    this.itemSync = new ItemSync(adapters, {
+      put: (kind, items) => this.itemSyncPut(kind, items),
+      pull: (since, kinds) => this.itemSyncPull(since, kinds),
+      prune: (kind, beforeSort) => this.itemSyncPrune(kind, beforeSort),
+    }, {
+      deviceId: () => this.paperDeviceId,
+      loadState: () => {
+        try {
+          if (!existsSync(this.itemSyncPath)) return null;
+          const d = JSON.parse(readFileSync(this.itemSyncPath, "utf8")) as ItemSyncState & { userId?: string };
+          return d;
+        } catch {
+          return null;
+        }
+      },
+      saveState: (st) => {
+        // 계정이 바뀌면(다른 사람이 같은 PC로 로그인) 버전 정보도 그 계정 것이어야 한다 — 계정 id를 함께 저장.
+        writeFileSync(this.itemSyncPath, JSON.stringify({ ...st, userId: this.authUserId }), "utf8");
+      },
+      onFirstSync: (kind, serverRows) => (kind === "settings" && serverRows === 0 ? this.seedSettingsFromMirror() : undefined),
+    });
+  }
+
+  /**
+   * [첫 동기화 — 기존 사용자 값 이어받기] 계정에 아직 설정이 하나도 안 올라가 있으면(=이 기능이 처음 켜진 순간),
+   *   지금 자동매매를 실제로 돌리고 있는 대표 PC가 올려 둔 상태 사진(capri_live_state snapshot.settings)의 값을
+   *   "계정의 정답"으로 삼는다(버전 3 — 각 기기의 옛 값 1·2보다 크다). 그래서 노트북·폰이 먼저 업데이트돼도
+   *   기본값이 PC 값을 덮어쓰는 일이 없고, 모든 기기가 오너가 PC에서 쓰던 값으로 맞춰진다.
+   */
+  private async seedSettingsFromMirror(): Promise<void> {
+    const live = await this.getLiveState().catch(() => null);
+    const snap = live?.ok ? (live.settings as Record<string, unknown> | null) : null;
+    if (!snap || !this.itemSync) return;
+    const ups: Array<{ id: string; data: string }> = [];
+    for (const e of this.syncedSettings()) {
+      if (!e.sk || !(e.sk in snap)) continue;
+      const raw = snap[e.sk];
+      ups.push({ id: e.env, data: raw == null ? "" : String(raw) });
+    }
+    if (ups.length > 0) this.itemSync.seed("settings", ups, 3);
+  }
+
+  /** 서버 함수 capri_sync_put 호출(반영된 id 목록을 돌려받는다). */
+  private async itemSyncPut(kind: string, items: PutItem[]): Promise<string[]> {
+    const token = await this.ensureAccessToken();
+    if (!token || !this.authUserId) throw new Error("로그인 필요");
+    const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/rpc/capri_sync_put`, {
+      method: "POST",
+      headers: this.authRestHeaders(token),
+      body: JSON.stringify({ p_kind: kind, p_items: items }),
+    }, 20_000, "capri_sync_put");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const j = (await res.json()) as { accepted?: string[] };
+    return Array.isArray(j?.accepted) ? j.accepted : [];
+  }
+
+  /** 바뀐 줄 받기(1000줄씩 나눠서). */
+  private async itemSyncPull(since: string | null, kinds: string[]): Promise<SyncRow[]> {
+    const token = await this.ensureAccessToken();
+    if (!token || !this.authUserId) throw new Error("로그인 필요");
+    const out: SyncRow[] = [];
+    const page = 1000;
+    for (let offset = 0; offset < 200_000; offset += page) {
+      const q = new URLSearchParams();
+      q.set("select", "kind,item_id,rev,hash,deleted,payload,updated_at");
+      q.set("user_id", `eq.${this.authUserId}`);
+      if (kinds.length > 0) q.set("kind", `in.(${kinds.join(",")})`);
+      if (since) q.set("updated_at", `gte.${since}`);
+      q.set("order", "updated_at.asc,kind.asc,item_id.asc");
+      q.set("limit", String(page));
+      q.set("offset", String(offset));
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_sync_items?${q.toString()}`, { headers: this.authRestHeaders(token) }, 30_000, "capri_sync_items");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const rows = (await res.json()) as SyncRow[];
+      out.push(...rows);
+      if (rows.length < page) break;
+    }
+    return out;
+  }
+
+  /** 오래된 줄 정리(이 기기가 상한으로 이미 잘라 낸 것보다 더 오래된 것만, 내 계정 줄만). */
+  private async itemSyncPrune(kind: string, beforeSort: number): Promise<void> {
+    const token = await this.ensureAccessToken();
+    if (!token || !this.authUserId) return;
+    await fetchWithTimeout(
+      `${ToolEngine.SUPABASE_URL}/rest/v1/capri_sync_items?user_id=eq.${this.authUserId}&kind=eq.${kind}&deleted=eq.false&sort_ms=lt.${Math.floor(beforeSort)}`,
+      { method: "DELETE", headers: { ...this.authRestHeaders(token), Prefer: "return=minimal" } },
+      15_000,
+      "capri_sync_items",
+    );
+  }
+
+  /** 로그인돼 있으면 항목 동기화를 시작(첫 전체 받기 → 이 기기 것 올리기)하고 10초 신호 루프를 켠다. 여러 번 불러도 안전. */
+  startItemSync(): void {
+    if (!this.itemSync) return;
+    if (!(this.authAccessToken || this.authRefreshToken)) return;
+    this.ensureItemSyncAccount();
+    if (!this.liveSyncStarted) {
+      this.liveSyncStarted = true;
+      void this.itemSync.start().catch((e) => {
+        this.liveSyncStarted = false; // 실패하면 다음 호출(15초 재시도 루프·화면 점검)에서 다시
+        this.itemSync && (this.itemSync.lastError = e instanceof Error ? e.message : String(e));
+      });
+    }
+    if (!this.liveSyncTimer) {
+      this.liveSyncTimer = setInterval(() => void this.liveSyncTick(), ToolEngine.LIVE_SYNC_INTERVAL_MS);
+      (this.liveSyncTimer as unknown as { unref?: () => void }).unref?.();
+    }
+  }
+
+  stopItemSync(): void {
+    if (this.liveSyncTimer) clearInterval(this.liveSyncTimer);
+    this.liveSyncTimer = null;
+    this.liveSyncStarted = false;
+  }
+
+  private static readonly LIVE_SYNC_INTERVAL_MS = 10_000;
+  private itemSyncAccount: string | null = null;
+
+  /** 다른 계정으로 로그인하면 버전 정보를 새로 시작한다(다른 사람 기록과 섞이지 않게). */
+  private ensureItemSyncAccount(): void {
+    if (!this.authUserId || this.itemSyncAccount === this.authUserId) return;
+    let saved: string | undefined;
+    try {
+      saved = existsSync(this.itemSyncPath) ? (JSON.parse(readFileSync(this.itemSyncPath, "utf8")) as { userId?: string }).userId : undefined;
+    } catch {
+      saved = undefined;
+    }
+    if (saved && saved !== this.authUserId) {
+      try {
+        writeFileSync(this.itemSyncPath, JSON.stringify({ meta: {}, inited: {}, userId: this.authUserId }), "utf8");
+      } catch {
+        /* 무시 */
+      }
+      this.setupItemSync(); // 빈 버전 정보로 다시 만든다(이 기기 데이터는 '옛 기록'으로 다시 등록돼 합쳐진다)
+      this.liveSyncStarted = false;
+    }
+    this.itemSyncAccount = this.authUserId;
+  }
+
+  /**
+   * 10초마다: "내 계정 데이터가 마지막으로 바뀐 시각"을 종류별로 한 번에 묻고(capri_sync_versions),
+   *   바뀐 것만 받는다 — 설정·기록(항목) / 체결·자동매매기록·삼분할(암호화) / 가상봇.
+   *   (Supabase 실시간 구독은 이 프로젝트에서 오류 상태라 못 쓴다 — v0.61.0 기록. 10초 신호 확인이 그 대신이다.)
+   */
+  private async liveSyncTick(): Promise<void> {
+    if (this.liveSyncBusy) return;
+    this.liveSyncBusy = true;
+    try {
+      const token = await this.ensureAccessToken();
+      if (!token || !this.authUserId) return;
+      if (!this.liveSyncStarted) this.startItemSync();
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/rpc/capri_sync_versions`, {
+        method: "POST",
+        headers: this.authRestHeaders(token),
+        body: "{}",
+      }, 10_000, "capri_sync_versions");
+      if (!res.ok) return;
+      const v = (await res.json()) as Record<string, string | null>;
+      const changed = (k: string) => {
+        const cur = v?.[k] ?? null;
+        const was = this.liveSyncSeen[k];
+        this.liveSyncSeen[k] = cur;
+        return was === undefined ? false : cur !== was; // 처음 본 값은 기준으로만 삼는다(시작 때 이미 전부 받았으므로)
+      };
+      if (changed("items") && this.itemSync) await this.itemSync.pullChanges().catch(() => 0);
+      for (const ch of ["trades", "autoState", "splits"] as const) {
+        if (changed(ch) && this.syncKeyReady()) await this.syncPullChannel(ch).catch(() => undefined);
+      }
+      if (changed("paper")) await this.paperSync().catch(() => undefined);
+    } catch {
+      /* 한 번 실패는 다음 10초에 */
+    } finally {
+      this.liveSyncBusy = false;
+    }
+  }
+
+  /** [화면] 동기화 상태 한 줄(설정 탭·동기화 띠에서 보여 준다). */
+  getItemSyncStatus(): { ready: string[]; lastOkMs: number | null; lastError: string | null } {
+    const s = this.itemSync?.status();
+    return { ready: s?.ready ?? [], lastOkMs: s?.lastOkMs ?? null, lastError: s?.lastError ?? null };
+  }
+
+  /** [테스트·수동 점검] 지금 즉시: 바뀐 것 받기 → 이 기기 것 올리기. */
+  async itemSyncNow(): Promise<{ ok: boolean; message: string }> {
+    if (!this.itemSync) return { ok: false, message: "동기화 준비 안 됨" };
+    this.startItemSync();
+    try {
+      await this.itemSync.start();
+      await this.itemSync.pullChanges();
+      const st = this.itemSync.status();
+      return { ok: !st.lastError, message: st.lastError ?? "설정·기록 동기화 완료" };
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /** 폰(웹)에서 연구소 화면을 처음 열 때 — 그때 연구소 신호를 받아 온다. */
+  private wantWebLab(): void {
+    if (this.role !== "web" || this.webLabWanted) return;
+    this.webLabWanted = true;
+    if (this.itemSync && (this.authAccessToken || this.authRefreshToken)) void this.itemSync.start(["lab_signal"]).catch(() => undefined);
+  }
+
   // ---------------------------------------------------------------------------
   // [v0.61.0] 상태 미러(state mirror) — PC → 폰 방향. capri_commands(폰→PC 명령 큐)와
   //   capri_auto_state(암호화 개인기록 동기화)는 둘 다 "PC가 지금 뭘 하고 있는지"를
@@ -7393,6 +7941,10 @@ export class ToolEngine extends EventEmitter {
    *   하지 않는다(웹/폰 세션도 이 함수를 그냥 불러도 안전 — fire-and-forget 전제).
    */
   async pushLiveState(force = false): Promise<void> {
+    // [v0.108.0] 폰(웹)은 상태 사진을 올리지 않는다 — 폰 엔진은 자동매매를 안 돌려서, 올리면 PC의 진짜 상태를 빈 상태로 덮어쓴다.
+    if (this.role === "web") return;
+    // [v0.108.0] PC가 여러 대면 대표 PC만 올린다(위 checkPrimary). 대표 확인 루프가 안 도는 경우(테스트 등)는 예전처럼 올린다.
+    if (this.remoteControlTimer && this.primaryState !== "primary") return;
     if (!force) {
       const longEnough = Date.now() - (this.lastLiveStatePushAtMs ?? 0) > ToolEngine.LIVE_STATE_PUSH_THROTTLE_MS;
       if (!longEnough) return;
@@ -7719,9 +8271,45 @@ export class ToolEngine extends EventEmitter {
     }
   }
 
+  /**
+   * [v0.108.0] "대표 PC" 정하기 — PC가 두 대(윈도우·맥) 켜져 있을 때 둘 다 상태 사진(snapshot)·생존 신호를 올리면
+   *   서로 덮어써서 폰 화면이 두 PC 사이를 오락가락하고, 폰 명령도 아무 PC나 먼저 집어 갔다(자동매매를 켜지도 않은
+   *   노트북이 "자동매매 시작"을 받는 식). 이제는 생존 신호 줄에 기기 번호를 남기고, 그 기기만 대표로 일한다.
+   *   대표가 되는 조건(위에서부터):
+   *     ① 아직 아무도 없음 ② 이미 내가 대표 ③ 대표가 45초 넘게 소식 없음(꺼짐)
+   *     ④ 나는 자동매매 중인데 대표는 아님(실제로 매매하는 PC가 대표여야 폰이 진짜 상태를 본다)
+   *   ※ 설정·기록 동기화(위 ItemSync)는 대표 여부와 상관없이 모든 기기가 한다 — 대표는 "상태 사진·명령 실행"만 맡는다.
+   */
+  private primaryState: "unknown" | "primary" | "secondary" = "unknown";
+
+  private async checkPrimary(token: string): Promise<boolean> {
+    try {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_desktop_heartbeat?user_id=eq.${this.authUserId}&select=device_id,last_seen,auto_trade_enabled`, {
+        headers: this.authRestHeaders(token),
+      }, 10_000, "capri_desktop_heartbeat");
+      if (!res.ok) return this.primaryState !== "secondary"; // 확인 실패 — 직전 판단 유지(처음이면 대표로 일한다: 폰이 아무것도 못 보는 것보다 낫다)
+      const rows = (await res.json()) as Array<{ device_id: string | null; last_seen: string | null; auto_trade_enabled: boolean | null }>;
+      const r = rows[0];
+      const me = this.paperDeviceId;
+      const fresh = r?.last_seen ? Date.now() - Date.parse(r.last_seen) < 45_000 : false;
+      const primary = !r || r.device_id === me || !fresh || (this.autoTradeEnabled && !r.auto_trade_enabled);
+      this.primaryState = primary ? "primary" : "secondary";
+      return primary;
+    } catch {
+      return this.primaryState !== "secondary";
+    }
+  }
+
+  /** 화면 표시용: 이 PC가 지금 대표 PC인가(폰 명령 실행·상태 사진 담당). */
+  isPrimaryDesktop(): boolean {
+    return this.primaryState !== "secondary";
+  }
+
   private async remoteControlTickInner(): Promise<void> {
     const token = await this.ensureAccessToken();
     if (!token || !this.authUserId) return;
+    // [v0.108.0] 대표 PC가 아니면 생존 신호·명령 실행을 하지 않는다(설정·기록 동기화는 계속 — 별도 루프).
+    if (!(await this.checkPrimary(token))) return;
     try {
       // [v0.60.4] auto_trade_enabled도 함께 실어 보낸다 — 폰이 "PC에서 지금 자동매매가
       //   진짜로 돌고 있는지"를 알 방법이 이것뿐이었다(오너 실사용 보고: "원격으로 시작을
@@ -7739,6 +8327,7 @@ export class ToolEngine extends EventEmitter {
           last_seen: new Date().toISOString(),
           auto_trade_enabled: this.autoTradeEnabled,
           app_version: this.appVersion,
+          device_id: this.paperDeviceId, // [v0.108.0] 대표 PC 표시
         }),
       }, 10_000, "capri_desktop_heartbeat");
     } catch {
@@ -7746,11 +8335,11 @@ export class ToolEngine extends EventEmitter {
     }
     try {
       const res = await fetchWithTimeout(
-        `${ToolEngine.SUPABASE_URL}/rest/v1/capri_commands?status=eq.pending&select=id,type,payload&order=created_at.asc&limit=5`,
+        `${ToolEngine.SUPABASE_URL}/rest/v1/capri_commands?status=eq.pending&select=id,type,payload,created_at&order=created_at.asc&limit=5`,
         { headers: this.authRestHeaders(token) },
       10_000, "capri_commands");
       if (!res.ok) return;
-      const rows = (await res.json()) as Array<{ id: string; type: string; payload: Record<string, unknown> }>;
+      const rows = (await res.json()) as Array<{ id: string; type: string; payload: Record<string, unknown>; created_at?: string }>;
       for (const row of rows) await this.claimAndExecuteCommand(token, row);
     } catch {
       /* 폴링 실패는 조용히 무시(다음 8초 주기에 재시도) */
@@ -7793,7 +8382,7 @@ export class ToolEngine extends EventEmitter {
    *   선점에 성공한 행만 실행하고, 끝나면 즉시 done/failed로 확정한다(재시도 없음 — 실주문
    *   명령을 여러 번 내는 것보다 한 번 실패하고 사람이 다시 보내는 쪽이 훨씬 안전하다).
    */
-  private async claimAndExecuteCommand(token: string, row: { id: string; type: string; payload: Record<string, unknown> }): Promise<void> {
+  private async claimAndExecuteCommand(token: string, row: { id: string; type: string; payload: Record<string, unknown>; created_at?: string }): Promise<void> {
     let claimed: unknown[] = [];
     try {
       const claim = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_commands?id=eq.${row.id}&status=eq.pending`, {
@@ -7809,7 +8398,15 @@ export class ToolEngine extends EventEmitter {
     if (claimed.length === 0) return; // 이미 다른 폴링 주기가 선점함 — 건너뛴다(중복 실행 방지)
 
     let result: { ok: boolean; message?: string; [k: string]: unknown };
-    try {
+    // [v0.108.0] 설정 저장 명령이 오래 묵었으면(PC가 꺼져 있던 동안 쌓인 것) 실행하지 않는다 — 설정은 이제 계정 동기화로
+    //   이미 정확한 최신값이 들어와 있다. 몇 시간 전 명령을 지금 실행하면 그 사이 다른 기기에서 고친 더 새로운 값을 옛 값으로 되돌린다.
+    const SETTINGS_CMDS = new Set(["saveAutoTradeSettings", "saveAutoScanSettings", "saveSystemPauseEnabled"]);
+    const ageMs = row.created_at ? Date.now() - Date.parse(row.created_at) : 0;
+    const labSettingsOnly = row.type === "saveLabSettings" && typeof row.payload?.enabled !== "boolean";
+    if ((SETTINGS_CMDS.has(row.type) || labSettingsOnly) && Number.isFinite(ageMs) && ageMs > 120_000) {
+      void this.itemSync?.pullChanges().catch(() => 0);
+      result = { ok: true, message: "오래된 설정 명령이라 건너뛰었습니다(설정은 계정 동기화로 이미 최신값이 반영돼 있습니다)." };
+    } else try {
       result = await this.dispatchCommand(row.type, row.payload);
     } catch (e) {
       result = { ok: false, message: e instanceof Error ? e.message : String(e) };
@@ -8512,6 +9109,7 @@ export class ToolEngine extends EventEmitter {
   /** 트레이드 한 건 삭제(잘못 기록된 것 정리용). */
   deleteTrade(id: string): StrengthTrade[] {
     this.trades = this.trades.filter((t) => t.id !== id);
+    this.itemSync?.markDeleted("trade_log", [id]); // [v0.108.0] 다른 기기에서도 지운다(부활 방지 표식)
     this.persistTrades();
     this.emit("trades", this.getTradeLog());
     return this.getTradeLog();

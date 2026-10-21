@@ -118,7 +118,8 @@ export function installKyleTool(): ToolEngine {
   installProcessShim(apiBase);
 
   // 저장 폴더 이름은 브라우저 저장소의 접두어로만 쓰인다(실제 폴더는 없음).
-  const e = new ToolEngine("capri-web");
+  // [v0.108.0] role "web" — 폰 엔진은 상태 사진을 올리지 않고(PC 화면을 빈 상태로 덮지 않게), 큰 기록을 폰 저장소에 쓰지 않는다.
+  const e = new ToolEngine("capri-web", { role: "web" });
   engine = e;
 
   // 화면이 구독하는 실시간 이벤트(매매일지·체결강도·스크리너 진행률·트레이드)
@@ -129,6 +130,9 @@ export function installKyleTool(): ToolEngine {
     trades: new Set<(v: unknown) => void>(),
     notify: new Set<(v: unknown) => void>(),
     groupSync: new Set<(v: unknown) => void>(),
+    settingsSynced: new Set<(v: unknown) => void>(), // [v0.108.0]
+    uiPrefsSynced: new Set<(v: unknown) => void>(), //  [v0.108.0]
+    itemsSynced: new Set<(v: unknown) => void>(), //    [v0.108.0]
   };
   e.on("journal", (v: unknown) => subs.journal.forEach((f) => f(v)));
   e.on("strength", (v: unknown) => subs.strength.forEach((f) => f(v)));
@@ -136,6 +140,9 @@ export function installKyleTool(): ToolEngine {
   e.on("trades", (v: unknown) => subs.trades.forEach((f) => f(v)));
   e.on("notify", (v: unknown) => subs.notify.forEach((f) => f(v))); // [v0.32.0] 관찰 확정·주문 알림
   e.on("groupSync", (v: unknown) => subs.groupSync.forEach((f) => f(v))); // [v0.56.0] 그룹 실시간 동기화
+  e.on("settingsSynced", (v: unknown) => subs.settingsSynced.forEach((f) => f(v))); // [v0.108.0] 다른 기기에서 바꾼 설정 도착
+  e.on("uiPrefsSynced", (v: unknown) => subs.uiPrefsSynced.forEach((f) => f(v)));
+  e.on("itemsSynced", (v: unknown) => subs.itemsSynced.forEach((f) => f(v)));
 
   const api = {
     // ── 상태·설정 ──────────────────────────────────────────────
@@ -266,6 +273,24 @@ export function installKyleTool(): ToolEngine {
     syncAllNow: () => e.syncAllNow(), // [v0.98.0] 🔄 전체 동기화
     dismissUnprotected: async (symbol: string) => e.dismissUnprotected(symbol), // [v0.69.4]
 
+    // ── [v0.108.0] 계정 동기화(설정·기록 전체) ──────────────────
+    onSettingsSynced: (cb: (v: unknown) => void) => {
+      subs.settingsSynced.add(cb);
+      return () => subs.settingsSynced.delete(cb);
+    },
+    onUiPrefsSynced: (cb: (v: unknown) => void) => {
+      subs.uiPrefsSynced.add(cb);
+      return () => subs.uiPrefsSynced.delete(cb);
+    },
+    onItemsSynced: (cb: (v: unknown) => void) => {
+      subs.itemsSynced.add(cb);
+      return () => subs.itemsSynced.delete(cb);
+    },
+    getUiPref: (key: string) => Promise.resolve(e.getUiPref(key)),
+    setUiPref: (key: string, value: string | null) => Promise.resolve(e.setUiPref(key, value)),
+    getItemSyncStatus: () => Promise.resolve(e.getItemSyncStatus()),
+    itemSyncNow: () => e.itemSyncNow(),
+
     // ── 현황(보유·주문·포지션·근거) ────────────────────────────
     positions: () => e.positions(),
     holdingsView: () => e.holdingsView(),
@@ -385,6 +410,9 @@ export function installKyleTool(): ToolEngine {
   };
 
   (window as unknown as { kyletool: typeof api }).kyletool = api;
+  // [v0.108.0] 저장된 로그인으로 열렸으면 곧바로 계정 동기화(설정·기록)를 시작한다 — 예전엔 동기화 띠가 1분 뒤 처음
+  //   점검할 때서야 켜져서, 폰을 연 직후엔 PC 설정 대신 폰의 기본값이 보였다.
+  setTimeout(() => e.startCloudSyncLoop(), 300);
   return e;
 }
 

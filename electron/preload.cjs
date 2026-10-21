@@ -168,6 +168,26 @@ contextBridge.exposeInMainWorld("kyletool", {
     ipcRenderer.on("tool:tradesEvent", h);
     return () => ipcRenderer.removeListener("tool:tradesEvent", h);
   },
+  // [v0.108.0] 계정 동기화(설정·기록 전체) — 다른 기기에서 바꾼 설정이 들어오면 알려 준다.
+  onSettingsSynced: (cb) => {
+    const h = (_ev, st) => cb(st);
+    ipcRenderer.on("tool:settingsSyncedEvent", h);
+    return () => ipcRenderer.removeListener("tool:settingsSyncedEvent", h);
+  },
+  onUiPrefsSynced: (cb) => {
+    const h = (_ev, p) => cb(p);
+    ipcRenderer.on("tool:uiPrefsSyncedEvent", h);
+    return () => ipcRenderer.removeListener("tool:uiPrefsSyncedEvent", h);
+  },
+  onItemsSynced: (cb) => {
+    const h = (_ev, p) => cb(p);
+    ipcRenderer.on("tool:itemsSyncedEvent", h);
+    return () => ipcRenderer.removeListener("tool:itemsSyncedEvent", h);
+  },
+  getUiPref: (key) => ipcRenderer.invoke("tool:uipref:get", key),
+  setUiPref: (key, value) => ipcRenderer.invoke("tool:uipref:set", key, value),
+  getItemSyncStatus: () => ipcRenderer.invoke("tool:itemsync:status"),
+  itemSyncNow: () => ipcRenderer.invoke("tool:itemsync:now"),
   positions: () => ipcRenderer.invoke("tool:positions"),
   holdingsView: () => ipcRenderer.invoke("tool:holdingsView"),
   ordersView: (status) => ipcRenderer.invoke("tool:ordersView", status),

@@ -92,7 +92,7 @@ function LabNotice({ lab }: { lab: LabApi }) {
     <>
       {lab.isMirror && (
         <p className="hint">
-          📱 폰에서는 <b>PC가 올려 둔 요약</b>만 보입니다(최근 갱신 {s ? kst(s.updatedAtMs, "MM-dd HH:mm:ss") : "—"}). 상세 로우·내보내기·초기화는 PC 앱에서 하세요.
+          📱 계정의 연구소 기록 전체를 받아 오는 중입니다 — 그동안은 <b>PC가 올려 둔 요약</b>을 보여 드립니다(최근 갱신 {s ? kst(s.updatedAtMs, "MM-dd HH:mm:ss") : "—"}). 다 받으면 PC와 똑같은 상세 화면이 됩니다. 내보내기·초기화는 PC 앱에서 하세요.
           켜기/끄기와 설정은 여기서 PC로 명령을 보낼 수 있어요.
         </p>
       )}
@@ -188,7 +188,7 @@ export function LabLiveTab({ lab }: { lab: LabApi }) {
           <button className={st?.enabled ? "btn btn-stop" : "btn btn-start"} disabled={lab.busy || !st} onClick={() => void lab.saveSettings({ enabled: !st?.enabled })}>
             {st?.enabled ? "신호 기록 끄기" : "신호 기록 켜기"}
           </button>
-          {!lab.isMirror && (
+          {!lab.isWeb && (
             <button className="mini" disabled={lab.busy} onClick={() => void lab.scanNow()} title="켜짐 여부와 무관하게 지금 한 번 훑습니다. 종목마다 처음 한 번은 1분봉을 깊게(약 2400개) 받아, 받을 수 있는 과거 구간(보통 하루 반 안팎)의 신호까지 한꺼번에 채웁니다.">
               🔎 지금 스캔(과거 백필 포함)
             </button>
@@ -270,7 +270,7 @@ export function LabLiveTab({ lab }: { lab: LabApi }) {
           </ul>
         </details>
 
-        {!lab.isMirror && (
+        {!lab.isWeb && (
           <>
             <h3>데이터 내보내기·초기화</h3>
             <div className="form-row" data-guide="live-export">
