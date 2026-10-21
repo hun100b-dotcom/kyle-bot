@@ -191,6 +191,24 @@ async function tryApplyUpdate(source: string): Promise<{ started: boolean; reaso
 }
 
 function setupAutoUpdater(): void {
+  // [v0.87.0] 적용 대기 폴링 — 15초마다 두 구간(주문 in-flight, 체결~OCO 등록 전)이 비었는지 보고, 비면 바로 재시작한다.
+  //   (v0.86.0까지는 5분 주기에 구간 구분 없이 재시작했다 — 체결~OCO 등록 사이에 죽을 수 있었다.)
+  //   맥·윈도우 공통이라 아래 맥 조기 반환보다 먼저 건다.
+  setInterval(() => {
+    void tryApplyUpdate("폴링").catch(() => undefined);
+  }, 15_000);
+
+  // [v0.107.0] ★ 맥에서는 electron-updater(Squirrel.Mac)를 아예 켜지 않는다.
+  //   애드혹 서명이라 Squirrel 설치는 구조적으로 실패한다(mac-self-update.ts 맨 위 주석). 그런데도
+  //   켜 두면 ① 같은 120MB zip을 한 번 더 받고 ② "앱을 끌 때 자동 설치(autoInstallOnAppQuit)"가
+  //   우리 교체 스크립트와 같은 순간에 Capri.app을 건드리려 할 수 있다 — 재시작 사고의 위험 요소라 끈다.
+  //   맥 업데이트는 오직 runMacAutoUpdateCycle(직접 교체)만 담당한다.
+  if (process.platform === "darwin") {
+    autoUpdater.autoDownload = false;
+    autoUpdater.autoInstallOnAppQuit = false;
+    return;
+  }
+
   // [v0.58.0] 묻지 않고 자동으로 받고, 앱을 끌 때는 자동으로 적용한다.
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
@@ -251,11 +269,6 @@ function setupAutoUpdater(): void {
     }
   }, 30 * 60_000);
 
-  // [v0.87.0] 적용 대기 폴링 — 15초마다 두 구간(주문 in-flight, 체결~OCO 등록 전)이 비었는지 보고, 비면 바로 재시작한다.
-  //   (v0.86.0까지는 5분 주기에 구간 구분 없이 재시작했다 — 체결~OCO 등록 사이에 죽을 수 있었다.)
-  setInterval(() => {
-    void tryApplyUpdate("폴링").catch(() => undefined);
-  }, 15_000);
 }
 
 // =============================================================================

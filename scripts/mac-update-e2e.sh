@@ -29,6 +29,13 @@ echo "== ① 옛 버전 설치(.pkg, 사용자와 똑같이 관리자 권한) ==
 sudo rm -rf "$APP"
 sudo installer -pkg "$OLD_PKG" -target / || { echo "::error::pkg 설치 실패"; exit 1; }
 echo "설치된 버전: $(ver_of "$APP")"
+# [SIMULATE_ROOT_LEFTOVER=1] 사용자 맥의 실제 상태를 흉내 낸다: 첫 자동 업데이트가 남긴 "관리자(root) 소유라
+#   못 지운 백업 폴더"가 /Applications 에 있는 상태 — 두 번째 업데이트부터 실패하던 원인.
+if [ "${SIMULATE_ROOT_LEFTOVER:-0}" = "1" ]; then
+  sudo mkdir -p "$APP.capri-update-backup/Contents"
+  sudo touch "$APP.capri-update-backup/Contents/leftover"
+  echo "(재현) root 소유 옛 백업 폴더를 남겨 둠:"; ls -ld "$APP.capri-update-backup"
+fi
 ls -ld "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tail -3
 
@@ -65,10 +72,15 @@ ls -ld "$APP" 2>/dev/null || true
 codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tail -5 || true
 echo "--- 실행 중 프로세스 ---"; pgrep -fl Capri || true
 echo "--- 옛 앱 로그(업데이트 관련) ---"; grep -i "update\|capri\]\[" "$LOG_DIR/old-app.log" | tail -40 || true
-echo "--- 교체 스크립트 로그 ---"; cat "$HOME/Library/Logs/Capri/update-swap.log" 2>/dev/null || echo "(없음 — 옛 버전은 로그를 안 남김)"
+echo "--- 교체 스크립트 로그 ---"; cat "$HOME/Library/Logs/Capri/update-swap.log" "$HOME/Library/Logs/kyle-bot/update-swap.log" 2>/dev/null || echo "(없음 — 옛 버전은 로그를 안 남김)"
 echo "--- 커널/AMFI 서명 거부 기록 ---"
 log show --last 10m --style compact --predicate '(eventMessage CONTAINS[c] "Capri") AND (process == "kernel" OR process == "amfid" OR process == "syspolicyd" OR process == "tccd")' 2>/dev/null | tail -40 || true
 echo "--- 충돌 보고서 ---"; ls -la "$HOME/Library/Logs/DiagnosticReports" 2>/dev/null | grep -i capri || echo "(없음)"
 
 pkill -f "$APP/Contents/MacOS/Capri" 2>/dev/null || true
+# EXPECT=fail 이면 "고장이 재현되는지" 확인하는 시험이다(옛 버전의 버그 입증용).
+if [ "${EXPECT:-ok}" = "fail" ]; then
+  [ "$RESULT" != "ok" ] && { echo "✅ 예상대로 고장 재현됨(앱이 다시 안 켜짐)"; exit 0; }
+  echo "::error::고장이 재현되지 않았습니다"; exit 1
+fi
 [ "$RESULT" = "ok" ] || exit 1
