@@ -1,0 +1,65 @@
+# =============================================================================
+# mac-update-e2e.yml — 맥 자동 업데이트(자기 교체·재시작)를 진짜 맥에서 검증
+# -----------------------------------------------------------------------------
+# [왜] 맥 자동 업데이트는 리눅스·윈도우에선 시험할 수 없다. 2026-10-21 "재시작 후 앱이 안 켜짐"
+#   사고를 계기로, 업데이트 관련 코드가 바뀐 PR마다 실제 맥 러너에서 처음부터 끝까지 돌려 본다.
+#   (배포는 하지 않는다 — 공개 릴리스는 건드리지 않고, 결과만 확인한다.)
+#
+# [두 가지 시험]
+#   1) released: 이미 배포된 직전 버전 → 최신 버전으로, 사용자 맥에서 일어나는 일 그대로 재현(현재 상태 진단)
+#   2) this-pr : 이 PR 코드로 만든 앱(옛 버전 역할)이 최신 배포 버전으로 스스로 업데이트·재시작하는지
+# =============================================================================
+name: mac-update-e2e
+
+on:
+  pull_request:
+    paths:
+      - "electron/**"
+      - "build/**"
+      - "electron-builder.yml"
+      - "scripts/mac-update-e2e.sh"
+      - ".github/workflows/mac-update-e2e.yml"
+  workflow_dispatch:
+
+jobs:
+  released:
+    runs-on: macos-latest
+    continue-on-error: true # 현재 배포본이 고장 나 있어도(진단 목적) 이 PR을 막지 않는다
+    steps:
+      - uses: actions/checkout@v4
+      - name: 직전 배포 버전 pkg 받기
+        id: rel
+        run: |
+          set -e
+          API=https://api.github.com/repos/hun100b-dotcom/kyle-bot-releases/releases
+          curl -sSL "$API?per_page=5" -o rels.json
+          LATEST=$(python3 -c "import json;r=json.load(open('rels.json'));print([x for x in r if any(a['name'].endswith('.pkg') for a in x['assets'])][0]['tag_name'][1:])")
+          PREV=$(python3 -c "import json;r=json.load(open('rels.json'));print([x for x in r if any(a['name'].endswith('.pkg') for a in x['assets'])][1]['tag_name'][1:])")
+          echo "latest=$LATEST prev=$PREV"
+          curl -sSL -o old.pkg "https://github.com/hun100b-dotcom/kyle-bot-releases/releases/download/v$PREV/Capri-$PREV-universal.pkg"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+      - name: 재현 — 직전 버전이 스스로 최신으로 업데이트·재시작하는가
+        run: bash scripts/mac-update-e2e.sh old.pkg "${{ steps.rel.outputs.latest }}" 420
+
+  this-pr:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: 이 PR 코드로 "옛 버전" 역할의 설치팩 만들기(버전을 0.0.1로 낮춰 최신 배포본을 새 버전으로 인식하게)
+        run: |
+          set -e
+          npm version 0.0.1 --no-git-tag-version --allow-same-version
+          npm run dist:mac
+          ls -la release
+      - name: 최신 배포 버전 번호
+        id: rel
+        run: |
+          LATEST=$(curl -sSL https://api.github.com/repos/hun100b-dotcom/kyle-bot-releases/releases/latest | python3 -c "import json,sys;print(json.load(sys.stdin)['tag_name'][1:])")
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+      - name: 검증 — 이 PR 코드가 최신 버전으로 스스로 업데이트·재시작하는가
+        run: bash scripts/mac-update-e2e.sh release/Capri-0.0.1-universal.pkg "${{ steps.rel.outputs.latest }}" 420
