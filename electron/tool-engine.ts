@@ -3155,6 +3155,78 @@ export class ToolEngine extends EventEmitter {
   }
 
   // --------------------------------------------------------------------------
+  // [v0.109.0 — 오너 지시 "내가 공지를 하면 팀원들이 등록한 웹훅 디스코드로 받을 수 있게"]
+  //   팀원의 웹훅 주소는 본인만 읽을 수 있게 잠겨 있어(RLS) 오너 앱이 직접 쏠 수 없다. 그래서
+  //   서버(Supabase) 함수 capri_announce_*가 주소를 읽어 대신 보낸다 — 이 앱은 "공지 보내줘/
+  //   결과 알려줘"만 요청하고, 어떤 팀원의 주소도 받아 보지 못한다. 오너 확인도 서버 함수가
+  //   로그인 토큰의 이메일로 다시 한다(화면 숨김은 편의일 뿐 방어선이 아니다).
+  // --------------------------------------------------------------------------
+
+  /** 서버 함수(rpc)를 부르는 공용 도우미 — 실패하면 서버가 보낸 한국어 오류 문장을 그대로 던진다. */
+  private async announceRpc<T>(fn: string, args: Record<string, unknown>): Promise<T> {
+    const token = await this.ensureAccessToken();
+    if (!token) throw new Error("먼저 로그인하세요.");
+    const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+      method: "POST",
+      headers: this.authRestHeaders(token),
+      body: JSON.stringify(args),
+    }, 15_000, fn);
+    if (!res.ok) {
+      let msg = `요청 실패(HTTP ${res.status})`;
+      try {
+        const j = (await res.json()) as { message?: string };
+        if (j.message) msg = j.message;
+      } catch { /* 본문이 JSON이 아니면 기본 문구 */ }
+      throw new Error(msg);
+    }
+    return (await res.json()) as T;
+  }
+
+  /** [운영자 전용] 공지를 보낸다 — 승인된 그룹원 전원의 웹훅으로. 성공하면 공지 번호를 돌려준다. */
+  async sendAnnouncement(title: string, body: string): Promise<{ ok: boolean; message: string; id?: number }> {
+    const t = title.trim();
+    const b = body.trim();
+    if (!t || !b) return { ok: false, message: "제목과 내용을 모두 입력하세요." };
+    if (t.length > 100 || b.length > 1700) return { ok: false, message: "제목은 100자, 내용은 1700자까지 보낼 수 있습니다." };
+    try {
+      const id = await this.announceRpc<number>("capri_announce_send", { p_title: t, p_body: b });
+      return { ok: true, message: "발송을 시작했습니다. 아래에서 사람별 결과를 확인하세요.", id };
+    } catch (err) {
+      return { ok: false, message: String(err).replace(/^Error:\s*/, "") };
+    }
+  }
+
+  /** [운영자 전용] 최근 공지 목록(성공·실패 건수 요약). */
+  async listAnnouncements(): Promise<Array<{ id: number; title: string; body: string; createdAt: string; sent: number; failed: number; pending: number; noWebhook: number }>> {
+    try {
+      const rows = await this.announceRpc<Array<{ id: number; title: string; body: string; created_at: string; sent: number; failed: number; pending: number; no_webhook: number }>>("capri_announce_list", { p_limit: 10 });
+      return rows.map((r) => ({ id: r.id, title: r.title, body: r.body, createdAt: r.created_at, sent: r.sent, failed: r.failed, pending: r.pending, noWebhook: r.no_webhook }));
+    } catch {
+      return [];
+    }
+  }
+
+  /** [운영자 전용] 사람별 결과 조회 — 이 호출이 서버에서 결과를 반영하고 일시 오류는 자동 재전송(최대 3회)한다. */
+  async getAnnouncementStatus(id: number): Promise<Array<{ email: string; status: "pending" | "sent" | "failed" | "no_webhook"; attempts: number; httpStatus: number | null; error: string | null }>> {
+    try {
+      const rows = await this.announceRpc<Array<{ member_email: string; status: "pending" | "sent" | "failed" | "no_webhook"; attempts: number; http_status: number | null; error: string | null }>>("capri_announce_status", { p_id: id });
+      return rows.map((r) => ({ email: r.member_email, status: r.status, attempts: r.attempts, httpStatus: r.http_status, error: r.error }));
+    } catch {
+      return [];
+    }
+  }
+
+  /** [운영자 전용] 실패했거나 웹훅이 없던 사람에게 다시 보낸다(그새 웹훅을 등록한 사람 포함). */
+  async retryAnnouncement(id: number): Promise<{ ok: boolean; message: string }> {
+    try {
+      const n = await this.announceRpc<number>("capri_announce_retry", { p_id: id });
+      return { ok: true, message: n > 0 ? `${n}명에게 다시 보냈습니다.` : "다시 보낼 대상이 없습니다." };
+    } catch (err) {
+      return { ok: false, message: String(err).replace(/^Error:\s*/, "") };
+    }
+  }
+
+  // --------------------------------------------------------------------------
   // [v0.83.0 — 오너 지시 "카일도 디스코드 알림 받으려면 개인용 웹훅 세팅창이 있어야
   //   해"] 위 capri_notify_settings(단일 전역 행)는 "새 가입 대기" 알림 전용으로 계속
   //   두고, 거래 신호(스크리닝·보호 가드)는 로그인한 사람 각자의 웹훅

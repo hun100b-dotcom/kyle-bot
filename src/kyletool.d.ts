@@ -890,6 +890,11 @@ interface KyletoolBridge {
   saveNotifySettings(url: string): Promise<{ ok: boolean; message: string }>;
   /** [v0.83.0] 개인용 디스코드 알림 — 로그인한 사람 누구나 자기 웹훅을 등록/조회한다. */
   getMyNotifySettings(): Promise<{ discordWebhookUrl: string | null }>;
+  /** [v0.109.0] 오너 공지 → 팀원 각자 등록한 디스코드 웹훅(서버 함수가 대신 발송, 운영자 전용). */
+  sendAnnouncement(title: string, body: string): Promise<{ ok: boolean; message: string; id?: number }>;
+  listAnnouncements(): Promise<Array<{ id: number; title: string; body: string; createdAt: string; sent: number; failed: number; pending: number; noWebhook: number }>>;
+  getAnnouncementStatus(id: number): Promise<Array<{ email: string; status: "pending" | "sent" | "failed" | "no_webhook"; attempts: number; httpStatus: number | null; error: string | null }>>;
+  retryAnnouncement(id: number): Promise<{ ok: boolean; message: string }>;
   /** [v0.91.0] 튜토리얼: 저장된 토스 키로 키 인증·시세·계좌를 차례로 시험(읽기 전용). */
   testTossConnection(): Promise<{ ok: boolean; stage: string; message: string; action?: string; steps: Array<{ name: string; ok: boolean }> }>;
   /** [v0.91.0] 튜토리얼: 내 디스코드 웹후크로 테스트 메시지 전송. */

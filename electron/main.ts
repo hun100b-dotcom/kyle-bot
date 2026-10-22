@@ -533,6 +533,11 @@ function registerIpc(e: ToolEngine): void {
   ipcMain.handle("tool:toss:testConnection", () => e.testTossConnection()); // [v0.91.0] 튜토리얼 연결 테스트
   ipcMain.handle("tool:notify:testMine", () => e.sendMyDiscordTest()); //        [v0.91.0] 튜토리얼 디스코드 테스트
   ipcMain.handle("tool:notify:saveMine", (_ev, url: string) => e.saveMyNotifySettings(url));
+  // [v0.109.0] 오너 공지 → 팀원 디스코드 웹훅(서버 함수가 대신 발송)
+  ipcMain.handle("tool:announce:send", (_ev, title: string, body: string) => e.sendAnnouncement(title, body));
+  ipcMain.handle("tool:announce:list", () => e.listAnnouncements());
+  ipcMain.handle("tool:announce:status", (_ev, id: number) => e.getAnnouncementStatus(id));
+  ipcMain.handle("tool:announce:retry", (_ev, id: number) => e.retryAnnouncement(id));
   ipcMain.handle("tool:auth:oauth", (_ev, provider: "google") => startOAuthPopup(e, provider));
   // [v0.59.0] 폰 원격 조종 — 명령 보내기/조회 + PC 생존신호 조회. 명령 "실행"(폴링 루프)은
   //   IPC로 노출하지 않는다(engine.startRemoteControlLoop()는 main.ts가 직접 부른다 — 아래 참고).
