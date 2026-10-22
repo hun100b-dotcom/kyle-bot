@@ -130,6 +130,7 @@ export function installKyleTool(): ToolEngine {
     trades: new Set<(v: unknown) => void>(),
     notify: new Set<(v: unknown) => void>(),
     groupSync: new Set<(v: unknown) => void>(),
+    groupFeed: new Set<(v: unknown) => void>(), //  [v0.109.0]
     settingsSynced: new Set<(v: unknown) => void>(), // [v0.108.0]
     uiPrefsSynced: new Set<(v: unknown) => void>(), //  [v0.108.0]
     itemsSynced: new Set<(v: unknown) => void>(), //    [v0.108.0]
@@ -139,6 +140,7 @@ export function installKyleTool(): ToolEngine {
   e.on("screener:progress", (v: unknown) => subs.screener.forEach((f) => f(v)));
   e.on("trades", (v: unknown) => subs.trades.forEach((f) => f(v)));
   e.on("notify", (v: unknown) => subs.notify.forEach((f) => f(v))); // [v0.32.0] 관찰 확정·주문 알림
+  e.on("groupFeed", (v: unknown) => subs.groupFeed.forEach((f) => f(v))); // [v0.109.0] 그룹 실시간 갱신
   e.on("groupSync", (v: unknown) => subs.groupSync.forEach((f) => f(v))); // [v0.56.0] 그룹 실시간 동기화
   e.on("settingsSynced", (v: unknown) => subs.settingsSynced.forEach((f) => f(v))); // [v0.108.0] 다른 기기에서 바꾼 설정 도착
   e.on("uiPrefsSynced", (v: unknown) => subs.uiPrefsSynced.forEach((f) => f(v)));
@@ -344,6 +346,15 @@ export function installKyleTool(): ToolEngine {
       subs.groupSync.add(cb);
       return () => subs.groupSync.delete(cb);
     },
+    // [v0.109.0] 그룹 실시간 갱신 + 근황 + 공지
+    onGroupFeed: (cb: (v: unknown) => void) => {
+      subs.groupFeed.add(cb);
+      return () => subs.groupFeed.delete(cb);
+    },
+    groupPresenceGet: () => e.getGroupPresence(),
+    noticesGet: () => e.getNotices(),
+    noticeSend: (title: string, body: string) => e.sendNotice(title, body),
+    noticeDelete: (id: number) => e.deleteNotice(id),
     groupChatSend: (body: string) => e.sendGroupChatMessage(body),
     groupChatList: () => e.getGroupChatMessages(),
     // [v0.61.9] "업데이트 내역" 탭 — getChangelog는 async라 그대로, markChangelogSeen은

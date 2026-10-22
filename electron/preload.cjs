@@ -156,6 +156,16 @@ contextBridge.exposeInMainWorld("kyletool", {
     ipcRenderer.on("tool:groupSyncEvent", h);
     return () => ipcRenderer.removeListener("tool:groupSyncEvent", h);
   },
+  // [v0.109.0] 그룹 실시간 갱신 + 근황 + 공지
+  onGroupFeed: (cb) => {
+    const h = (_ev, payload) => cb(payload);
+    ipcRenderer.on("tool:groupFeedEvent", h);
+    return () => ipcRenderer.removeListener("tool:groupFeedEvent", h);
+  },
+  groupPresenceGet: () => ipcRenderer.invoke("tool:grouppresence:get"),
+  noticesGet: () => ipcRenderer.invoke("tool:notices:get"),
+  noticeSend: (title, body) => ipcRenderer.invoke("tool:notices:send", title, body),
+  noticeDelete: (id) => ipcRenderer.invoke("tool:notices:delete", id),
   groupChatSend: (body) => ipcRenderer.invoke("tool:groupchat:send", body), // [v0.56.0] 그룹 채팅
   groupChatList: () => ipcRenderer.invoke("tool:groupchat:list"),
   getChangelog: () => ipcRenderer.invoke("tool:changelog:get"), // [v0.61.9] 업데이트 내역

@@ -645,6 +645,12 @@ function registerIpc(e: ToolEngine): void {
   // [v0.56.0] 그룹 채팅 — 가입 허용목록 전원이 실명으로 함께 쓰는 대화방.
   ipcMain.handle("tool:groupchat:send", (_ev, body: string) => e.sendGroupChatMessage(body));
   ipcMain.handle("tool:groupchat:list", () => e.getGroupChatMessages());
+  // [v0.109.0] 그룹 실시간 갱신(채팅·공지·근황·업데이트 내역) + 공지(오너 전용 쓰기)
+  e.on("groupFeed", (ev) => win?.webContents.send("tool:groupFeedEvent", ev));
+  ipcMain.handle("tool:grouppresence:get", () => e.getGroupPresence());
+  ipcMain.handle("tool:notices:get", () => e.getNotices());
+  ipcMain.handle("tool:notices:send", (_ev, title: string, body: string) => e.sendNotice(String(title ?? ""), String(body ?? "")));
+  ipcMain.handle("tool:notices:delete", (_ev, id: number) => e.deleteNotice(Number(id)));
   ipcMain.handle("tool:changelog:get", () => e.getChangelog());
   ipcMain.handle("tool:changelog:seen", (_ev, version: string) => e.markChangelogSeen(version));
   ipcMain.handle("tool:trades:stats", () => e.getTradeStats());

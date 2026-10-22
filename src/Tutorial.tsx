@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   applyTutorialPatch,
+  mergeTutorialStored,
   computeProgress,
   parseTutorialStored,
   shouldAutoOpen,
@@ -167,6 +168,28 @@ export default function Tutorial(p: TutorialProps) {
     try { setStored(parseTutorialStored(localStorage.getItem(storeKey))); } catch { /* 무시 */ }
   }, [storeKey]);
 
+  // [v0.109.0] 튜토리얼 진행 상태도 계정에 맞춘다(폰에서 끝낸 단계가 PC에서 다시 안 뜨게).
+  //   합치기 규칙은 lib/tutorial.ts mergeTutorialStored(단방향 값만 → 어느 기기가 먼저 합쳐도 같은 결과).
+  useEffect(() => {
+    const k = window.kyletool;
+    const key = `tutorial:${storeKey}`;
+    const take = (raw: string | null | undefined) => {
+      if (!raw) return;
+      try {
+        const remote = parseTutorialStored(raw);
+        setStored((prev) => {
+          const next = mergeTutorialStored(prev, remote);
+          if (JSON.stringify(next) === JSON.stringify(prev)) return prev;
+          try { localStorage.setItem(storeKey, JSON.stringify(next)); } catch { /* 무시 */ }
+          return next;
+        });
+      } catch { /* 깨진 값은 무시 */ }
+    };
+    void k?.getUiPref?.(key).then(take).catch(() => undefined);
+    const off = k?.onUiPrefsSynced?.((prefs) => take(prefs[key]));
+    return () => off?.();
+  }, [storeKey]);
+
   // [v0.95.0][버그 수정] setStored에 "직접 계산한 값"이 아니라 "이전 상태 → 다음 상태" 함수를 넘긴다.
   //   React는 같은 핸들러 안에서 setState가 여러 번 불려도 함수형 업데이트는 항상 직전 결과를 이어받게
   //   보장한다 — 예전처럼 둘 다 storedRef.current(리렌더 전이라 둘 다 옛 값)를 기준으로 계산하면,
@@ -175,6 +198,7 @@ export default function Tutorial(p: TutorialProps) {
     setStored((prev) => {
       const next = applyTutorialPatch(prev, patch);
       try { localStorage.setItem(storeKey, JSON.stringify(next)); } catch { /* 저장소를 못 써도 이번 화면은 동작 */ }
+      void window.kyletool?.setUiPref?.(`tutorial:${storeKey}`, JSON.stringify(next)); // [v0.109.0] 다른 기기에도
       return next;
     });
   }, [storeKey]);

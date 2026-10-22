@@ -1105,6 +1105,16 @@ function App() {
   const [chatInput, setChatInput] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
   const [chatErr, setChatErr] = useState("");
+  // [v0.109.0] 그룹원 근황(접속·상태) · 공지 — 8초마다 자동 갱신되는 그룹 실시간 피드로 채운다.
+  const [presence, setPresence] = useState<GroupPresence[]>([]);
+  const [notices, setNotices] = useState<GroupNotice[]>([]);
+  const [noticeTitle, setNoticeTitle] = useState("");
+  const [noticeBody, setNoticeBody] = useState("");
+  const [noticeBusy, setNoticeBusy] = useState(false);
+  const [noticeMsg, setNoticeMsg] = useState("");
+  const [unseenNotice, setUnseenNotice] = useState<GroupNotice | null>(null);
+  // 마운트 때 한 번 만든 이벤트 핸들러가 "지금 로그인한 사람"을 알아야 하므로 ref로 들고 있는다(옛 값에 갇히지 않게).
+  const myEmailRef = useRef<string | null>(null);
   // [v0.49.0] Raw Data 탭 안에서만 쓰는 원본 소스 선택("내 데이터"/"그룹 전체" 중 어느 쪽 원본을 볼지).
   //   위 researchView와 별도로 두는 이유: Raw Data를 보다가도 groupMembers는 그대로 유지돼야
   //   (다시 안 눌러도) 곧바로 전환할 수 있게.
@@ -1199,6 +1209,42 @@ function App() {
     if (!unseenChangelog) return;
     void window.kyletool.markChangelogSeen?.(unseenChangelog.version);
     setUnseenChangelog(null);
+  }
+  /** [v0.109.0] 새 공지가 오면 팝업. "읽음"은 계정에 저장(uiPref)해서 폰에서 읽으면 PC에서도 다시 안 뜬다.
+   *  처음 켜는 기기는 이미 있던 옛 공지를 한꺼번에 띄우지 않도록 최신 번호만 읽음 처리한다. 내가 올린 공지는 띄우지 않는다. */
+  async function checkUnseenNotice(list: GroupNotice[]) {
+    if (list.length === 0) return;
+    const newest = list[0]; // 서버가 최신순으로 준다
+    let seen: number | null = null;
+    try { const raw = await window.kyletool.getUiPref?.("notice_seen_id"); seen = raw ? Number(raw) : null; } catch { /* 읽기 실패 = 처음으로 간주 */ }
+    if (seen === null || !Number.isFinite(seen)) { void window.kyletool.setUiPref?.("notice_seen_id", String(newest.id)); return; }
+    if (newest.id > seen) {
+      if (newest.authorEmail === myEmailRef.current) void window.kyletool.setUiPref?.("notice_seen_id", String(newest.id));
+      else setUnseenNotice(newest);
+    }
+  }
+  function dismissNoticePopup() {
+    if (!unseenNotice) return;
+    void window.kyletool.setUiPref?.("notice_seen_id", String(unseenNotice.id));
+    setUnseenNotice(null);
+  }
+  async function doSendNotice() {
+    if (noticeBusy) return;
+    setNoticeBusy(true);
+    setNoticeMsg("");
+    try {
+      const r = await window.kyletool.noticeSend?.(noticeTitle, noticeBody);
+      if (!r) { setNoticeMsg("⚠️ 이 버전에서는 공지를 지원하지 않습니다."); return; }
+      setNoticeMsg(r.ok ? `✅ ${r.message}` : `⚠️ ${r.message}`);
+      if (r.ok) { setNoticeTitle(""); setNoticeBody(""); if (r.notices) setNotices(r.notices); }
+    } finally {
+      setNoticeBusy(false);
+    }
+  }
+  async function doDeleteNotice(id: number) {
+    const r = await window.kyletool.noticeDelete?.(id);
+    setNoticeMsg(r ? (r.ok ? `✅ ${r.message}` : `⚠️ ${r.message}`) : "");
+    if (r?.ok) setNotices((cur) => cur.filter((n) => n.id !== id));
   }
   /**
    * [v0.48.0 버그 수정 — 오너 보고 "자동매매기록 탭도 실시간 연동 안 됨, 새로고침해도 그대로"]
@@ -1469,6 +1515,21 @@ function App() {
     //   최신 그룹 기록은 이벤트로 들어오는 대로 화면(매매연구·그룹원 관리 탭)에 바로 반영한다.
     void window.kyletool.groupSyncEnsure?.();
     const offGroupSync = window.kyletool.onGroupSync?.((members) => setGroupMembers(members));
+    // [v0.109.0] 그룹 실시간 피드 — 채팅·공지·근황·업데이트 내역이 바뀌면 8초 안에 화면에 반영(새로고침 불필요).
+    const offGroupFeed = window.kyletool.onGroupFeed?.((ev) => {
+      if (ev.chat) {
+        const incoming = ev.chat;
+        // 번호(id)로 중복을 거르고 시간순으로 정렬 — 같은 줄이 두 번 오거나 순서가 엇갈려도 화면은 항상 같다.
+        setGroupChat((cur) => {
+          const map = new Map<number, GroupChatMessage>(ev.chatFull ? [] : cur.map((m) => [m.id, m]));
+          for (const m of incoming) map.set(m.id, m);
+          return [...map.values()].sort((a, b) => a.id - b.id);
+        });
+      }
+      if (ev.presence) setPresence(ev.presence);
+      if (ev.notices) { setNotices(ev.notices); void checkUnseenNotice(ev.notices); }
+      if (ev.changelogLatest) void loadChangelog(true);
+    });
     // 업데이트 이벤트 구독(있음/진행률/완료/오류).
     // [v0.32.3] 예전엔 오류를 "조용히 무시"했다(앱이 죽지 않는 건 맞지만, 그 대가로
     //   업데이트가 실패해도 오너가 원인을 전혀 알 수 없었다 — "버튼이 안 눌린다"는 보고의
@@ -1495,6 +1556,7 @@ function App() {
       offTrd?.();
       offUpd?.();
       offGroupSync?.();
+      offGroupFeed?.();
       offSettingsSynced?.();
       offItemsSynced?.();
     };
@@ -1540,7 +1602,11 @@ function App() {
     // [v0.62.1] 자동매매 리포트 탭을 열 때 최신 실행 기록으로 리포트를 다시 만든다.
     else if (t === "autoReport") void loadAutoReports();
     // [v0.56.0] 그룹원 관리 탭을 열 때 근황(그룹 기록)·채팅을 바로 불러온다.
-    else if (t === "groupManage") { void loadGroupResearch(); void loadGroupChat(); }
+    else if (t === "groupManage") {
+      void loadGroupResearch(); void loadGroupChat();
+      void window.kyletool.groupPresenceGet?.().then((r) => { if (r.ok) setPresence(r.presence); }).catch(() => undefined);
+      void window.kyletool.noticesGet?.().then((r) => { if (r.ok) setNotices(r.notices); }).catch(() => undefined);
+    }
     // [v0.61.9] 업데이트 내역 탭을 열 때 최신 목록을 다시 받아온다(팝업은 이미 로그인 직후
     //   한 번 확인했으므로 여기선 다시 띄우지 않는다).
     else if (t === "changelog") void loadChangelog(false);
@@ -3077,6 +3143,7 @@ ${msg}
     try {
       const s = await window.kyletool.authStatus();
       setAuthState(s);
+      myEmailRef.current = s.email; // [v0.109.0] 공지 팝업이 "내가 올린 공지"를 구별하는 데 쓴다
       if (s.loggedIn) void loadMyNotifySettings(); // [v0.83.0] 개인용 알림 — 운영자 아니어도 누구나
       if (s.isOwner) {
         void loadAccessRequests();
@@ -6929,35 +6996,90 @@ ${msg}
             </section>
           )}
 
+          {/* [v0.109.0] 공지 — 모든 그룹원이 보고, 올리기·삭제는 오너만. 올리면 디스코드 웹훅을 등록한 팀원에게 자동 발송. */}
+          <section className="card wide">
+            <h2>📢 공지</h2>
+            <p className="hint">
+              운영자가 올린 공지가 8초 안에 모든 그룹원 화면에 뜨고, [알림 설정]에 디스코드 웹훅을 등록해 둔 팀원에게는 앱이 꺼져 있어도 디스코드로 자동 발송됩니다.
+            </p>
+            {authState.isOwner && (
+              <div className="form-col" style={{ marginBottom: 10 }}>
+                <input placeholder="공지 제목 (100자 이하)" maxLength={100} value={noticeTitle} disabled={noticeBusy} onChange={(e) => setNoticeTitle(e.target.value)} />
+                <textarea placeholder="공지 내용 (1500자 이하)" maxLength={1500} rows={4} value={noticeBody} disabled={noticeBusy} onChange={(e) => setNoticeBody(e.target.value)} />
+                <div className="form-row">
+                  <button className="btn btn-start" disabled={noticeBusy || !noticeTitle.trim() || !noticeBody.trim()} onClick={() => void doSendNotice()}>
+                    {noticeBusy ? "보내는 중…" : "📣 공지 올리고 디스코드로 보내기"}
+                  </button>
+                </div>
+              </div>
+            )}
+            {noticeMsg && <p className={noticeMsg.startsWith("✅") ? "ok" : "hint"}>{noticeMsg}</p>}
+            {notices.length === 0 ? (
+              <p className="hint">등록된 공지가 없습니다.</p>
+            ) : (
+              notices.map((n) => (
+                <div key={n.id} className="logline" style={{ display: "block", marginBottom: 8 }}>
+                  <span className="log-ts">{DateTime.fromISO(n.createdAt).setZone("Asia/Seoul").toFormat("MM-dd HH:mm")}</span>{" "}
+                  <b>{n.title}</b>
+                  {authState.isOwner && (
+                    <>
+                      {" "}<span className="hint">(디스코드 발송 {n.webhookSent}명)</span>{" "}
+                      <button className="mini" onClick={() => void doDeleteNotice(n.id)}>삭제</button>
+                    </>
+                  )}
+                  <div style={{ whiteSpace: "pre-wrap" }}>{n.body}</div>
+                </div>
+              ))
+            )}
+          </section>
+
           <section className="card wide">
             <h2>👥 그룹원 근황</h2>
             <p className="hint">
-              그룹 전체 자동매매기록을 3분마다 자동으로 서로 주고받습니다(로그인 상태일 때만).
-              로그인만 하고 아직 매매 기록을 한 번도 안 올린 그룹원은 "아직 기록 없음"으로 보여요.
+              접속 상태·자동매매 ON/OFF·보유 종목 수는 30초마다, 자동매매기록은 바뀔 때마다 8초 안에 서로 자동으로 맞춰집니다(로그인 상태일 때만).
+              금액이나 종목명은 공유하지 않고 건수와 켜짐/꺼짐만 보여요. 로그인만 하고 아직 매매 기록을 안 올린 그룹원은 "아직 기록 없음"으로 보입니다.
             </p>
             <button className="mini" disabled={groupResearchBusy} onClick={() => void loadGroupResearch()}>🔄 지금 새로고침</button>
-            {groupMembers === null ? (
+            {groupMembers === null && presence.length === 0 ? (
               <p className="hint">아직 안 받아왔습니다 — 위 새로고침을 눌러 주세요(로그인 필요).</p>
-            ) : groupMembers.length === 0 ? (
-              <p className="hint">그룹원 기록이 아직 없습니다.</p>
             ) : (
-              <table className="result-table">
-                <thead>
-                  <tr><th>이메일</th><th>기록 건수</th><th>마지막 매매</th></tr>
-                </thead>
-                <tbody>
-                  {groupMembers.map((m) => {
-                    const last = m.history[0]; // getAutoTradeHistory와 동일 관례: 최신이 앞
-                    return (
-                      <tr key={m.email}>
-                        <td>{m.email}</td>
-                        <td>{m.history.length}건</td>
-                        <td>{last ? `${last.symbol} · ${last.enteredAt}` : "아직 기록 없음"}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+              (() => {
+                // 기록 명단(groupMembers)과 접속 명단(presence)을 이메일로 합친다 — 한쪽에만 있어도 줄이 빠지지 않게.
+                const emails = [...new Set([...(groupMembers ?? []).map((m) => m.email), ...presence.map((p) => p.email)])].sort();
+                if (emails.length === 0) return <p className="hint">그룹원 기록이 아직 없습니다.</p>;
+                const histOf = (e: string) => (groupMembers ?? []).find((m) => m.email === e)?.history ?? [];
+                const presOf = (e: string) => presence.find((p) => p.email === e);
+                const ago = (ms: number | null) => {
+                  if (ms == null) return "기록 없음";
+                  const min = Math.max(0, Math.floor((Date.now() - ms) / 60_000));
+                  return min < 1 ? "방금 전" : min < 60 ? `${min}분 전` : min < 1440 ? `${Math.floor(min / 60)}시간 전` : `${Math.floor(min / 1440)}일 전`;
+                };
+                return (
+                  <table className="result-table">
+                    <thead>
+                      <tr><th>이메일</th><th>상태</th><th>자동매매</th><th>보유</th><th>버전</th><th>기록 건수</th><th>마지막 매매</th></tr>
+                    </thead>
+                    <tbody>
+                      {emails.map((email) => {
+                        const hist = histOf(email);
+                        const last = hist[0]; // getAutoTradeHistory와 동일 관례: 최신이 앞
+                        const pr = presOf(email);
+                        return (
+                          <tr key={email}>
+                            <td>{email}</td>
+                            <td>{pr ? (pr.online ? `🟢 접속 중 (${pr.platforms.map((x) => (x === "pc" ? "PC" : "폰/웹")).join("·")})` : `⚪ ${ago(pr.lastSeenMs)}`) : "⚪ 아직 접속 기록 없음"}</td>
+                            <td>{pr?.online ? (pr.autoTradeEnabled ? "🟢 켜짐" : "꺼짐") : "-"}</td>
+                            <td>{pr?.online && pr.platforms.includes("pc") ? `${pr.openPositions}종목` : "-"}</td>
+                            <td>{pr?.appVersion ? `v${pr.appVersion}` : "-"}</td>
+                            <td>{hist.length}건</td>
+                            <td>{last ? `${last.symbol} · ${last.enteredAt}` : "아직 기록 없음"}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                );
+              })()
             )}
           </section>
 
@@ -7135,6 +7257,20 @@ ${msg}
               >
                 업데이트 내역 전체 보기
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* [v0.109.0] 새 공지 팝업 — 폰·PC 모두. 읽음은 계정에 저장돼 한 기기에서 확인하면 다른 기기에서도 사라진다. */}
+      {unseenNotice && (
+        <div className="modal-back" onClick={dismissNoticePopup}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2>📢 공지</h2>
+            <p><b>{unseenNotice.title}</b></p>
+            <div className="changelog-body" style={{ whiteSpace: "pre-wrap" }}>{unseenNotice.body}</div>
+            <div className="form-row">
+              <button className="btn btn-start" onClick={dismissNoticePopup}>확인했어요</button>
             </div>
           </div>
         </div>
