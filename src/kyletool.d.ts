@@ -226,6 +226,36 @@ interface GroupChatMessage {
   createdAt: string; // ISO(UTC) — 화면에서 로컬 시각으로 변환해 표시
 }
 
+/** [v0.109.0] 그룹원 근황(접속·상태) — lib/group-presence.ts와 같은 모양. */
+interface GroupPresence {
+  email: string;
+  online: boolean;
+  lastSeenMs: number | null;
+  platforms: Array<"pc" | "web">;
+  appVersion: string | null;
+  autoTradeEnabled: boolean;
+  openPositions: number;
+}
+
+/** [v0.109.0] 오너 공지 한 건. */
+interface GroupNotice {
+  id: number;
+  title: string;
+  body: string;
+  authorEmail: string;
+  createdAt: string;
+  webhookSent: number;
+}
+
+/** [v0.109.0] 그룹 실시간 갱신 이벤트(바뀐 칸만 들어 있음). */
+interface GroupFeedEvent {
+  chat?: GroupChatMessage[];
+  chatFull?: boolean;
+  presence?: GroupPresence[];
+  notices?: GroupNotice[];
+  changelogLatest?: string;
+}
+
 /** [v0.61.9] "업데이트 내역" 탭 한 줄 — 그룹 전원이 함께 보는 공개 변경 로그. */
 interface ChangelogEntry {
   version: string;
@@ -1118,6 +1148,13 @@ interface KyletoolBridge {
    *  아무 때나 불러도 안전(이미 돌고 있으면 아무 일도 안 함). 결과는 onGroupSync로 받는다. */
   groupSyncEnsure(): Promise<{ ok: boolean }>;
   onGroupSync(cb: (members: { email: string; history: AutoTradeHistoryEntry[] }[]) => void): () => void;
+  /** [v0.109.0] 그룹 실시간 갱신 — 8초마다 확인해 바뀐 것만 온다(채팅·공지·근황·업데이트 내역). */
+  onGroupFeed?(cb: (ev: GroupFeedEvent) => void): () => void;
+  groupPresenceGet?(): Promise<{ ok: boolean; presence: GroupPresence[] }>;
+  /** [v0.109.0] 오너 공지 — 읽기는 전원, 쓰기·삭제는 오너만(서버가 강제). 올리면 웹훅 등록 팀원에게 디스코드로 자동 발송. */
+  noticesGet?(): Promise<{ ok: boolean; message: string; notices: GroupNotice[] }>;
+  noticeSend?(title: string, body: string): Promise<{ ok: boolean; message: string; notices?: GroupNotice[] }>;
+  noticeDelete?(id: number): Promise<{ ok: boolean; message: string }>;
   /** [v0.56.0] 그룹 채팅 — 가입 허용목록 전원이 실명으로 함께 쓰는 대화방. */
   groupChatSend(body: string): Promise<{ ok: boolean; message: string }>;
   groupChatList(): Promise<{ ok: boolean; message: string; chat: GroupChatMessage[] }>;

@@ -32,6 +32,7 @@ import { buildCycles, analyzeTrades, type TradeCycle, type TradeInsights } from 
 import { toSyncPayload, isSyncPayload, type TradeSyncPayload } from "../lib/trade-sync";
 import { toAutoStateSyncPayload, isAutoStateSyncPayload, mergeAutoHistory, derivePositionsFromHistory, type AutoStateSyncPayload } from "../lib/auto-state-sync"; // [v0.31.0] 자동매매 기록 기기 간 동기화
 import { classifyPullResult } from "../lib/sync-all";
+import { aggregatePresence, presenceKey, PRESENCE_PUSH_INTERVAL_MS, type GroupPresence, type PresenceRow } from "../lib/group-presence"; // [v0.109.0] 그룹원 근황(접속·상태)
 import { ItemSync, type ItemAdapter, type ItemSyncState, type PutItem, type SyncRow } from "../lib/item-sync"; // [v0.108.0] 설정·기록 전체 계정 동기화(항목 단위) // [v0.98.0] 전체 동기화: 받기 결과 분류(진짜 실패면 올리기 보류)
 import { toSplitsSyncPayload, isSplitsSyncPayload, mergeSplits, mergeTombstones, type SplitsSyncPayload, type Tombstones } from "../lib/splits-sync"; // [v0.61.7] 삼분할 타점 기록 기기 간 동기화
 import { aggregate1mTo5m, dropIncompleteBucket, toHeikinAshi, inPriceBand, ema, ichimoku, scanSessionPattern, WICK_MIN_RATIO, DOJI_MAX_AGE_MINUTES, type Candle, type SessionPattern } from "../lib/indicators";
@@ -391,6 +392,27 @@ export interface GroupChatMessage {
   email: string;
   body: string;
   createdAt: string; // ISO(UTC) — 화면에서 로컬 시각으로 변환해 표시
+}
+
+/** [v0.109.0] 오너 공지 한 건(capri_notices). webhookSent = 디스코드로 발송을 시도한 팀원 수. */
+export interface GroupNotice {
+  id: number;
+  title: string;
+  body: string;
+  authorEmail: string;
+  createdAt: string; // ISO(UTC)
+  webhookSent: number;
+}
+
+/** [v0.109.0] 그룹 실시간 갱신 이벤트 — 바뀐 것만 담겨 온다(없는 칸 = 안 바뀜).
+ *  chat: 새 채팅(chatFull=true면 최근 전체를 새로 받은 것) · presence: 그룹원 근황 ·
+ *  notices: 공지 전체 목록(새 공지/삭제 때) · changelogLatest: 최신 업데이트 내역 버전 · trades: 그룹 기록 갱신됨. */
+export interface GroupFeedEvent {
+  chat?: GroupChatMessage[];
+  chatFull?: boolean;
+  presence?: GroupPresence[];
+  notices?: GroupNotice[];
+  changelogLatest?: string;
 }
 
 /** [v0.61.9] "업데이트 내역" 탭 한 줄 — 그룹 전원이 함께 보는 공개 변경 로그. */
@@ -1763,6 +1785,18 @@ export class ToolEngine extends EventEmitter {
    *  절대 안 돈다(startGroupSyncLoop 참고). */
   private groupSyncTimer: ReturnType<typeof setInterval> | null = null;
   private static readonly GROUP_SYNC_INTERVAL_MS = 3 * 60_000; // 3분마다
+  /** [v0.109.0] 그룹 "실시간" 갱신 루프 — 채팅·공지·업데이트 내역·근황·그룹 매매기록을 8초마다 아주 가볍게
+   *  확인(바뀐 게 있을 때만 본문을 받는다). Realtime 확장이 이 프로젝트에서 안 되므로 폴링으로 만든다. */
+  private groupFeedTimer: ReturnType<typeof setInterval> | null = null;
+  private groupFeedBusy = false;
+  private static readonly GROUP_FEED_INTERVAL_MS = 8_000;
+  private feedLastChatId: number | null = null; // null = 아직 한 번도 못 받음(첫 틱에 최근 전체를 받는다)
+  private feedNoticeIds: string | null = null; // 공지 id 목록 지문(새 공지·삭제 감지)
+  private feedChangelogKey: string | null = null;
+  private feedPresenceKey: string | null = null;
+  private feedTradesStamp = new Map<string, string>(); // 그룹원 이메일 → capri_group_trades.updated_at
+  private lastPresencePushAtMs = 0;
+  private lastPresenceCleanupAtMs = 0;
   /** [v0.59.0] 폰 원격 조종 — PC(데스크톱)에서만 돌아야 한다. electron/main.ts가 로그인 직후
    *  이 인스턴스에서만 명시적으로 시작한다(IPC로 노출 안 함 — 화면 코드가 실수로도 못 켠다).
    *  웹(폰) 쪽 ToolEngine 인스턴스는 이 타이머를 절대 돌리지 않는다(kyletool-adapter.ts가
@@ -8249,9 +8283,22 @@ export class ToolEngine extends EventEmitter {
     if (!this.authAccessToken && !this.authRefreshToken) return; // 로그인 안 돼 있으면 시작 안 함
     void this.groupSyncTick(); // 기다리지 않고 즉시 1회(다음 3분을 기다리지 않게)
     this.groupSyncTimer = setInterval(() => void this.groupSyncTick(), ToolEngine.GROUP_SYNC_INTERVAL_MS);
+    // [v0.109.0] 3분 주기와 별개로, 8초마다 "바뀐 게 있는지"만 확인하는 실시간 루프도 함께 시작.
+    void this.groupFeedTick();
+    this.groupFeedTimer = setInterval(() => void this.groupFeedTick(), ToolEngine.GROUP_FEED_INTERVAL_MS);
   }
 
   stopGroupSyncLoop(): void {
+    if (this.groupFeedTimer) {
+      clearInterval(this.groupFeedTimer);
+      this.groupFeedTimer = null;
+    }
+    // 로그아웃 후 다른 계정으로 로그인해도 이전 계정 기준값이 남지 않게 초기화.
+    this.feedLastChatId = null;
+    this.feedNoticeIds = null;
+    this.feedChangelogKey = null;
+    this.feedPresenceKey = null;
+    this.feedTradesStamp.clear();
     if (this.groupSyncTimer) {
       clearInterval(this.groupSyncTimer);
       this.groupSyncTimer = null;
@@ -8265,6 +8312,239 @@ export class ToolEngine extends EventEmitter {
       if (pulled.ok) this.emit("groupSync", pulled.members);
     } catch {
       // 한 사이클 실패는 조용히 넘어간다 — 다음 3분에 다시 시도(자가 복구, 자동매매 사이클과 동일 원칙).
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // [v0.109.0 — 오너 지시 2026-10-22 "그룹원 근황 등 동기화 전수조사, 실시간 교환"]
+  //   전수조사 결과(그룹 쪽): ① 채팅·업데이트 내역은 탭을 열거나 새로고침해야만 갱신 ② 그룹 기록은 3분 주기
+  //   ③ 상대가 접속 중인지·자동매매 ON/OFF·보유 종목 수·버전은 아예 공유 안 됨 ④ 공지 기능 없음.
+  //   → 8초마다 "바뀐 게 있는지"만 가볍게 확인(번호·시각만 받고, 달라졌을 때만 본문을 받는다)해서
+  //     바뀐 것만 "groupFeed" 이벤트로 화면에 흘려보낸다. 실패는 조용히 넘기고 8초 뒤 다시 한다.
+  // ---------------------------------------------------------------------------
+
+  /** 읽기 전용 REST 조회 도우미 — 실패하면 null(그 항목만 건너뛰고 나머지는 계속). */
+  private async feedGet<T>(path: string, token: string, label: string): Promise<T[] | null> {
+    try {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/${path}`, { headers: this.authRestHeaders(token) }, 10_000, label);
+      if (!res.ok) return null;
+      return (await res.json()) as T[];
+    } catch {
+      return null;
+    }
+  }
+
+  private feedSeenChatIds = new Set<number>();
+
+  private async groupFeedTick(): Promise<void> {
+    if (this.groupFeedBusy) return;
+    this.groupFeedBusy = true;
+    try {
+      const token = await this.ensureAccessToken();
+      if (!token || !this.authUserId) return;
+      const ev: GroupFeedEvent = {};
+      let tradesChanged = false;
+
+      // 내 근황을 먼저 올린다(30초 쓰로틀) — 그래야 내 화면에도 내가 "접속 중"으로 바로 보인다.
+      await this.pushMyPresence(token);
+
+      // ① 채팅 — 첫 틱은 최근 전체, 이후는 새 줄만. 번호가 뒤늦게 커밋돼 순서가 엇갈려도 놓치지 않게 최근 30번 앞에서부터 겹쳐 받고
+      //    이미 본 번호는 걸러낸다.
+      if (this.feedLastChatId === null) {
+        const r = await this.getGroupChatMessages();
+        if (r.ok && r.chat.length > 0) {
+          this.feedSeenChatIds = new Set(r.chat.map((c) => c.id));
+          ev.chat = r.chat;
+          ev.chatFull = true;
+        }
+      } else {
+        const rows = await this.feedGet<{ id: number; member_email: string; body: string; created_at: string }>(
+          `capri_group_chat?select=id,member_email,body,created_at&id=gt.${Math.max(0, this.feedLastChatId - 30)}&order=id.asc&limit=200`, token, "capri_group_chat");
+        const fresh = (rows ?? []).filter((r) => !this.feedSeenChatIds.has(r.id));
+        if (fresh.length > 0) {
+          for (const r of fresh) this.feedSeenChatIds.add(r.id);
+          this.feedLastChatId = Math.max(this.feedLastChatId, ...fresh.map((r) => r.id));
+          if (this.feedSeenChatIds.size > 1000) this.feedSeenChatIds = new Set([...this.feedSeenChatIds].slice(-500));
+          ev.chat = fresh.map((r) => ({ id: r.id, email: r.member_email, body: r.body, createdAt: r.created_at }));
+        }
+      }
+
+      // ② 공지 — 번호 목록이 달라졌을 때(새 공지·삭제)만 본문을 새로 받는다.
+      const nIds = await this.feedGet<{ id: number }>("capri_notices?select=id&order=id.desc&limit=30", token, "capri_notices");
+      if (nIds) {
+        const key = nIds.map((x) => x.id).join(",");
+        if (key !== this.feedNoticeIds) {
+          const full = await this.getNotices();
+          if (full.ok) {
+            this.feedNoticeIds = key;
+            ev.notices = full.notices;
+          }
+        }
+      }
+
+      // ③ 업데이트 내역 — 최신 버전/시각이 달라지면 알린다(첫 틱은 기준값만 기억: 로그인 직후 화면이 따로 받는다).
+      const cl = await this.feedGet<{ version: string; published_at: string }>("capri_changelog?select=version,published_at&order=published_at.desc&limit=1", token, "capri_changelog");
+      if (cl && cl[0]) {
+        const key = `${cl[0].version}|${cl[0].published_at}`;
+        if (this.feedChangelogKey !== null && key !== this.feedChangelogKey) ev.changelogLatest = cl[0].version;
+        this.feedChangelogKey = key;
+      }
+
+      // ④ 그룹원 근황
+      const since = new Date(Date.now() - 14 * 86_400_000).toISOString();
+      const pr = await this.feedGet<PresenceRow>(`capri_group_presence?select=*&last_seen=gte.${encodeURIComponent(since)}`, token, "capri_group_presence");
+      if (pr) {
+        const list = aggregatePresence(pr, Date.now());
+        const key = presenceKey(list);
+        if (key !== this.feedPresenceKey) {
+          this.feedPresenceKey = key;
+          ev.presence = list;
+        }
+      }
+
+      // ⑤ 그룹 자동매매기록 — 누군가의 기록이 갱신된 시각이 달라졌을 때만 전체를 새로 받는다.
+      const gt = await this.feedGet<{ member_email: string; updated_at: string }>("capri_group_trades?select=member_email,updated_at", token, "capri_group_trades");
+      if (gt) {
+        const first = this.feedTradesStamp.size === 0;
+        for (const r of gt) {
+          if (this.feedTradesStamp.get(r.member_email) !== r.updated_at) {
+            this.feedTradesStamp.set(r.member_email, r.updated_at);
+            tradesChanged = true;
+          }
+        }
+        if (first && gt.length === 0) tradesChanged = false;
+      }
+
+      if (Object.keys(ev).length > 0) this.emit("groupFeed", ev);
+      if (tradesChanged) {
+        const pulled = await this.syncPullGroupHistory();
+        if (pulled.ok) this.emit("groupSync", pulled.members);
+      }
+    } catch {
+      // 한 번 실패는 조용히 넘긴다 — 8초 뒤 다시 시도.
+    } finally {
+      this.groupFeedBusy = false;
+    }
+  }
+
+  /**
+   * pushMyPresence — 이 기기의 접속·상태를 그룹에 올린다(30초마다). 기기마다 따로 한 줄이라 PC와 폰이 서로 덮어쓰지 않는다.
+   *   담는 것은 건수·ON/OFF·버전뿐 — 금액·종목명은 올리지 않는다.
+   */
+  private async pushMyPresence(token: string): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastPresencePushAtMs < PRESENCE_PUSH_INTERVAL_MS - 1000) return;
+    if (!this.authEmail || !this.authUserId) return;
+    this.lastPresencePushAtMs = now;
+    const web = this.role === "web";
+    try {
+      await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_presence?on_conflict=user_id,device_id`, {
+        method: "POST",
+        headers: { ...this.authRestHeaders(token), Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({
+          user_id: this.authUserId,
+          device_id: web ? "web" : (this.paperDeviceId || "pc"),
+          member_email: this.authEmail,
+          platform: web ? "web" : "pc",
+          app_version: this.appVersion,
+          auto_trade_enabled: web ? false : this.autoTradeEnabled,
+          open_positions: web ? 0 : this.autoTradePositions.length,
+          last_seen: new Date(now).toISOString(),
+        }),
+      }, 10_000, "capri_group_presence");
+      // 하루에 한 번, 14일 넘게 소식 없는 내 옛 기기 줄을 정리한다.
+      if (now - this.lastPresenceCleanupAtMs > 24 * 3600_000) {
+        this.lastPresenceCleanupAtMs = now;
+        const cutoff = new Date(now - 14 * 86_400_000).toISOString();
+        await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_group_presence?user_id=eq.${this.authUserId}&last_seen=lt.${encodeURIComponent(cutoff)}`, {
+          method: "DELETE", headers: this.authRestHeaders(token),
+        }, 10_000, "capri_group_presence_cleanup");
+      }
+    } catch {
+      /* 근황 신호 실패는 조용히 무시(30초 뒤 재시도) */
+    }
+  }
+
+  /** getGroupPresence — 그룹원 근황을 지금 바로 받아온다(화면의 [새로고침] 버튼용). */
+  async getGroupPresence(): Promise<{ ok: boolean; presence: GroupPresence[] }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, presence: [] };
+    const since = new Date(Date.now() - 14 * 86_400_000).toISOString();
+    const rows = await this.feedGet<PresenceRow>(`capri_group_presence?select=*&last_seen=gte.${encodeURIComponent(since)}`, token, "capri_group_presence");
+    return rows ? { ok: true, presence: aggregatePresence(rows, Date.now()) } : { ok: false, presence: [] };
+  }
+
+  // ---------------------------------------------------------------------------
+  // [v0.109.0 — 오너 지시 "내가 공지를 하면 팀원들이 등록한 웹훅 디스코드로 받을 수 있게"]
+  //   공지는 capri_notices에 저장 → ①앱을 켜 둔 모든 그룹원 화면에 8초 안에 뜨고 ②DB 트리거가
+  //   팀원들이 [알림 설정]에 등록해 둔 디스코드 웹훅(capri_user_notify_settings)으로 직접 보낸다
+  //   (앱이 꺼져 있어도 도착). 쓰기는 오너 계정만(서버 RLS가 강제).
+  // ---------------------------------------------------------------------------
+
+  /** getNotices — 최근 공지 30건(최신순). */
+  async getNotices(): Promise<{ ok: boolean; message: string; notices: GroupNotice[] }> {
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요.", notices: [] };
+    const rows = await this.feedGet<{ id: number; title: string; body: string; author_email: string; created_at: string; webhook_sent: number }>(
+      "capri_notices?select=id,title,body,author_email,created_at,webhook_sent&order=id.desc&limit=30", token, "capri_notices");
+    if (!rows) return { ok: false, message: "공지 조회에 실패했습니다.", notices: [] };
+    return {
+      ok: true,
+      message: `공지 ${rows.length}건`,
+      notices: rows.map((r) => ({ id: r.id, title: r.title, body: r.body, authorEmail: r.author_email, createdAt: r.created_at, webhookSent: r.webhook_sent ?? 0 })),
+    };
+  }
+
+  /** sendNotice — [오너 전용] 공지를 올린다. 올리는 순간 서버가 웹훅 등록자 전원에게 디스코드로 보낸다. */
+  async sendNotice(title: string, body: string): Promise<{ ok: boolean; message: string; notices?: GroupNotice[] }> {
+    const t = (title ?? "").trim();
+    const b = (body ?? "").trim();
+    if (!t) return { ok: false, message: "공지 제목을 입력하세요." };
+    if (!b) return { ok: false, message: "공지 내용을 입력하세요." };
+    if (t.length > 100) return { ok: false, message: "제목은 100자 이하로 써 주세요." };
+    if (b.length > 1500) return { ok: false, message: "내용은 1500자 이하로 써 주세요." };
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요." };
+    if (this.authEmail !== ToolEngine.OWNER_EMAIL) return { ok: false, message: "공지는 운영자(오너) 계정만 올릴 수 있습니다." };
+    try {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_notices`, {
+        method: "POST",
+        headers: { ...this.authRestHeaders(token), Prefer: "return=representation" },
+        body: JSON.stringify({ title: t, body: b, author_email: ToolEngine.OWNER_EMAIL }),
+      }, 15_000, "capri_notices");
+      if (!res.ok) return { ok: false, message: `공지 등록 실패(HTTP ${res.status}).` };
+      const created = (await res.json()) as Array<{ id: number }>;
+      const newId = created[0]?.id;
+      // 서버 트리거가 발송 인원을 기록하는 데 잠깐 걸리므로 약간 기다렸다가 다시 읽는다.
+      await new Promise((r) => setTimeout(r, 800));
+      const list = await this.getNotices();
+      const mine = list.notices.find((n) => n.id === newId);
+      if (list.ok) {
+        this.feedNoticeIds = list.notices.map((n) => n.id).join(",");
+        this.emit("groupFeed", { notices: list.notices } satisfies GroupFeedEvent);
+      }
+      const sent = mine?.webhookSent ?? 0;
+      return {
+        ok: true,
+        message: sent > 0 ? `공지를 올렸습니다. 디스코드 웹훅을 등록한 팀원 ${sent}명에게 발송했습니다.` : "공지를 올렸습니다. (디스코드 웹훅을 등록한 팀원이 없어 앱 안에만 표시됩니다.)",
+        notices: list.notices,
+      };
+    } catch (e) {
+      return { ok: false, message: `공지 등록 실패: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+
+  /** deleteNotice — [오너 전용] 공지를 지운다(앱 안 목록에서만 사라지고, 이미 나간 디스코드 메시지는 그대로). */
+  async deleteNotice(id: number): Promise<{ ok: boolean; message: string }> {
+    if (!Number.isInteger(id) || id <= 0) return { ok: false, message: "잘못된 공지 번호입니다." };
+    const token = await this.ensureAccessToken();
+    if (!token) return { ok: false, message: "먼저 로그인하세요." };
+    if (this.authEmail !== ToolEngine.OWNER_EMAIL) return { ok: false, message: "공지는 운영자(오너) 계정만 지울 수 있습니다." };
+    try {
+      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_notices?id=eq.${id}`, { method: "DELETE", headers: this.authRestHeaders(token) }, 10_000, "capri_notices");
+      return res.ok ? { ok: true, message: "공지를 지웠습니다." } : { ok: false, message: `삭제 실패(HTTP ${res.status}).` };
+    } catch (e) {
+      return { ok: false, message: `삭제 실패: ${e instanceof Error ? e.message : String(e)}` };
     }
   }
 
@@ -8655,6 +8935,7 @@ export class ToolEngine extends EventEmitter {
       const chat: GroupChatMessage[] = rows
         .map((r) => ({ id: r.id, email: r.member_email, body: r.body, createdAt: r.created_at }))
         .reverse(); // 서버는 최신순으로 주므로, 화면(위→아래 시간순) 표시를 위해 뒤집는다.
+      if (chat.length > 0) this.feedLastChatId = Math.max(this.feedLastChatId ?? 0, ...chat.map((c) => c.id)); // [v0.109.0] 실시간 루프가 이어받을 지점
       return { ok: true, message: `메시지 ${chat.length}건을 받았습니다.`, chat };
     } catch (e) {
       return { ok: false, message: `조회 실패: ${e instanceof Error ? e.message : String(e)}`, chat: [] };

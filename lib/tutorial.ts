@@ -115,6 +115,21 @@ export function applyTutorialPatch(
   return { ...prev, ...(typeof patch === "function" ? patch(prev) : patch) };
 }
 
+/**
+ * [v0.109.0] mergeTutorialStored — 두 기기의 튜토리얼 진행 상태를 합친다(계정 동기화용).
+ *   방문한 단계는 합집합, 켜짐 표시는 하나라도 true면 true — "한 번 한 것은 되돌아가지 않는" 단방향 값뿐이라
+ *   어느 기기가 먼저 합쳐도 결과가 같다(수렴). lastStep은 현재(local) 기기 것을 우선한다.
+ */
+export function mergeTutorialStored(local: TutorialStored, remote: TutorialStored): TutorialStored {
+  return {
+    visited: [...new Set([...local.visited, ...remote.visited])],
+    connectionOk: local.connectionOk || remote.connectionOk,
+    autoOpened: local.autoOpened || remote.autoOpened,
+    pillHidden: local.pillHidden || remote.pillHidden,
+    lastStep: local.lastStep ?? remote.lastStep,
+  };
+}
+
 export function tutorialStorageKey(email: string | null | undefined): string {
   return `capri-tutorial-v1:${(email ?? "anon").toLowerCase()}`;
 }

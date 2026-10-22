@@ -63,6 +63,10 @@
 - 새 설정 칸을 추가하면 `ToolEngine.syncedSettings()`에도 넣어야 다른 기기에 간다(persistEnv 줄 이름과 동일하게).
 - 일부러 동기화 안 하는 것: LIVE_ORDERS(실주문 잠금 — 그 PC에서 직접), LAB_ENABLED(토스 조회 한도), 자동매매 켜짐, 토스 키(capri_secrets 별도), 저널·체결강도(기기 로그).
 - PC가 여러 대면 생존 신호(`capri_desktop_heartbeat.device_id`) 기준 "대표 PC"만 상태 사진을 올리고 폰 명령을 실행한다(자동매매 중인 PC 우선).
+- **그룹 실시간(v0.109.0)**: `ToolEngine.groupFeedTick`이 8초마다 채팅·공지·업데이트 내역·그룹원 근황·그룹 매매기록을 "번호/시각만 먼저 확인 → 바뀐 때만 본문"으로 받아 `groupFeed` 이벤트로 화면에 흘린다
+  (Supabase Realtime은 이 프로젝트에서 안 되므로 폴링). 근황은 `capri_group_presence`(기기당 한 줄, 30초 신호, 건수·ON/OFF·버전만 — 금액·종목명 금지),
+  합치기 규칙은 `lib/group-presence.ts`. 공지는 `capri_notices`(오너만 쓰기) — INSERT 트리거 `capri_notify_notice`가 팀원이 등록한
+  디스코드 웹훅(`capri_user_notify_settings`)으로 pg_net 발송(앱이 꺼져 있어도 도착). 새 그룹 공유 항목을 만들면 이 루프에 넣어야 "새로고침 없이" 갱신된다.
 - 체결·자동매매기록·삼분할(암호화 3채널)·가상봇은 기존 경로 그대로, 변경 감지만 10초로 빨라졌다.
 
 ## 작업 방식 (오너 = 비전공자)
@@ -84,7 +88,7 @@
 ## 실행/검증
 ```bash
 npm install        # 기기 바꾸면 최초 1회
-npx vitest run     # 전체 테스트(2026-10-22 기준 893개 통과)
+npx vitest run     # 전체 테스트(2026-10-22 기준 901개 통과)
 npm run demo       # 키 없이 워커가 목 서버에 붙어 한 판 도는 데모
 npm run app        # 데스크톱 앱을 개발 모드로 빌드해 실행(Electron)
 npm run app:dist   # macOS 설치 파일(dmg) 생성 → release/
