@@ -65,8 +65,8 @@
 - PC가 여러 대면 생존 신호(`capri_desktop_heartbeat.device_id`) 기준 "대표 PC"만 상태 사진을 올리고 폰 명령을 실행한다(자동매매 중인 PC 우선).
 - **그룹 실시간(v0.109.0)**: `ToolEngine.groupFeedTick`이 8초마다 채팅·공지·업데이트 내역·그룹원 근황·그룹 매매기록을 "번호/시각만 먼저 확인 → 바뀐 때만 본문"으로 받아 `groupFeed` 이벤트로 화면에 흘린다
   (Supabase Realtime은 이 프로젝트에서 안 되므로 폴링). 근황은 `capri_group_presence`(기기당 한 줄, 30초 신호, 건수·ON/OFF·버전만 — 금액·종목명 금지),
-  합치기 규칙은 `lib/group-presence.ts`. 공지는 `capri_notices`(오너만 쓰기) — INSERT 트리거 `capri_notify_notice`가 팀원이 등록한
-  디스코드 웹훅(`capri_user_notify_settings`)으로 pg_net 발송(앱이 꺼져 있어도 도착). 새 그룹 공유 항목을 만들면 이 루프에 넣어야 "새로고침 없이" 갱신된다.
+  합치기 규칙은 `lib/group-presence.ts`. 공지 보내기·발송은 `capri_announce_*`(v0.109.0, 사람별 결과·재시도), 앱 안 표시는 그룹 피드가 `capri_announcements`를 읽는다. 발송은 팀원이 등록한
+  디스코드 웹훅(`capri_user_notify_settings`)으로 서버가 pg_net 발송(앱이 꺼져 있어도 도착). 새 그룹 공유 항목을 만들면 이 루프에 넣어야 "새로고침 없이" 갱신된다.
 - 체결·자동매매기록·삼분할(암호화 3채널)·가상봇은 기존 경로 그대로, 변경 감지만 10초로 빨라졌다.
 
 ## 작업 방식 (오너 = 비전공자)

@@ -654,8 +654,6 @@ function registerIpc(e: ToolEngine): void {
   e.on("groupFeed", (ev) => win?.webContents.send("tool:groupFeedEvent", ev));
   ipcMain.handle("tool:grouppresence:get", () => e.getGroupPresence());
   ipcMain.handle("tool:notices:get", () => e.getNotices());
-  ipcMain.handle("tool:notices:send", (_ev, title: string, body: string) => e.sendNotice(String(title ?? ""), String(body ?? "")));
-  ipcMain.handle("tool:notices:delete", (_ev, id: number) => e.deleteNotice(Number(id)));
   ipcMain.handle("tool:changelog:get", () => e.getChangelog());
   ipcMain.handle("tool:changelog:seen", (_ev, version: string) => e.markChangelogSeen(version));
   ipcMain.handle("tool:trades:stats", () => e.getTradeStats());

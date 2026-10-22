@@ -169,8 +169,6 @@ contextBridge.exposeInMainWorld("kyletool", {
   },
   groupPresenceGet: () => ipcRenderer.invoke("tool:grouppresence:get"),
   noticesGet: () => ipcRenderer.invoke("tool:notices:get"),
-  noticeSend: (title, body) => ipcRenderer.invoke("tool:notices:send", title, body),
-  noticeDelete: (id) => ipcRenderer.invoke("tool:notices:delete", id),
   groupChatSend: (body) => ipcRenderer.invoke("tool:groupchat:send", body), // [v0.56.0] 그룹 채팅
   groupChatList: () => ipcRenderer.invoke("tool:groupchat:list"),
   getChangelog: () => ipcRenderer.invoke("tool:changelog:get"), // [v0.61.9] 업데이트 내역

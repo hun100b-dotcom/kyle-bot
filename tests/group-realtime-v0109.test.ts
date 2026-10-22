@@ -47,10 +47,9 @@ function makeEngine(email: string, userId: string, role: "desktop" | "web" = "de
 function fakeServer() {
   const db = {
     chat: [] as Array<{ id: number; member_email: string; body: string; created_at: string }>,
-    notices: [] as Array<{ id: number; title: string; body: string; author_email: string; created_at: string; webhook_sent: number }>,
+    notices: [] as Array<{ id: number; title: string; body: string; created_by: string; created_at: string }>,
     presence: [] as PresenceRow[],
     trades: [] as Array<{ member_email: string; updated_at: string; history: unknown[] }>,
-    nextNotice: 1,
   };
   global.fetch = (async (url: string | URL, init?: RequestInit) => {
     const u = new URL(String(url));
@@ -63,21 +62,10 @@ function fakeServer() {
       const order = u.searchParams.get("order") ?? "";
       return json(order.includes("desc") ? [...db.chat].sort((a, b) => b.id - a.id) : rows);
     }
-    if (t === "capri_notices" && method === "GET") {
+    if (t === "capri_announcements" && method === "GET") {
       const sel = u.searchParams.get("select") ?? "";
       const rows = [...db.notices].sort((a, b) => b.id - a.id);
       return json(sel === "id" ? rows.map((r) => ({ id: r.id })) : rows);
-    }
-    if (t === "capri_notices" && method === "POST") {
-      const b = JSON.parse(String(init?.body));
-      const row = { id: db.nextNotice++, title: b.title, body: b.body, author_email: b.author_email, created_at: new Date().toISOString(), webhook_sent: 3 };
-      db.notices.push(row);
-      return json([row], 201);
-    }
-    if (t === "capri_notices" && method === "DELETE") {
-      const id = Number((u.searchParams.get("id") ?? "eq.0").replace("eq.", ""));
-      db.notices = db.notices.filter((r) => r.id !== id);
-      return json([], 204);
     }
     if (t === "capri_group_presence" && method === "POST") {
       const b = JSON.parse(String(init?.body)) as PresenceRow;
@@ -153,35 +141,26 @@ describe("그룹 실시간 피드 — 두 기기 시나리오", () => {
     } finally { B.cleanup(); }
   });
 
-  it("공지: 오너만 올릴 수 있고, 올리면 B가 받고, 삭제하면 B에서도 사라진다", async () => {
+  it("공지: 오너가 올린 공지(서버 표)가 B 화면에 8초 안에 한 번 뜨고, 변화가 없으면 다시 안 보낸다", async () => {
     const db = fakeServer();
-    const A = makeEngine("hun100b@gmail.com", "11111111-1111-1111-1111-111111111111");
     const B = makeEngine("b@x.com", "22222222-2222-2222-2222-222222222222");
     try {
-      const denied = await B.eng.sendNotice("해킹", "팀원은 못 올림");
-      expect(denied.ok).toBe(false);
-      expect(db.notices).toHaveLength(0);
-
       await B.i.groupFeedTick(); // 공지 0건 기준
-      const sent = await A.eng.sendNotice("점검 안내", "오늘 밤 업데이트합니다");
-      expect(sent.ok).toBe(true);
-      expect(sent.message).toContain("3명");
-      expect(db.notices[0].author_email).toBe("hun100b@gmail.com");
-
+      db.notices.push({ id: 1, title: "점검 안내", body: "오늘 밤 업데이트합니다", created_by: "hun100b@gmail.com", created_at: new Date().toISOString() });
       await B.i.groupFeedTick();
       const got = B.events.map((e) => e.notices).filter(Boolean).pop()!;
       expect(got.map((n) => n.title)).toEqual(["점검 안내"]);
+      expect(got[0].authorEmail).toBe("hun100b@gmail.com");
 
-      await B.i.groupFeedTick(); // 변화 없음 → 같은 목록을 또 보내지 않는다
-      const noticeEvents = B.events.filter((e) => e.notices).length;
+      const before = B.events.filter((e) => e.notices).length;
       await B.i.groupFeedTick();
-      expect(B.events.filter((e) => e.notices).length).toBe(noticeEvents);
+      await B.i.groupFeedTick();
+      expect(B.events.filter((e) => e.notices).length).toBe(before); // 변화 없음 → 같은 목록을 또 보내지 않는다
 
-      expect((await A.eng.deleteNotice(db.notices[0].id)).ok).toBe(true);
-      expect((await B.eng.deleteNotice(1)).ok).toBe(false);
+      db.notices.push({ id: 2, title: "두 번째", body: "b", created_by: "hun100b@gmail.com", created_at: new Date().toISOString() });
       await B.i.groupFeedTick();
-      expect(B.events.map((e) => e.notices).filter(Boolean).pop()).toEqual([]);
-    } finally { A.cleanup(); B.cleanup(); }
+      expect(B.events.map((e) => e.notices).filter(Boolean).pop()!.map((n) => n.id)).toEqual([2, 1]);
+    } finally { B.cleanup(); }
   });
 
   it("근황: 각 기기가 자기 줄을 올리고, 서로의 화면에 사람별로 합쳐져 보인다", async () => {

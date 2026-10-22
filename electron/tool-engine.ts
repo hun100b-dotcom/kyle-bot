@@ -394,14 +394,13 @@ export interface GroupChatMessage {
   createdAt: string; // ISO(UTC) — 화면에서 로컬 시각으로 변환해 표시
 }
 
-/** [v0.109.0] 오너 공지 한 건(capri_notices). webhookSent = 디스코드로 발송을 시도한 팀원 수. */
+/** [v0.109.0] 오너 공지 한 건(capri_announcements — 보내기·디스코드 발송은 sendAnnouncement 쪽이 맡고, 이건 앱 안 표시용 읽기). */
 export interface GroupNotice {
   id: number;
   title: string;
   body: string;
   authorEmail: string;
   createdAt: string; // ISO(UTC)
-  webhookSent: number;
 }
 
 /** [v0.109.0] 그룹 실시간 갱신 이벤트 — 바뀐 것만 담겨 온다(없는 칸 = 안 바뀜).
@@ -8370,7 +8369,7 @@ export class ToolEngine extends EventEmitter {
       }
 
       // ② 공지 — 번호 목록이 달라졌을 때(새 공지·삭제)만 본문을 새로 받는다.
-      const nIds = await this.feedGet<{ id: number }>("capri_notices?select=id&order=id.desc&limit=30", token, "capri_notices");
+      const nIds = await this.feedGet<{ id: number }>("capri_announcements?select=id&order=id.desc&limit=30", token, "capri_announcements");
       if (nIds) {
         const key = nIds.map((x) => x.id).join(",");
         if (key !== this.feedNoticeIds) {
@@ -8475,77 +8474,23 @@ export class ToolEngine extends EventEmitter {
   }
 
   // ---------------------------------------------------------------------------
-  // [v0.109.0 — 오너 지시 "내가 공지를 하면 팀원들이 등록한 웹훅 디스코드로 받을 수 있게"]
-  //   공지는 capri_notices에 저장 → ①앱을 켜 둔 모든 그룹원 화면에 8초 안에 뜨고 ②DB 트리거가
-  //   팀원들이 [알림 설정]에 등록해 둔 디스코드 웹훅(capri_user_notify_settings)으로 직접 보낸다
-  //   (앱이 꺼져 있어도 도착). 쓰기는 오너 계정만(서버 RLS가 강제).
+  // [v0.109.1] 공지 "받는 쪽" — 보내기·디스코드 발송은 sendAnnouncement(서버 함수 capri_announce_*, 사람별 결과·재시도 포함)가
+  //   맡는다. 여기서는 같은 표(capri_announcements)를 읽어, 앱을 켜 둔 모든 그룹원 화면에 8초 안에 띄운다
+  //   (디스코드 웹훅을 안 등록한 팀원도 앱에서 확인). 발송 경로를 하나로 두어 같은 공지가 두 번 나가지 않는다.
   // ---------------------------------------------------------------------------
 
   /** getNotices — 최근 공지 30건(최신순). */
   async getNotices(): Promise<{ ok: boolean; message: string; notices: GroupNotice[] }> {
     const token = await this.ensureAccessToken();
     if (!token) return { ok: false, message: "먼저 로그인하세요.", notices: [] };
-    const rows = await this.feedGet<{ id: number; title: string; body: string; author_email: string; created_at: string; webhook_sent: number }>(
-      "capri_notices?select=id,title,body,author_email,created_at,webhook_sent&order=id.desc&limit=30", token, "capri_notices");
+    const rows = await this.feedGet<{ id: number; title: string; body: string; created_by: string; created_at: string }>(
+      "capri_announcements?select=id,title,body,created_by,created_at&order=id.desc&limit=30", token, "capri_announcements");
     if (!rows) return { ok: false, message: "공지 조회에 실패했습니다.", notices: [] };
     return {
       ok: true,
       message: `공지 ${rows.length}건`,
-      notices: rows.map((r) => ({ id: r.id, title: r.title, body: r.body, authorEmail: r.author_email, createdAt: r.created_at, webhookSent: r.webhook_sent ?? 0 })),
+      notices: rows.map((r) => ({ id: r.id, title: r.title, body: r.body, authorEmail: r.created_by, createdAt: r.created_at })),
     };
-  }
-
-  /** sendNotice — [오너 전용] 공지를 올린다. 올리는 순간 서버가 웹훅 등록자 전원에게 디스코드로 보낸다. */
-  async sendNotice(title: string, body: string): Promise<{ ok: boolean; message: string; notices?: GroupNotice[] }> {
-    const t = (title ?? "").trim();
-    const b = (body ?? "").trim();
-    if (!t) return { ok: false, message: "공지 제목을 입력하세요." };
-    if (!b) return { ok: false, message: "공지 내용을 입력하세요." };
-    if (t.length > 100) return { ok: false, message: "제목은 100자 이하로 써 주세요." };
-    if (b.length > 1500) return { ok: false, message: "내용은 1500자 이하로 써 주세요." };
-    const token = await this.ensureAccessToken();
-    if (!token) return { ok: false, message: "먼저 로그인하세요." };
-    if (this.authEmail !== ToolEngine.OWNER_EMAIL) return { ok: false, message: "공지는 운영자(오너) 계정만 올릴 수 있습니다." };
-    try {
-      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_notices`, {
-        method: "POST",
-        headers: { ...this.authRestHeaders(token), Prefer: "return=representation" },
-        body: JSON.stringify({ title: t, body: b, author_email: ToolEngine.OWNER_EMAIL }),
-      }, 15_000, "capri_notices");
-      if (!res.ok) return { ok: false, message: `공지 등록 실패(HTTP ${res.status}).` };
-      const created = (await res.json()) as Array<{ id: number }>;
-      const newId = created[0]?.id;
-      // 서버 트리거가 발송 인원을 기록하는 데 잠깐 걸리므로 약간 기다렸다가 다시 읽는다.
-      await new Promise((r) => setTimeout(r, 800));
-      const list = await this.getNotices();
-      const mine = list.notices.find((n) => n.id === newId);
-      if (list.ok) {
-        this.feedNoticeIds = list.notices.map((n) => n.id).join(",");
-        this.emit("groupFeed", { notices: list.notices } satisfies GroupFeedEvent);
-      }
-      const sent = mine?.webhookSent ?? 0;
-      return {
-        ok: true,
-        message: sent > 0 ? `공지를 올렸습니다. 디스코드 웹훅을 등록한 팀원 ${sent}명에게 발송했습니다.` : "공지를 올렸습니다. (디스코드 웹훅을 등록한 팀원이 없어 앱 안에만 표시됩니다.)",
-        notices: list.notices,
-      };
-    } catch (e) {
-      return { ok: false, message: `공지 등록 실패: ${e instanceof Error ? e.message : String(e)}` };
-    }
-  }
-
-  /** deleteNotice — [오너 전용] 공지를 지운다(앱 안 목록에서만 사라지고, 이미 나간 디스코드 메시지는 그대로). */
-  async deleteNotice(id: number): Promise<{ ok: boolean; message: string }> {
-    if (!Number.isInteger(id) || id <= 0) return { ok: false, message: "잘못된 공지 번호입니다." };
-    const token = await this.ensureAccessToken();
-    if (!token) return { ok: false, message: "먼저 로그인하세요." };
-    if (this.authEmail !== ToolEngine.OWNER_EMAIL) return { ok: false, message: "공지는 운영자(오너) 계정만 지울 수 있습니다." };
-    try {
-      const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/capri_notices?id=eq.${id}`, { method: "DELETE", headers: this.authRestHeaders(token) }, 10_000, "capri_notices");
-      return res.ok ? { ok: true, message: "공지를 지웠습니다." } : { ok: false, message: `삭제 실패(HTTP ${res.status}).` };
-    } catch (e) {
-      return { ok: false, message: `삭제 실패: ${e instanceof Error ? e.message : String(e)}` };
-    }
   }
 
   // ==========================================================================

@@ -244,7 +244,6 @@ interface GroupNotice {
   body: string;
   authorEmail: string;
   createdAt: string;
-  webhookSent: number;
 }
 
 /** [v0.109.0] 그룹 실시간 갱신 이벤트(바뀐 칸만 들어 있음). */
@@ -1151,10 +1150,8 @@ interface KyletoolBridge {
   /** [v0.109.0] 그룹 실시간 갱신 — 8초마다 확인해 바뀐 것만 온다(채팅·공지·근황·업데이트 내역). */
   onGroupFeed?(cb: (ev: GroupFeedEvent) => void): () => void;
   groupPresenceGet?(): Promise<{ ok: boolean; presence: GroupPresence[] }>;
-  /** [v0.109.0] 오너 공지 — 읽기는 전원, 쓰기·삭제는 오너만(서버가 강제). 올리면 웹훅 등록 팀원에게 디스코드로 자동 발송. */
+  /** [v0.109.1] 공지 읽기(앱 안 표시) — 보내기는 sendAnnouncement(오너 전용, 디스코드 발송 포함). */
   noticesGet?(): Promise<{ ok: boolean; message: string; notices: GroupNotice[] }>;
-  noticeSend?(title: string, body: string): Promise<{ ok: boolean; message: string; notices?: GroupNotice[] }>;
-  noticeDelete?(id: number): Promise<{ ok: boolean; message: string }>;
   /** [v0.56.0] 그룹 채팅 — 가입 허용목록 전원이 실명으로 함께 쓰는 대화방. */
   groupChatSend(body: string): Promise<{ ok: boolean; message: string }>;
   groupChatList(): Promise<{ ok: boolean; message: string; chat: GroupChatMessage[] }>;
