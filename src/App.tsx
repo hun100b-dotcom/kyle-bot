@@ -1117,10 +1117,6 @@ function App() {
   // [v0.109.0] 그룹원 근황(접속·상태) · 공지 — 8초마다 자동 갱신되는 그룹 실시간 피드로 채운다.
   const [presence, setPresence] = useState<GroupPresence[]>([]);
   const [notices, setNotices] = useState<GroupNotice[]>([]);
-  const [noticeTitle, setNoticeTitle] = useState("");
-  const [noticeBody, setNoticeBody] = useState("");
-  const [noticeBusy, setNoticeBusy] = useState(false);
-  const [noticeMsg, setNoticeMsg] = useState("");
   const [unseenNotice, setUnseenNotice] = useState<GroupNotice | null>(null);
   // 마운트 때 한 번 만든 이벤트 핸들러가 "지금 로그인한 사람"을 알아야 하므로 ref로 들고 있는다(옛 값에 갇히지 않게).
   const myEmailRef = useRef<string | null>(null);
@@ -1236,24 +1232,6 @@ function App() {
     if (!unseenNotice) return;
     void window.kyletool.setUiPref?.("notice_seen_id", String(unseenNotice.id));
     setUnseenNotice(null);
-  }
-  async function doSendNotice() {
-    if (noticeBusy) return;
-    setNoticeBusy(true);
-    setNoticeMsg("");
-    try {
-      const r = await window.kyletool.noticeSend?.(noticeTitle, noticeBody);
-      if (!r) { setNoticeMsg("⚠️ 이 버전에서는 공지를 지원하지 않습니다."); return; }
-      setNoticeMsg(r.ok ? `✅ ${r.message}` : `⚠️ ${r.message}`);
-      if (r.ok) { setNoticeTitle(""); setNoticeBody(""); if (r.notices) setNotices(r.notices); }
-    } finally {
-      setNoticeBusy(false);
-    }
-  }
-  async function doDeleteNotice(id: number) {
-    const r = await window.kyletool.noticeDelete?.(id);
-    setNoticeMsg(r ? (r.ok ? `✅ ${r.message}` : `⚠️ ${r.message}`) : "");
-    if (r?.ok) setNotices((cur) => cur.filter((n) => n.id !== id));
   }
   /**
    * [v0.48.0 버그 수정 — 오너 보고 "자동매매기록 탭도 실시간 연동 안 됨, 새로고침해도 그대로"]
@@ -7132,24 +7110,12 @@ ${msg}
             </section>
           )}
 
-          {/* [v0.109.0] 공지 — 모든 그룹원이 보고, 올리기·삭제는 오너만. 올리면 디스코드 웹훅을 등록한 팀원에게 자동 발송. */}
+          {/* [v0.109.1] 공지 목록 — 모든 그룹원이 앱에서 확인(8초 자동 갱신). 보내기·디스코드 발송 결과는 오너 전용 [공지 보내기] 카드가 맡는다. */}
           <section className="card wide">
             <h2>📢 공지</h2>
             <p className="hint">
-              운영자가 올린 공지가 8초 안에 모든 그룹원 화면에 뜨고, [알림 설정]에 디스코드 웹훅을 등록해 둔 팀원에게는 앱이 꺼져 있어도 디스코드로 자동 발송됩니다.
+              운영자가 올린 공지가 8초 안에 이 화면과 팝업으로 뜹니다. [알림 설정]에 디스코드 웹훅을 등록해 두면 앱이 꺼져 있어도 디스코드로도 받아요.
             </p>
-            {authState.isOwner && (
-              <div className="form-col" style={{ marginBottom: 10 }}>
-                <input placeholder="공지 제목 (100자 이하)" maxLength={100} value={noticeTitle} disabled={noticeBusy} onChange={(e) => setNoticeTitle(e.target.value)} />
-                <textarea placeholder="공지 내용 (1500자 이하)" maxLength={1500} rows={4} value={noticeBody} disabled={noticeBusy} onChange={(e) => setNoticeBody(e.target.value)} />
-                <div className="form-row">
-                  <button className="btn btn-start" disabled={noticeBusy || !noticeTitle.trim() || !noticeBody.trim()} onClick={() => void doSendNotice()}>
-                    {noticeBusy ? "보내는 중…" : "📣 공지 올리고 디스코드로 보내기"}
-                  </button>
-                </div>
-              </div>
-            )}
-            {noticeMsg && <p className={noticeMsg.startsWith("✅") ? "ok" : "hint"}>{noticeMsg}</p>}
             {notices.length === 0 ? (
               <p className="hint">등록된 공지가 없습니다.</p>
             ) : (
@@ -7157,12 +7123,6 @@ ${msg}
                 <div key={n.id} className="logline" style={{ display: "block", marginBottom: 8 }}>
                   <span className="log-ts">{DateTime.fromISO(n.createdAt).setZone("Asia/Seoul").toFormat("MM-dd HH:mm")}</span>{" "}
                   <b>{n.title}</b>
-                  {authState.isOwner && (
-                    <>
-                      {" "}<span className="hint">(디스코드 발송 {n.webhookSent}명)</span>{" "}
-                      <button className="mini" onClick={() => void doDeleteNotice(n.id)}>삭제</button>
-                    </>
-                  )}
                   <div style={{ whiteSpace: "pre-wrap" }}>{n.body}</div>
                 </div>
               ))

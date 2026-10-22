@@ -358,8 +358,6 @@ export function installKyleTool(): ToolEngine {
     },
     groupPresenceGet: () => e.getGroupPresence(),
     noticesGet: () => e.getNotices(),
-    noticeSend: (title: string, body: string) => e.sendNotice(title, body),
-    noticeDelete: (id: number) => e.deleteNotice(id),
     groupChatSend: (body: string) => e.sendGroupChatMessage(body),
     groupChatList: () => e.getGroupChatMessages(),
     // [v0.61.9] "업데이트 내역" 탭 — getChangelog는 async라 그대로, markChangelogSeen은
