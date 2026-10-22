@@ -177,6 +177,11 @@ export function installKyleTool(): ToolEngine {
     getNotifySettings: () => e.getNotifySettings(),
     saveNotifySettings: (url: string) => e.saveNotifySettings(url),
     getMyNotifySettings: () => e.getMyNotifySettings(),
+    // [v0.109.0] 오너 공지 → 팀원 디스코드 웹훅
+    sendAnnouncement: (title: string, body: string) => e.sendAnnouncement(title, body),
+    listAnnouncements: () => e.listAnnouncements(),
+    getAnnouncementStatus: (id: number) => e.getAnnouncementStatus(id),
+    retryAnnouncement: (id: number) => e.retryAnnouncement(id),
     testTossConnection: () => e.testTossConnection(), // [v0.91.0]
     sendMyDiscordTest: () => e.sendMyDiscordTest(), //   [v0.91.0]
     saveMyNotifySettings: (url: string) => e.saveMyNotifySettings(url),

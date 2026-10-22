@@ -34,6 +34,11 @@ contextBridge.exposeInMainWorld("kyletool", {
   getNotifySettings: () => ipcRenderer.invoke("tool:notify:get"),
   saveNotifySettings: (url) => ipcRenderer.invoke("tool:notify:save", url),
   getMyNotifySettings: () => ipcRenderer.invoke("tool:notify:getMine"),
+  // [v0.109.0] 오너 공지 → 팀원 디스코드 웹훅
+  sendAnnouncement: (title, body) => ipcRenderer.invoke("tool:announce:send", title, body),
+  listAnnouncements: () => ipcRenderer.invoke("tool:announce:list"),
+  getAnnouncementStatus: (id) => ipcRenderer.invoke("tool:announce:status", id),
+  retryAnnouncement: (id) => ipcRenderer.invoke("tool:announce:retry", id),
   testTossConnection: () => ipcRenderer.invoke("tool:toss:testConnection"), // [v0.91.0]
   sendMyDiscordTest: () => ipcRenderer.invoke("tool:notify:testMine"), //      [v0.91.0]
   saveMyNotifySettings: (url) => ipcRenderer.invoke("tool:notify:saveMine", url),

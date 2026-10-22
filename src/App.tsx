@@ -881,6 +881,15 @@ function App() {
   const [discordWebhook, setDiscordWebhook] = useState("");
   const [discordSaveBusy, setDiscordSaveBusy] = useState(false);
   const [discordMsg, setDiscordMsg] = useState("");
+  // [v0.109.0] 오너 공지 → 팀원 디스코드 웹훅. 발송은 서버 함수가 하고, 화면은 결과만 본다.
+  type AnnStatus = Awaited<ReturnType<typeof window.kyletool.getAnnouncementStatus>>;
+  const [annTitle, setAnnTitle] = useState("");
+  const [annBody, setAnnBody] = useState("");
+  const [annBusy, setAnnBusy] = useState(false);
+  const [annMsg, setAnnMsg] = useState("");
+  const [annList, setAnnList] = useState<Awaited<ReturnType<typeof window.kyletool.listAnnouncements>>>([]);
+  const [annOpenId, setAnnOpenId] = useState<number | null>(null);
+  const [annDetail, setAnnDetail] = useState<AnnStatus>([]);
   // [v0.83.0] 개인용 디스코드 알림 — 로그인한 사람 누구나. null=아직 안 불러옴(배너
   // 깜빡임 방지), ""=불러왔는데 비어있음(배너 뜸), 값 있으면 설정 완료(배너 안 뜸).
   const [myDiscordWebhook, setMyDiscordWebhook] = useState<string | null>(null);
@@ -1591,6 +1600,21 @@ function App() {
     };
     for (const t of map[kind] ?? []) if (isTabVisible(t)) activateTab(t);
   };
+
+  // [v0.109.0] 공지 결과에 '전송 중'이 남아 있는 동안 5초마다 다시 확인(최대 약 2분) — 확인할 때마다
+  //   서버가 도착 여부를 반영하고 일시 오류는 자동 재전송한다. 다 끝나면 저절로 멈춘다.
+  const annPendingCount = annDetail.filter((d) => d.status === "pending").length;
+  useEffect(() => {
+    if (annOpenId == null || annPendingCount === 0) return;
+    let ticks = 0;
+    const t = setInterval(() => {
+      ticks += 1;
+      if (ticks > 24) { clearInterval(t); return; }
+      void refreshAnnDetail(annOpenId);
+    }, 5000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [annOpenId, annPendingCount]);
 
   // [v0.59.0] 디스코드 알림의 "지금 승인하기" 링크(#/approve)로 들어온 경우 — 오너 로그인이
   //   확인되는 즉시 [그룹원 관리] 탭으로 바로 이동한다. 아직 로그인 전이면(막 앱을 열어
@@ -3081,6 +3105,7 @@ ${msg}
       if (s.isOwner) {
         void loadAccessRequests();
         void loadPendingAccounts(); // [v0.59.0] 진짜 게이트(capri_accounts) 대기 목록
+        void loadAnnouncements(); // [v0.109.0] 최근 공지
         void loadNotifySettings();
       }
     } catch {
@@ -3216,6 +3241,40 @@ ${msg}
       const r = await window.kyletool.saveNotifySettings(discordWebhook);
       setDiscordMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
     } finally { setDiscordSaveBusy(false); }
+  }
+
+  // --------------------------------------------------------------------------
+  // [v0.109.0] 공지 보내기 — 서버가 승인된 그룹원 전원의 웹훅으로 보내고, 결과는 사람별로 남는다.
+  //   결과 조회(getAnnouncementStatus) 자체가 서버에서 "도착 확인 + 일시 오류 자동 재전송(최대 3회)"을
+  //   함께 하므로, 화면은 결과가 아직 '전송 중'인 동안만 몇 초마다 다시 물어보면 된다.
+  // --------------------------------------------------------------------------
+  async function loadAnnouncements() {
+    try {
+      setAnnList(await window.kyletool.listAnnouncements());
+    } catch { /* 무시 */ }
+  }
+  async function refreshAnnDetail(id: number) {
+    try {
+      setAnnDetail(await window.kyletool.getAnnouncementStatus(id));
+      void loadAnnouncements();
+    } catch { /* 무시 */ }
+  }
+  async function doSendAnnouncement() {
+    setAnnBusy(true); setAnnMsg("보내는 중…");
+    try {
+      const r = await window.kyletool.sendAnnouncement(annTitle, annBody);
+      setAnnMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+      if (r.ok && r.id != null) {
+        setAnnTitle(""); setAnnBody("");
+        setAnnOpenId(r.id);
+        await refreshAnnDetail(r.id);
+      }
+    } finally { setAnnBusy(false); }
+  }
+  async function doRetryAnnouncement(id: number) {
+    const r = await window.kyletool.retryAnnouncement(id);
+    setAnnMsg((r.ok ? "✅ " : "⚠️ ") + r.message);
+    await refreshAnnDetail(id);
   }
 
   // --------------------------------------------------------------------------
@@ -6890,6 +6949,83 @@ ${msg}
                 </button>
               </div>
               {discordMsg && <p className={discordMsg.startsWith("✅") ? "ok" : "hint"}>{discordMsg}</p>}
+            </section>
+          )}
+
+          {/* [v0.109.0] 공지 보내기 — 오너가 쓰면 승인된 그룹원 전원이 "각자 등록한" 디스코드 웹훅으로 받는다.
+              웹훅 주소는 서버만 읽고 이 화면에는 오지 않는다. 사람별 성공/실패와 재전송을 여기서 본다. */}
+          {authState.isOwner && (
+            <section className="card wide">
+              <h2>📢 공지 보내기</h2>
+              <p className="hint">
+                여기서 쓴 공지가 승인된 그룹원 전원의 디스코드로 갑니다(각자 [설정]에 등록한 웹훅 주소로).
+                웹훅을 아직 등록하지 않은 사람은 "웹훅 미등록"으로 표시되니, 등록을 안내한 뒤 [다시 보내기]를 누르세요.
+              </p>
+              <div className="form-row">
+                <input
+                  type="text"
+                  style={{ flex: 1 }}
+                  placeholder="제목 (100자 이내)"
+                  maxLength={100}
+                  value={annTitle}
+                  disabled={annBusy}
+                  onChange={(e) => setAnnTitle(e.target.value)}
+                />
+              </div>
+              <div className="form-row">
+                <textarea
+                  style={{ flex: 1, minHeight: 90 }}
+                  placeholder="공지 내용 (1700자 이내)"
+                  maxLength={1700}
+                  value={annBody}
+                  disabled={annBusy}
+                  onChange={(e) => setAnnBody(e.target.value)}
+                />
+              </div>
+              <div className="form-row">
+                <button className="btn btn-start" disabled={annBusy || !annTitle.trim() || !annBody.trim()} onClick={() => void doSendAnnouncement()}>
+                  {annBusy ? "보내는 중…" : "📢 전체에게 보내기"}
+                </button>
+                <button className="mini" onClick={() => void loadAnnouncements()}>🔄 최근 공지 불러오기</button>
+              </div>
+              {annMsg && <p className={annMsg.startsWith("✅") ? "hint small ok" : "hint small danger"}>{annMsg}</p>}
+              {annList.map((a) => (
+                <div key={a.id} style={{ marginTop: 8 }}>
+                  <div className="form-row">
+                    <span>
+                      <b>{a.title}</b>{" "}
+                      <span className="hint small">
+                        ({DateTime.fromISO(a.createdAt).setZone("Asia/Seoul").toFormat("MM-dd HH:mm")}) ·
+                        ✅ {a.sent} · ⚠️ {a.failed} · ⏳ {a.pending} · 미등록 {a.noWebhook}
+                      </span>
+                    </span>
+                    <button
+                      className="mini"
+                      onClick={() => {
+                        if (annOpenId === a.id) { setAnnOpenId(null); setAnnDetail([]); return; }
+                        setAnnOpenId(a.id);
+                        void refreshAnnDetail(a.id);
+                      }}
+                    >
+                      {annOpenId === a.id ? "접기" : "결과 보기"}
+                    </button>
+                  </div>
+                  {annOpenId === a.id && (
+                    <div>
+                      {annDetail.map((d) => (
+                        <div key={d.email} className="hint small">
+                          {d.status === "sent" ? "✅" : d.status === "pending" ? "⏳" : d.status === "no_webhook" ? "➖" : "⚠️"} {d.email}
+                          {" — "}
+                          {d.status === "sent" ? "전달됨" : d.status === "pending" ? "전송 중…" : d.status === "no_webhook" ? "웹훅 미등록" : `실패(${d.error ?? "원인 불명"}${d.attempts > 1 ? `, ${d.attempts}회 시도` : ""})`}
+                        </div>
+                      ))}
+                      {annDetail.some((d) => d.status === "failed" || d.status === "no_webhook") && (
+                        <button className="mini" onClick={() => void doRetryAnnouncement(a.id)}>🔁 실패·미등록분 다시 보내기</button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
             </section>
           )}
 
