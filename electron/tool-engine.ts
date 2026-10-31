@@ -1724,6 +1724,13 @@ export class ToolEngine extends EventEmitter {
   private authEmail: string | null = null;
   private authUserId: string | null = null;
   private authExpiresAtMs = 0;
+  // [로그인 갱신 폭주 방지] 갱신(refresh)이 서버에서 거절되면(402 결제/사용량 제한, 429, 5xx 등)
+  //   "다음 시도 가능 시각"까지 서버를 다시 두드리지 않는다. 실제로 서버가 402를 돌려주던 동안
+  //   앱이 하루 8만 번 넘게 갱신을 재시도해 상황을 악화시켰다(동기화·그룹 루프가 매번 호출하므로).
+  private authRefreshRetryAtMs = 0;
+  private authRefreshFailCount = 0;
+  // 동시에 여러 곳이 갱신을 요청해도 서버 호출은 1번만 나가게 묶는다.
+  private authRefreshInflight: Promise<string | null> | null = null;
   // [v0.24.0] 로그인 비밀번호 — 오직 "이번에 앱을 켠 동안"만 메모리에 들고 있는다.
   //   ⚠️ 파일에 절대 저장하지 않는다(persistEnv에도 안 씀). 이 값을 그대로
   //   토스 키·매매 이력 암호화 열쇠로 재사용해서, 사용자가 따로 외울 "동기화 비밀번호"가
@@ -2978,6 +2985,8 @@ export class ToolEngine extends EventEmitter {
   /** 토큰 응답을 세션 상태로 반영. */
   private applySession(data: Record<string, unknown>): void {
     this.authAccessToken = String(data.access_token);
+    this.authRefreshFailCount = 0; // 새 로그인/갱신 성공 → 쿨다운 해제
+    this.authRefreshRetryAtMs = 0;
     if (data.refresh_token) this.authRefreshToken = String(data.refresh_token);
     const expiresIn = Number(data.expires_in ?? 3600);
     this.authExpiresAtMs = Date.now() + expiresIn * 1000;
@@ -2993,6 +3002,22 @@ export class ToolEngine extends EventEmitter {
   private async ensureAccessToken(): Promise<string | null> {
     if (this.authAccessToken && Date.now() < this.authExpiresAtMs - 60_000) return this.authAccessToken;
     if (!this.authRefreshToken) return null;
+    // 최근에 거절당했으면 쿨다운이 끝날 때까지 서버를 부르지 않는다(그냥 "로그인 안 됨"으로 취급).
+    if (Date.now() < this.authRefreshRetryAtMs) return null;
+    if (this.authRefreshInflight) return this.authRefreshInflight;
+    this.authRefreshInflight = this.doRefreshAccessToken().finally(() => {
+      this.authRefreshInflight = null;
+    });
+    return this.authRefreshInflight;
+  }
+
+  /** 실제 refresh 호출 1회. 실패하면 30초→1분→2분…최대 10분까지 간격을 늘려 재시도를 미룬다. */
+  private async doRefreshAccessToken(): Promise<string | null> {
+    const backoff = () => {
+      this.authRefreshFailCount += 1;
+      const waitMs = Math.min(30_000 * 2 ** (this.authRefreshFailCount - 1), 600_000);
+      this.authRefreshRetryAtMs = Date.now() + waitMs;
+    };
     try {
       const res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
         method: "POST",
@@ -3000,11 +3025,17 @@ export class ToolEngine extends EventEmitter {
         body: JSON.stringify({ refresh_token: this.authRefreshToken }),
       }, 10_000, "token");
       const data = (await res.json()) as Record<string, unknown>;
-      if (!res.ok || !data.access_token) return null;
+      if (!res.ok || !data.access_token) {
+        backoff();
+        return null;
+      }
+      this.authRefreshFailCount = 0;
+      this.authRefreshRetryAtMs = 0;
       this.applySession(data);
       this.persistEnv(); // 새 refresh 토큰 저장
       return this.authAccessToken;
     } catch {
+      backoff();
       return null;
     }
   }
