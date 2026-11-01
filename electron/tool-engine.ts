@@ -79,6 +79,7 @@ import {
   advanceBot, cancelPending, placeEntries, summarizeScan, applyScanSummary, botStats, paperDashboard, PAPER_MAX_BOTS,
   type PaperStore, type PaperBot, type PaperBotConfig, type PaperScreen, type PaperSim, type PaperBar, type PaperBotStats, type PaperDashboard,
 } from "../lib/paper-bots"; // [v0.103.0] 가상매매 봇(주문 없음)
+import { egressBudget } from "../lib/egress-budget"; // [egress 예산] 하루 내려받기량을 스스로 세어 폴링 간격을 늘린다
 import { fetchWithTimeout, netStats } from "../lib/fetch-timeout"; // [v0.61.5 — ③ 전수조사 "높음-1"] Supabase REST 호출도 토스처럼 타임아웃을 건다
 import {
   getPrice,
@@ -1799,7 +1800,7 @@ export class ToolEngine extends EventEmitter {
    *  확인(바뀐 게 있을 때만 본문을 받는다). Realtime 확장이 이 프로젝트에서 안 되므로 폴링으로 만든다. */
   private groupFeedTimer: ReturnType<typeof setInterval> | null = null;
   private groupFeedBusy = false;
-  private static readonly GROUP_FEED_INTERVAL_MS = 8_000;
+  private static readonly GROUP_FEED_INTERVAL_MS = 60_000; // [egress] 8초→60초(무료 플랜 월 5GB 안에 들어오게 — 2026-11-01 사고)
   private feedLastChatId: number | null = null; // null = 아직 한 번도 못 받음(첫 틱에 최근 전체를 받는다)
   private feedNoticeIds: string | null = null; // 공지 id 목록 지문(새 공지·삭제 감지)
   private feedChangelogKey: string | null = null;
@@ -1813,7 +1814,7 @@ export class ToolEngine extends EventEmitter {
    *  이 메서드를 부르지 않음) — 그래서 폰 브라우저 탭이 실수로 명령을 "실행"하는 일은
    *  구조적으로 없다(폰은 sendCommand로 "넣기"만 한다). */
   private remoteControlTimer: ReturnType<typeof setInterval> | null = null;
-  private static readonly REMOTE_CONTROL_INTERVAL_MS = 8_000; // 8초마다(Realtime 대신 폴링)
+  private static readonly REMOTE_CONTROL_INTERVAL_MS = 20_000; // [egress] 8초→20초(폰 명령은 최대 20초 안에 집힌다)
   /** [v0.71.0 — 오너 보고 "손절 종목이 계속 나온다" 조사 중 발견한 LPCN 37시간 무방비 사례]
    *  보호 감사(auditUnprotectedHoldings)가 지금까지 autoTradeTick 안에서만 돌았다 — 즉
    *  "자동매매가 켜져 있을 때만" 확인됐다. 마스터 스위치는 절대 저장 안 되므로(CLAUDE.md),
@@ -7157,7 +7158,7 @@ export class ToolEngine extends EventEmitter {
       let pr: { ok: boolean; message: string };
       try {
         // 자동(force=false)이고 10초 변경 감지가 최근 정상이면 받기는 건너뛴다(egress 절감). 수동 전체 동기화는 항상 받는다.
-        pr = !force && now - this.liveSyncOkAtMs < 60_000 ? { ok: true, message: "변경 감지 정상 — 받기 생략" } : await d.pull();
+        pr = !force && now - this.liveSyncOkAtMs < 120_000 ? { ok: true, message: "변경 감지 정상 — 받기 생략" } : await d.pull();
       } catch (e) {
         pr = { ok: false, message: `받기 실패: ${e instanceof Error ? e.message : String(e)}` };
       }
@@ -7167,10 +7168,10 @@ export class ToolEngine extends EventEmitter {
       let detail = pulled === "fail" ? pr.message : "";
       if (pulled === "fail") {
         pushed = "held"; // 받지 못한 채 올리면 클라우드의 다른 기기 기록을 덮어쓸 수 있다 → 보류
-      } else if (!force && (this.autoPushLog[d.key] = (this.autoPushLog[d.key] ?? []).filter((t) => now - t < 3_600_000)).length >= 6) {
-        // [서킷 브레이커] 한 시간에 자동 올리기가 6번을 넘으면 기기끼리 서로 덮어쓰며 핑퐁하는 상태로 보고 멈춘다(수동 동기화는 그대로 가능).
+      } else if (!force && (this.autoPushLog[d.key] = (this.autoPushLog[d.key] ?? []).filter((t) => now - t < 3_600_000)).length >= 3) {
+        // [서킷 브레이커] 한 시간에 자동 올리기가 3번을 넘으면 기기끼리 서로 덮어쓰며 핑퐁하는 상태로 보고 멈춘다(수동 동기화는 그대로 가능).
         pushed = "held";
-        detail = "자동 올리기가 너무 잦아 잠시 멈춤(1시간에 6회 초과)";
+        detail = "자동 올리기가 너무 잦아 잠시 멈춤(1시간에 3회 초과)";
       } else if (this.syncChannelDef(d.key).hasData() && (force || this.cloudSync[d.key].lastFingerprint !== d.fp() || stale(d.key))) {
         // [v0.102.0] 기록이 0건이어도 삭제 표식이 있으면 올린다(hasData) — "전부 지웠다"도 다른 기기에 전해야 하는 변경이다.
         try {
@@ -7982,7 +7983,7 @@ export class ToolEngine extends EventEmitter {
     this.liveSyncStarted = false;
   }
 
-  private static readonly LIVE_SYNC_INTERVAL_MS = 10_000;
+  private static readonly LIVE_SYNC_INTERVAL_MS = 30_000; // [egress] 10초→30초
   private itemSyncAccount: string | null = null;
 
   /** 다른 계정으로 로그인하면 버전 정보를 새로 시작한다(다른 사람 기록과 섞이지 않게). */
@@ -8013,6 +8014,7 @@ export class ToolEngine extends EventEmitter {
    */
   private async liveSyncTick(): Promise<void> {
     if (this.liveSyncBusy) return;
+    if (!egressBudget.shouldRun("liveSync")) return;
     this.liveSyncBusy = true;
     try {
       const token = await this.ensureAccessToken();
@@ -8380,6 +8382,7 @@ export class ToolEngine extends EventEmitter {
 
   private async groupFeedTick(): Promise<void> {
     if (this.groupFeedBusy) return;
+    if (!egressBudget.shouldRun("groupFeed")) return; // 오늘 예산이 빠듯하면 이번 틱은 건너뛴다(간격이 자동으로 늘어남)
     this.groupFeedBusy = true;
     try {
       const token = await this.ensureAccessToken();
@@ -8603,6 +8606,7 @@ export class ToolEngine extends EventEmitter {
   /** 한 주기: ①생존 신호 갱신 ②내 pending 명령을 폴링해 실행. 실패해도 다음 주기에 재시도. */
   private async remoteControlTick(): Promise<void> {
     if (this.remoteControlTickBusy) return;
+    if (!egressBudget.shouldRun("remoteControl")) return;
     this.remoteControlTickBusy = true;
     try {
       await this.remoteControlTickInner();
