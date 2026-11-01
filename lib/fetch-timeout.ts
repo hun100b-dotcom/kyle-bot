@@ -12,6 +12,8 @@
 //   헬퍼로 일괄 적용한다(토스·Supabase 양쪽이 이제 같은 함수를 쓴다 — 로직 중복 없음).
 // =============================================================================
 
+import { egressBudget } from "./egress-budget";
+
 /**
  * [v0.62.1 — 자동매매 리포트의 "오류 로그 요약"용] 프로세스 전체 네트워크 오류 카운터.
  *   fetchWithTimeout가 타임아웃·네트워크 실패를 셀 수 있는 유일한 공통 지점이고, 재시도는
@@ -28,7 +30,13 @@ export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    const res = await fetch(url, { ...init, signal: controller.signal });
+    // [egress 예산] Supabase로 가는 요청만 응답 크기를 센다(토스 API는 대상 아님). 폴링 루프가 이 값으로 간격을 조절한다.
+    if (url.includes(".supabase.co")) {
+      const len = Number(res.headers.get("content-length"));
+      egressBudget.record(Number.isFinite(len) && res.headers.get("content-length") !== null ? len : null);
+    }
+    return res;
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
       netStats.timeouts++;
