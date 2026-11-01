@@ -1728,6 +1728,10 @@ export class ToolEngine extends EventEmitter {
   //   "다음 시도 가능 시각"까지 서버를 다시 두드리지 않는다. 실제로 서버가 402를 돌려주던 동안
   //   앱이 하루 8만 번 넘게 갱신을 재시도해 상황을 악화시켰다(동기화·그룹 루프가 매번 호출하므로).
   private authRefreshRetryAtMs = 0;
+  // [사용량 폭주 방지] 10초 변경 감지(liveSyncTick)가 최근 정상이면 5분 주기 점검은 암호화 기록 "받기"를 건너뛴다
+  //   (변경 감지가 이미 바뀐 것만 받아 오므로 같은 수백 KB를 또 받을 이유가 없다). 자동 올리기 횟수 상한용 기록도 함께 둔다.
+  private liveSyncOkAtMs = 0;
+  private autoPushLog: Record<string, number[]> = {};
   private authRefreshFailCount = 0;
   // 동시에 여러 곳이 갱신을 요청해도 서버 호출은 1번만 나가게 묶는다.
   private authRefreshInflight: Promise<string | null> | null = null;
@@ -5643,13 +5647,13 @@ export class ToolEngine extends EventEmitter {
         const nextAt = new Date(Math.max(now, (Number.isFinite(prevMs) ? prevMs : 0) + 1)).toISOString();
         let w: Response;
         if (row) {
-          w = await fetchWithTimeout(`${base}?${mine}&updated_at=eq.${encodeURIComponent(row.updated_at)}`, {
+          w = await fetchWithTimeout(`${base}?${mine}&updated_at=eq.${encodeURIComponent(row.updated_at)}&select=user_id`, {
             method: "PATCH",
             headers: { ...this.authRestHeaders(token), Prefer: "return=representation" },
             body: JSON.stringify({ payload: this.paperStore, updated_at: nextAt }),
           }, 10_000, "capri_live_state");
         } else {
-          w = await fetchWithTimeout(`${base}?on_conflict=user_id,kind`, {
+          w = await fetchWithTimeout(`${base}?on_conflict=user_id,kind&select=user_id`, {
             method: "POST",
             headers: { ...this.authRestHeaders(token), Prefer: "resolution=ignore-duplicates,return=representation" },
             body: JSON.stringify({ user_id: this.authUserId, kind: "paper_bots", payload: this.paperStore, updated_at: nextAt }),
@@ -7152,7 +7156,8 @@ export class ToolEngine extends EventEmitter {
       const before = d.count();
       let pr: { ok: boolean; message: string };
       try {
-        pr = await d.pull();
+        // 자동(force=false)이고 10초 변경 감지가 최근 정상이면 받기는 건너뛴다(egress 절감). 수동 전체 동기화는 항상 받는다.
+        pr = !force && now - this.liveSyncOkAtMs < 60_000 ? { ok: true, message: "변경 감지 정상 — 받기 생략" } : await d.pull();
       } catch (e) {
         pr = { ok: false, message: `받기 실패: ${e instanceof Error ? e.message : String(e)}` };
       }
@@ -7162,10 +7167,15 @@ export class ToolEngine extends EventEmitter {
       let detail = pulled === "fail" ? pr.message : "";
       if (pulled === "fail") {
         pushed = "held"; // 받지 못한 채 올리면 클라우드의 다른 기기 기록을 덮어쓸 수 있다 → 보류
+      } else if (!force && (this.autoPushLog[d.key] = (this.autoPushLog[d.key] ?? []).filter((t) => now - t < 3_600_000)).length >= 6) {
+        // [서킷 브레이커] 한 시간에 자동 올리기가 6번을 넘으면 기기끼리 서로 덮어쓰며 핑퐁하는 상태로 보고 멈춘다(수동 동기화는 그대로 가능).
+        pushed = "held";
+        detail = "자동 올리기가 너무 잦아 잠시 멈춤(1시간에 6회 초과)";
       } else if (this.syncChannelDef(d.key).hasData() && (force || this.cloudSync[d.key].lastFingerprint !== d.fp() || stale(d.key))) {
         // [v0.102.0] 기록이 0건이어도 삭제 표식이 있으면 올린다(hasData) — "전부 지웠다"도 다른 기기에 전해야 하는 변경이다.
         try {
           const x = await d.push();
+          if (!force) (this.autoPushLog[d.key] ??= []).push(now);
           pushed = x.ok ? "ok" : "fail";
           if (!x.ok) detail = x.message;
         } catch (e) {
@@ -7478,18 +7488,19 @@ export class ToolEngine extends EventEmitter {
           // 새 버전은 반드시 이전 버전보다 커야 한다(같은 ms에 두 기기가 저장해도 버전이 겹치지 않게 +1ms).
           const nextAt = new Date(Math.max(Date.now(), (Number.isFinite(prevMs) ? prevMs : 0) + 1)).toISOString();
           let res: Response;
+          // [egress 절감] return=representation 이 저장한 줄 전체(수백 KB 암호문)를 되돌려 보내던 것을 select=user_id 로 줄였다 — 거절 판단(0줄)은 그대로.
           if (got.row) {
             // 이미 줄이 있으면: "updated_at이 아까 읽은 값 그대로인 줄"만 고친다. 그 사이 누가 저장했으면 0줄이 고쳐진다(=거절).
             const mine = this.authUserId ? `user_id=eq.${encodeURIComponent(this.authUserId)}` : "";
             const ver = got.row.updated_at ? `&updated_at=eq.${encodeURIComponent(got.row.updated_at)}` : "";
-            res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/${def.table}?${mine}${ver}`, {
+            res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/${def.table}?${mine}${ver}&select=user_id`, {
               method: "PATCH",
               headers: { ...this.authRestHeaders(token), Prefer: "return=representation" },
               body: JSON.stringify({ ciphertext: rec.ciphertext, salt: rec.salt, iv: rec.iv, updated_at: nextAt }),
             }, 10_000, def.table);
           } else {
             // 줄이 아직 없으면: 새로 만든다. 그 사이 다른 기기가 먼저 만들었으면 "중복 무시"로 0줄이 돌아온다(=거절).
-            res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/${def.table}?on_conflict=user_id`, {
+            res = await fetchWithTimeout(`${ToolEngine.SUPABASE_URL}/rest/v1/${def.table}?on_conflict=user_id&select=user_id`, {
               method: "POST",
               headers: { ...this.authRestHeaders(token), Prefer: "resolution=ignore-duplicates,return=representation" },
               body: JSON.stringify({ user_id: this.authUserId, ciphertext: rec.ciphertext, salt: rec.salt, iv: rec.iv, updated_at: nextAt }),
@@ -8013,6 +8024,7 @@ export class ToolEngine extends EventEmitter {
         body: "{}",
       }, 10_000, "capri_sync_versions");
       if (!res.ok) return;
+      this.liveSyncOkAtMs = Date.now();
       const v = (await res.json()) as Record<string, string | null>;
       const changed = (k: string) => {
         const cur = v?.[k] ?? null;
